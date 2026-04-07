@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+set -u -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+FAILURES=0
+declare -a SUMMARY
+
+print_section() {
+  local title="$1"
+  printf '\n==> %s\n' "$title"
+}
+
+record_result() {
+  local status="$1"
+  local message="$2"
+
+  SUMMARY+=("[$status] $message")
+
+  if [[ "$status" == "FAIL" ]]; then
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+run_command_check() {
+  local label="$1"
+  local command="$2"
+
+  print_section "$label"
+  if bash -lc "$command"; then
+    record_result "PASS" "$label"
+  else
+    local exit_code=$?
+    record_result "FAIL" "$label (exit ${exit_code})"
+  fi
+}
+
+ensure_vitest_dependencies() {
+  local app_dir="$1"
+  local label="$2"
+
+  if [[ ! -x "$app_dir/node_modules/.bin/vitest" ]]; then
+    print_section "$label dependencies"
+    if (cd "$app_dir" && npm ci); then
+      record_result "PASS" "$label dependencies installed via npm ci"
+    else
+      local exit_code=$?
+      record_result "FAIL" "$label dependencies install failed (exit ${exit_code})"
+    fi
+  fi
+}
+
+run_test_phase() {
+  print_section "Running all test suites"
+
+  run_command_check \
+    "backend tests" \
+    "cd '$REPO_ROOT/backend' && source .venv/bin/activate && pytest -q"
+
+  run_command_check \
+    "runner tests" \
+    "cd '$REPO_ROOT/runner' && source .venv/bin/activate && pytest -q"
+
+  ensure_vitest_dependencies "$REPO_ROOT/webapp" "webapp"
+  run_command_check \
+    "webapp tests" \
+    "cd '$REPO_ROOT/webapp' && npm run test"
+}
+
+run_branch_phase() {
+  local branch
+
+  print_section "Checking current branch"
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+
+  if [[ "$branch" == "main" ]]; then
+    printf 'Current branch: %s\n' "$branch"
+    printf 'Direct commits to main are forbidden. Create or switch to a feature branch.\n'
+    record_result "FAIL" "current branch is main"
+    return
+  fi
+
+  printf 'Current branch: %s\n' "$branch"
+  record_result "PASS" "current branch is ${branch}"
+}
+
+run_origin_main_phase() {
+  local branch
+  local missing_commits
+
+  print_section "Checking origin/main sync"
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+
+  if ! git fetch origin main; then
+    record_result "FAIL" "git fetch origin main failed"
+    return
+  fi
+
+  if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+    record_result "FAIL" "origin/main is not available after fetch"
+    return
+  fi
+
+  missing_commits="$(git rev-list --count HEAD..origin/main)"
+
+  if [[ "$missing_commits" -gt 0 ]]; then
+    printf 'origin/main has %s commit(s) not in %s.\n' "$missing_commits" "$branch"
+    printf 'Pull or rebase the latest main into your branch before committing.\n'
+    record_result "FAIL" "branch is behind origin/main by ${missing_commits} commit(s)"
+    return
+  fi
+
+  printf '%s contains the latest commits from origin/main.\n' "$branch"
+  record_result "PASS" "branch contains latest origin/main commits"
+}
+
+run_test_phase
+run_branch_phase
+run_origin_main_phase
+
+print_section "Summary"
+printf '%s\n' "${SUMMARY[@]}"
+
+if [[ "$FAILURES" -eq 0 ]]; then
+  printf '\nReady to commit.\n'
+  exit 0
+fi
+
+printf '\nCommit blocked. Fix the failing checks and rerun ./.githooks/pre-commit.\n'
+printf 'A commit is only allowed immediately after this hook finishes with "Ready to commit."\n'
+exit 1

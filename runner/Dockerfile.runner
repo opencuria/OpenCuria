@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# opencuria Runner Daemon — Docker Image
+# ─────────────────────────────────────────────────────────────────────────────
+# This builds the runner daemon (the process that connects to the backend
+# and manages workspace containers). NOT the workspace container image.
+#
+# The runner needs access to the Docker socket to create/manage workspace
+# containers. Mount /var/run/docker.sock when running.
+#
+# Usage:
+#   docker build -f Dockerfile.runner -t opencuria-runner .
+#   docker run -v /var/run/docker.sock:/var/run/docker.sock \
+#     -e RUNNER_API_TOKEN=<token> \
+#     -e RUNNER_BACKEND_URL=wss://api.opencuria.example.com \
+#     opencuria-runner
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install build/runtime deps required by libvirt-python.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libvirt-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy runner source
+COPY src/ ./src/
+
+# Default environment
+ENV RUNNER_LOG_FORMAT=json
+ENV RUNNER_BACKEND_URL=wss://api.opencuria.example.com
+
+CMD ["python", "-m", "src"]

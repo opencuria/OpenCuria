@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 244 64" role="img" aria-label="OpenCuria logo">
+  <polygon points="18,23 32,15 32,32" fill="#4F5A72" opacity="0.24"/>
+  <polygon points="32,15 46,23 32,32" fill="#4F5A72" opacity="0.42"/>
+  <polygon points="46,23 32,32 46,41" fill="#534AB7"/>
+  <polygon points="32,32 32,49 46,41" fill="#433A93"/>
+  <polygon points="18,23 32,32 18,41" fill="#4F5A72" opacity="0.18"/>
+  <polygon points="32,32 32,49 18,41" fill="#4F5A72" opacity="0.1"/>
+  <polygon points="18,23 32,15 46,23 46,41 32,49 18,41" fill="none" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1.2"/>
+  <line x1="18" y1="23" x2="32" y2="32" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <line x1="32" y1="15" x2="32" y2="32" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <line x1="46" y1="23" x2="32" y2="32" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <line x1="32" y1="32" x2="46" y2="41" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <line x1="32" y1="32" x2="32" y2="49" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <line x1="32" y1="32" x2="18" y2="41" stroke="#4F5A72" stroke-opacity="0.22" stroke-width="1"/>
+  <text x="78" y="42" font-family="SF Pro Display, Inter, Segoe UI, sans-serif" font-size="30" font-weight="600" fill="#1E2130" letter-spacing="-0.6">Open<tspan font-weight="400" fill="#534AB7">Curia</tspan></text>
+</svg>

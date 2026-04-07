@@ -1,0 +1,631 @@
+@import 'tailwindcss';
+@plugin "@tailwindcss/typography";
+
+/*
+ * OpenCuria — Apple Liquid Glass Design System (2026)
+ *
+ * Implements the full Apple Liquid Glass specification:
+ * - OKLCH colour space for perceptually uniform colours
+ * - Squircle geometry (superellipse n=4-5, doubled border-radius)
+ * - SF Pro typography with exact tracking values
+ * - 8pt spatial grid
+ * - Spring-physics CSS animations via linear()
+ * - Three-layer glass stack: Highlight · Shadow · Illumination
+ * - backdrop-filter: blur(25px) saturate(120%) Vibrancy effect
+ * - prefers-reduced-transparency accessibility fallback
+ */
+
+/* ─── SVG Filter: Liquid Glass Refraction ───────────────────────────────── */
+/* Injected once into <body> via JS — see LiquidGlass.vue */
+
+/* ─── 8pt Spatial Grid Tokens ────────────────────────────────────────────── */
+:root {
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 16px;
+  --sp-4: 24px;
+  --sp-5: 32px;
+  --sp-6: 48px;
+  --sp-7: 64px;
+}
+
+/* ─── Typography: SF Pro System ──────────────────────────────────────────── */
+:root {
+  --font-text:
+    'SF Pro Text',
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  --font-display:
+    'SF Pro Display',
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  --font-mono:
+    'SF Mono',
+    ui-monospace,
+    'Cascadia Code',
+    'Fira Code',
+    monospace;
+
+  /* Tracking (letter-spacing) — Apple Human Interface Guidelines */
+  --tracking-body:   -0.43px;  /* 17pt body text */
+  --tracking-title:  -0.72px;  /* 28pt title */
+  --tracking-large:  -1.08px;  /* 34pt large */
+  --tracking-caption: 0px;     /* 12pt caption */
+
+  /* Line heights */
+  --lh-body:     1.25;   /* 120-130 % for body text */
+  --lh-heading:  1.15;   /* 110-120 % for headlines */
+  --lh-caption:  1.30;
+}
+
+/* ─── Squircle Geometry ──────────────────────────────────────────────────── */
+/*
+ * Squircle: superellipse with n=4-5.
+ * Rule: double the visual border-radius for squircle curvature.
+ * corner-shape is used where supported; clip-path fallback elsewhere.
+ */
+:root {
+  --radius-xs:   16px;   /* was 8  — doubled */
+  --radius-sm:   24px;   /* was 12 — doubled */
+  --radius-md:   28px;   /* was 14 — doubled */
+  --radius-lg:   32px;   /* was 16 — doubled */
+  --radius-xl:   48px;   /* was 24 — doubled */
+  --radius-2xl:  64px;
+  --radius-full: 9999px;
+
+  /* Squircle clip-path helpers (G2-continuous approximation) */
+  --squircle-sm: polygon(
+    16px 0%, calc(100% - 16px) 0%,
+    100% 0%, 100% 16px,
+    100% calc(100% - 16px), 100% 100%,
+    calc(100% - 16px) 100%, 16px 100%,
+    0% 100%, 0% calc(100% - 16px),
+    0% 16px, 0% 0%
+  );
+}
+
+/* ─── Spring-Physics Animation Curves ───────────────────────────────────── */
+/*
+ * Approximated via CSS linear() — GPU-accelerated 120fps animations.
+ * Snappy  (buttons)  : stiffness=170, damping=20
+ * Bouncy  (modals)   : mass=1, stiffness=120, damping=14
+ */
+:root {
+  /* Snappy spring — fast settle, minimal overshoot */
+  --spring-snappy: linear(
+    0, 0.006 1.1%, 0.054 3.3%, 0.208 7.7%,
+    0.432 12.4%, 0.601 16.2%, 0.735 19.9%,
+    0.839 23.5%, 0.914 27.1%, 0.958 30.5%,
+    0.985 34.1%, 1.000 40.1%, 1.010 46%,
+    1.014 51.4%, 1.012 59.3%, 1.005 72.9%, 1
+  );
+
+  /* Bouncy spring — pronounced overshoot + oscillation */
+  --spring-bouncy: linear(
+    0, 0.009 1.6%, 0.078 4.9%, 0.188 8.4%,
+    0.355 12.5%, 0.487 15.7%, 0.607 18.8%,
+    0.720 21.9%, 0.820 25.1%, 0.900 28.3%,
+    0.965 31.6%, 1.013 35%,  1.046 38.4%,
+    1.065 41.9%, 1.071 45.4%, 1.068 49%,
+    1.056 52.7%, 1.036 56.4%, 1.014 60.1%,
+    0.992 63.8%, 0.977 67.5%, 0.968 71.2%,
+    0.966 75%,   0.971 79.7%, 0.982 84.4%,
+    0.994 89.1%, 1.001 93.8%, 1.004 98.5%, 1
+  );
+
+  /* Gentle spring — soft, natural */
+  --spring-gentle: linear(
+    0, 0.016 2.3%, 0.128 7.2%, 0.327 13.5%,
+    0.538 19.8%, 0.702 25.5%, 0.821 30.9%,
+    0.906 36.3%, 0.957 41.6%, 0.986 47%,
+    1.001 52.4%, 1.010 57.9%, 1.010 63.3%,
+    1.005 73.9%, 1.000 84.6%, 1
+  );
+
+  /* Animation durations */
+  --dur-instant: 80ms;
+  --dur-fast:    200ms;
+  --dur-normal:  350ms;
+  --dur-slow:    500ms;
+}
+
+/* ─── Liquid Glass Material Tokens ──────────────────────────────────────── */
+:root {
+  /* Glass backgrounds — OKLCH for perceptual uniformity */
+  --glass-bg:         oklch(0.97 0.008 240 / 0.72);
+  --glass-bg-strong:  oklch(0.97 0.008 240 / 0.88);
+  --glass-bg-subtle:  oklch(0.99 0.004 240 / 0.50);
+
+  /* Glass border — luminous rim light */
+  --glass-border:        oklch(1.00 0.000 0 / 0.24);
+  --glass-border-strong: oklch(1.00 0.000 0 / 0.40);
+  --glass-border-inner:  oklch(1.00 0.000 0 / 0.12);
+
+  /* Highlight layer — specular glint */
+  --glass-highlight: linear-gradient(
+    135deg,
+    oklch(1.00 0.000 0 / 0.32) 0%,
+    oklch(1.00 0.000 0 / 0.08) 40%,
+    transparent 100%
+  );
+
+  /* Shadow layer — depth separation */
+  --glass-shadow:
+    0 1px 1px oklch(0.00 0.000 0 / 0.04),
+    0 4px 12px oklch(0.00 0.000 0 / 0.08),
+    0 16px 40px oklch(0.00 0.000 0 / 0.10),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.20);
+
+  --glass-shadow-sm:
+    0 1px 2px oklch(0.00 0.000 0 / 0.06),
+    0 2px 8px oklch(0.00 0.000 0 / 0.06),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.18);
+
+  --glass-shadow-lg:
+    0 2px 4px oklch(0.00 0.000 0 / 0.05),
+    0 8px 24px oklch(0.00 0.000 0 / 0.12),
+    0 32px 64px oklch(0.00 0.000 0 / 0.16),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.22);
+
+  /* Illumination layer — ambient colour bleed */
+  --glass-illumination: radial-gradient(
+    ellipse 80% 60% at 50% 0%,
+    oklch(0.80 0.06 260 / 0.08) 0%,
+    transparent 100%
+  );
+
+  /* Backdrop filter — Vibrancy */
+  --glass-filter: blur(25px) saturate(1.2) brightness(1.02);
+  --glass-filter-strong: blur(40px) saturate(1.3) brightness(1.04);
+  --glass-filter-subtle: blur(12px) saturate(1.1);
+
+  /* Form controls / separators */
+  --input-bg: oklch(1.00 0.000 0 / 0.82);
+  --input-border: oklch(0.78 0.015 248 / 0.90);
+  --sidebar-divider-color: oklch(0.76 0.014 248 / 0.55);
+  --sidebar-org-switcher-border: oklch(0.78 0.015 248 / 0.78);
+}
+
+/* ─── Brand Colors (OKLCH) ───────────────────────────────────────────────── */
+:root {
+  /* Background — warm blue-grey gradient */
+  --color-background: oklch(0.965 0.012 248);
+  --color-foreground: oklch(0.18 0.02 248);
+
+  /* Primary — Apple Blue */
+  --color-primary:            oklch(0.55 0.20 258);
+  --color-primary-hover:      oklch(0.50 0.22 258);
+  --color-primary-light:      oklch(0.92 0.05 258);
+  --color-primary-foreground: oklch(1.00 0.000 0);
+
+  /* Surface — glass layers */
+  --color-surface:          oklch(0.99 0.006 248 / 0.80);
+  --color-surface-hover:    oklch(0.97 0.008 248 / 0.90);
+  --color-surface-elevated: oklch(1.00 0.004 248 / 0.92);
+
+  /* Muted */
+  --color-muted:            oklch(0.93 0.012 248);
+  --color-muted-foreground: oklch(0.52 0.03 248);
+
+  /* Border */
+  --color-border:       oklch(0.85 0.012 248 / 0.60);
+  --color-border-hover: oklch(0.75 0.015 248 / 0.80);
+
+  /* Status */
+  --color-success:       oklch(0.52 0.16 150);
+  --color-success-muted: oklch(0.95 0.05 150);
+  --color-warning:       oklch(0.65 0.18 80);
+  --color-warning-muted: oklch(0.96 0.06 80);
+  --color-error:         oklch(0.55 0.22 27);
+  --color-error-muted:   oklch(0.95 0.06 27);
+  --color-info:          oklch(0.58 0.18 248);
+  --color-info-muted:    oklch(0.94 0.05 248);
+
+  /* Shadows */
+  --shadow-sm: var(--glass-shadow-sm);
+  --shadow-md: var(--glass-shadow);
+  --shadow-lg: var(--glass-shadow-lg);
+
+  /* Sidebar */
+  --sidebar-width:           220px;
+  --sidebar-collapsed-width: 64px;
+}
+
+/* ─── Dark Mode ──────────────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  --color-background: oklch(0.12 0.016 258);
+  --color-foreground: oklch(0.94 0.010 248);
+
+  --color-primary:            oklch(0.65 0.18 258);
+  --color-primary-hover:      oklch(0.70 0.16 258);
+  --color-primary-light:      oklch(0.20 0.06 258);
+  --color-primary-foreground: oklch(1.00 0.000 0);
+
+  --color-surface:          oklch(0.18 0.016 258 / 0.72);
+  --color-surface-hover:    oklch(0.22 0.018 258 / 0.80);
+  --color-surface-elevated: oklch(0.22 0.016 258 / 0.88);
+
+  --color-muted:            oklch(0.22 0.016 258);
+  --color-muted-foreground: oklch(0.60 0.025 248);
+
+  --color-border:       oklch(1.00 0.000 0 / 0.12);
+  --color-border-hover: oklch(1.00 0.000 0 / 0.22);
+
+  --color-success:       oklch(0.65 0.18 150);
+  --color-success-muted: oklch(0.20 0.06 150);
+  --color-warning:       oklch(0.72 0.18 80);
+  --color-warning-muted: oklch(0.20 0.06 80);
+  --color-error:         oklch(0.65 0.22 27);
+  --color-error-muted:   oklch(0.20 0.08 27);
+  --color-info:          oklch(0.68 0.18 248);
+  --color-info-muted:    oklch(0.18 0.06 248);
+
+  /* Dark glass */
+  --glass-bg:         oklch(0.18 0.016 258 / 0.70);
+  --glass-bg-strong:  oklch(0.20 0.018 258 / 0.86);
+  --glass-bg-subtle:  oklch(0.22 0.012 258 / 0.50);
+
+  --glass-border:        oklch(1.00 0.000 0 / 0.14);
+  --glass-border-strong: oklch(1.00 0.000 0 / 0.24);
+  --glass-border-inner:  oklch(1.00 0.000 0 / 0.06);
+
+  --glass-highlight: linear-gradient(
+    135deg,
+    oklch(1.00 0.000 0 / 0.14) 0%,
+    oklch(1.00 0.000 0 / 0.04) 40%,
+    transparent 100%
+  );
+
+  --glass-shadow:
+    0 1px 1px oklch(0.00 0.000 0 / 0.30),
+    0 4px 12px oklch(0.00 0.000 0 / 0.40),
+    0 16px 40px oklch(0.00 0.000 0 / 0.45),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.10);
+
+  --glass-shadow-sm:
+    0 1px 2px oklch(0.00 0.000 0 / 0.25),
+    0 2px 8px oklch(0.00 0.000 0 / 0.30),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.08);
+
+  --glass-shadow-lg:
+    0 2px 4px oklch(0.00 0.000 0 / 0.25),
+    0 8px 24px oklch(0.00 0.000 0 / 0.45),
+    0 32px 64px oklch(0.00 0.000 0 / 0.50),
+    inset 0 1px 0 oklch(1.00 0.000 0 / 0.12);
+
+  --glass-illumination: radial-gradient(
+    ellipse 80% 60% at 50% 0%,
+    oklch(0.60 0.08 260 / 0.06) 0%,
+    transparent 100%
+  );
+
+  --input-bg: var(--glass-bg-subtle);
+  --input-border: var(--glass-border);
+  --sidebar-divider-color: var(--glass-border);
+  --sidebar-org-switcher-border: oklch(1.00 0.000 0 / 0.18);
+
+  --shadow-sm: var(--glass-shadow-sm);
+  --shadow-md: var(--glass-shadow);
+  --shadow-lg: var(--glass-shadow-lg);
+}
+
+/* ─── Tailwind Theme Extension ───────────────────────────────────────────── */
+@theme {
+  --color-bg: var(--color-background);
+  --color-fg: var(--color-foreground);
+  --color-primary: var(--color-primary);
+  --color-primary-hover: var(--color-primary-hover);
+  --color-primary-light: var(--color-primary-light);
+  --color-primary-fg: var(--color-primary-foreground);
+  --color-surface: var(--color-surface);
+  --color-surface-hover: var(--color-surface-hover);
+  --color-surface-elevated: var(--color-surface-elevated);
+  --color-muted: var(--color-muted);
+  --color-muted-fg: var(--color-muted-foreground);
+  --color-border: var(--color-border);
+  --color-border-hover: var(--color-border-hover);
+  --color-success: var(--color-success);
+  --color-success-muted: var(--color-success-muted);
+  --color-warning: var(--color-warning);
+  --color-warning-muted: var(--color-warning-muted);
+  --color-error: var(--color-error);
+  --color-error-muted: var(--color-error-muted);
+  --color-info: var(--color-info);
+  --color-info-muted: var(--color-info-muted);
+
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-2xl: var(--radius-2xl);
+  --radius-full: var(--radius-full);
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  --font-sans: var(--font-text);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+}
+
+/* ─── Base Styles ────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Smooth rendering on retina */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1;
+}
+
+body {
+  background-color: var(--color-background);
+  /* Subtle animated gradient background */
+  background-image:
+    radial-gradient(ellipse 80% 50% at 20% 0%, oklch(0.82 0.06 280 / 0.25) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 10%, oklch(0.80 0.05 220 / 0.20) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 50% 100%, oklch(0.85 0.04 200 / 0.15) 0%, transparent 60%);
+  background-attachment: fixed;
+  color: var(--color-foreground);
+  font-family: var(--font-text);
+  font-size: 17px;
+  line-height: var(--lh-body);
+  letter-spacing: var(--tracking-body);
+  min-height: 100vh;
+}
+
+:root[data-theme="dark"] body {
+  background-color: var(--color-background);
+  background-image:
+    radial-gradient(ellipse 80% 50% at 20% 0%, oklch(0.30 0.08 280 / 0.30) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 10%, oklch(0.28 0.06 220 / 0.25) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 50% 100%, oklch(0.25 0.05 200 / 0.20) 0%, transparent 60%);
+}
+
+/* ─── Scrollbar Styling ──────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}
+
+/* ─── Focus Ring ─────────────────────────────────────────────────────────── */
+*:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* ─── Liquid Glass Utility Classes ───────────────────────────────────────── */
+
+/* Base glass — use on panels, cards, sidebars */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  position: relative;
+  overflow: hidden;
+  will-change: backdrop-filter;
+}
+
+/* Highlight overlay (top-left glint) */
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--glass-highlight);
+  pointer-events: none;
+  z-index: 1;
+  border-radius: inherit;
+}
+
+/* Illumination (ambient colour bleed) */
+.glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--glass-illumination);
+  pointer-events: none;
+  z-index: 0;
+  border-radius: inherit;
+}
+
+.glass > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* Glass variants */
+.glass-strong {
+  background: var(--glass-bg-strong);
+  backdrop-filter: var(--glass-filter-strong);
+  -webkit-backdrop-filter: var(--glass-filter-strong);
+  border: 1px solid var(--glass-border-strong);
+  box-shadow: var(--glass-shadow-lg);
+}
+
+.glass-subtle {
+  background: var(--glass-bg-subtle);
+  backdrop-filter: var(--glass-filter-subtle);
+  -webkit-backdrop-filter: var(--glass-filter-subtle);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-sm);
+}
+
+/* ─── Squircle Shape Utility ─────────────────────────────────────────────── */
+.squircle-sm  { border-radius: var(--radius-sm);  corner-shape: squircle; }
+.squircle-md  { border-radius: var(--radius-md);  corner-shape: squircle; }
+.squircle-lg  { border-radius: var(--radius-lg);  corner-shape: squircle; }
+.squircle-xl  { border-radius: var(--radius-xl);  corner-shape: squircle; }
+
+/* ─── Spring Animation Utilities ─────────────────────────────────────────── */
+.animate-spring-snappy  { transition-timing-function: var(--spring-snappy); }
+.animate-spring-bouncy  { transition-timing-function: var(--spring-bouncy); }
+.animate-spring-gentle  { transition-timing-function: var(--spring-gentle); }
+
+/* ─── Dialog Enter/Leave Animations ─────────────────────────────────────── */
+@keyframes dialog-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.88) translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes dialog-leave {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.92) translateY(8px);
+  }
+}
+
+@keyframes backdrop-enter {
+  from { opacity: 0; backdrop-filter: blur(0); }
+  to   { opacity: 1; backdrop-filter: blur(8px); }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ─── Button Press Animation ─────────────────────────────────────────────── */
+.btn-glass:active {
+  transform: scale(0.97);
+  transition: transform var(--dur-instant) var(--spring-snappy);
+}
+
+/* ─── Reduced Transparency Fallback ─────────────────────────────────────── */
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .glass-strong,
+  .glass-subtle {
+    background: var(--color-surface) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-color: var(--color-border) !important;
+  }
+
+  body {
+    background-image: none !important;
+  }
+}
+
+/* ─── Markdown Prose ─────────────────────────────────────────────────────── */
+.prose-output .table-scroll-wrapper {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  border-radius: var(--radius-sm);
+}
+
+.prose-output .table-scroll-wrapper table {
+  width: max-content;
+  min-width: 100%;
+}
+
+/* Fix Tailwind Typography inline code: remove backtick pseudo-elements and
+   add a visible pill background so code is clearly distinct from body text.
+   The typography plugin adds ` characters via ::before/::after by default. */
+.prose :not(pre) > code::before,
+.prose :not(pre) > code::after {
+  content: '' !important;
+}
+
+.prose :not(pre) > code {
+  background: oklch(0.88 0.016 248 / 0.75);
+  color: var(--color-foreground);
+  border: 1px solid oklch(0.78 0.015 248 / 0.50);
+  border-radius: 0.3em;
+  padding: 0.1em 0.4em;
+  font-size: 0.875em;
+  font-weight: 500;
+}
+
+html.dark .prose :not(pre) > code {
+  background: oklch(0.24 0.018 258 / 0.75);
+  color: var(--color-foreground);
+  border-color: oklch(1.00 0.000 0 / 0.15);
+}
+
+/* Ensure prose text colors are readable in both modes using theme variables */
+.prose {
+  color: var(--color-foreground);
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  color: var(--color-foreground);
+}
+
+.prose strong {
+  color: var(--color-foreground);
+}
+
+.prose a {
+  color: var(--color-primary);
+}
+
+.prose thead th {
+  color: var(--color-foreground);
+}
+
+.prose blockquote {
+  color: var(--color-muted-foreground);
+  border-left-color: var(--color-border);
+}
+
+/* ─── Selection ──────────────────────────────────────────────────────────── */
+::selection {
+  background: oklch(0.55 0.20 258 / 0.20);
+  color: var(--color-foreground);
+}

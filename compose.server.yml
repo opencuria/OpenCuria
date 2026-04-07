@@ -1,0 +1,93 @@
+name: opencuria
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: opencuria_db
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${DB_NAME:-opencuria}
+      POSTGRES_USER: ${DB_USER:-opencuria}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    networks:
+      - opencuria-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-opencuria}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: opencuria_redis
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    networks:
+      - opencuria-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    container_name: opencuria_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DJANGO_ENV: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: db
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:8080,http://localhost:8000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+      SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
+      DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - opencuria-net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  webapp:
+    image: ghcr.io/ti-kamp/opencuria/webapp:${OPENCURIA_TAG:-latest}
+    container_name: opencuria_webapp
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      VITE_API_BASE_URL: ${BACKEND_PUBLIC_URL:-http://localhost:8000}/api/v1
+      VITE_WS_BASE_URL: ${BACKEND_PUBLIC_URL:-http://localhost:8000}
+    ports:
+      - "${WEBAPP_PORT:-8080}:80"
+    networks:
+      - opencuria-net
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  opencuria-net:
+    driver: bridge

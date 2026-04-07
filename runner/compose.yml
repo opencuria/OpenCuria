@@ -1,0 +1,23 @@
+services:
+  runner:
+    image: ghcr.io/ti-kamp/opencuria/runner:${OPENCURIA_TAG:-latest}
+    container_name: opencuria_runner
+    restart: unless-stopped
+    environment:
+      RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:?RUNNER_API_TOKEN is required}
+      RUNNER_BACKEND_URL: ${RUNNER_BACKEND_URL:-http://localhost:8000}
+      RUNNER_DOCKER_SOCKET: ${RUNNER_DOCKER_SOCKET:-unix:///var/run/docker.sock}
+      RUNNER_DOCKER_NETWORK: ${RUNNER_DOCKER_NETWORK:-bridge}
+      RUNNER_LOG_LEVEL: ${RUNNER_LOG_LEVEL:-INFO}
+      RUNNER_LOG_FORMAT: ${RUNNER_LOG_FORMAT:-json}
+      RUNNER_ENABLED_RUNTIMES: ${RUNNER_ENABLED_RUNTIMES:-docker}
+      RUNNER_QEMU_IMAGE_CACHE_DIR: ${RUNNER_QEMU_IMAGE_CACHE_DIR:-/var/lib/opencuria/images}
+      RUNNER_QEMU_DISK_DIR: ${RUNNER_QEMU_DISK_DIR:-/var/lib/opencuria/disks}
+      RUNNER_QEMU_SNAPSHOT_DIR: ${RUNNER_QEMU_SNAPSHOT_DIR:-/var/lib/opencuria/snapshots}
+      RUNNER_QEMU_VCPUS: ${RUNNER_QEMU_VCPUS:-2}
+      RUNNER_QEMU_MEMORY_MB: ${RUNNER_QEMU_MEMORY_MB:-4096}
+      RUNNER_QEMU_DISK_SIZE_GB: ${RUNNER_QEMU_DISK_SIZE_GB:-20}
+      RUNNER_QEMU_NETWORK: ${RUNNER_QEMU_NETWORK:-default}
+      RUNNER_QEMU_SSH_USER: ${RUNNER_QEMU_SSH_USER:-ubuntu}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

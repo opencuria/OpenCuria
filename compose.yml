@@ -1,0 +1,122 @@
+name: opencuria-local
+
+services:
+  backend:
+    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: opencuria_local_backend
+    restart: unless-stopped
+    environment:
+      DJANGO_ENV: development
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      SQLITE_PATH: /data/db.sqlite3
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      DJANGO_SUPERUSER_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
+      DJANGO_SUPERUSER_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
+    volumes:
+      - backend-data:/data
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    networks:
+      - opencuria-local
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  webapp:
+    image: ghcr.io/ti-kamp/opencuria/webapp:${OPENCURIA_TAG:-latest}
+    build:
+      context: ./webapp
+      dockerfile: Dockerfile
+    container_name: opencuria_local_webapp
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      VITE_API_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}/api/v1
+      VITE_WS_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}
+    ports:
+      - "127.0.0.1:${WEBAPP_PORT:-8080}:80"
+    networks:
+      - opencuria-local
+
+  bootstrap:
+    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: opencuria_local_bootstrap
+    restart: "no"
+    depends_on:
+      backend:
+        condition: service_healthy
+    entrypoint:
+      - python
+      - manage.py
+      - bootstrap_local_deploy
+      - --admin-email
+      - ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
+      - --admin-password
+      - ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
+      - --organization-name
+      - ${LOCAL_ORGANIZATION_NAME:-Local}
+      - --runner-name
+      - ${LOCAL_RUNNER_NAME:-local-docker}
+      - --runner-token
+      - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
+      - --workspace-image
+      - ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/ti-kamp/opencuria/workspace:latest}
+      - --image-definition-name
+      - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
+    environment:
+      DJANGO_ENV: development
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
+      SQLITE_PATH: /data/db.sqlite3
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
+      LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
+      LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
+      LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-docker}
+      LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
+      LOCAL_WORKSPACE_IMAGE: ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/ti-kamp/opencuria/workspace:latest}
+      LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
+    volumes:
+      - backend-data:/data
+    networks:
+      - opencuria-local
+
+  runner:
+    image: ghcr.io/ti-kamp/opencuria/runner:${OPENCURIA_TAG:-latest}
+    build:
+      context: ./runner
+      dockerfile: Dockerfile.runner
+    container_name: opencuria_local_runner
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
+      RUNNER_BACKEND_URL: http://backend:8000
+      RUNNER_DOCKER_NETWORK: opencuria-local
+      RUNNER_LOG_LEVEL: ${RUNNER_LOG_LEVEL:-INFO}
+      RUNNER_LOG_FORMAT: ${RUNNER_LOG_FORMAT:-console}
+      RUNNER_ENABLED_RUNTIMES: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - opencuria-local
+
+volumes:
+  backend-data:
+
+networks:
+  opencuria-local:
+    name: opencuria-local

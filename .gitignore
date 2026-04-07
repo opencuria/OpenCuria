@@ -1,0 +1,26 @@
+.DS_Store
+*.pyc
+.env
+.env.local
+.env.*.local
+!.env.example
+*.sqlite3
+
+# Docker volumes (created by docker compose on dev machines)
+certs/
+html/
+pgdata/
+redisdata/
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/

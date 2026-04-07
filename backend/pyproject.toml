@@ -1,0 +1,23 @@
+[project]
+name = "opencuria-backend"
+version = "0.1.0"
+description = "Central control plane for opencuria coding agent platform"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "apps", "common"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.development"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
