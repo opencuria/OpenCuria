@@ -94,6 +94,23 @@ require_command python3
 require_command npm
 require_command git
 
+install_system_deps() {
+  print_section "Installing system build dependencies"
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    printf 'apt-get not found — skipping system dependency install (non-Debian system).\n'
+    return 0
+  fi
+
+  # Required to compile libvirt-python and other C-extension packages.
+  apt-get install -y \
+    build-essential \
+    python3-dev \
+    pkg-config \
+    libvirt-dev
+}
+
+install_system_deps
 setup_git_hooks
 setup_python_component backend
 setup_python_component runner

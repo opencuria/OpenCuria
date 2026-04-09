@@ -533,6 +533,12 @@ the same change so the suite remains green and current.
 
 For development, both the backend and the runner each have their own Python virtual environments (.venv); these must be activated once before any Python-related operations.
 
+The runner requires system build tools to compile `libvirt-python`. On Debian/Ubuntu, install these before running `pip install`:
+
+```bash
+apt-get install -y build-essential python3-dev pkg-config libvirt-dev
+```
+
 ```bash
 cd runner
 python3 -m venv .venv && source .venv/bin/activate
@@ -670,10 +676,10 @@ Native Linux runner hosts that need QEMU/KVM should use the systemd unit at
 ### Runner CI/CD
 
 `.github/workflows/runner-build.yml` builds and publishes multi-arch images for:
-- `ghcr.io/ti-kamp/opencuria/backend`
-- `ghcr.io/ti-kamp/opencuria/webapp`
-- `ghcr.io/ti-kamp/opencuria/runner`
-- `ghcr.io/ti-kamp/opencuria/workspace`
+- `ghcr.io/opencuria/backend`
+- `ghcr.io/opencuria/webapp`
+- `ghcr.io/opencuria/runner`
+- `ghcr.io/opencuria/workspace`
 
 It runs for pushes to `main`, `release`, tags, and manual dispatches.
 

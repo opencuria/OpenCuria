@@ -57,7 +57,7 @@ class Command(BaseCommand):
             "--workspace-image",
             default=os.getenv(
                 "LOCAL_WORKSPACE_IMAGE",
-                "ghcr.io/ti-kamp/opencuria/workspace:latest",
+                "ghcr.io/opencuria/workspace:latest",
             ),
             help="Docker image tag for locally created workspaces.",
         )

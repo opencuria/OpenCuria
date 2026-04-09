@@ -136,10 +136,10 @@ Why native for QEMU:
 
 Published via GHCR:
 
-- `ghcr.io/ti-kamp/opencuria/backend`
-- `ghcr.io/ti-kamp/opencuria/webapp`
-- `ghcr.io/ti-kamp/opencuria/runner`
-- `ghcr.io/ti-kamp/opencuria/workspace`
+- `ghcr.io/opencuria/backend`
+- `ghcr.io/opencuria/webapp`
+- `ghcr.io/opencuria/runner`
+- `ghcr.io/opencuria/workspace`
 
 The GitHub Actions workflow builds multi-arch images for:
 

@@ -34,7 +34,7 @@ services:
       retries: 12
 
   backend:
-    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     container_name: opencuria_backend
     restart: unless-stopped
     depends_on:
@@ -70,7 +70,7 @@ services:
       start_period: 30s
 
   webapp:
-    image: ghcr.io/ti-kamp/opencuria/webapp:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     container_name: opencuria_webapp
     restart: unless-stopped
     depends_on:

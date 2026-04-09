@@ -1,6 +1,6 @@
 services:
   runner:
-    image: ghcr.io/ti-kamp/opencuria/runner:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/runner:${OPENCURIA_TAG:-latest}
     container_name: opencuria_runner
     restart: unless-stopped
     environment:

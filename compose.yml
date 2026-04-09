@@ -2,7 +2,7 @@ name: opencuria-local
 
 services:
   backend:
-    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -30,7 +30,7 @@ services:
       start_period: 10s
 
   webapp:
-    image: ghcr.io/ti-kamp/opencuria/webapp:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     build:
       context: ./webapp
       dockerfile: Dockerfile
@@ -48,7 +48,7 @@ services:
       - opencuria-local
 
   bootstrap:
-    image: ghcr.io/ti-kamp/opencuria/backend:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -72,7 +72,7 @@ services:
       - --runner-token
       - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
       - --workspace-image
-      - ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/ti-kamp/opencuria/workspace:latest}
+      - ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/opencuria/workspace:latest}
       - --image-definition-name
       - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     environment:
@@ -85,7 +85,7 @@ services:
       LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
       LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-docker}
       LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      LOCAL_WORKSPACE_IMAGE: ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/ti-kamp/opencuria/workspace:latest}
+      LOCAL_WORKSPACE_IMAGE: ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/opencuria/workspace:latest}
       LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     volumes:
       - backend-data:/data
@@ -93,7 +93,7 @@ services:
       - opencuria-local
 
   runner:
-    image: ghcr.io/ti-kamp/opencuria/runner:${OPENCURIA_TAG:-latest}
+    image: ghcr.io/opencuria/runner:${OPENCURIA_TAG:-latest}
     build:
       context: ./runner
       dockerfile: Dockerfile.runner

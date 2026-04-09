@@ -30,7 +30,7 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
         "--runner-token",
         "runner-secret",
         "--workspace-image",
-        "ghcr.io/ti-kamp/opencuria/workspace:test",
+        "ghcr.io/opencuria/workspace:test",
         stdout=out,
     )
 
@@ -51,9 +51,9 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
     assert runner.api_token_hash == hash_token("runner-secret")
     assert runner.available_runtimes == [RuntimeType.DOCKER]
     assert build.status == RunnerImageBuild.Status.ACTIVE
-    assert build.image_tag == "ghcr.io/ti-kamp/opencuria/workspace:test"
+    assert build.image_tag == "ghcr.io/opencuria/workspace:test"
     assert artifact.status == ImageArtifact.ArtifactStatus.READY
-    assert artifact.runner_artifact_id == "ghcr.io/ti-kamp/opencuria/workspace:test"
+    assert artifact.runner_artifact_id == "ghcr.io/opencuria/workspace:test"
     assert (
         CredentialService.objects.filter(
             slug="github-token",
@@ -96,7 +96,7 @@ def test_bootstrap_local_deploy_is_idempotent_and_updates_runner(db) -> None:
         "--runner-token",
         "new-token",
         "--workspace-image",
-        "ghcr.io/ti-kamp/opencuria/workspace:latest",
+        "ghcr.io/opencuria/workspace:latest",
     )
     call_command(
         "bootstrap_local_deploy",
@@ -111,7 +111,7 @@ def test_bootstrap_local_deploy_is_idempotent_and_updates_runner(db) -> None:
         "--runner-token",
         "new-token",
         "--workspace-image",
-        "ghcr.io/ti-kamp/opencuria/workspace:latest",
+        "ghcr.io/opencuria/workspace:latest",
     )
 
     runner.refresh_from_db()

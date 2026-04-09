@@ -12,10 +12,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/ti-kamp/opencuria/backend
-  WEBAPP_IMAGE: ghcr.io/ti-kamp/opencuria/webapp
-  RUNNER_IMAGE: ghcr.io/ti-kamp/opencuria/runner
-  WORKSPACE_IMAGE: ghcr.io/ti-kamp/opencuria/workspace
+  BACKEND_IMAGE: ghcr.io/opencuria/backend
+  WEBAPP_IMAGE: ghcr.io/opencuria/webapp
+  RUNNER_IMAGE: ghcr.io/opencuria/runner
+  WORKSPACE_IMAGE: ghcr.io/opencuria/workspace
 
 jobs:
   build-images:
@@ -29,19 +29,19 @@ jobs:
       matrix:
         include:
           - name: backend
-            image: ghcr.io/ti-kamp/opencuria/backend
+            image: ghcr.io/opencuria/backend
             context: ./backend
             dockerfile: ./backend/Dockerfile
           - name: webapp
-            image: ghcr.io/ti-kamp/opencuria/webapp
+            image: ghcr.io/opencuria/webapp
             context: ./webapp
             dockerfile: ./webapp/Dockerfile
           - name: runner
-            image: ghcr.io/ti-kamp/opencuria/runner
+            image: ghcr.io/opencuria/runner
             context: ./runner
             dockerfile: ./runner/Dockerfile.runner
           - name: workspace
-            image: ghcr.io/ti-kamp/opencuria/workspace
+            image: ghcr.io/opencuria/workspace
             context: ./runner
             dockerfile: ./runner/Dockerfile
 
