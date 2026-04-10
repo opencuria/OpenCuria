@@ -2588,9 +2588,8 @@ class RunnerService:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         user=None,
-        is_admin: bool = False,
     ) -> list["Workspace"]:
-        """Return workspaces filtered by org/user access."""
+        """Return workspaces filtered by org and owner."""
         if runner_id:
             qs = self.workspaces.list_by_runner(runner_id)
         elif organization_id:
@@ -2598,8 +2597,7 @@ class RunnerService:
         else:
             qs = self.workspaces.list_all()
 
-        # Non-admins only see their own workspaces
-        if user and not is_admin:
+        if user is not None:
             qs = qs.filter(created_by=user)
 
         return list(qs)
@@ -2608,6 +2606,21 @@ class RunnerService:
         """Return a workspace by ID or raise WorkspaceNotFoundError."""
         workspace = self.workspaces.get_by_id(workspace_id)
         if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        return workspace
+
+    def get_workspace_for_user(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user,
+        organization_id: uuid.UUID,
+    ) -> "Workspace":
+        """Return a workspace only when it belongs to the active org and owner."""
+        workspace = self.get_workspace(workspace_id)
+        if workspace.runner.organization_id != organization_id:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        if workspace.created_by_id != user.id:
             raise WorkspaceNotFoundError(str(workspace_id))
         return workspace
 

@@ -843,7 +843,6 @@ class ConversationRepository:
     def list_for_user(
         organization_id: uuid.UUID,
         user_id: int,
-        is_admin: bool,
     ) -> list[dict]:
         """
         Return all conversations for a user, sorted by last activity DESC.
@@ -860,10 +859,9 @@ class ConversationRepository:
         ).order_by("-created_at")
 
         chat_qs = Chat.objects.select_related("workspace", "workspace__runner").filter(
-            workspace__runner__organization_id=organization_id
+            workspace__runner__organization_id=organization_id,
+            workspace__created_by_id=user_id,
         )
-        if not is_admin:
-            chat_qs = chat_qs.filter(workspace__created_by_id=user_id)
 
         chat_qs = chat_qs.annotate(
             _session_count=Count("sessions"),
@@ -924,12 +922,13 @@ class ConversationRepository:
 
         ws_qs = (
             Workspace.objects.select_related("runner")
-            .filter(runner__organization_id=organization_id)
+            .filter(
+                runner__organization_id=organization_id,
+                created_by_id=user_id,
+            )
             .annotate(_has_chats=has_any_chat)
             .filter(_has_chats=False)
         )
-        if not is_admin:
-            ws_qs = ws_qs.filter(created_by_id=user_id)
 
         ws_qs = ws_qs.annotate(
             _session_count=Count("chats__sessions"),

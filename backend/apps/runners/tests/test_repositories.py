@@ -250,7 +250,7 @@ class TestConversationRepository:
             completed_at=completed_at,
         )
 
-        rows = ConversationRepository.list_for_user(org.id, user.id, is_admin=True)
+        rows = ConversationRepository.list_for_user(org.id, user.id)
         row = next(r for r in rows if r["chat_id"] == chat.id)
         assert row["updated_at"] == completed_at
 
