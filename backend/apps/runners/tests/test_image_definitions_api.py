@@ -5,6 +5,7 @@ Tests for image definition management API endpoints.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -497,3 +498,149 @@ def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
     artifact = ImageArtifact.objects.get(runner_image_build=build)
     assert payload[0]["image_artifact_id"] == str(artifact.id)
     assert artifact.runner_artifact_id == "opencuria/custom/backfill:1"
+
+
+@pytest.mark.django_db
+def test_create_runner_build_returns_pending_build_without_artifact(client: Client, monkeypatch):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="image-build-create@test.com", password="secret")
+    org = Organization.objects.create(name="Create Build Org", slug="create-build-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+
+    runner = Runner.objects.create(
+        name="create-build-runner",
+        api_token_hash=hash_token("create-build-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["qemu"],
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Create Build Definition",
+        runtime_type="qemu",
+        base_distro="ubuntu:24.04",
+    )
+    build = RunnerImageBuild.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=RunnerImageBuild.Status.PENDING,
+    )
+
+    async def _trigger_runner_image_build(**kwargs):
+        return build
+
+    monkeypatch.setattr(
+        "apps.runners.api._get_service",
+        lambda: SimpleNamespace(trigger_runner_image_build=_trigger_runner_image_build),
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
+    )
+    response = client.post(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
+        data=json.dumps({"runner_id": str(runner.id), "activate": True}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["id"] == str(build.id)
+    assert payload["status"] == RunnerImageBuild.Status.PENDING
+    assert payload["image_artifact_id"] is None
+
+
+@pytest.mark.django_db
+def test_list_runner_builds_includes_global_definition_builds(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="image-build-global@test.com", password="secret")
+    org = Organization.objects.create(name="Global Build Org", slug="global-build-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+
+    runner = Runner.objects.create(
+        name="global-build-runner",
+        api_token_hash=hash_token("global-build-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["qemu"],
+    )
+    definition = ImageDefinition.objects.create(
+        organization=None,
+        created_by=admin,
+        name="Global QEMU Definition",
+        runtime_type="qemu",
+        base_distro="ubuntu:24.04",
+    )
+    build = RunnerImageBuild.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=RunnerImageBuild.Status.ACTIVE,
+        image_path="/var/lib/opencuria/base-images/global.qcow2",
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_READ.value],
+    )
+    response = client.get(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["id"] == str(build.id)
+
+
+@pytest.mark.django_db
+def test_rebuild_runner_build_allows_global_definition_builds(client: Client, monkeypatch):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="image-build-global-rebuild@test.com", password="secret")
+    org = Organization.objects.create(name="Global Rebuild Org", slug="global-rebuild-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+
+    runner = Runner.objects.create(
+        name="global-rebuild-runner",
+        api_token_hash=hash_token("global-rebuild-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["qemu"],
+    )
+    definition = ImageDefinition.objects.create(
+        organization=None,
+        created_by=admin,
+        name="Global Rebuild Definition",
+        runtime_type="qemu",
+        base_distro="ubuntu:24.04",
+    )
+    build = RunnerImageBuild.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=RunnerImageBuild.Status.FAILED,
+    )
+
+    async def _trigger_runner_image_build(**kwargs):
+        return build
+
+    monkeypatch.setattr(
+        "apps.runners.api._get_service",
+        lambda: SimpleNamespace(trigger_runner_image_build=_trigger_runner_image_build),
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
+    )
+    response = client.patch(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/{runner.id}/",
+        data=json.dumps({"action": "rebuild"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == str(build.id)
