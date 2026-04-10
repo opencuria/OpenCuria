@@ -44,8 +44,8 @@ from .exceptions import (
 from .repositories import (
     AgentRepository,
     ChatRepository,
-    ImageArtifactRepository,
     ImageDefinitionRepository,
+    ImageInstanceRepository,
     RunnerRepository,
     RunnerImageBuildRepository,
     SessionRepository,
@@ -81,7 +81,7 @@ class RunnerService:
         self.tasks = TaskRepository
         self.agents = AgentRepository
         self.chats = ChatRepository
-        self.image_artifacts = ImageArtifactRepository
+        self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
         self.runner_image_builds = RunnerImageBuildRepository
         # Tracks unknown runtime workspaces for which a cleanup request has
@@ -170,6 +170,40 @@ class RunnerService:
                 logger.exception(
                     "Failed to dispatch pending image build %s for runner %s",
                     build.id,
+                    runner.id,
+                )
+        return dispatched
+
+    async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
+        """Dispatch pending image deletions that accumulated while runner was offline."""
+        pending_images = await sync_to_async(
+            lambda: list(self.image_instances.list_pending_delete_for_runner(runner.id))
+        )()
+
+        dispatched = []
+        for image in pending_images:
+            if not image.deleting_task_id:
+                continue
+            task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(image.deleting_task_id))
+            if task is None:
+                continue
+            try:
+                await self._emit_to_runner(
+                    runner,
+                    "task:delete_image_artifact",
+                    {
+                        "task_id": str(task.id),
+                        "image_instance_id": str(image.id),
+                        "runtime_type": image.runtime_type,
+                        "image_artifact_id": image.runner_ref,
+                    },
+                )
+                await sync_to_async(self.tasks.mark_in_progress)(task)
+                dispatched.append(image)
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch pending image deletion %s for runner %s",
+                    image.id,
                     runner.id,
                 )
         return dispatched
@@ -751,17 +785,17 @@ class RunnerService:
         if image_artifact_id is None:
             raise ConflictError("An image artifact is required")
 
-        selected_artifact = await sync_to_async(self.image_artifacts.get_by_id)(
+        selected_image = await sync_to_async(self.image_instances.get_by_id)(
             image_artifact_id
         )
-        if selected_artifact is None:
+        if selected_image is None:
             raise NotFoundError("ImageArtifact", str(image_artifact_id))
 
-        if selected_artifact.status != "ready":
+        if selected_image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        selected_runner_build = selected_artifact.runner_image_build
-        source_workspace = selected_artifact.source_workspace
+        selected_runner_build = selected_image.runner_image_build
+        source_workspace = selected_image.origin_workspace
         requested_runner_id = runner_id
         if selected_runner_build is not None:
             if selected_runner_build.status != "active":
@@ -855,6 +889,7 @@ class RunnerService:
             qemu_vcpus=resolved_qemu_vcpus,
             qemu_memory_mb=resolved_qemu_memory_mb,
             qemu_disk_size_gb=resolved_qemu_disk_size_gb,
+            base_image_instance=selected_image,
             created_by=user,
         )
         if credentials is not None:
@@ -2972,7 +3007,7 @@ class RunnerService:
         created_by=None,
     ):
         """Create/update runner build record and dispatch task:build_image."""
-        from .models import ImageArtifact, RunnerImageBuild
+        from .models import ImageInstance, RunnerImageBuild
 
         self._ensure_runner_supports_runtime(
             runner=runner,
@@ -2996,11 +3031,11 @@ class RunnerService:
             await sync_to_async(build.save)(update_fields=["status", "updated_at"])
 
         if not activate:
-            existing_artifact = await sync_to_async(
-                self.image_artifacts.get_by_runner_image_build_id
+            existing_image = await sync_to_async(
+                self.image_instances.get_by_runner_image_build_id
             )(build.id)
-            if existing_artifact is not None:
-                await sync_to_async(self.image_artifacts.mark_failed)(existing_artifact.id)
+            if existing_image is not None:
+                await sync_to_async(self.image_instances.mark_retired)(existing_image.id)
             return build
 
         if image_definition.runtime_type == RuntimeType.QEMU:
@@ -3027,34 +3062,40 @@ class RunnerService:
                 else ""
             ),
         )
-        artifact = await sync_to_async(
-            self.image_artifacts.get_by_runner_image_build_id
+        image = await sync_to_async(
+            self.image_instances.get_by_runner_image_build_id
         )(build.id)
-        artifact_name = f"{image_definition.name} ({runner.name})"
-        if artifact is None:
-            await sync_to_async(self.image_artifacts.create_pending)(
-                source_workspace=None,
-                name=artifact_name,
+        image_name = f"{image_definition.name} ({runner.name})"
+        if image is None:
+            await sync_to_async(self.image_instances.create_pending)(
+                runner=runner,
+                runtime_type=image_definition.runtime_type,
+                origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+                origin_definition=image_definition,
+                name=image_name,
                 creating_task_id=str(task.id),
-                artifact_kind=ImageArtifact.ArtifactKind.BUILT,
                 runner_image_build=build,
                 created_by=created_by,
             )
         else:
-            artifact.name = artifact_name
-            artifact.status = ImageArtifact.ArtifactStatus.CREATING
-            artifact.created_by = created_by
-            artifact.creating_task_id = str(task.id)
-            artifact.runner_artifact_id = ""
-            artifact.size_bytes = 0
-            await sync_to_async(artifact.save)(
+            image.name = image_name
+            image.status = ImageInstance.Status.BUILDING
+            image.created_by = created_by
+            image.creating_task_id = str(task.id)
+            image.size_bytes = 0
+            image.origin_definition = image_definition
+            image.runner = runner
+            image.runtime_type = image_definition.runtime_type
+            await sync_to_async(image.save)(
                 update_fields=[
                     "name",
                     "status",
                     "created_by",
                     "creating_task_id",
-                    "runner_artifact_id",
                     "size_bytes",
+                    "origin_definition",
+                    "runner",
+                    "runtime_type",
                 ]
             )
 
@@ -3112,7 +3153,7 @@ class RunnerService:
     ) -> None:
         """Mark a runner image build as active and complete its task."""
         from django.utils import timezone
-        from .models import ImageArtifact, RunnerImageBuild
+        from .models import ImageInstance, RunnerImageBuild
 
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
@@ -3130,31 +3171,37 @@ class RunnerService:
         build.save(
             update_fields=["status", "image_tag", "image_path", "built_at", "updated_at"]
         )
-        artifact = self.image_artifacts.get_by_runner_image_build_id(uuid.UUID(runner_image_build_id))
-        runner_artifact_id = image_tag or image_path
-        artifact_name = f"{build.image_definition.name} ({build.runner.name})"
-        if artifact is None:
-            self.image_artifacts.create(
-                source_workspace=None,
-                runner_artifact_id=runner_artifact_id,
-                name=artifact_name,
+        image = self.image_instances.get_by_runner_image_build_id(
+            uuid.UUID(runner_image_build_id)
+        )
+        runner_ref = image_tag or image_path
+        image_name = f"{build.image_definition.name} ({build.runner.name})"
+        if image is None:
+            self.image_instances.create(
+                runner=build.runner,
+                runtime_type=build.image_definition.runtime_type,
+                origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+                origin_definition=build.image_definition,
+                runner_ref=runner_ref,
+                name=image_name,
                 size_bytes=0,
-                artifact_kind=ImageArtifact.ArtifactKind.BUILT,
                 runner_image_build=build,
             )
         else:
-            artifact.name = artifact_name
-            artifact.status = ImageArtifact.ArtifactStatus.READY
-            artifact.runner_artifact_id = runner_artifact_id
-            artifact.size_bytes = 0
-            artifact.creating_task_id = None
-            artifact.save(
+            image.name = image_name
+            image.status = ImageInstance.Status.READY
+            image.runner_ref = runner_ref
+            image.size_bytes = 0
+            image.creating_task_id = None
+            image.deleted_at = None
+            image.save(
                 update_fields=[
                     "name",
                     "status",
-                    "runner_artifact_id",
+                    "runner_ref",
                     "size_bytes",
                     "creating_task_id",
+                    "deleted_at",
                 ]
             )
         self.tasks.complete(task)
@@ -3177,11 +3224,11 @@ class RunnerService:
         RunnerImageBuild.objects.filter(id=runner_image_build_id).update(
             status=RunnerImageBuild.Status.FAILED
         )
-        artifact = self.image_artifacts.get_by_runner_image_build_id(
+        image = self.image_instances.get_by_runner_image_build_id(
             uuid.UUID(runner_image_build_id)
         )
-        if artifact is not None:
-            self.image_artifacts.mark_failed(artifact.id)
+        if image is not None:
+            self.image_instances.mark_failed(image.id)
         if task is not None:
             self.tasks.fail(task, error)
 
@@ -3194,12 +3241,14 @@ class RunnerService:
         workspace_id: uuid.UUID,
         name: str,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["ImageArtifact", "Task"]:
+    ) -> tuple["Workspace", "Task"]:
         """Dispatch image artifact creation to the runner.
 
-        Creates a 'creating' artifact record immediately so the UI can show
+        Creates a pending image instance immediately so the UI can show
         progress. The record is updated to 'ready' when the runner completes.
         """
+        from .models import ImageInstance
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
@@ -3232,8 +3281,11 @@ class RunnerService:
             lambda: list(workspace.credentials.all())
         )()
         created_by = await sync_to_async(lambda: workspace.created_by)()
-        artifact = await sync_to_async(self.image_artifacts.create_pending)(
-            source_workspace=workspace,
+        image = await sync_to_async(self.image_instances.create_pending)(
+            runner=runner,
+            runtime_type=workspace.runtime_type,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=workspace,
             name=name,
             creating_task_id=str(task_id),
             created_by=created_by,
@@ -3253,10 +3305,10 @@ class RunnerService:
             },
         )
         logger.info(
-            "Dispatched create_image_artifact (workspace=%s, task=%s, artifact=%s)",
+            "Dispatched create_image_artifact (workspace=%s, task=%s, image=%s)",
             workspace_id,
             task_id,
-            artifact.id,
+            image.id,
         )
         return workspace, task
 
@@ -3269,7 +3321,7 @@ class RunnerService:
         size_bytes: int = 0,
         runner_id: str | None = None,
     ) -> None:
-        """Handle image_artifact:created from runner and mark the artifact ready."""
+        """Handle image_artifact:created from runner and mark the image ready."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             raise TaskNotFoundError(task_id)
@@ -3277,11 +3329,11 @@ class RunnerService:
         if not self._validate_task_runner(task, runner_id):
             return
 
-        artifact = self.image_artifacts.get_by_task_id(task_id)
-        if artifact is not None:
-            self.image_artifacts.mark_ready(
-                artifact.id,
-                runner_artifact_id=artifact_id,
+        image = self.image_instances.get_by_task_id(task_id)
+        if image is not None:
+            self.image_instances.mark_ready(
+                image.id,
+                runner_ref=artifact_id,
                 size_bytes=size_bytes,
             )
         else:
@@ -3289,9 +3341,12 @@ class RunnerService:
             if workspace is None:
                 raise WorkspaceNotFoundError(workspace_id)
             workspace_credentials = list(workspace.credentials.all())
-            self.image_artifacts.create(
-                source_workspace=workspace,
-                runner_artifact_id=artifact_id,
+            self.image_instances.create(
+                runner=workspace.runner,
+                runtime_type=workspace.runtime_type,
+                origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+                origin_workspace=workspace,
+                runner_ref=artifact_id,
                 name=name,
                 size_bytes=size_bytes,
                 created_by=task.workspace.created_by if task.workspace else None,
@@ -3326,12 +3381,12 @@ class RunnerService:
         error: str = "",
         runner_id: str | None = None,
     ) -> None:
-        """Handle image_artifact:failed by marking the pending artifact as failed."""
+        """Handle image_artifact:failed by marking the pending image as failed."""
         task = self.tasks.get_by_id(uuid.UUID(task_id)) if task_id else None
         if task is not None and not self._validate_task_runner(task, runner_id):
             return
 
-        self.image_artifacts.mark_failed_by_task_id(task_id)
+        self.image_instances.mark_failed_by_task_id(task_id)
 
         if task is not None:
             if task.workspace:
@@ -3354,43 +3409,89 @@ class RunnerService:
 
     def list_image_artifacts_for_workspace(self, workspace_id: uuid.UUID) -> list:
         """Return all artifacts captured from a workspace."""
-        return list(self.image_artifacts.list_by_workspace(workspace_id))
+        return list(self.image_instances.list_by_workspace(workspace_id))
 
     def list_image_artifacts_for_user(self, user) -> list:
         """Return all artifacts created by a specific user."""
-        return list(self.image_artifacts.list_by_user(user))
+        return list(self.image_instances.list_by_user(user))
 
     async def delete_image_artifact(
         self,
         image_artifact_id: uuid.UUID,
     ) -> None:
-        """Delete an image artifact and dispatch cleanup to the runner if needed."""
-        artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
-        if artifact is None:
+        """Delete an image instance safely and dispatch cleanup to the runner if needed."""
+        image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
+        if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
 
-        if artifact.runner_image_build is not None:
-            await sync_to_async(self.image_artifacts.delete)(image_artifact_id)
-            logger.info("Built image artifact deleted: %s", image_artifact_id)
+        dependent_workspaces = await sync_to_async(
+            lambda: list(self.workspaces.list_by_base_image_instance(image_artifact_id))
+        )()
+        if dependent_workspaces:
+            await sync_to_async(self.image_instances.mark_retired)(image_artifact_id)
+            raise ConflictError(
+                f"Image artifact '{image_artifact_id}' is still used by {len(dependent_workspaces)} workspace(s) and was retired instead"
+            )
+
+        runner = image.runner
+        if not image.runner_ref:
+            await sync_to_async(self.image_instances.mark_deleted)(image_artifact_id)
+            logger.info("Image artifact deleted without runner cleanup: %s", image_artifact_id)
             return
 
-        workspace = artifact.source_workspace
-        if workspace is None:
-            raise ValueError(f"Image artifact '{image_artifact_id}' has no source workspace")
-        runner = workspace.runner
-        if runner.is_online and artifact.runner_artifact_id:
+        task_id = generate_uuid()
+        task = await sync_to_async(self.tasks.create)(
+            task_id=task_id,
+            runner=runner,
+            task_type=TaskType.DELETE_IMAGE,
+        )
+        await sync_to_async(self.image_instances.mark_deleting)(
+            image_artifact_id,
+            deleting_task_id=str(task.id),
+        )
+
+        if runner.is_online:
             await self._emit_to_runner(
                 runner,
                 "task:delete_image_artifact",
                 {
-                    "task_id": str(generate_uuid()),
-                    "workspace_id": str(workspace.id),
-                    "image_artifact_id": artifact.runner_artifact_id,
+                    "task_id": str(task.id),
+                    "image_instance_id": str(image.id),
+                    "runtime_type": image.runtime_type,
+                    "image_artifact_id": image.runner_ref,
                 },
             )
+            await sync_to_async(self.tasks.mark_in_progress)(task)
 
-        await sync_to_async(self.image_artifacts.delete)(image_artifact_id)
-        logger.info("Image artifact deleted: %s", image_artifact_id)
+        logger.info("Image artifact marked for deletion: %s", image_artifact_id)
+
+    def handle_image_artifact_deleted(
+        self,
+        task_id: str,
+        image_instance_id: str = "",
+        runner_ref: str = "",
+        runner_id: str | None = None,
+    ) -> None:
+        """Mark an image instance deleted after runner cleanup confirms it."""
+        task = self.tasks.get_by_id(uuid.UUID(task_id)) if task_id else None
+        if task is not None and not self._validate_task_runner(task, runner_id):
+            return
+
+        image = None
+        if image_instance_id:
+            image = self.image_instances.get_by_id(uuid.UUID(image_instance_id))
+        if image is None and task_id:
+            image = self.image_instances.get_by_task_id(task_id)
+        if image is None and runner_ref and runner_id:
+            pending = list(
+                self.image_instances.list_pending_delete_for_runner(uuid.UUID(runner_id))
+            )
+            image = next((item for item in pending if item.runner_ref == runner_ref), None)
+
+        if image is not None:
+            self.image_instances.mark_deleted(image.id)
+        if task is not None:
+            self.tasks.complete(task)
 
     async def create_workspace_from_image_artifact(
         self,
@@ -3410,23 +3511,23 @@ class RunnerService:
         """
         from apps.credentials.services import CredentialSvc
 
-        artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
-        if artifact is None:
+        image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
+        if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
 
-        if artifact.status != "ready":
+        if image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        source_workspace = artifact.source_workspace
+        source_workspace = image.origin_workspace
         if source_workspace is not None:
             runner = source_workspace.runner
             runtime_type = source_workspace.runtime_type
             qemu_vcpus = source_workspace.qemu_vcpus
             qemu_memory_mb = source_workspace.qemu_memory_mb
             qemu_disk_size_gb = source_workspace.qemu_disk_size_gb
-        elif artifact.runner_image_build is not None:
-            runner = artifact.runner_image_build.runner
-            runtime_type = artifact.runner_image_build.image_definition.runtime_type
+        elif image.runner_image_build is not None:
+            runner = image.runner_image_build.runner
+            runtime_type = image.runner_image_build.image_definition.runtime_type
             qemu_vcpus = None
             qemu_memory_mb = None
             qemu_disk_size_gb = None
@@ -3476,6 +3577,7 @@ class RunnerService:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            base_image_instance=image,
             created_by=user,
         )
 
@@ -3485,12 +3587,12 @@ class RunnerService:
             resolved_env_vars = env_vars or {}
             resolved_ssh_keys = ssh_keys or []
         else:
-            artifact_credentials = await sync_to_async(list)(artifact.credentials.all())
-            if artifact_credentials:
+            image_credentials = await sync_to_async(list)(image.credentials.all())
+            if image_credentials:
                 await sync_to_async(self.workspaces.set_credentials)(
-                    workspace, artifact_credentials
+                    workspace, image_credentials
                 )
-                artifact_cred_ids = [c.id for c in artifact_credentials]
+                artifact_cred_ids = [c.id for c in image_credentials]
                 credential_svc = CredentialSvc()
                 resolved = await sync_to_async(credential_svc.resolve_credentials)(
                     artifact_cred_ids,
@@ -3522,7 +3624,7 @@ class RunnerService:
             payload={
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
-                "image_artifact_id": artifact.runner_artifact_id,
+                "image_artifact_id": image.runner_ref,
                 "runtime_type": runtime_type,
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,

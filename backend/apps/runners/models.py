@@ -142,6 +142,17 @@ class Workspace(models.Model):
     qemu_vcpus = models.PositiveSmallIntegerField(null=True, blank=True)
     qemu_memory_mb = models.PositiveIntegerField(null=True, blank=True)
     qemu_disk_size_gb = models.PositiveIntegerField(null=True, blank=True)
+    base_image_instance = models.ForeignKey(
+        "runners.ImageInstance",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="dependent_workspaces",
+        help_text=(
+            "The concrete runtime image this workspace was created from. "
+            "Legacy workspaces created before image-instance tracking may be null."
+        ),
+    )
     credentials = models.ManyToManyField(
         "credentials.Credential",
         blank=True,
@@ -806,90 +817,123 @@ class RunnerImageBuild(models.Model):
         )
 
 
-class ImageArtifact(models.Model):
-    """Concrete runtime artifact used to create or clone workspaces."""
+class ImageInstance(models.Model):
+    """Concrete runnable image instance tracked independently from definitions."""
 
-    class ArtifactKind(models.TextChoices):
-        CAPTURED = "captured", "Captured"
-        BUILT = "built", "Built"
+    class OriginType(models.TextChoices):
+        DEFINITION_BUILD = "definition_build", "Definition Build"
+        WORKSPACE_CAPTURE = "workspace_capture", "Workspace Capture"
 
-    class ArtifactStatus(models.TextChoices):
-        CREATING = "creating", "Creating"
+    class Status(models.TextChoices):
+        BUILDING = "building", "Building"
+        CAPTURING = "capturing", "Capturing"
         READY = "ready", "Ready"
+        RETIRED = "retired", "Retired"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    source_workspace = models.ForeignKey(
-        Workspace,
+    runner = models.ForeignKey(
+        Runner,
         on_delete=models.CASCADE,
-        related_name="image_artifacts",
-        null=True,
-        blank=True,
+        related_name="image_instances",
     )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="image_artifacts",
-        null=True,
-        blank=True,
-        help_text="The user who created this artifact.",
-    )
-    artifact_kind = models.CharField(
+    runtime_type = models.CharField(
         max_length=20,
-        choices=ArtifactKind.choices,
-        default=ArtifactKind.CAPTURED,
+        choices=RuntimeType.choices,
+        default=RuntimeType.DOCKER,
+    )
+    origin_type = models.CharField(
+        max_length=32,
+        choices=OriginType.choices,
+        default=OriginType.WORKSPACE_CAPTURE,
+    )
+    origin_definition = models.ForeignKey(
+        ImageDefinition,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="image_instances",
+    )
+    origin_workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.SET_NULL,
+        related_name="captured_image_instances",
+        null=True,
+        blank=True,
     )
     runner_image_build = models.OneToOneField(
         RunnerImageBuild,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="artifact",
+        related_name="image_instance",
     )
-    runner_artifact_id = models.CharField(
-        max_length=255,
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="image_instances",
+        null=True,
+        blank=True,
+        help_text="The user who created this image instance.",
+    )
+    runner_ref = models.CharField(
+        max_length=512,
         blank=True,
         default="",
-        help_text="Artifact identifier on the runner. Empty while creating.",
+        help_text=(
+            "Concrete runtime reference on the runner, e.g. a Docker image tag "
+            "or QCOW2 path."
+        ),
     )
     name = models.CharField(
         max_length=255,
-        help_text="Human-readable artifact name.",
+        help_text="Human-readable image instance name.",
     )
     size_bytes = models.BigIntegerField(
         default=0,
-        help_text="Artifact size in bytes.",
+        help_text="Image instance size in bytes.",
     )
     status = models.CharField(
         max_length=20,
-        choices=ArtifactStatus.choices,
-        default=ArtifactStatus.READY,
-        help_text="Artifact status: creating (in progress), ready (available), failed.",
+        choices=Status.choices,
+        default=Status.READY,
+        help_text="Lifecycle status of the image instance.",
     )
     creating_task_id = models.CharField(
         max_length=64,
         null=True,
         blank=True,
         db_index=True,
-        help_text="Task ID of the creation task, used to link runner events back to this record.",
+        help_text="Task ID of the creation/build task.",
+    )
+    deleting_task_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Task ID of the delete task while cleanup is pending.",
     )
     credentials = models.ManyToManyField(
         "credentials.Credential",
         blank=True,
-        related_name="image_artifacts",
+        related_name="image_instances",
         help_text=(
-            "Credentials attached when the artifact was created. "
-            "Used to automatically restore credentials when creating a workspace from this artifact."
+            "Credentials attached when the image instance was created. "
+            "Used to automatically restore credentials when cloning from it."
         ),
     )
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "runners_image_artifact"
+        db_table = "runners_image_instance"
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
         return (
-            "ImageArtifact("
-            f"{self.name}, source_workspace={self.source_workspace_id}, kind={self.artifact_kind})"
+            "ImageInstance("
+            f"{self.name}, origin_type={self.origin_type}, status={self.status})"
         )

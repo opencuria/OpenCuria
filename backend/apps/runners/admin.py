@@ -6,8 +6,8 @@ from .models import (
     AgentCommand,
     AgentDefinition,
     Chat,
-    ImageArtifact,
     ImageDefinition,
+    ImageInstance,
     OrgAgentDefinitionActivation,
     Runner,
     RunnerImageBuild,
@@ -104,18 +104,21 @@ class RunnerSystemMetricsAdmin(admin.ModelAdmin):
     ]
 
 
-@admin.register(ImageArtifact)
-class ImageArtifactAdmin(admin.ModelAdmin):
+@admin.register(ImageInstance)
+class ImageInstanceAdmin(admin.ModelAdmin):
     list_display = [
         "id",
-        "source_workspace",
+        "origin_workspace",
+        "origin_definition",
+        "runner",
         "name",
-        "runner_artifact_id",
-        "artifact_kind",
+        "runner_ref",
+        "origin_type",
+        "status",
         "size_bytes",
         "created_at",
     ]
-    readonly_fields = ["id", "created_at"]
+    readonly_fields = ["id", "created_at", "updated_at", "deleted_at"]
 
 
 @admin.register(ImageDefinition)

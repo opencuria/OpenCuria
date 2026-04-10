@@ -66,6 +66,7 @@ class TaskType(models.TextChoices):
     REMOVE_WORKSPACE = "remove_workspace", "Remove Workspace"
     START_TERMINAL = "start_terminal", "Start Terminal"
     CREATE_IMAGE_ARTIFACT = "create_image_artifact", "Create Image Artifact"
+    DELETE_IMAGE = "delete_image", "Delete Image"
     CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT = (
         "create_workspace_from_image_artifact",
         "Create Workspace From Image Artifact",

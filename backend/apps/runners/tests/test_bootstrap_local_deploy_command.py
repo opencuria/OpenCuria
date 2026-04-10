@@ -14,7 +14,7 @@ from apps.runners.management.commands.bootstrap_local_deploy import (
     DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
     DEFAULT_WORKSPACE_PACKAGES,
 )
-from apps.runners.models import ImageArtifact, ImageDefinition, Runner, RunnerImageBuild
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, RunnerImageBuild
 from common.utils import hash_token
 
 
@@ -60,7 +60,7 @@ def test_bootstrap_creates_pending_build(db) -> None:
     assert build.built_at is None
 
     # No artifact should exist yet
-    assert not ImageArtifact.objects.filter(runner_image_build=build).exists()
+    assert not ImageInstance.objects.filter(runner_image_build=build).exists()
 
     # Image definition should have the correct packages and Dockerfile
     assert definition.packages == DEFAULT_WORKSPACE_PACKAGES

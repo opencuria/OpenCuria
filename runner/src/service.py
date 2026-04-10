@@ -1733,6 +1733,36 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             image_artifact_id=image_artifact_id,
         )
 
+    async def delete_image_reference(
+        self,
+        *,
+        runtime_type: str,
+        image_ref: str,
+    ) -> None:
+        """Delete a concrete runtime image reference without requiring a workspace."""
+        if runtime_type == "docker":
+            if not image_ref.strip():
+                raise RuntimeError("image_ref is required for docker image deletion")
+            try:
+                import docker  # type: ignore[import-not-found]
+            except Exception as exc:
+                raise RuntimeError("docker SDK is not available") from exc
+
+            client = docker.from_env()
+            await asyncio.to_thread(client.images.remove, image=image_ref, force=True)
+            logger.info("docker_image_deleted", image_ref=image_ref)
+            return
+
+        if runtime_type == "qemu":
+            if not image_ref.strip():
+                raise RuntimeError("image_ref is required for qemu image deletion")
+            runtime = self._get_runtime_by_type("qemu")
+            await runtime.delete_image_artifact(image_ref)
+            logger.info("qemu_image_deleted", image_ref=image_ref)
+            return
+
+        raise RuntimeError(f"Unsupported runtime_type for image deletion: {runtime_type}")
+
     async def create_workspace_from_image_artifact(
         self,
         image_artifact_id: str,

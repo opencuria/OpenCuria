@@ -973,13 +973,13 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    svc.image_artifacts.timeout_stale(timeout_hours=1)
+    svc.image_instances.timeout_stale(timeout_hours=1)
     artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
     result = [
         {
             "id": str(s.id),
             "source_workspace_id": (
-                str(s.source_workspace_id) if s.source_workspace_id else None
+                str(s.origin_workspace_id) if s.origin_workspace_id else None
             ),
             "name": s.name,
             "status": str(s.status),

@@ -14,7 +14,7 @@ from django.test import Client
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageArtifact, ImageDefinition, Runner, RunnerImageBuild, Workspace
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, RunnerImageBuild, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -245,21 +245,25 @@ def test_list_user_images_includes_source_runner_online_flag(client: Client):
         status=WorkspaceStatus.RUNNING,
         created_by=admin,
     )
-    image_online = ImageArtifact.objects.create(
-        source_workspace=ws_online,
+    image_online = ImageInstance.objects.create(
+        runner=runner_online,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=ws_online,
         created_by=admin,
         name="Captured Online",
-        runner_artifact_id="img-online",
-        status=ImageArtifact.ArtifactStatus.READY,
-        artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        runner_ref="img-online",
+        status=ImageInstance.Status.READY,
     )
-    image_offline = ImageArtifact.objects.create(
-        source_workspace=ws_offline,
+    image_offline = ImageInstance.objects.create(
+        runner=runner_offline,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=ws_offline,
         created_by=admin,
         name="Captured Offline",
-        runner_artifact_id="img-offline",
-        status=ImageArtifact.ArtifactStatus.READY,
-        artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        runner_ref="img-offline",
+        status=ImageInstance.Status.READY,
     )
 
     token = _create_api_key(
@@ -296,13 +300,15 @@ def test_clone_workspace_from_offline_image_returns_runner_offline(client: Clien
         status=WorkspaceStatus.RUNNING,
         created_by=admin,
     )
-    image_offline = ImageArtifact.objects.create(
-        source_workspace=ws_offline,
+    image_offline = ImageInstance.objects.create(
+        runner=runner_offline,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=ws_offline,
         created_by=admin,
         name="Captured Offline Clone",
-        runner_artifact_id="img-offline-clone",
-        status=ImageArtifact.ArtifactStatus.READY,
-        artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        runner_ref="img-offline-clone",
+        status=ImageInstance.Status.READY,
     )
 
     token = _create_api_key(
@@ -381,13 +387,15 @@ def test_clone_workspace_from_image_rejects_incompatible_runtime(client: Client)
         qemu_memory_mb=4096,
         qemu_disk_size_gb=50,
     )
-    artifact = ImageArtifact.objects.create(
-        source_workspace=workspace,
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="qemu",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
         created_by=admin,
         name="QEMU Clone Source",
-        runner_artifact_id="qemu-clone-artifact",
-        status=ImageArtifact.ArtifactStatus.READY,
-        artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        runner_ref="qemu-clone-artifact",
+        status=ImageInstance.Status.READY,
     )
 
     token = _create_api_key(
@@ -432,14 +440,16 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         status=RunnerImageBuild.Status.ACTIVE,
         image_path="/var/lib/opencuria/base-images/artifact.qcow2",
     )
-    artifact = ImageArtifact.objects.create(
-        source_workspace=None,
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="qemu",
+        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+        origin_definition=definition,
         created_by=admin,
-        artifact_kind=ImageArtifact.ArtifactKind.BUILT,
         runner_image_build=build,
-        runner_artifact_id=build.image_path,
+        runner_ref=build.image_path,
         name="Artifact Image",
-        status=ImageArtifact.ArtifactStatus.READY,
+        status=ImageInstance.Status.READY,
     )
 
     token = _create_api_key(
@@ -457,7 +467,7 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
 
 
 @pytest.mark.django_db
-def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
+def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Client):
     user_model = get_user_model()
     admin = user_model.objects.create_user(email="image-build-backfill@test.com", password="secret")
     org = Organization.objects.create(name="Backfill Org", slug="backfill-org")
@@ -495,9 +505,54 @@ def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
 
     assert response.status_code == 200
     payload = response.json()
-    artifact = ImageArtifact.objects.get(runner_image_build=build)
-    assert payload[0]["image_artifact_id"] == str(artifact.id)
-    assert artifact.runner_artifact_id == "opencuria/custom/backfill:1"
+    assert payload[0]["image_artifact_id"] is None
+    assert not ImageInstance.objects.filter(runner_image_build=build).exists()
+
+
+@pytest.mark.django_db
+def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="image-retire@test.com", password="secret")
+    org = Organization.objects.create(name="Retire Org", slug="retire-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+
+    runner = Runner.objects.create(
+        name="retire-runner",
+        api_token_hash=hash_token("retire-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    image = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+        created_by=admin,
+        name="Retire Me",
+        runner_ref="opencuria/custom/retire-me:1",
+        status=ImageInstance.Status.READY,
+    )
+    Workspace.objects.create(
+        runner=runner,
+        name="Dependent Workspace",
+        status=WorkspaceStatus.STOPPED,
+        runtime_type="docker",
+        created_by=admin,
+        base_image_instance=image,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGES_DELETE.value],
+    )
+    response = client.delete(
+        f"/api/v1/image-artifacts/{image.id}/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 409
+    image.refresh_from_db()
+    assert image.status == ImageInstance.Status.RETIRED
 
 
 @pytest.mark.django_db

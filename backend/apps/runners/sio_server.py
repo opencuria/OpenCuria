@@ -246,6 +246,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
         if runner is not None:
             await service.dispatch_pending_image_builds(runner)
+            await service.dispatch_pending_image_deletions(runner)
 
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
@@ -568,13 +569,13 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "image_artifact:deleted")
         if not runner_id:
             return
-        logger.info(
-            "Image artifact deleted on runner %s: workspace=%s, artifact=%s",
-            runner_id,
-            data.get("workspace_id"),
-            data.get("image_artifact_id"),
+        service = get_runner_service()
+        await sync_to_async(service.handle_image_artifact_deleted)(
+            task_id=data.get("task_id", ""),
+            image_instance_id=data.get("image_instance_id", ""),
+            runner_ref=data.get("image_artifact_id", ""),
+            runner_id=runner_id,
         )
-
     @sio.on("image_artifact:failed")
     async def on_image_artifact_failed(sid: str, data: dict):
         """Handle image_artifact:failed by marking the pending artifact as failed."""

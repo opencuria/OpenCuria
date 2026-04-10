@@ -1051,20 +1051,32 @@ class WebSocketInterface(Interface):
         @sio.on("task:delete_image_artifact")
         async def on_delete_image_artifact(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
             image_artifact_id = data["image_artifact_id"]
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            image_instance_id = data.get("image_instance_id", "")
+            runtime_type = data.get("runtime_type", "")
+            raw_workspace_id = data.get("workspace_id")
+            workspace_id = uuid.UUID(raw_workspace_id) if raw_workspace_id else None
+            log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             try:
-                await self._service.delete_image_artifact(
-                    workspace_id, image_artifact_id
-                )
+                if runtime_type:
+                    await self._service.delete_image_reference(
+                        runtime_type=runtime_type,
+                        image_ref=image_artifact_id,
+                    )
+                elif workspace_id is not None:
+                    await self._service.delete_image_artifact(
+                        workspace_id, image_artifact_id
+                    )
+                else:
+                    raise RuntimeError(
+                        "Either runtime_type or workspace_id is required for image deletion"
+                    )
                 await sio.emit(
                     "image_artifact:deleted",
                     {
                         "task_id": task_id,
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": str(workspace_id) if workspace_id else "",
+                        "image_instance_id": image_instance_id,
                         "image_artifact_id": image_artifact_id,
                     },
                 )

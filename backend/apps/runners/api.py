@@ -1282,10 +1282,14 @@ image_artifact_router = Router(tags=["image-artifacts"])
 def _image_artifact_to_out(artifact) -> ImageArtifactOut:
     """Map an ImageArtifact ORM instance to ImageArtifactOut."""
     runner_build = getattr(artifact, "runner_image_build", None)
-    source_workspace = getattr(artifact, "source_workspace", None)
+    source_workspace = getattr(artifact, "origin_workspace", None)
     runtime_type = getattr(source_workspace, "runtime_type", None)
     source_runner_id = getattr(source_workspace, "runner_id", None)
     source_runner_online = False
+    image_runner = getattr(artifact, "runner", None)
+    if image_runner is not None and source_runner_id is None:
+        source_runner_id = image_runner.id
+        source_runner_online = image_runner.status == RS.ONLINE
     workspace_runner = getattr(source_workspace, "runner", None)
     if workspace_runner is not None:
         source_runner_online = workspace_runner.status == RS.ONLINE
@@ -1301,15 +1305,21 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
             source_definition_name = image_definition.name
             runtime_type = image_definition.runtime_type
         is_deactivated = getattr(runner_build, "status", "") == "deactivated"
+    if getattr(artifact, "status", "") == "retired":
+        is_deactivated = True
 
     return ImageArtifactOut(
         id=artifact.id,
-        source_workspace_id=artifact.source_workspace_id,
-        runner_artifact_id=artifact.runner_artifact_id,
+        source_workspace_id=artifact.origin_workspace_id,
+        runner_artifact_id=artifact.runner_ref,
         name=artifact.name,
         size_bytes=artifact.size_bytes,
         status=artifact.status,
-        artifact_kind=artifact.artifact_kind,
+        artifact_kind=(
+            "built"
+            if getattr(artifact, "origin_type", "") == "definition_build"
+            else "captured"
+        ),
         runner_image_build_id=artifact.runner_image_build_id,
         source_definition_name=source_definition_name,
         source_runner_id=source_runner_id,
@@ -1336,7 +1346,7 @@ def list_image_artifacts(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    service.image_artifacts.timeout_stale(timeout_hours=1)
+    service.image_instances.timeout_stale(timeout_hours=1)
     artifacts = service.list_image_artifacts_for_user(user=request.user)
     return [_image_artifact_to_out(artifact) for artifact in artifacts]
 
@@ -1385,7 +1395,7 @@ async def rename_image_artifact(
     await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
-    artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
     if artifact is None:
         return 404, ErrorOut(detail="Image artifact not found", code="not_found")
     if artifact.created_by != request.user:
@@ -1394,16 +1404,16 @@ async def rename_image_artifact(
             code="forbidden",
         )
 
-    await sync_to_async(service.image_artifacts.update_name)(
+    await sync_to_async(service.image_instances.update_name)(
         image_artifact_id, payload.name.strip()
     )
-    updated = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    updated = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
     return 200, _image_artifact_to_out(updated)
 
 
 @image_artifact_router.delete(
     "/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut},
+    response={204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_image_artifact_global(
@@ -1417,7 +1427,7 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1429,6 +1439,8 @@ async def delete_image_artifact_global(
         return 204, None
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @image_artifact_router.post(
@@ -1454,7 +1466,7 @@ async def create_workspace_from_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1534,7 +1546,7 @@ async def create_workspace_image_artifact(
 
 @workspace_image_artifact_router.delete(
     "/{workspace_id}/image-artifacts/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut},
+    response={204: None, 404: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_workspace_image_artifact(
@@ -1554,6 +1566,8 @@ async def delete_workspace_image_artifact(
         return 204, None
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_image_artifact_router.post(
@@ -1626,25 +1640,9 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
 def _runner_image_build_to_out(build) -> RunnerImageBuildOut:
     artifact = None
     try:
-        artifact = getattr(build, "artifact", None)
+        artifact = getattr(build, "image_instance", None)
     except (ObjectDoesNotExist, SynchronousOnlyOperation):
         artifact = None
-    if (
-        artifact is None
-        and getattr(build, "status", "") == "active"
-        and (build.image_tag or build.image_path)
-    ):
-        from .models import ImageArtifact
-
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
-            created_by=None,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag or build.image_path,
-            name=f"{build.image_definition.name} ({build.runner.name})",
-            status=ImageArtifact.ArtifactStatus.READY,
-        )
 
     return RunnerImageBuildOut(
         id=build.id,

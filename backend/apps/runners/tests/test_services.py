@@ -36,8 +36,8 @@ from apps.runners.models import (
     AgentDefinition,
     AgentDefinitionCredentialRelation,
     Chat,
-    ImageArtifact,
     ImageDefinition,
+    ImageInstance,
     Runner,
     RunnerImageBuild,
     Session,
@@ -93,14 +93,16 @@ class TestCreateWorkspace:
             status=RunnerImageBuild.Status.ACTIVE,
             image_tag="opencuria/custom/base:1",
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=user,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
             runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            runner_ref=build.image_tag,
             name="Base Workspace Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
         workspace, task = await service.create_workspace(
             name="Test Workspace",
@@ -119,6 +121,8 @@ class TestCreateWorkspace:
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
         assert len(payload["ssh_keys"]) == 1
+        workspace.refresh_from_db()
+        assert workspace.base_image_instance_id == artifact.id
 
     @pytest.mark.asyncio
     async def test_requires_image_selection(self, service, runner, user):
@@ -186,14 +190,16 @@ class TestCreateWorkspace:
             status=RunnerImageBuild.Status.ACTIVE,
             image_tag="opencuria/custom/foreign:1",
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        artifact = ImageInstance.objects.create(
+            runner=foreign_runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=owner,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
             runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            runner_ref=build.image_tag,
             name="Foreign Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(NotFoundError):
@@ -228,14 +234,16 @@ class TestCreateWorkspace:
             status=RunnerImageBuild.Status.ACTIVE,
             image_tag="opencuria/custom/base:definition",
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=user,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
             runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            runner_ref=build.image_tag,
             name="Definition Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(
@@ -289,13 +297,15 @@ class TestCreateWorkspace:
             created_by=owner,
             runtime_type="docker",
         )
-        image = ImageArtifact.objects.create(
-            source_workspace=foreign_workspace,
+        image = ImageInstance.objects.create(
+            runner=foreign_runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=foreign_workspace,
             created_by=owner,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
-            runner_artifact_id="snapshot-1",
+            runner_ref="snapshot-1",
             name="Foreign Image",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(NotFoundError):
@@ -341,6 +351,116 @@ class TestCreateImageArtifactSecurity:
                 name="forbidden-image-artifact",
                 organization_id=local_org.id,
             )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestImageDeletionLifecycle:
+    @pytest.mark.asyncio
+    async def test_delete_retires_image_when_workspace_still_depends_on_it(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Reusable Base",
+            runner_ref="opencuria/custom/reusable:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Dependent Workspace",
+            status=WorkspaceStatus.STOPPED,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        with pytest.raises(ConflictError, match="was retired instead"):
+            await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.RETIRED
+
+    @pytest.mark.asyncio
+    async def test_delete_marks_image_deleting_when_runner_offline(
+        self, service, runner, user
+    ):
+        runner.status = RunnerStatus.OFFLINE
+        runner.save(update_fields=["status"])
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Offline Cleanup",
+            runner_ref="opencuria/custom/offline-cleanup:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+
+        await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETING
+        assert image.deleting_task_id is not None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_image_deletions_marks_task_in_progress(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Pending Delete",
+            runner_ref="opencuria/custom/pending-delete:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(
+                Task.objects.create(
+                    runner=runner,
+                    type=TaskType.DELETE_IMAGE,
+                    status=TaskStatus.PENDING,
+                ).id
+            ),
+        )
+
+        dispatched = await service.dispatch_pending_image_deletions(runner)
+
+        assert [item.id for item in dispatched] == [image.id]
+        task = Task.objects.get(id=image.deleting_task_id)
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    def test_handle_image_artifact_deleted_marks_image_deleted(
+        self, service, runner, user
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Delete Confirmed",
+            runner_ref="opencuria/custom/delete-confirmed:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(task.id),
+        )
+
+        service.handle_image_artifact_deleted(
+            task_id=str(task.id),
+            image_instance_id=str(image.id),
+            runner_id=str(runner.id),
+        )
+
+        image.refresh_from_db()
+        task.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETED
+        assert task.status == TaskStatus.COMPLETED
 
 
 @pytest.mark.django_db(transaction=True)
@@ -405,13 +525,15 @@ class TestRuntimeCompatibilityGuards:
             qemu_memory_mb=4096,
             qemu_disk_size_gb=50,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="qemu",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
             created_by=user,
             name="QEMU Snapshot",
-            runner_artifact_id="artifact-qemu-1",
-            status=ImageArtifact.ArtifactStatus.READY,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+            runner_ref="artifact-qemu-1",
+            status=ImageInstance.Status.READY,
         )
         runner.available_runtimes = ["docker"]
         runner.save(update_fields=["available_runtimes"])
@@ -1093,9 +1215,9 @@ class TestDispatchPendingImageBuilds:
         sio_mock.emit.assert_called()
 
         # An artifact should have been created (in CREATING status)
-        artifact = ImageArtifact.objects.filter(runner_image_build=build).first()
+        artifact = ImageInstance.objects.filter(runner_image_build=build).first()
         assert artifact is not None
-        assert artifact.status == ImageArtifact.ArtifactStatus.CREATING
+        assert artifact.status == ImageInstance.Status.BUILDING
 
     @pytest.mark.asyncio
     async def test_skips_builds_with_task(self, service, sio_mock, runner, user):
