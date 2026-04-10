@@ -71,8 +71,6 @@ services:
       - ${LOCAL_RUNNER_NAME:-local-docker}
       - --runner-token
       - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      - --workspace-image
-      - ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/opencuria/workspace:latest}
       - --image-definition-name
       - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     environment:
@@ -85,7 +83,6 @@ services:
       LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
       LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-docker}
       LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      LOCAL_WORKSPACE_IMAGE: ${LOCAL_WORKSPACE_IMAGE:-ghcr.io/opencuria/workspace:latest}
       LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     volumes:
       - backend-data:/data

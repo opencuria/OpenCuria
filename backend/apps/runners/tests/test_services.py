@@ -1058,3 +1058,92 @@ class TestHandleOutputError:
         assert session.output == "work in progress\n[Error] Tool crashed"
         assert task.status == TaskStatus.FAILED
         assert task.error == "Tool crashed"
+
+
+@pytest.mark.django_db(transaction=True)
+class TestDispatchPendingImageBuilds:
+    """Tests for dispatching pending image builds when a runner comes online."""
+
+    @pytest.mark.asyncio
+    async def test_dispatches_pending_builds(self, service, sio_mock, runner, user):
+        """Pending builds without a task should be dispatched."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Pending Build Test",
+            runtime_type="docker",
+            base_distro="ubuntu:22.04",
+        )
+        build = RunnerImageBuild.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=RunnerImageBuild.Status.PENDING,
+            build_task=None,
+        )
+
+        dispatched = await service.dispatch_pending_image_builds(runner)
+
+        assert len(dispatched) == 1
+        assert dispatched[0].id == build.id
+
+        # Build should now have a task and the SIO mock should have been called
+        build.refresh_from_db()
+        assert build.build_task is not None
+        assert build.status == RunnerImageBuild.Status.PENDING
+        sio_mock.emit.assert_called()
+
+        # An artifact should have been created (in CREATING status)
+        artifact = ImageArtifact.objects.filter(runner_image_build=build).first()
+        assert artifact is not None
+        assert artifact.status == ImageArtifact.ArtifactStatus.CREATING
+
+    @pytest.mark.asyncio
+    async def test_skips_builds_with_task(self, service, sio_mock, runner, user):
+        """Builds that already have a task should not be re-dispatched."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Has Task Test",
+            runtime_type="docker",
+            base_distro="ubuntu:22.04",
+        )
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.BUILD_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        RunnerImageBuild.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=RunnerImageBuild.Status.PENDING,
+            build_task=task,
+        )
+
+        dispatched = await service.dispatch_pending_image_builds(runner)
+        assert len(dispatched) == 0
+
+    @pytest.mark.asyncio
+    async def test_skips_active_builds(self, service, sio_mock, runner, user):
+        """Already active builds should not be dispatched."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Active Build Test",
+            runtime_type="docker",
+            base_distro="ubuntu:22.04",
+        )
+        RunnerImageBuild.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=RunnerImageBuild.Status.ACTIVE,
+            image_tag="test:latest",
+        )
+
+        dispatched = await service.dispatch_pending_image_builds(runner)
+        assert len(dispatched) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_pending_builds_returns_empty(self, service, runner):
+        """When there are no pending builds, return an empty list."""
+        dispatched = await service.dispatch_pending_image_builds(runner)
+        assert dispatched == []
