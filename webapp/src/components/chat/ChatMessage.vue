@@ -240,6 +240,11 @@ function enhanceMarkdownHtml(html: string): string {
   const root = doc.getElementById('md-root')
   if (!root) return html
 
+  for (const link of Array.from(root.querySelectorAll('a[href]'))) {
+    link.setAttribute('target', '_blank')
+    link.setAttribute('rel', 'noopener noreferrer')
+  }
+
   for (const pre of Array.from(root.querySelectorAll('pre'))) {
     const code = pre.querySelector('code')
     if (!code) continue
