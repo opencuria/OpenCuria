@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { UiDialog, UiInput, UiButton, UiSelect } from '@/components/ui'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
@@ -26,6 +26,7 @@ const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
 const credentialStore = useCredentialStore()
 const imageStore = useImageStore()
+const router = useRouter()
 
 const open = ref(false)
 const activeTab = ref<'basic' | 'advanced'>('basic')
@@ -402,6 +403,11 @@ function handleClose(): void {
   }, 200)
 }
 
+async function navigateToCredentials(): Promise<void> {
+  handleClose()
+  await router.push({ name: 'credentials' })
+}
+
 const isValid = computed(
   () =>
     name.value.trim().length > 0 &&
@@ -507,7 +513,9 @@ const isValid = computed(
           </button>
         </div>
         <p v-else class="text-xs text-muted-fg">
-          No credentials available. <RouterLink to="/credentials" class="underline">Add credentials</RouterLink> first.
+          No credentials available.
+          <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
+          first.
         </p>
       </div>
 
