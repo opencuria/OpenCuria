@@ -131,6 +131,49 @@ class RunnerService:
         )
         return runner
 
+    async def dispatch_pending_image_builds(self, runner: "Runner") -> list:
+        """Dispatch pending image builds that were created while the runner was offline.
+
+        This is called after a runner registers online.  It queries for
+        ``RunnerImageBuild`` records with status ``pending`` and no associated
+        build task, then triggers the regular build pipeline for each.
+
+        Returns the list of dispatched RunnerImageBuild records.
+        """
+        from .models import RunnerImageBuild
+
+        pending_builds = await sync_to_async(
+            lambda: list(
+                RunnerImageBuild.objects.filter(
+                    runner=runner,
+                    status=RunnerImageBuild.Status.PENDING,
+                    build_task__isnull=True,
+                ).select_related("image_definition", "runner")
+            )
+        )()
+
+        dispatched = []
+        for build in pending_builds:
+            try:
+                await self.trigger_runner_image_build(
+                    image_definition=build.image_definition,
+                    runner=runner,
+                    activate=True,
+                )
+                dispatched.append(build)
+                logger.info(
+                    "Dispatched pending image build %s for runner %s",
+                    build.id,
+                    runner.id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch pending image build %s for runner %s",
+                    build.id,
+                    runner.id,
+                )
+        return dispatched
+
     def unregister_runner(self, sid: str) -> None:
         """
         Mark a runner as offline when it disconnects.
