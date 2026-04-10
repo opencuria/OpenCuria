@@ -536,7 +536,8 @@ For development, both the backend and the runner each have their own Python virt
 The runner requires system build tools to compile `libvirt-python`. On Debian/Ubuntu, install these before running `pip install`:
 
 ```bash
-apt-get install -y build-essential python3-dev pkg-config libvirt-dev
+sudo apt-get update
+sudo apt-get install -y build-essential python3-dev pkg-config libvirt-dev
 ```
 
 ```bash

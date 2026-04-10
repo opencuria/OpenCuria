@@ -102,8 +102,19 @@ install_system_deps() {
     return 0
   fi
 
+  local -a apt_prefix=()
+  if [[ "${EUID}" -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+      apt_prefix=(sudo)
+    else
+      printf 'Skipping system dependency install: root or sudo is required for apt-get.\n'
+      return 0
+    fi
+  fi
+
   # Required to compile libvirt-python and other C-extension packages.
-  apt-get install -y \
+  "${apt_prefix[@]}" apt-get update
+  "${apt_prefix[@]}" apt-get install -y \
     build-essential \
     python3-dev \
     pkg-config \
