@@ -16,7 +16,6 @@ env:
   BACKEND_IMAGE: ghcr.io/opencuria/backend
   WEBAPP_IMAGE: ghcr.io/opencuria/webapp
   RUNNER_IMAGE: ghcr.io/opencuria/runner
-  WORKSPACE_IMAGE: ghcr.io/opencuria/workspace
 
 jobs:
   test-backend:
@@ -99,10 +98,6 @@ jobs:
             image: ghcr.io/opencuria/runner
             context: ./runner
             dockerfile: ./runner/Dockerfile.runner
-          - name: workspace
-            image: ghcr.io/opencuria/workspace
-            context: ./runner
-            dockerfile: ./runner/Dockerfile
 
     steps:
       - name: Checkout

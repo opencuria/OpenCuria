@@ -10,11 +10,16 @@ from django.core.management import call_command
 from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RuntimeType
+from apps.runners.management.commands.bootstrap_local_deploy import (
+    DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
+    DEFAULT_WORKSPACE_PACKAGES,
+)
 from apps.runners.models import ImageArtifact, ImageDefinition, Runner, RunnerImageBuild
 from common.utils import hash_token
 
 
-def test_bootstrap_local_deploy_creates_required_records(db) -> None:
+def test_bootstrap_creates_pending_build(db) -> None:
+    """Fresh bootstrap seeds a pending build, not a ready artifact."""
     out = StringIO()
 
     call_command(
@@ -29,8 +34,6 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
         "local-runner",
         "--runner-token",
         "runner-secret",
-        "--workspace-image",
-        "ghcr.io/opencuria/workspace:test",
         stdout=out,
     )
 
@@ -42,7 +45,6 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
         name="Local Docker Workspace",
     )
     build = RunnerImageBuild.objects.get(image_definition=definition, runner=runner)
-    artifact = ImageArtifact.objects.get(runner_image_build=build)
 
     membership = Membership.objects.get(user=user, organization=org)
 
@@ -50,10 +52,22 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
     assert membership.role == MembershipRole.ADMIN
     assert runner.api_token_hash == hash_token("runner-secret")
     assert runner.available_runtimes == [RuntimeType.DOCKER]
-    assert build.status == RunnerImageBuild.Status.ACTIVE
-    assert build.image_tag == "ghcr.io/opencuria/workspace:test"
-    assert artifact.status == ImageArtifact.ArtifactStatus.READY
-    assert artifact.runner_artifact_id == "ghcr.io/opencuria/workspace:test"
+
+    # Build should be pending (not active) — the runner will build it
+    assert build.status == RunnerImageBuild.Status.PENDING
+    assert build.build_task is None
+    assert build.image_tag == ""
+    assert build.built_at is None
+
+    # No artifact should exist yet
+    assert not ImageArtifact.objects.filter(runner_image_build=build).exists()
+
+    # Image definition should have the correct packages and Dockerfile
+    assert definition.packages == DEFAULT_WORKSPACE_PACKAGES
+    assert definition.custom_dockerfile == DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
+    assert definition.runtime_type == RuntimeType.DOCKER
+    assert definition.base_distro == "ubuntu:22.04"
+
     assert (
         CredentialService.objects.filter(
             slug="github-token",
@@ -64,65 +78,143 @@ def test_bootstrap_local_deploy_creates_required_records(db) -> None:
     assert "Local deployment bootstrap complete" in out.getvalue()
 
 
-def test_bootstrap_local_deploy_is_idempotent_and_updates_runner(db) -> None:
-    user_model = get_user_model()
-    user = user_model.objects.create_user(
-        email="repeat@example.com",
-        password="old-password",
-    )
-    org = Organization.objects.create(name="Repeat Org", slug="repeat-org")
-    Membership.objects.create(
-        user=user,
-        organization=org,
-        role=MembershipRole.MEMBER,
-    )
-    runner = Runner.objects.create(
-        name="repeat-runner",
-        api_token_hash=hash_token("old-token"),
-        organization=org,
-        available_runtimes=[],
-    )
-
+def test_bootstrap_is_idempotent(db) -> None:
+    """Running bootstrap twice should not create duplicate records."""
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
         "repeat@example.com",
         "--admin-password",
-        "new-password",
+        "admin",
         "--organization-name",
         "Repeat Org",
         "--runner-name",
         "repeat-runner",
         "--runner-token",
-        "new-token",
-        "--workspace-image",
-        "ghcr.io/opencuria/workspace:latest",
+        "runner-secret",
     )
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
         "repeat@example.com",
         "--admin-password",
-        "new-password",
+        "admin",
         "--organization-name",
         "Repeat Org",
         "--runner-name",
         "repeat-runner",
         "--runner-token",
         "new-token",
-        "--workspace-image",
-        "ghcr.io/opencuria/workspace:latest",
     )
 
-    runner.refresh_from_db()
-    membership = Membership.objects.get(user=user, organization=org)
-    build = RunnerImageBuild.objects.get(runner=runner)
-    artifact = ImageArtifact.objects.get(runner_image_build=build)
+    org = Organization.objects.get(slug="repeat-org")
+    runner = Runner.objects.get(name="repeat-runner", organization=org)
+    definition = ImageDefinition.objects.get(organization=org)
+    builds = RunnerImageBuild.objects.filter(
+        image_definition=definition, runner=runner
+    )
 
-    assert Membership.objects.filter(user=user, organization=org).count() == 1
-    assert Runner.objects.filter(name="repeat-runner", organization=org).count() == 1
-    assert membership.role == MembershipRole.ADMIN
+    assert builds.count() == 1
+    build = builds.first()
+    assert build.status == RunnerImageBuild.Status.PENDING
     assert runner.api_token_hash == hash_token("new-token")
-    assert runner.available_runtimes == [RuntimeType.DOCKER]
+
+
+def test_bootstrap_preserves_active_build(db) -> None:
+    """If a build already succeeded, bootstrap should not reset it to pending."""
+    from django.utils import timezone
+
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "active@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Active Org",
+        "--runner-name",
+        "active-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    org = Organization.objects.get(slug="active-org")
+    runner = Runner.objects.get(name="active-runner", organization=org)
+    definition = ImageDefinition.objects.get(organization=org)
+    build = RunnerImageBuild.objects.get(
+        image_definition=definition, runner=runner
+    )
+
+    # Simulate a successful build
+    build.status = RunnerImageBuild.Status.ACTIVE
+    build.image_tag = "opencuria/custom/local-docker-workspace:test"
+    build.built_at = timezone.now()
+    build.save(update_fields=["status", "image_tag", "built_at"])
+
+    # Run bootstrap again
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "active@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Active Org",
+        "--runner-name",
+        "active-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    build.refresh_from_db()
     assert build.status == RunnerImageBuild.Status.ACTIVE
-    assert artifact.status == ImageArtifact.ArtifactStatus.READY
+    assert build.image_tag == "opencuria/custom/local-docker-workspace:test"
+
+
+def test_bootstrap_resets_failed_build_to_pending(db) -> None:
+    """A failed build should be reset to pending on next bootstrap."""
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "failed@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Failed Org",
+        "--runner-name",
+        "failed-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    org = Organization.objects.get(slug="failed-org")
+    runner = Runner.objects.get(name="failed-runner", organization=org)
+    definition = ImageDefinition.objects.get(organization=org)
+    build = RunnerImageBuild.objects.get(
+        image_definition=definition, runner=runner
+    )
+
+    # Simulate a failed build
+    build.status = RunnerImageBuild.Status.FAILED
+    build.save(update_fields=["status"])
+
+    # Run bootstrap again
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "failed@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Failed Org",
+        "--runner-name",
+        "failed-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    build.refresh_from_db()
+    assert build.status == RunnerImageBuild.Status.PENDING
+    assert build.build_task is None
+    assert build.image_tag == ""
+    assert build.built_at is None

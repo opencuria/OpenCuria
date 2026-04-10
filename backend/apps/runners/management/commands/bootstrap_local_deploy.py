@@ -3,17 +3,83 @@
 from __future__ import annotations
 
 import os
+import textwrap
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
 
 from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import RuntimeType
-from apps.runners.models import ImageArtifact, ImageDefinition, Runner, RunnerImageBuild
+from apps.runners.models import ImageDefinition, Runner, RunnerImageBuild
 from common.utils import hash_token
+
+# Default packages installed in the workspace image.
+DEFAULT_WORKSPACE_PACKAGES = [
+    "curl",
+    "wget",
+    "git",
+    "openssh-client",
+    "build-essential",
+    "ca-certificates",
+    "gnupg",
+    "lsb-release",
+    "software-properties-common",
+    "python3",
+    "python3-pip",
+    "python3-venv",
+    "vim",
+    "nano",
+    "jq",
+    "zip",
+    "unzip",
+    "tini",
+]
+
+# Custom Dockerfile fragment appended after package installation.
+# Installs Node.js 22.x, GitHub CLI, sets up /workspace with default
+# agent instruction files, and configures tini as entrypoint.
+DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE = textwrap.dedent("""\
+    # Node.js 22.x
+    RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
+        && apt-get install -y nodejs \\
+        && rm -rf /var/lib/apt/lists/*
+
+    # GitHub CLI
+    RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
+          | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \\
+        && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \\
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
+          | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\
+        && apt-get update && apt-get install -y gh \\
+        && rm -rf /var/lib/apt/lists/*
+
+    WORKDIR /workspace
+
+    # Default agent instruction files
+    RUN printf '%s\\n' \\
+          '# Agent Environment & Operating Protocol' \\
+          '' \\
+          'You are operating within a **dedicated, isolated Virtual Machine (VM)**.' \\
+          'You have **full administrative access** to this system.' \\
+          '' \\
+          '## The AGENTS.md Protocol' \\
+          '1. **Read on Startup:** Always check this file first.' \\
+          '2. **Self-Modification:** You may edit this file.' \\
+        > /workspace/AGENTS.md \\
+      && printf '%s\\n' \\
+          '# Critical Instructions for Claude / AI Agent' \\
+          '' \\
+          '## Mandatory Initialization' \\
+          'Before performing any task, read the AGENTS.md file in the root directory.' \\
+        > /workspace/CLAUDE.md
+
+    ENTRYPOINT ["/usr/bin/tini", "--"]
+""")
+
+# Default environment variables baked into the workspace image.
+_DEFAULT_ENV_VARS = {"PATH": "/root/.local/bin:$" + "{PATH}"}
 
 
 class Command(BaseCommand):
@@ -21,7 +87,7 @@ class Command(BaseCommand):
 
     help = (
         "Ensure that a local admin user, organization, runner, and default "
-        "workspace image artifact exist for the all-in-one compose stack."
+        "workspace image definition exist for the all-in-one compose stack."
     )
 
     def add_arguments(self, parser) -> None:
@@ -54,14 +120,6 @@ class Command(BaseCommand):
             help="Plaintext runner token used by the local runner container.",
         )
         parser.add_argument(
-            "--workspace-image",
-            default=os.getenv(
-                "LOCAL_WORKSPACE_IMAGE",
-                "ghcr.io/opencuria/workspace:latest",
-            ),
-            help="Docker image tag for locally created workspaces.",
-        )
-        parser.add_argument(
             "--image-definition-name",
             default=os.getenv(
                 "LOCAL_IMAGE_DEFINITION_NAME",
@@ -89,19 +147,18 @@ class Command(BaseCommand):
             name=options["runner_name"].strip(),
             runner_token=runner_token,
         )
-        artifact = self._ensure_workspace_artifact(
+        build = self._ensure_pending_image_build(
             organization=org,
             user=user,
             runner=runner,
             definition_name=options["image_definition_name"].strip(),
-            workspace_image=options["workspace_image"].strip(),
         )
 
         self.stdout.write(
             self.style.SUCCESS(
                 "Local deployment bootstrap complete: "
                 f"admin={user.email}, org={org.slug}, runner={runner.name}, "
-                f"image_artifact={artifact.id}"
+                f"image_build={build.id} (status={build.status})"
             )
         )
 
@@ -185,15 +242,20 @@ class Command(BaseCommand):
             runner.save(update_fields=update_fields)
         return runner
 
-    def _ensure_workspace_artifact(
+    def _ensure_pending_image_build(
         self,
         *,
         organization,
         user,
         runner: Runner,
         definition_name: str,
-        workspace_image: str,
-    ) -> ImageArtifact:
+    ) -> RunnerImageBuild:
+        """Seed the default image definition and a pending build record.
+
+        The build is created with status ``pending`` and **no** task or
+        artifact.  Once the runner comes online it will pick up the pending
+        build, execute it, and create the artifact on success.
+        """
         definition, _ = ImageDefinition.objects.get_or_create(
             organization=organization,
             name=definition_name,
@@ -202,6 +264,9 @@ class Command(BaseCommand):
                 "description": "Default workspace image for the local all-in-one stack.",
                 "runtime_type": RuntimeType.DOCKER,
                 "base_distro": "ubuntu:22.04",
+                "packages": DEFAULT_WORKSPACE_PACKAGES,
+                "custom_dockerfile": DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
+                "env_vars": _DEFAULT_ENV_VARS,
             },
         )
         definition_updates: list[str] = []
@@ -214,6 +279,15 @@ class Command(BaseCommand):
         if definition.base_distro != "ubuntu:22.04":
             definition.base_distro = "ubuntu:22.04"
             definition_updates.append("base_distro")
+        if definition.packages != DEFAULT_WORKSPACE_PACKAGES:
+            definition.packages = DEFAULT_WORKSPACE_PACKAGES
+            definition_updates.append("packages")
+        if definition.custom_dockerfile != DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE:
+            definition.custom_dockerfile = DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
+            definition_updates.append("custom_dockerfile")
+        if definition.env_vars != _DEFAULT_ENV_VARS:
+            definition.env_vars = _DEFAULT_ENV_VARS
+            definition_updates.append("env_vars")
         if definition.description != "Default workspace image for the local all-in-one stack.":
             definition.description = (
                 "Default workspace image for the local all-in-one stack."
@@ -222,60 +296,36 @@ class Command(BaseCommand):
         if definition_updates:
             definition.save(update_fields=definition_updates)
 
-        build, _ = RunnerImageBuild.objects.get_or_create(
+        build, created = RunnerImageBuild.objects.get_or_create(
             image_definition=definition,
             runner=runner,
             defaults={
-                "status": RunnerImageBuild.Status.ACTIVE,
-                "image_tag": workspace_image,
-                "built_at": timezone.now(),
+                "status": RunnerImageBuild.Status.PENDING,
             },
         )
 
-        build_updates: list[str] = []
-        if build.status != RunnerImageBuild.Status.ACTIVE:
-            build.status = RunnerImageBuild.Status.ACTIVE
-            build_updates.append("status")
-        if build.image_tag != workspace_image:
-            build.image_tag = workspace_image
-            build_updates.append("image_tag")
-        if build.image_path:
+        # If the build already exists and is active (from a previous
+        # successful run), leave it alone so workspaces keep working.
+        if not created and build.status == RunnerImageBuild.Status.ACTIVE:
+            return build
+
+        # For new or non-active builds, ensure they are in pending state
+        # so the runner will pick them up.
+        if not created and build.status != RunnerImageBuild.Status.PENDING:
+            build.status = RunnerImageBuild.Status.PENDING
+            build.build_task = None
+            build.image_tag = ""
             build.image_path = ""
-            build_updates.append("image_path")
-        if build.built_at is None:
-            build.built_at = timezone.now()
-            build_updates.append("built_at")
-        if build_updates:
-            build.save(update_fields=build_updates)
+            build.built_at = None
+            build.save(
+                update_fields=[
+                    "status",
+                    "build_task",
+                    "image_tag",
+                    "image_path",
+                    "built_at",
+                    "updated_at",
+                ]
+            )
 
-        artifact, _ = ImageArtifact.objects.get_or_create(
-            runner_image_build=build,
-            defaults={
-                "created_by": user,
-                "artifact_kind": ImageArtifact.ArtifactKind.BUILT,
-                "runner_artifact_id": workspace_image,
-                "name": definition_name,
-                "status": ImageArtifact.ArtifactStatus.READY,
-            },
-        )
-
-        artifact_updates: list[str] = []
-        if artifact.created_by_id is None:
-            artifact.created_by = user
-            artifact_updates.append("created_by")
-        if artifact.artifact_kind != ImageArtifact.ArtifactKind.BUILT:
-            artifact.artifact_kind = ImageArtifact.ArtifactKind.BUILT
-            artifact_updates.append("artifact_kind")
-        if artifact.runner_artifact_id != workspace_image:
-            artifact.runner_artifact_id = workspace_image
-            artifact_updates.append("runner_artifact_id")
-        if artifact.name != definition_name:
-            artifact.name = definition_name
-            artifact_updates.append("name")
-        if artifact.status != ImageArtifact.ArtifactStatus.READY:
-            artifact.status = ImageArtifact.ArtifactStatus.READY
-            artifact_updates.append("status")
-        if artifact_updates:
-            artifact.save(update_fields=artifact_updates)
-
-        return artifact
+        return build

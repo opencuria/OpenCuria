@@ -241,6 +241,12 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             available_runtimes=data.get("supported_runtimes", ["docker"]),
         )
 
+        # Dispatch any image builds that were created while the runner
+        # was offline (e.g. during bootstrap).
+        runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
+        if runner is not None:
+            await service.dispatch_pending_image_builds(runner)
+
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
         """Handle workspace creation confirmation from runner."""
