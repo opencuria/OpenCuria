@@ -9,6 +9,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import * as agentsApi from '@/services/agents.api'
 import { usePolling } from '@/composables/usePolling'
+import { useChatOptionsCache } from '@/composables/useChatOptionsCache'
 import {
   subscribeToWorkspace,
   unsubscribeFromWorkspace,
@@ -48,7 +49,7 @@ const editingName = ref(false)
 const workspaceNameInput = ref('')
 const agents = ref<Agent[]>([])
 const selectedOptions = ref<Record<string, string>>({})
-const selectedOptionsChatId = ref<string | null>(null)
+const selectedOptionsInitializedChatId = ref<string | null>(null)
 const terminalHeight = ref(300)
 const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
@@ -186,6 +187,9 @@ const availableAgents = computed(() =>
 const secondaryAgents = computed(() =>
   agents.value.filter(a => !(a.has_online_runner && a.has_credentials))
 )
+
+const { loadFromCache: loadCachedChatOptions, saveToCache: saveCachedChatOptions } =
+  useChatOptionsCache(workspaceId, () => workspaceStore.activeChatId)
 
 async function loadAvailableAgents(id: string): Promise<void> {
   try {
@@ -463,10 +467,11 @@ watch(
   [agentOptions, () => workspaceStore.activeChatId, () => workspaceStore.activeChatSessions],
   () => {
     const opts = agentOptions.value
-    if (!opts.length) return
-
     const activeChatId = workspaceStore.activeChatId
-    const switchedChat = selectedOptionsChatId.value !== activeChatId
+    if (!opts.length || !activeChatId || !workspace.value) return
+
+    if (selectedOptionsInitializedChatId.value === activeChatId) return
+
     const sessions = workspaceStore.activeChatSessions ?? []
     const sortedSessions = [...sessions].sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -476,10 +481,16 @@ watch(
       (s) => s.agent_options && Object.keys(s.agent_options).length,
     )?.agent_options ?? {}
 
+    const cachedOptions = loadCachedChatOptions()
     const resolved: Record<string, string> = {}
     for (const opt of opts) {
-      const currentVal = selectedOptions.value[opt.key] || ''
+      const cachedVal = cachedOptions[opt.key] || ''
       const lastVal = latestSessionOptions[opt.key] || ''
+
+      if (cachedVal && opt.choices.includes(cachedVal)) {
+        resolved[opt.key] = cachedVal
+        continue
+      }
 
       if (opt.key === 'model') {
         const latestModel = latestSession?.agent_model || ''
@@ -487,8 +498,6 @@ watch(
           resolved[opt.key] = lastVal
         } else if (sortedSessions.length > 0 && latestModel && opt.choices.includes(latestModel)) {
           resolved[opt.key] = latestModel
-        } else if (!switchedChat && currentVal && opt.choices.includes(currentVal)) {
-          resolved[opt.key] = currentVal
         } else {
           resolved[opt.key] = opt.default
         }
@@ -497,16 +506,23 @@ watch(
 
       if (sortedSessions.length > 0 && lastVal && opt.choices.includes(lastVal)) {
         resolved[opt.key] = lastVal
-      } else if (!switchedChat && currentVal && opt.choices.includes(currentVal)) {
-        resolved[opt.key] = currentVal
       } else {
         resolved[opt.key] = opt.default
       }
     }
     selectedOptions.value = resolved
-    selectedOptionsChatId.value = activeChatId
+    selectedOptionsInitializedChatId.value = activeChatId
   },
   { immediate: true },
+)
+
+watch(
+  [selectedOptions, () => workspaceStore.activeChatId],
+  ([options, activeChatId]) => {
+    if (!activeChatId) return
+    saveCachedChatOptions(options)
+  },
+  { deep: true },
 )
 
 function goBack(): void {
