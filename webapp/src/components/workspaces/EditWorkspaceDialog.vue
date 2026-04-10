@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { Pencil, Check, Key } from 'lucide-vue-next'
 
 import { UiButton, UiDialog, UiInput } from '@/components/ui'
@@ -19,6 +19,7 @@ const props = defineProps<{
 const credentialStore = useCredentialStore()
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
+const router = useRouter()
 
 const open = ref(false)
 const name = ref('')
@@ -116,6 +117,11 @@ function handleClose(): void {
   qemuMemoryMb.value = props.workspace.qemu_memory_mb ?? 4096
   qemuDiskSizeGb.value = props.workspace.qemu_disk_size_gb ?? 50
 }
+
+async function navigateToCredentials(): Promise<void> {
+  handleClose()
+  await router.push({ name: 'credentials' })
+}
 </script>
 
 <template>
@@ -188,7 +194,7 @@ function handleClose(): void {
 
         <p v-else class="text-xs text-muted-fg">
           No credentials available.
-          <RouterLink to="/credentials" class="underline">Add credentials</RouterLink>
+          <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
           first.
         </p>
       </div>
