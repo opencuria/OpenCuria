@@ -127,6 +127,14 @@ class Workspace(models.Model):
         default=RuntimeType.DOCKER,
         help_text="Virtualisation backend: 'docker' or 'qemu'.",
     )
+    base_image_artifact = models.ForeignKey(
+        "runners.ImageArtifact",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="dependent_workspaces",
+        help_text="The image artifact this workspace was created from.",
+    )
     status = models.CharField(
         max_length=20,
         choices=WorkspaceStatus.choices,
@@ -817,6 +825,9 @@ class ImageArtifact(models.Model):
         CREATING = "creating", "Creating"
         READY = "ready", "Ready"
         FAILED = "failed", "Failed"
+        RETIRED = "retired", "Retired"
+        PENDING_DELETE = "pending_delete", "Pending Delete"
+        DELETED = "deleted", "Deleted"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     source_workspace = models.ForeignKey(
@@ -883,6 +894,11 @@ class ImageArtifact(models.Model):
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the artifact was marked as deleted.",
+    )
 
     class Meta:
         db_table = "runners_image_artifact"
@@ -893,3 +909,20 @@ class ImageArtifact(models.Model):
             "ImageArtifact("
             f"{self.name}, source_workspace={self.source_workspace_id}, kind={self.artifact_kind})"
         )
+
+    @property
+    def is_usable(self) -> bool:
+        """Return True when this artifact can be used to create new workspaces."""
+        return self.status == self.ArtifactStatus.READY
+
+    @property
+    def is_deletable(self) -> bool:
+        """Return True when this artifact has no active workspace dependencies."""
+        active_statuses = [
+            WorkspaceStatus.CREATING,
+            WorkspaceStatus.RUNNING,
+            WorkspaceStatus.STOPPED,
+        ]
+        return not self.dependent_workspaces.filter(
+            status__in=active_statuses
+        ).exists()

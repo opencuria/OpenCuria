@@ -60,6 +60,7 @@ from .schemas import (
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
+    ImageArtifactRetireIn,
     ImageArtifactUpdateIn,
     ImageDefinitionCreateIn,
     ImageDefinitionDuplicateIn,
@@ -141,6 +142,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         active_operation=workspace.active_operation,
         name=workspace.name,
         runtime_type=workspace.runtime_type,
+        base_image_artifact_id=workspace.base_image_artifact_id,
         qemu_vcpus=workspace.qemu_vcpus,
         qemu_memory_mb=workspace.qemu_memory_mb,
         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
@@ -606,6 +608,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             active_operation=workspace.active_operation,
             name=workspace.name,
             runtime_type=workspace.runtime_type,
+            base_image_artifact_id=workspace.base_image_artifact_id,
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=workspace.qemu_disk_size_gb,
@@ -1302,6 +1305,10 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
             runtime_type = image_definition.runtime_type
         is_deactivated = getattr(runner_build, "status", "") == "deactivated"
 
+    from .repositories import ImageArtifactRepository
+
+    dep_count = ImageArtifactRepository.count_dependent_workspaces(artifact.id)
+
     return ImageArtifactOut(
         id=artifact.id,
         source_workspace_id=artifact.source_workspace_id,
@@ -1317,8 +1324,10 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
         is_deactivated=is_deactivated,
         source_runner_online=source_runner_online,
         created_at=artifact.created_at,
+        deleted_at=artifact.deleted_at,
         created_by_id=artifact.created_by_id,
         credential_ids=[c.id for c in artifact.credentials.all()],
+        dependent_workspace_count=dep_count,
     )
 
 
@@ -1398,18 +1407,21 @@ async def rename_image_artifact(
         image_artifact_id, payload.name.strip()
     )
     updated = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
-    return 200, _image_artifact_to_out(updated)
+    return 200, await sync_to_async(_image_artifact_to_out)(updated)
 
 
 @image_artifact_router.delete(
     "/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut},
+    response={204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_image_artifact_global(
     request: HttpRequest, image_artifact_id: uuid.UUID
 ):
-    """Delete an image artifact owned by the current user."""
+    """Delete an image artifact owned by the current user.
+
+    Returns 409 if active workspaces depend on the artifact.
+    """
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
         return _perm_denied(APIKeyPermission.IMAGES_DELETE)
     org_id = _get_org_id(request)
@@ -1427,8 +1439,54 @@ async def delete_image_artifact_global(
             )
         await service.delete_image_artifact(image_artifact_id)
         return 204, None
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code="image_in_use")
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+
+
+@image_artifact_router.post(
+    "/{image_artifact_id}/retire/",
+    response={200: ImageArtifactOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    summary="Retire or unretire an image artifact",
+)
+async def retire_image_artifact(
+    request: HttpRequest,
+    image_artifact_id: uuid.UUID,
+    payload: ImageArtifactRetireIn,
+):
+    """Retire an image artifact so it cannot be used for new workspaces.
+
+    Existing workspaces that depend on it remain unaffected.
+    Pass ``{"retired": false}`` to restore a retired artifact.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
+        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
+    org_id = _get_org_id(request)
+    await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    if artifact is None:
+        return 404, ErrorOut(detail="Image artifact not found", code="not_found")
+    if artifact.created_by != request.user:
+        return 403, ErrorOut(
+            detail="Not authorized to manage this image artifact",
+            code="forbidden",
+        )
+
+    try:
+        if payload.retired:
+            await service.retire_image_artifact(image_artifact_id)
+        else:
+            await service.unretire_image_artifact(image_artifact_id)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code="conflict")
+    except ValueError as e:
+        return 404, ErrorOut(detail=str(e), code="not_found")
+
+    updated = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    return 200, await sync_to_async(_image_artifact_to_out)(updated)
 
 
 @image_artifact_router.post(
@@ -1629,22 +1687,6 @@ def _runner_image_build_to_out(build) -> RunnerImageBuildOut:
         artifact = getattr(build, "artifact", None)
     except (ObjectDoesNotExist, SynchronousOnlyOperation):
         artifact = None
-    if (
-        artifact is None
-        and getattr(build, "status", "") == "active"
-        and (build.image_tag or build.image_path)
-    ):
-        from .models import ImageArtifact
-
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
-            created_by=None,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag or build.image_path,
-            name=f"{build.image_definition.name} ({build.runner.name})",
-            status=ImageArtifact.ArtifactStatus.READY,
-        )
 
     return RunnerImageBuildOut(
         id=build.id,

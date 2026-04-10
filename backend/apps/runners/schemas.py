@@ -101,6 +101,7 @@ class WorkspaceOut(Schema):
     active_operation: str | None = None
     name: str
     runtime_type: str = "docker"
+    base_image_artifact_id: uuid.UUID | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -538,14 +539,22 @@ class ImageArtifactOut(Schema):
     is_deactivated: bool = False
     source_runner_online: bool = False
     created_at: datetime
+    deleted_at: datetime | None = None
     created_by_id: int | None = None
     credential_ids: list[uuid.UUID] = []
+    dependent_workspace_count: int = 0
 
 
 class ImageArtifactUpdateIn(Schema):
     """Request schema for renaming an image artifact."""
 
     name: str
+
+
+class ImageArtifactRetireIn(Schema):
+    """Request schema for retiring/unretiring an image artifact."""
+
+    retired: bool
 
 
 class ImageArtifactCreateIn(Schema):

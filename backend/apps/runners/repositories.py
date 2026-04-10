@@ -298,6 +298,7 @@ class WorkspaceRepository:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        base_image_artifact=None,
         created_by=None,
     ) -> Workspace:
         """Create a new workspace record."""
@@ -309,6 +310,7 @@ class WorkspaceRepository:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            base_image_artifact=base_image_artifact,
             status=WorkspaceStatus.CREATING,
             active_operation=WorkspaceOperation.CREATING,
             created_by=created_by,
@@ -1163,9 +1165,97 @@ class ImageArtifactRepository:
 
     @staticmethod
     def delete(artifact_id: uuid.UUID) -> bool:
-        """Delete an artifact record. Returns True if deleted."""
+        """Delete an artifact record. Returns True if deleted.
+
+        Clears the base_image_artifact FK on non-active workspaces first to
+        avoid ProtectedError from the PROTECT constraint.  The service layer
+        already blocks deletion when *active* workspaces still reference the
+        artifact, so only inactive (removed / error) references remain here.
+        """
+        inactive_statuses = [
+            WorkspaceStatus.REMOVED,
+            WorkspaceStatus.FAILED,
+        ]
+        Workspace.objects.filter(
+            base_image_artifact_id=artifact_id,
+            status__in=inactive_statuses,
+        ).update(base_image_artifact=None)
+
         count, _ = ImageArtifact.objects.filter(id=artifact_id).delete()
         return count > 0
+
+    @staticmethod
+    def mark_retired(artifact_id: uuid.UUID) -> bool:
+        """Mark an artifact as retired (no new workspaces, existing ones unaffected)."""
+        count = ImageArtifact.objects.filter(
+            id=artifact_id,
+            status__in=[
+                ImageArtifact.ArtifactStatus.READY,
+            ],
+        ).update(status=ImageArtifact.ArtifactStatus.RETIRED)
+        return count > 0
+
+    @staticmethod
+    def unretire(artifact_id: uuid.UUID) -> bool:
+        """Restore a retired artifact to ready status."""
+        count = ImageArtifact.objects.filter(
+            id=artifact_id,
+            status=ImageArtifact.ArtifactStatus.RETIRED,
+        ).update(status=ImageArtifact.ArtifactStatus.READY)
+        return count > 0
+
+    @staticmethod
+    def mark_pending_delete(artifact_id: uuid.UUID) -> bool:
+        """Mark an artifact as pending deletion (awaiting runner cleanup)."""
+        count = ImageArtifact.objects.filter(
+            id=artifact_id,
+            status__in=[
+                ImageArtifact.ArtifactStatus.READY,
+                ImageArtifact.ArtifactStatus.RETIRED,
+                ImageArtifact.ArtifactStatus.FAILED,
+            ],
+        ).update(status=ImageArtifact.ArtifactStatus.PENDING_DELETE)
+        return count > 0
+
+    @staticmethod
+    def mark_deleted(artifact_id: uuid.UUID) -> bool:
+        """Mark an artifact as fully deleted after runner cleanup confirmation."""
+        from django.utils import timezone as tz
+
+        count = ImageArtifact.objects.filter(
+            id=artifact_id,
+            status=ImageArtifact.ArtifactStatus.PENDING_DELETE,
+        ).update(
+            status=ImageArtifact.ArtifactStatus.DELETED,
+            deleted_at=tz.now(),
+        )
+        return count > 0
+
+    @staticmethod
+    def has_dependent_workspaces(artifact_id: uuid.UUID) -> bool:
+        """Check if any active workspace depends on this artifact."""
+        active_statuses = [
+            WorkspaceStatus.CREATING,
+            WorkspaceStatus.RUNNING,
+            WorkspaceStatus.STOPPED,
+        ]
+        return Workspace.objects.filter(
+            base_image_artifact_id=artifact_id,
+            status__in=active_statuses,
+        ).exists()
+
+    @staticmethod
+    def count_dependent_workspaces(artifact_id: uuid.UUID) -> int:
+        """Count active workspaces depending on this artifact."""
+        active_statuses = [
+            WorkspaceStatus.CREATING,
+            WorkspaceStatus.RUNNING,
+            WorkspaceStatus.STOPPED,
+        ]
+        return Workspace.objects.filter(
+            base_image_artifact_id=artifact_id,
+            status__in=active_statuses,
+        ).count()
 
 
 class ImageDefinitionRepository:

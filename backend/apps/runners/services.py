@@ -855,6 +855,7 @@ class RunnerService:
             qemu_vcpus=resolved_qemu_vcpus,
             qemu_memory_mb=resolved_qemu_memory_mb,
             qemu_disk_size_gb=resolved_qemu_disk_size_gb,
+            base_image_artifact=selected_artifact,
             created_by=user,
         )
         if credentials is not None:
@@ -3364,33 +3365,98 @@ class RunnerService:
         self,
         image_artifact_id: uuid.UUID,
     ) -> None:
-        """Delete an image artifact and dispatch cleanup to the runner if needed."""
+        """Delete an image artifact with unified lifecycle handling.
+
+        Deletion follows a state-machine approach:
+        1. Check for active workspace dependencies → 409 if any exist
+        2. Mark as pending_delete
+        3. Dispatch runner-side cleanup for both built and captured images
+        4. Hard-delete the DB record after dispatching cleanup
+
+        For offline runners, the artifact is still removed from the DB.
+        Runner-side reconciliation should clean up orphaned artifacts later.
+        """
         artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
         if artifact is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
 
-        if artifact.runner_image_build is not None:
-            await sync_to_async(self.image_artifacts.delete)(image_artifact_id)
-            logger.info("Built image artifact deleted: %s", image_artifact_id)
-            return
+        # Block deletion when active workspaces depend on this artifact
+        has_deps = await sync_to_async(self.image_artifacts.has_dependent_workspaces)(
+            image_artifact_id
+        )
+        if has_deps:
+            dep_count = await sync_to_async(
+                self.image_artifacts.count_dependent_workspaces
+            )(image_artifact_id)
+            raise ConflictError(
+                f"Cannot delete image artifact: {dep_count} active workspace(s) "
+                f"depend on it. Retire it first or remove dependent workspaces."
+            )
 
-        workspace = artifact.source_workspace
-        if workspace is None:
-            raise ValueError(f"Image artifact '{image_artifact_id}' has no source workspace")
-        runner = workspace.runner
-        if runner.is_online and artifact.runner_artifact_id:
+        # Mark as pending_delete before dispatching cleanup
+        await sync_to_async(self.image_artifacts.mark_pending_delete)(image_artifact_id)
+
+        # Unified runner-side cleanup for both built and captured images
+        runner = None
+        workspace_id_str = None
+        if artifact.runner_image_build is not None:
+            runner = artifact.runner_image_build.runner
+            workspace_id_str = ""
+        elif artifact.source_workspace is not None:
+            runner = artifact.source_workspace.runner
+            workspace_id_str = str(artifact.source_workspace.id)
+
+        if runner is not None and runner.is_online and artifact.runner_artifact_id:
             await self._emit_to_runner(
                 runner,
                 "task:delete_image_artifact",
                 {
                     "task_id": str(generate_uuid()),
-                    "workspace_id": str(workspace.id),
+                    "workspace_id": workspace_id_str,
                     "image_artifact_id": artifact.runner_artifact_id,
                 },
             )
 
         await sync_to_async(self.image_artifacts.delete)(image_artifact_id)
         logger.info("Image artifact deleted: %s", image_artifact_id)
+
+    async def retire_image_artifact(
+        self,
+        image_artifact_id: uuid.UUID,
+    ) -> None:
+        """Mark an image artifact as retired.
+
+        Retired artifacts cannot be used to create new workspaces but existing
+        workspaces that depend on them remain unaffected.
+        """
+        artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
+        if artifact is None:
+            raise ValueError(f"Image artifact '{image_artifact_id}' not found")
+
+        success = await sync_to_async(self.image_artifacts.mark_retired)(image_artifact_id)
+        if not success:
+            raise ConflictError(
+                f"Image artifact '{image_artifact_id}' cannot be retired "
+                f"(current status: {artifact.status})"
+            )
+        logger.info("Image artifact retired: %s", image_artifact_id)
+
+    async def unretire_image_artifact(
+        self,
+        image_artifact_id: uuid.UUID,
+    ) -> None:
+        """Restore a retired image artifact back to ready status."""
+        artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
+        if artifact is None:
+            raise ValueError(f"Image artifact '{image_artifact_id}' not found")
+
+        success = await sync_to_async(self.image_artifacts.unretire)(image_artifact_id)
+        if not success:
+            raise ConflictError(
+                f"Image artifact '{image_artifact_id}' cannot be unretired "
+                f"(current status: {artifact.status})"
+            )
+        logger.info("Image artifact unretired: %s", image_artifact_id)
 
     async def create_workspace_from_image_artifact(
         self,
@@ -3476,6 +3542,7 @@ class RunnerService:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            base_image_artifact=artifact,
             created_by=user,
         )
 

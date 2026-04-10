@@ -457,7 +457,13 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
 
 
 @pytest.mark.django_db
-def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
+def test_list_runner_builds_no_side_effect_artifact_creation(client: Client):
+    """Listing runner builds must NOT create ImageArtifact records as a side effect.
+
+    Previously, _runner_image_build_to_out() would backfill a missing artifact
+    during serialization. This was removed (issue #4) — read paths should never
+    mutate state. Artifacts are now only created during handle_image_built().
+    """
     user_model = get_user_model()
     admin = user_model.objects.create_user(email="image-build-backfill@test.com", password="secret")
     org = Organization.objects.create(name="Backfill Org", slug="backfill-org")
@@ -477,7 +483,7 @@ def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
         runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    RunnerImageBuild.objects.create(
         image_definition=definition,
         runner=runner,
         status=RunnerImageBuild.Status.ACTIVE,
@@ -495,9 +501,11 @@ def test_list_runner_builds_backfills_missing_built_artifact(client: Client):
 
     assert response.status_code == 200
     payload = response.json()
-    artifact = ImageArtifact.objects.get(runner_image_build=build)
-    assert payload[0]["image_artifact_id"] == str(artifact.id)
-    assert artifact.runner_artifact_id == "opencuria/custom/backfill:1"
+    # No artifact should be created as a side effect of reading
+    assert payload[0]["image_artifact_id"] is None
+    assert not ImageArtifact.objects.filter(
+        runner_artifact_id="opencuria/custom/backfill:1"
+    ).exists()
 
 
 @pytest.mark.django_db
