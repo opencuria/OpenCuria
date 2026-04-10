@@ -11,6 +11,7 @@ import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 
 const props = defineProps<{
   workspace: Workspace
+  storageBytes?: number | null
   showResourceWarning?: boolean
   clickable?: boolean
 }>()
@@ -75,6 +76,14 @@ const imminentAutoStopLabel = computed(() => {
   }
   return `Stops ${formatRelativeTime(props.workspace.auto_stop_at)}`
 })
+
+function formatStorage(bytes?: number | null): string {
+  if (bytes == null) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+}
 </script>
 
 <template>
@@ -108,7 +117,7 @@ const imminentAutoStopLabel = computed(() => {
               {{ workspace.name }}
             </h3>
             <div class="text-xs text-muted-fg font-mono">
-              {{ workspace.id.slice(0, 8) }}…
+              {{ formatStorage(storageBytes) }}
             </div>
           </div>
         </div>

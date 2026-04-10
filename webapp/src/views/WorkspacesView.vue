@@ -17,6 +17,7 @@ const runnerStore = useRunnerStore()
 const searchQuery = ref('')
 const showRemoved = ref(false)
 const warningWorkspaceIds = ref<Record<string, boolean>>({})
+const storageBytesByWorkspaceId = ref<Record<string, number | null>>({})
 
 const VM_WARNING_THRESHOLD_PERCENT = 80
 
@@ -33,8 +34,9 @@ function isVmMetricWarning(metric: VmSystemMetrics): boolean {
   )
 }
 
-async function fetchWarningWorkspaceIds(): Promise<void> {
+async function fetchWorkspaceMetrics(): Promise<void> {
   const warnings: Record<string, boolean> = {}
+  const storageByWorkspace: Record<string, number | null> = {}
   const metricsPerRunner = await Promise.all(
     runnerStore.runners.map(async (runner) => {
       try {
@@ -49,15 +51,17 @@ async function fetchWarningWorkspaceIds(): Promise<void> {
     if (!metrics?.vm_metrics) continue
     for (const [workspaceId, vmMetric] of Object.entries(metrics.vm_metrics)) {
       if (isVmMetricWarning(vmMetric)) warnings[workspaceId] = true
+      storageByWorkspace[workspaceId] = vmMetric.disk_used_bytes
     }
   }
 
   warningWorkspaceIds.value = warnings
+  storageBytesByWorkspaceId.value = storageByWorkspace
 }
 
 async function fetchWorkspacesAndWarnings(): Promise<void> {
   await workspaceStore.fetchWorkspaces()
-  await fetchWarningWorkspaceIds()
+  await fetchWorkspaceMetrics()
 }
 
 const { start } = usePolling(fetchWorkspacesAndWarnings, 10000)
@@ -172,6 +176,7 @@ onMounted(async () => {
     <WorkspaceList
       v-else
       :workspaces="filteredWorkspaces"
+      :storage-bytes-by-workspace-id="storageBytesByWorkspaceId"
       :warning-workspace-ids="warningWorkspaceIds"
     />
   </div>

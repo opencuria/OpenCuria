@@ -1205,12 +1205,15 @@ class RunnerImageBuildRepository:
         organization_id: uuid.UUID | None = None,
     ) -> QuerySet[RunnerImageBuild]:
         """List runner image builds, optionally scoped to an organization."""
-        filters: dict[str, Any] = {"image_definition_id": image_definition_id}
+        queryset = RunnerImageBuild.objects.filter(
+            image_definition_id=image_definition_id
+        )
         if organization_id is not None:
-            filters["image_definition__organization_id"] = organization_id
-        return RunnerImageBuild.objects.filter(
-            **filters
-        ).select_related("runner", "image_definition", "build_task")
+            queryset = queryset.filter(
+                Q(image_definition__organization_id=organization_id)
+                | Q(image_definition__organization__isnull=True)
+            )
+        return queryset.select_related("runner", "image_definition", "build_task")
 
     @staticmethod
     def get(
@@ -1219,15 +1222,16 @@ class RunnerImageBuildRepository:
         organization_id: uuid.UUID | None = None,
     ) -> RunnerImageBuild | None:
         """Fetch one runner image build, optionally scoped to an organization."""
-        filters: dict[str, Any] = {
-            "image_definition_id": image_definition_id,
-            "runner_id": runner_id,
-        }
+        queryset = RunnerImageBuild.objects.filter(
+            image_definition_id=image_definition_id,
+            runner_id=runner_id,
+        )
         if organization_id is not None:
-            filters["image_definition__organization_id"] = organization_id
-        return RunnerImageBuild.objects.filter(
-            **filters
-        ).select_related("runner", "image_definition", "build_task").first()
+            queryset = queryset.filter(
+                Q(image_definition__organization_id=organization_id)
+                | Q(image_definition__organization__isnull=True)
+            )
+        return queryset.select_related("runner", "image_definition", "build_task").first()
 
     @staticmethod
     def get_by_id(runner_image_build_id: uuid.UUID) -> RunnerImageBuild | None:
@@ -1259,6 +1263,8 @@ class RunnerImageBuildRepository:
         deleted, _ = RunnerImageBuild.objects.filter(
             image_definition_id=image_definition_id,
             runner_id=runner_id,
-            image_definition__organization_id=organization_id,
+        ).filter(
+            Q(image_definition__organization_id=organization_id)
+            | Q(image_definition__organization__isnull=True)
         ).delete()
         return deleted

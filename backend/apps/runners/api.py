@@ -19,6 +19,7 @@ import uuid
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
+from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.http import HttpRequest
 from django.db.models import Q
 from django.utils import timezone
@@ -279,8 +280,11 @@ def _get_runner_image_build_for_org(
         RunnerImageBuild.objects.filter(
             image_definition_id=definition_id,
             runner_id=runner_id,
-            image_definition__organization_id=org_id,
             runner__organization_id=org_id,
+        )
+        .filter(
+            Q(image_definition__organization_id=org_id)
+            | Q(image_definition__organization__isnull=True)
         )
         .select_related("image_definition", "runner", "build_task")
         .first()
@@ -1620,7 +1624,11 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
 
 
 def _runner_image_build_to_out(build) -> RunnerImageBuildOut:
-    artifact = getattr(build, "artifact", None)
+    artifact = None
+    try:
+        artifact = getattr(build, "artifact", None)
+    except (ObjectDoesNotExist, SynchronousOnlyOperation):
+        artifact = None
     if (
         artifact is None
         and getattr(build, "status", "") == "active"

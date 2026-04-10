@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 
 defineProps<{
   workspaces: Workspace[]
+  storageBytesByWorkspaceId?: Record<string, number | null>
   warningWorkspaceIds?: Record<string, boolean>
 }>()
 
@@ -23,6 +24,7 @@ function openWorkspace(id: string): void {
       v-for="ws in workspaces"
       :key="ws.id"
       :workspace="ws"
+      :storage-bytes="storageBytesByWorkspaceId?.[ws.id]"
       :show-resource-warning="Boolean(warningWorkspaceIds?.[ws.id])"
       clickable
       @click="openWorkspace(ws.id)"
