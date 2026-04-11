@@ -12,6 +12,7 @@ from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
 from apps.runners.models import Chat, Runner, Session, Workspace
 from apps.mcp_app.server import (
     _call_get_workspace,
+    _call_list_agents,
     _call_list_conversations,
     _call_list_workspaces,
 )
@@ -107,3 +108,37 @@ def test_mcp_list_conversations_is_owner_scoped(mcp_access_setup):
     assert [entry["workspace_id"] for entry in payload] == [
         str(mcp_access_setup["admin_workspace"].id)
     ]
+
+
+@pytest.mark.django_db
+def test_mcp_list_agents_passes_owned_workspace_to_service(mcp_access_setup, monkeypatch):
+    captured: dict[str, object] = {}
+    workspace = mcp_access_setup["admin_workspace"]
+
+    class FakeService:
+        def get_workspace_for_user(self, workspace_id, *, user, organization_id):
+            assert workspace_id == workspace.id
+            assert user == mcp_access_setup["admin_api_key"].user
+            assert organization_id == mcp_access_setup["org"].id
+            return workspace
+
+        def get_available_agents(self, *, organization_id, user, workspace=None):
+            captured["organization_id"] = organization_id
+            captured["user"] = user
+            captured["workspace"] = workspace
+            return []
+
+    monkeypatch.setattr("apps.runners.sio_server.get_runner_service", lambda: FakeService())
+
+    result = _call_list_agents(
+        mcp_access_setup["admin_api_key"],
+        mcp_access_setup["org"].id,
+        {"workspace_id": str(workspace.id)},
+    )
+
+    assert json.loads(_parse_text_payload(result)) == []
+    assert captured == {
+        "organization_id": mcp_access_setup["org"].id,
+        "user": mcp_access_setup["admin_api_key"].user,
+        "workspace": workspace,
+    }

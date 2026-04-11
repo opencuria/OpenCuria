@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.runners import api as runners_api
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
 from apps.runners.models import Chat, ImageArtifact, Runner, Session, Workspace
@@ -165,6 +166,37 @@ def test_global_image_artifact_create_requires_workspace_owner(workspace_access_
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_global_image_artifact_create_requires_images_create_permission(
+    workspace_access_setup,
+    monkeypatch,
+):
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[],
+    )
+
+    def _unexpected_service():
+        raise AssertionError("service should not be resolved without images:create")
+
+    monkeypatch.setattr(runners_api, "_get_service", _unexpected_service)
+
+    response = client.post(
+        "/api/v1/image-artifacts/",
+        data=json.dumps(
+            {
+                "workspace_id": str(workspace_access_setup["owner_workspace"].id),
+                "name": "blocked-snapshot",
+            }
+        ),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
 
 
 @pytest.mark.django_db

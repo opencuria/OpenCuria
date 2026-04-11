@@ -1313,13 +1313,15 @@ def list_image_artifacts(request: HttpRequest):
 
 @image_artifact_router.post(
     "/",
-    response={202: ImageArtifactCreateOut, 404: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_image_artifact_global(
     request: HttpRequest, payload: ImageArtifactCreateIn
 ):
     """Create an image artifact from a workspace using the global endpoint."""
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
+        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
 

@@ -921,7 +921,7 @@ def _call_list_agents(api_key, org_id, args: dict) -> list[TextContent]:
             workspace_id = _uuid.UUID(args["workspace_id"])
         except ValueError:
             return _error("Invalid workspace_id UUID")
-        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
         if error is not None:
             return error
 
