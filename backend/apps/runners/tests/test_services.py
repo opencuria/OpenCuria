@@ -39,7 +39,7 @@ from apps.runners.models import (
     ImageDefinition,
     ImageInstance,
     Runner,
-    RunnerImageBuild,
+    ImageBuildJob,
     Session,
     Task,
     Workspace,
@@ -87,20 +87,20 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/base:1",
+            status=ImageBuildJob.Status.ACTIVE,
         )
+        runner_ref = "opencuria/custom/base:1"
         artifact = ImageInstance.objects.create(
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
-            runner_image_build=build,
-            runner_ref=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Base Workspace Artifact",
             status=ImageInstance.Status.READY,
         )
@@ -184,20 +184,20 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=foreign_runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/foreign:1",
+            status=ImageBuildJob.Status.ACTIVE,
         )
+        runner_ref = "opencuria/custom/foreign:1"
         artifact = ImageInstance.objects.create(
             runner=foreign_runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=owner,
-            runner_image_build=build,
-            runner_ref=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Foreign Artifact",
             status=ImageInstance.Status.READY,
         )
@@ -228,20 +228,20 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/base:definition",
+            status=ImageBuildJob.Status.ACTIVE,
         )
+        runner_ref = "opencuria/custom/base:definition"
         artifact = ImageInstance.objects.create(
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
-            runner_image_build=build,
-            runner_ref=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Definition Artifact",
             status=ImageInstance.Status.READY,
         )
@@ -488,7 +488,7 @@ class TestRuntimeCompatibilityGuards:
             service.update_runner_qemu_settings(runner.id, qemu_default_vcpus=4)
 
     @pytest.mark.asyncio
-    async def test_trigger_runner_image_build_rejects_unsupported_runtime(
+    async def test_trigger_build_job_rejects_unsupported_runtime(
         self, service, runner, user
     ):
         """Image definition builds must match a runner-supported runtime."""
@@ -503,7 +503,7 @@ class TestRuntimeCompatibilityGuards:
         )
 
         with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
-            await service.trigger_runner_image_build(
+            await service.trigger_build_job(
                 image_definition=definition,
                 runner=runner,
                 activate=True,
@@ -1196,10 +1196,10 @@ class TestDispatchPendingImageBuilds:
             runtime_type="docker",
             base_distro="ubuntu:22.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.PENDING,
+            status=ImageBuildJob.Status.PENDING,
             build_task=None,
         )
 
@@ -1211,11 +1211,11 @@ class TestDispatchPendingImageBuilds:
         # Build should now have a task and the SIO mock should have been called
         build.refresh_from_db()
         assert build.build_task is not None
-        assert build.status == RunnerImageBuild.Status.PENDING
+        assert build.status == ImageBuildJob.Status.PENDING
         sio_mock.emit.assert_called()
 
         # An artifact should have been created (in CREATING status)
-        artifact = ImageInstance.objects.filter(runner_image_build=build).first()
+        artifact = ImageInstance.objects.filter(build_job=build).first()
         assert artifact is not None
         assert artifact.status == ImageInstance.Status.BUILDING
 
@@ -1234,10 +1234,10 @@ class TestDispatchPendingImageBuilds:
             type=TaskType.BUILD_IMAGE,
             status=TaskStatus.IN_PROGRESS,
         )
-        RunnerImageBuild.objects.create(
+        ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.PENDING,
+            status=ImageBuildJob.Status.PENDING,
             build_task=task,
         )
 
@@ -1254,11 +1254,10 @@ class TestDispatchPendingImageBuilds:
             runtime_type="docker",
             base_distro="ubuntu:22.04",
         )
-        RunnerImageBuild.objects.create(
+        ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="test:latest",
+            status=ImageBuildJob.Status.ACTIVE,
         )
 
         dispatched = await service.dispatch_pending_image_builds(runner)

@@ -531,7 +531,7 @@ class ImageArtifactOut(Schema):
     size_bytes: int
     status: str
     artifact_kind: str = "captured"
-    runner_image_build_id: uuid.UUID | None = None
+    build_job_id: uuid.UUID | None = None
     source_definition_name: str | None = None
     source_runner_id: uuid.UUID | None = None
     runtime_type: str | None = None
@@ -581,7 +581,7 @@ class WorkspaceFromImageArtifactOut(Schema):
     status: str
 
 
-class RunnerImageBuildOut(Schema):
+class ImageBuildJobOut(Schema):
     """Response schema for runner-specific image build status."""
 
     id: uuid.UUID
@@ -599,14 +599,14 @@ class RunnerImageBuildOut(Schema):
     updated_at: datetime
 
 
-class RunnerImageBuildCreateIn(Schema):
+class ImageBuildJobCreateIn(Schema):
     """Assign runner + trigger build for an image definition."""
 
     runner_id: uuid.UUID
     activate: bool = True
 
 
-class RunnerImageBuildUpdateIn(Schema):
+class ImageBuildJobUpdateIn(Schema):
     """Update runner build lifecycle state via actions."""
 
     action: str  # deactivate | activate | rebuild

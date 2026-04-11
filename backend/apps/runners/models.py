@@ -759,7 +759,7 @@ class ImageDefinition(models.Model):
         return f"ImageDefinition({self.name}, runtime={self.runtime_type})"
 
 
-class RunnerImageBuild(models.Model):
+class ImageBuildJob(models.Model):
     """Per-runner build/activation status for an image definition."""
 
     class Status(models.TextChoices):
@@ -785,15 +785,13 @@ class RunnerImageBuild(models.Model):
         choices=Status.choices,
         default=Status.PENDING,
     )
-    image_tag = models.CharField(max_length=255, blank=True, default="")
-    image_path = models.CharField(max_length=512, blank=True, default="")
     build_log = models.TextField(blank=True, default="")
     build_task = models.ForeignKey(
         Task,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="runner_image_builds",
+        related_name="build_jobs",
     )
     built_at = models.DateTimeField(null=True, blank=True)
     deactivated_at = models.DateTimeField(null=True, blank=True)
@@ -801,18 +799,18 @@ class RunnerImageBuild(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "runners_runner_image_build"
+        db_table = "runners_build_job"
         ordering = ["-updated_at", "-created_at"]
         constraints = [
             models.UniqueConstraint(
                 fields=["image_definition", "runner"],
-                name="uniq_runner_image_build_definition_runner",
+                name="uniq_build_job_definition_runner",
             )
         ]
 
     def __str__(self) -> str:
         return (
-            "RunnerImageBuild("
+            "ImageBuildJob("
             f"definition={self.image_definition_id}, runner={self.runner_id}, status={self.status})"
         )
 
@@ -863,8 +861,8 @@ class ImageInstance(models.Model):
         null=True,
         blank=True,
     )
-    runner_image_build = models.OneToOneField(
-        RunnerImageBuild,
+    build_job = models.OneToOneField(
+        ImageBuildJob,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

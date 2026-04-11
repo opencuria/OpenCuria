@@ -1611,7 +1611,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         self,
         *,
         runtime_type: str,
-        runner_image_build_id: str,
+        build_job_id: str,
         dockerfile_content: str = "",
         image_tag: str = "",
         base_distro: str = "",

@@ -598,7 +598,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         await sync_to_async(service.handle_image_build_progress)(
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             line=data.get("line", ""),
             runner_id=runner_id,
         )
@@ -612,7 +612,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await sync_to_async(service.handle_image_built)(
             task_id=data.get("task_id", ""),
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             image_tag=data.get("image_tag", ""),
             image_path=data.get("image_path", ""),
             runner_id=runner_id,
@@ -627,7 +627,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await sync_to_async(service.handle_image_build_failed)(
             task_id=data.get("task_id", ""),
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             error=data.get("error", ""),
             runner_id=runner_id,
         )

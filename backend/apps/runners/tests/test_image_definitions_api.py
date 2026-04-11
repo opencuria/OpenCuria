@@ -14,7 +14,7 @@ from django.test import Client
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, RunnerImageBuild, Workspace
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -147,11 +147,10 @@ def test_foreign_org_cannot_list_runner_builds(client: Client):
         runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
-    RunnerImageBuild.objects.create(
+    ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.ACTIVE,
-        image_tag="opencuria/custom/owner:1",
+        status=ImageBuildJob.Status.ACTIVE,
     )
 
     token = _create_api_key(
@@ -191,11 +190,10 @@ def test_foreign_org_cannot_update_runner_build(client: Client):
         runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
-    RunnerImageBuild.objects.create(
+    ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.ACTIVE,
-        image_tag="opencuria/custom/build:1",
+        status=ImageBuildJob.Status.ACTIVE,
     )
 
     token = _create_api_key(
@@ -434,20 +432,20 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    build = ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.ACTIVE,
-        image_path="/var/lib/opencuria/base-images/artifact.qcow2",
+        status=ImageBuildJob.Status.ACTIVE,
     )
+    runner_ref = "/var/lib/opencuria/base-images/artifact.qcow2"
     artifact = ImageInstance.objects.create(
         runner=runner,
         runtime_type="qemu",
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
         origin_definition=definition,
         created_by=admin,
-        runner_image_build=build,
-        runner_ref=build.image_path,
+        build_job=build,
+        runner_ref=runner_ref,
         name="Artifact Image",
         status=ImageInstance.Status.READY,
     )
@@ -487,11 +485,10 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
         runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    build = ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.ACTIVE,
-        image_tag="opencuria/custom/backfill:1",
+        status=ImageBuildJob.Status.ACTIVE,
     )
 
     token = _create_api_key(
@@ -506,7 +503,7 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
     assert response.status_code == 200
     payload = response.json()
     assert payload[0]["image_artifact_id"] is None
-    assert not ImageInstance.objects.filter(runner_image_build=build).exists()
+    assert not ImageInstance.objects.filter(build_job=build).exists()
 
 
 @pytest.mark.django_db
@@ -576,18 +573,18 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
         runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    build = ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.PENDING,
+        status=ImageBuildJob.Status.PENDING,
     )
 
-    async def _trigger_runner_image_build(**kwargs):
+    async def _trigger_build_job(**kwargs):
         return build
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_runner_image_build=_trigger_runner_image_build),
+        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
     )
 
     token = _create_api_key(
@@ -604,7 +601,7 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
     assert response.status_code == 202
     payload = response.json()
     assert payload["id"] == str(build.id)
-    assert payload["status"] == RunnerImageBuild.Status.PENDING
+    assert payload["status"] == ImageBuildJob.Status.PENDING
     assert payload["image_artifact_id"] is None
 
 
@@ -629,11 +626,10 @@ def test_list_runner_builds_includes_global_definition_builds(client: Client):
         runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    build = ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.ACTIVE,
-        image_path="/var/lib/opencuria/base-images/global.qcow2",
+        status=ImageBuildJob.Status.ACTIVE,
     )
 
     token = _create_api_key(
@@ -672,18 +668,18 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
         runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
-    build = RunnerImageBuild.objects.create(
+    build = ImageBuildJob.objects.create(
         image_definition=definition,
         runner=runner,
-        status=RunnerImageBuild.Status.FAILED,
+        status=ImageBuildJob.Status.FAILED,
     )
 
-    async def _trigger_runner_image_build(**kwargs):
+    async def _trigger_build_job(**kwargs):
         return build
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_runner_image_build=_trigger_runner_image_build),
+        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
     )
 
     token = _create_api_key(

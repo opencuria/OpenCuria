@@ -31,7 +31,7 @@ from .models import (
     ImageDefinition,
     ImageInstance,
     Runner,
-    RunnerImageBuild,
+    ImageBuildJob,
     RunnerSystemMetrics,
     Session,
     Task,
@@ -1005,7 +1005,7 @@ class ImageInstanceRepository:
         size_bytes: int = 0,
         origin_definition: ImageDefinition | None = None,
         origin_workspace: Workspace | None = None,
-        runner_image_build: RunnerImageBuild | None = None,
+        build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
     ) -> "ImageInstance":
@@ -1020,7 +1020,7 @@ class ImageInstanceRepository:
             name=name,
             size_bytes=size_bytes,
             status=ImageInstance.Status.READY,
-            runner_image_build=runner_image_build,
+            build_job=build_job,
             created_by=created_by,
         )
         if credentials:
@@ -1037,7 +1037,7 @@ class ImageInstanceRepository:
         creating_task_id: str,
         origin_definition: ImageDefinition | None = None,
         origin_workspace: Workspace | None = None,
-        runner_image_build: RunnerImageBuild | None = None,
+        build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
     ) -> "ImageInstance":
@@ -1056,7 +1056,7 @@ class ImageInstanceRepository:
             runner_ref="",
             name=name,
             size_bytes=0,
-            runner_image_build=runner_image_build,
+            build_job=build_job,
             created_by=created_by,
             status=status,
             creating_task_id=creating_task_id,
@@ -1076,9 +1076,9 @@ class ImageInstanceRepository:
                 "origin_workspace__runner",
                 "created_by",
                 "origin_definition",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
@@ -1143,30 +1143,30 @@ class ImageInstanceRepository:
                 "origin_workspace__runner",
                 "created_by",
                 "origin_definition",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
         )
 
     @staticmethod
-    def get_by_runner_image_build_id(
-        runner_image_build_id: uuid.UUID,
+    def get_by_build_job_id(
+        build_job_id: uuid.UUID,
     ) -> "ImageInstance | None":
         """Fetch a built image instance by its runner build relation."""
         return (
-            ImageInstance.objects.filter(runner_image_build_id=runner_image_build_id)
+            ImageInstance.objects.filter(build_job_id=build_job_id)
             .select_related(
                 "runner",
                 "origin_workspace",
                 "origin_workspace__runner",
                 "created_by",
                 "origin_definition",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
@@ -1187,9 +1187,9 @@ class ImageInstanceRepository:
             "origin_workspace__runner",
             "created_by",
             "origin_definition",
-            "runner_image_build",
-            "runner_image_build__runner",
-            "runner_image_build__image_definition",
+            "build_job",
+            "build_job__runner",
+            "build_job__image_definition",
         ).prefetch_related("credentials__service")
 
     @staticmethod
@@ -1207,9 +1207,9 @@ class ImageInstanceRepository:
             "origin_workspace__runner",
             "created_by",
             "origin_definition",
-            "runner_image_build",
-            "runner_image_build__runner",
-            "runner_image_build__image_definition",
+            "build_job",
+            "build_job__runner",
+            "build_job__image_definition",
         ).prefetch_related("credentials__service")
 
     @staticmethod
@@ -1246,7 +1246,7 @@ class ImageInstanceRepository:
             "runner",
             "origin_definition",
             "origin_workspace",
-            "runner_image_build",
+            "build_job",
         )
 
 
@@ -1278,16 +1278,16 @@ class ImageDefinitionRepository:
         ).first()
 
 
-class RunnerImageBuildRepository:
+class ImageBuildJobRepository:
     """Data access for runner image build records."""
 
     @staticmethod
     def list_for_definition(
         image_definition_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
-    ) -> QuerySet[RunnerImageBuild]:
+    ) -> QuerySet[ImageBuildJob]:
         """List runner image builds, optionally scoped to an organization."""
-        queryset = RunnerImageBuild.objects.filter(
+        queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id
         )
         if organization_id is not None:
@@ -1307,9 +1307,9 @@ class RunnerImageBuildRepository:
         image_definition_id: uuid.UUID,
         runner_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
-    ) -> RunnerImageBuild | None:
+    ) -> ImageBuildJob | None:
         """Fetch one runner image build, optionally scoped to an organization."""
-        queryset = RunnerImageBuild.objects.filter(
+        queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id,
             runner_id=runner_id,
         )
@@ -1326,10 +1326,10 @@ class RunnerImageBuildRepository:
         ).first()
 
     @staticmethod
-    def get_by_id(runner_image_build_id: uuid.UUID) -> RunnerImageBuild | None:
+    def get_by_id(build_job_id: uuid.UUID) -> ImageBuildJob | None:
         """Fetch one runner image build by primary key."""
-        return RunnerImageBuild.objects.filter(
-            id=runner_image_build_id
+        return ImageBuildJob.objects.filter(
+            id=build_job_id
         ).select_related(
             "runner",
             "image_definition",
@@ -1342,9 +1342,9 @@ class RunnerImageBuildRepository:
         image_definition_id: uuid.UUID,
         runner_id: uuid.UUID,
         organization_id: uuid.UUID,
-    ) -> RunnerImageBuild | None:
+    ) -> ImageBuildJob | None:
         """Fetch one runner image build scoped to an organization."""
-        return RunnerImageBuildRepository.get(
+        return ImageBuildJobRepository.get(
             image_definition_id,
             runner_id,
             organization_id=organization_id,
@@ -1357,7 +1357,7 @@ class RunnerImageBuildRepository:
         organization_id: uuid.UUID,
     ) -> int:
         """Delete a runner image build scoped to an organization."""
-        deleted, _ = RunnerImageBuild.objects.filter(
+        deleted, _ = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id,
             runner_id=runner_id,
         ).filter(

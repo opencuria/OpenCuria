@@ -60,7 +60,7 @@ def _copy_image_artifacts_forward(apps, schema_editor):
             origin_type=origin_type,
             origin_definition=origin_definition,
             origin_workspace=origin_workspace,
-            runner_image_build=build,
+            build_job=build,
             created_by=artifact.created_by,
             runner_ref=runner_ref,
             name=artifact.name,
@@ -78,8 +78,8 @@ def _copy_image_artifacts_forward(apps, schema_editor):
         )
 
     existing_build_ids = set(
-        ImageInstance.objects.exclude(runner_image_build_id__isnull=True).values_list(
-            "runner_image_build_id",
+        ImageInstance.objects.exclude(build_job_id__isnull=True).values_list(
+            "build_job_id",
             flat=True,
         )
     )
@@ -105,7 +105,7 @@ def _copy_image_artifacts_forward(apps, schema_editor):
             origin_type="definition_build",
             origin_definition=build.image_definition,
             origin_workspace=None,
-            runner_image_build=build,
+            build_job=build,
             created_by=build.image_definition.created_by,
             runner_ref=runner_ref,
             name=f"{build.image_definition.name} ({build.runner.name})",
@@ -131,12 +131,12 @@ def _copy_image_artifacts_backward(apps, schema_editor):
 
     for image in ImageInstance.objects.select_related(
         "origin_workspace",
-        "runner_image_build",
+        "build_job",
     ):
         if image.origin_type == "definition_build":
             artifact_kind = "built"
             source_workspace = None
-            runner_image_build = image.runner_image_build
+            runner_image_build = image.build_job
             status = {
                 "building": "creating",
                 "ready": "ready",
@@ -215,7 +215,7 @@ class Migration(migrations.Migration):
                 ('origin_definition', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='image_instances', to='runners.imagedefinition')),
                 ('origin_workspace', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='captured_image_instances', to='runners.workspace')),
                 ('runner', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='image_instances', to='runners.runner')),
-                ('runner_image_build', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='image_instance', to='runners.runnerimagebuild')),
+                ('build_job', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='image_instance', to='runners.runnerimagebuild')),
             ],
             options={
                 'db_table': 'runners_image_instance',

@@ -10,7 +10,7 @@ from .models import (
     ImageInstance,
     OrgAgentDefinitionActivation,
     Runner,
-    RunnerImageBuild,
+    ImageBuildJob,
     RunnerSystemMetrics,
     Session,
     Task,
@@ -128,8 +128,8 @@ class ImageDefinitionAdmin(admin.ModelAdmin):
     search_fields = ["name", "description", "base_distro"]
 
 
-@admin.register(RunnerImageBuild)
-class RunnerImageBuildAdmin(admin.ModelAdmin):
-    list_display = ["id", "image_definition", "runner", "status", "image_tag", "built_at", "updated_at"]
+@admin.register(ImageBuildJob)
+class ImageBuildJobAdmin(admin.ModelAdmin):
+    list_display = ["id", "image_definition", "runner", "status", "built_at", "updated_at"]
     list_filter = ["status", "runner", "image_definition"]
-    search_fields = ["image_tag", "image_path", "image_definition__name", "runner__name"]
+    search_fields = ["image_definition__name", "runner__name", "image_instance__runner_ref"]

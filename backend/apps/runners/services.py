@@ -47,7 +47,7 @@ from .repositories import (
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
-    RunnerImageBuildRepository,
+    ImageBuildJobRepository,
     SessionRepository,
     TaskRepository,
     WorkspaceRepository,
@@ -83,7 +83,7 @@ class RunnerService:
         self.chats = ChatRepository
         self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
-        self.runner_image_builds = RunnerImageBuildRepository
+        self.build_jobs = ImageBuildJobRepository
         # Tracks unknown runtime workspaces for which a cleanup request has
         # already been sent, to avoid emitting duplicate cleanup tasks on every
         # heartbeat while one is still in flight.
@@ -135,18 +135,18 @@ class RunnerService:
         """Dispatch pending image builds that were created while the runner was offline.
 
         This is called after a runner registers online.  It queries for
-        ``RunnerImageBuild`` records with status ``pending`` and no associated
+        ``ImageBuildJob`` records with status ``pending`` and no associated
         build task, then triggers the regular build pipeline for each.
 
-        Returns the list of dispatched RunnerImageBuild records.
+        Returns the list of dispatched ImageBuildJob records.
         """
-        from .models import RunnerImageBuild
+        from .models import ImageBuildJob
 
         pending_builds = await sync_to_async(
             lambda: list(
-                RunnerImageBuild.objects.filter(
+                ImageBuildJob.objects.filter(
                     runner=runner,
-                    status=RunnerImageBuild.Status.PENDING,
+                    status=ImageBuildJob.Status.PENDING,
                     build_task__isnull=True,
                 ).select_related("image_definition", "runner")
             )
@@ -155,7 +155,7 @@ class RunnerService:
         dispatched = []
         for build in pending_builds:
             try:
-                await self.trigger_runner_image_build(
+                await self.trigger_build_job(
                     image_definition=build.image_definition,
                     runner=runner,
                     activate=True,
@@ -794,26 +794,26 @@ class RunnerService:
         if selected_image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        selected_runner_build = selected_image.runner_image_build
+        selected_build_job = selected_image.build_job
         source_workspace = selected_image.origin_workspace
         requested_runner_id = runner_id
-        if selected_runner_build is not None:
-            if selected_runner_build.status != "active":
+        if selected_build_job is not None:
+            if selected_build_job.status != "active":
                 raise ConflictError("Selected image artifact is not active on runner")
             if (
                 organization_id
-                and selected_runner_build.runner.organization_id != organization_id
+                and selected_build_job.runner.organization_id != organization_id
             ):
                 raise NotFoundError("ImageArtifact", str(image_artifact_id))
             if (
                 requested_runner_id is not None
-                and requested_runner_id != selected_runner_build.runner_id
+                and requested_runner_id != selected_build_job.runner_id
             ):
                 raise ConflictError(
                     "Selected runner does not have the selected image artifact"
                 )
-            runtime_type = selected_runner_build.image_definition.runtime_type
-            runner_id = selected_runner_build.runner_id
+            runtime_type = selected_build_job.image_definition.runtime_type
+            runner_id = selected_build_job.runner_id
         else:
             if source_workspace is None:
                 raise ConflictError("Captured image artifact is missing its source workspace")
@@ -924,16 +924,8 @@ class RunnerService:
                 "env_vars": env_vars or {},
                 "ssh_keys": ssh_keys or [],
                 "image_artifact_id": str(image_artifact_id),
-                "image_tag": (
-                    selected_runner_build.image_tag
-                    if selected_runner_build and runtime_type == RuntimeType.DOCKER
-                    else ""
-                ),
-                "base_image_path": (
-                    selected_runner_build.image_path
-                    if selected_runner_build and runtime_type == RuntimeType.QEMU
-                    else ""
-                ),
+                "image_tag": selected_image.runner_ref if runtime_type == RuntimeType.DOCKER else "",
+                "base_image_path": selected_image.runner_ref if runtime_type == RuntimeType.QEMU else "",
             },
         )
         logger.info(
@@ -2985,20 +2977,20 @@ class RunnerService:
         """List image definitions for an organization."""
         return list(self.image_definitions.list_by_org(organization_id))
 
-    def list_runner_image_builds(
+    def list_build_jobs(
         self,
         image_definition_id: uuid.UUID,
         organization_id: uuid.UUID,
     ) -> list:
         """List runner build records for an image definition."""
         return list(
-            self.runner_image_builds.list_for_definition(
+            self.build_jobs.list_for_definition(
                 image_definition_id,
                 organization_id=organization_id,
             )
         )
 
-    async def trigger_runner_image_build(
+    async def trigger_build_job(
         self,
         *,
         image_definition,
@@ -3007,32 +2999,32 @@ class RunnerService:
         created_by=None,
     ):
         """Create/update runner build record and dispatch task:build_image."""
-        from .models import ImageInstance, RunnerImageBuild
+        from .models import ImageInstance, ImageBuildJob
 
         self._ensure_runner_supports_runtime(
             runner=runner,
             runtime_type=image_definition.runtime_type,
         )
 
-        existing = await sync_to_async(self.runner_image_builds.get)(
+        existing = await sync_to_async(self.build_jobs.get)(
             image_definition.id, runner.id
         )
         if existing is None:
-            build = await sync_to_async(RunnerImageBuild.objects.create)(
+            build = await sync_to_async(ImageBuildJob.objects.create)(
                 image_definition=image_definition,
                 runner=runner,
-                status=RunnerImageBuild.Status.PENDING,
+                status=ImageBuildJob.Status.PENDING,
             )
         else:
             build = existing
-            build.status = RunnerImageBuild.Status.PENDING
+            build.status = ImageBuildJob.Status.PENDING
             if not activate:
-                build.status = RunnerImageBuild.Status.DEACTIVATED
+                build.status = ImageBuildJob.Status.DEACTIVATED
             await sync_to_async(build.save)(update_fields=["status", "updated_at"])
 
         if not activate:
             existing_image = await sync_to_async(
-                self.image_instances.get_by_runner_image_build_id
+                self.image_instances.get_by_build_job_id
             )(build.id)
             if existing_image is not None:
                 await sync_to_async(self.image_instances.mark_retired)(existing_image.id)
@@ -3046,24 +3038,19 @@ class RunnerService:
             runner=runner,
             task_type=TaskType.BUILD_IMAGE,
         )
+        build_runner_ref = (
+            f"opencuria/custom/{re.sub(r'[^a-z0-9-]+', '-', image_definition.name.lower())}:{build.id}"
+            if image_definition.runtime_type == RuntimeType.DOCKER
+            else f"/var/lib/opencuria/base-images/{build.id}.qcow2"
+        )
         await sync_to_async(
-            RunnerImageBuild.objects.filter(id=build.id).update
+            ImageBuildJob.objects.filter(id=build.id).update
         )(
             build_task=task,
-            status=RunnerImageBuild.Status.PENDING,
-            image_tag=(
-                f"opencuria/custom/{re.sub(r'[^a-z0-9-]+', '-', image_definition.name.lower())}:{build.id}"
-                if image_definition.runtime_type == RuntimeType.DOCKER
-                else ""
-            ),
-            image_path=(
-                f"/var/lib/opencuria/base-images/{build.id}.qcow2"
-                if image_definition.runtime_type == RuntimeType.QEMU
-                else ""
-            ),
+            status=ImageBuildJob.Status.PENDING,
         )
         image = await sync_to_async(
-            self.image_instances.get_by_runner_image_build_id
+            self.image_instances.get_by_build_job_id
         )(build.id)
         image_name = f"{image_definition.name} ({runner.name})"
         if image is None:
@@ -3074,7 +3061,7 @@ class RunnerService:
                 origin_definition=image_definition,
                 name=image_name,
                 creating_task_id=str(task.id),
-                runner_image_build=build,
+                build_job=build,
                 created_by=created_by,
             )
         else:
@@ -3099,46 +3086,46 @@ class RunnerService:
                 ]
             )
 
-        build = await sync_to_async(RunnerImageBuild.objects.select_related(
+        build = await sync_to_async(ImageBuildJob.objects.select_related(
             "image_definition", "runner", "build_task"
         ).get)(id=build.id)
 
         payload = {
             "task_id": str(task.id),
-            "runner_image_build_id": str(build.id),
+            "build_job_id": str(build.id),
             "runtime_type": image_definition.runtime_type,
         }
         if image_definition.runtime_type == RuntimeType.DOCKER:
             payload["dockerfile_content"] = self._generate_dockerfile_content(
                 image_definition
             )
-            payload["image_tag"] = build.image_tag
+            payload["image_tag"] = build_runner_ref
         else:
             payload["base_distro"] = image_definition.base_distro
             payload["init_script"] = self._build_qemu_init_script_content(
                 image_definition
             )
-            payload["image_path"] = build.image_path
+            payload["image_path"] = build_runner_ref
 
         await self._emit_to_runner(runner, "task:build_image", payload)
         await sync_to_async(self.tasks.mark_in_progress)(task)
         return build
 
     def handle_image_build_progress(
-        self, runner_image_build_id: str, line: str, runner_id: str | None = None
+        self, build_job_id: str, line: str, runner_id: str | None = None
     ) -> None:
         """Append build log lines for runner image builds."""
-        from .models import RunnerImageBuild
+        from .models import ImageBuildJob
 
         try:
-            build = RunnerImageBuild.objects.select_related("runner").get(
-                id=runner_image_build_id
+            build = ImageBuildJob.objects.select_related("runner").get(
+                id=build_job_id
             )
-        except RunnerImageBuild.DoesNotExist:
+        except ImageBuildJob.DoesNotExist:
             return
         if runner_id and str(build.runner_id) != str(runner_id):
             return
-        build.status = RunnerImageBuild.Status.BUILDING
+        build.status = ImageBuildJob.Status.BUILDING
         build.build_log = (build.build_log or "") + (line.rstrip("\n") + "\n")
         build.save(update_fields=["status", "build_log", "updated_at"])
 
@@ -3146,14 +3133,14 @@ class RunnerService:
         self,
         *,
         task_id: str,
-        runner_image_build_id: str,
+        build_job_id: str,
         image_tag: str = "",
         image_path: str = "",
         runner_id: str | None = None,
     ) -> None:
         """Mark a runner image build as active and complete its task."""
         from django.utils import timezone
-        from .models import ImageInstance, RunnerImageBuild
+        from .models import ImageInstance, ImageBuildJob
 
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
@@ -3161,18 +3148,14 @@ class RunnerService:
         if not self._validate_task_runner(task, runner_id):
             return
 
-        build = RunnerImageBuild.objects.get(id=runner_image_build_id)
-        build.status = RunnerImageBuild.Status.ACTIVE
-        if image_tag:
-            build.image_tag = image_tag
-        if image_path:
-            build.image_path = image_path
+        build = ImageBuildJob.objects.get(id=build_job_id)
+        build.status = ImageBuildJob.Status.ACTIVE
         build.built_at = timezone.now()
         build.save(
-            update_fields=["status", "image_tag", "image_path", "built_at", "updated_at"]
+            update_fields=["status", "built_at", "updated_at"]
         )
-        image = self.image_instances.get_by_runner_image_build_id(
-            uuid.UUID(runner_image_build_id)
+        image = self.image_instances.get_by_build_job_id(
+            uuid.UUID(build_job_id)
         )
         runner_ref = image_tag or image_path
         image_name = f"{build.image_definition.name} ({build.runner.name})"
@@ -3185,7 +3168,7 @@ class RunnerService:
                 runner_ref=runner_ref,
                 name=image_name,
                 size_bytes=0,
-                runner_image_build=build,
+                build_job=build,
             )
         else:
             image.name = image_name
@@ -3210,22 +3193,22 @@ class RunnerService:
         self,
         *,
         task_id: str,
-        runner_image_build_id: str,
+        build_job_id: str,
         error: str = "",
         runner_id: str | None = None,
     ) -> None:
         """Mark a runner image build as failed and fail the correlated task."""
-        from .models import RunnerImageBuild
+        from .models import ImageBuildJob
 
         task = self.tasks.get_by_id(uuid.UUID(task_id)) if task_id else None
         if task is not None and not self._validate_task_runner(task, runner_id):
             return
 
-        RunnerImageBuild.objects.filter(id=runner_image_build_id).update(
-            status=RunnerImageBuild.Status.FAILED
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.FAILED
         )
-        image = self.image_instances.get_by_runner_image_build_id(
-            uuid.UUID(runner_image_build_id)
+        image = self.image_instances.get_by_build_job_id(
+            uuid.UUID(build_job_id)
         )
         if image is not None:
             self.image_instances.mark_failed(image.id)
@@ -3525,9 +3508,9 @@ class RunnerService:
             qemu_vcpus = source_workspace.qemu_vcpus
             qemu_memory_mb = source_workspace.qemu_memory_mb
             qemu_disk_size_gb = source_workspace.qemu_disk_size_gb
-        elif image.runner_image_build is not None:
-            runner = image.runner_image_build.runner
-            runtime_type = image.runner_image_build.image_definition.runtime_type
+        elif image.build_job is not None:
+            runner = image.build_job.runner
+            runtime_type = image.build_job.image_definition.runtime_type
             qemu_vcpus = None
             qemu_memory_mb = None
             qemu_disk_size_gb = None

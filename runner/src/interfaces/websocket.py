@@ -324,9 +324,9 @@ class WebSocketInterface(Interface):
         @sio.on("task:build_image")
         async def on_build_image(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
-            runner_image_build_id = data.get("runner_image_build_id", "")
+            build_job_id = data.get("build_job_id", "")
             runtime_type = data.get("runtime_type", "docker")
-            log = logger.bind(task_id=task_id, runner_image_build_id=runner_image_build_id)
+            log = logger.bind(task_id=task_id, build_job_id=build_job_id)
             log.info("task_received", task="build_image", runtime_type=runtime_type)
             try:
                 async def _progress(line: str) -> None:
@@ -334,14 +334,14 @@ class WebSocketInterface(Interface):
                         "image:build_progress",
                         {
                             "task_id": task_id,
-                            "runner_image_build_id": runner_image_build_id,
+                            "build_job_id": build_job_id,
                             "line": line,
                         },
                     )
 
                 result = await self._service.build_image(
                     runtime_type=runtime_type,
-                    runner_image_build_id=runner_image_build_id,
+                    build_job_id=build_job_id,
                     dockerfile_content=data.get("dockerfile_content", ""),
                     image_tag=data.get("image_tag", ""),
                     base_distro=data.get("base_distro", ""),
@@ -353,7 +353,7 @@ class WebSocketInterface(Interface):
                     "image:built",
                     {
                         "task_id": task_id,
-                        "runner_image_build_id": runner_image_build_id,
+                        "build_job_id": build_job_id,
                         "image_tag": result.get("image_tag", ""),
                         "image_path": result.get("image_path", ""),
                     },
@@ -363,7 +363,7 @@ class WebSocketInterface(Interface):
                     "image:build_failed",
                     {
                         "task_id": task_id,
-                        "runner_image_build_id": runner_image_build_id,
+                        "build_job_id": build_job_id,
                         "error": str(exc),
                     },
                 )
