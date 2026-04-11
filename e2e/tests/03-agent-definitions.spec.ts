@@ -68,29 +68,21 @@ test.describe('03 — Agent Definitions', () => {
   test('should duplicate an existing agent definition', async ({ authedPage: page, testState }) => {
     test.skip(!testState.agentDefinitionId, 'No agent definition created');
 
-    // Use API to duplicate since the UI Duplicate button is hard to target per-row
-    const original = await api.get(`/org-agent-definitions/${testState.agentDefinitionId}/`);
-    const dupName = `${original.name}-copy`;
-    const dupe = await api.post('/org-agent-definitions/', {
+    const dupName = `${testState.prefix}-agent-copy`;
+    const dupe = await api.post(`/org-agent-definitions/${testState.agentDefinitionId}/duplicate/`, {
       name: dupName,
-      description: `Copy of ${original.description}`,
-      commands: original.commands || [],
-      is_active: true,
+      activate: true,
     });
+    testState.agentDuplicateId = dupe.id;
+    expect(dupe.name).toBe(dupName);
+    console.log(`Duplicated agent: ${dupe.id} (${dupe.name})`);
 
-    if (dupe && !dupe._error) {
-      testState.agentDuplicateId = dupe.id;
-      console.log(`Duplicated agent: ${dupe.id} (${dupe.name})`);
-
-      // Verify on UI
-      await page.goto(`${BASE_URL}/org-settings`);
-      await page.waitForLoadState('networkidle');
-      await page.getByRole('button', { name: 'Agent Definitions' }).click();
-      await page.waitForTimeout(500);
-      await expect(page.getByText(dupName)).toBeVisible({ timeout: 5_000 });
-    } else {
-      console.log(`Duplication failed: ${JSON.stringify(dupe)}`);
-    }
+    // Verify on UI
+    await page.goto(`${BASE_URL}/org-settings`);
+    await page.waitForLoadState('networkidle');
+    await page.getByRole('button', { name: 'Agent Definitions' }).click();
+    await page.waitForTimeout(500);
+    await expect(page.getByText(dupName)).toBeVisible({ timeout: 5_000 });
   });
 
   test('should toggle agent activation', async ({ authedPage: page, testState }) => {
@@ -127,7 +119,6 @@ test.describe('03 — Agent Definitions', () => {
     const updated = await api.patch(`/org-agent-definitions/${testState.agentDefinitionId}/`, {
       description: 'E2E test agent — updated',
     });
-    expect(updated._error).toBeFalsy();
     expect(updated.description).toContain('updated');
   });
 });

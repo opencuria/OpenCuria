@@ -48,31 +48,15 @@ test.describe('02 — Credential Services', () => {
     await page.waitForTimeout(200);
     await createBtn.click();
 
-    // Wait for dialog to close — if it doesn't, press Escape and verify via API
-    const dialogHidden = await dialog.isHidden({ timeout: 8_000 }).catch(() => false);
-    if (!dialogHidden) {
-      console.log('Dialog stayed open after clicking Create Service — pressing Escape');
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(500);
-    }
+    // The UI flow itself must succeed; do not hide failures behind API fallbacks.
+    await expect(dialog).toBeHidden({ timeout: 10_000 });
 
     // Verify service was created via API (authoritative check)
     const services = await api.get('/credential-services/');
     const created = services.find((s: any) => s.name === name);
-    if (!created) {
-      // Service wasn't created — try via API directly
-      console.log('Service not found via API — creating via API fallback');
-      const newService = await api.post('/credential-services/', {
-        name,
-        credential_type: 'env',
-        env_var_name: 'E2E_TEST_TOKEN',
-      });
-      testState.credentialServiceId = newService.id;
-      testState.credentialServiceSlug = newService.slug;
-    } else {
-      testState.credentialServiceId = created.id;
-      testState.credentialServiceSlug = created.slug;
-    }
+    expect(created).toBeTruthy();
+    testState.credentialServiceId = created.id;
+    testState.credentialServiceSlug = created.slug;
 
     // Reload and verify service appears in list
     await page.goto(`${BASE_URL}/org-settings`);
