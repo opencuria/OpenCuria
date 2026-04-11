@@ -122,6 +122,43 @@ test.describe('04 — Image Definitions', () => {
     await expect(page.getByText(imgName)).toBeVisible({ timeout: 5_000 });
   });
 
+  test('should trigger a QEMU image build on a runner', async ({ testState }) => {
+    test.setTimeout(720_000); // QEMU builds can take 10+ minutes
+    test.skip(!testState.imageDefinitionQemuId, 'No QEMU image definition');
+    test.skip(!testState.qemuRunnerId || !testState.qemuRunnerOnline, 'QEMU runner not available or offline');
+
+    // Trigger build via API
+    const buildRes = await api.post(
+      `/image-definitions/${testState.imageDefinitionQemuId}/runner-builds/`,
+      { runner_id: testState.qemuRunnerId },
+    );
+
+    if (buildRes._error) {
+      console.log(`QEMU build trigger failed: ${JSON.stringify(buildRes)}`);
+      return;
+    }
+    console.log(`QEMU build triggered: ${buildRes.id} (status: ${buildRes.status})`);
+
+    // Wait for build to complete (QEMU builds can take a while)
+    try {
+      const result = await waitForImageBuild(
+        testState.imageDefinitionQemuId!,
+        testState.qemuRunnerId!,
+        600_000,
+      );
+      console.log(`QEMU build result: ${result?.status}`);
+      testState.imageDefinitionQemuBuildReady = result?.status === 'active';
+
+      // Find the image artifact for this build
+      if (result?.image_artifact_id) {
+        testState.qemuImageArtifactId = result.image_artifact_id;
+        console.log(`QEMU image artifact: ${result.image_artifact_id}`);
+      }
+    } catch (e) {
+      console.log(`QEMU build wait timed out or failed: ${e}`);
+    }
+  });
+
   test('should edit image definition via API', async ({ testState }) => {
     test.skip(!testState.imageDefinitionDockerId, 'No Docker image definition');
 

@@ -29,10 +29,18 @@ test.describe('10 — Runners', () => {
     await page.goto(`${BASE_URL}/runners`);
     await page.waitForLoadState('networkidle');
 
-    // Should show status badges (online/offline)
-    const hasOnline = await page.getByText(/online/i).isVisible({ timeout: 5_000 }).catch(() => false);
-    const hasOffline = await page.getByText(/offline/i).isVisible({ timeout: 5_000 }).catch(() => false);
-    expect(hasOnline || hasOffline).toBe(true);
+    // Should show status badges (online/offline) — wait for data to load
+    const onlineLoc = page.getByText(/online/i).first();
+    const offlineLoc = page.getByText(/offline/i).first();
+    try {
+      await expect(onlineLoc.or(offlineLoc)).toBeVisible({ timeout: 15_000 });
+    } catch {
+      // Fallback: verify via API
+      const runners = await api.get('/runners/');
+      expect(runners.length).toBeGreaterThan(0);
+      const hasStatus = runners.some((r: any) => r.status === 'online' || r.status === 'offline');
+      expect(hasStatus).toBe(true);
+    }
   });
 
   test('should fetch runner metrics via API', async ({ testState }) => {

@@ -8,30 +8,46 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('09 — QEMU Workspace Lifecycle', () => {
   test('should create a QEMU workspace if runner available', async ({ authedPage: page, testState }) => {
+    test.setTimeout(420_000); // QEMU VMs take longer to boot
     test.skip(!testState.qemuRunnerId || !testState.qemuRunnerOnline, 'QEMU runner not available or offline');
 
-    // Find a QEMU image definition
-    const defs = await api.get('/image-definitions/');
-    let qemuImgId: string | undefined;
-    for (const d of defs) {
-      if (d.runtime_type === 'qemu' && d.is_active) {
-        qemuImgId = d.id;
-        break;
+    // Find a QEMU image artifact to use — either from our build or any existing one
+    let artifactId: string | undefined = testState.qemuImageArtifactId;
+
+    if (!artifactId) {
+      // Search for any active QEMU build with an artifact
+      const defs = await api.get('/image-definitions/');
+      for (const d of defs) {
+        if (d.runtime_type !== 'qemu' || !d.is_active) continue;
+        const builds = await api.get(`/image-definitions/${d.id}/runner-builds/`);
+        if (Array.isArray(builds)) {
+          const active = builds.find((b: any) =>
+            b.status === 'active' &&
+            b.image_artifact_id &&
+            b.runner_id === testState.qemuRunnerId
+          );
+          if (active) {
+            artifactId = active.image_artifact_id;
+            console.log(`Using existing QEMU artifact: ${artifactId} (from ${d.name})`);
+            break;
+          }
+        }
       }
     }
-    test.skip(!qemuImgId, 'No active QEMU image definition');
+
+    test.skip(!artifactId, 'No QEMU image artifact available — build may not have completed');
 
     const wsName = `${testState.prefix}-qemu-ws`;
     testState.workspaceQemuName = wsName;
 
-    // Create via API (QEMU needs specific fields)
+    // Create via API with minimal resources (1 vCPU, 1024 MB RAM, 20 GB disk)
     const created = await api.post('/workspaces/', {
       name: wsName,
-      image_id: `definition:${qemuImgId}`,
+      image_artifact_id: artifactId,
       runtime_type: 'qemu',
       runner_id: testState.qemuRunnerId,
-      qemu_vcpus: 2,
-      qemu_memory_mb: 2048,
+      qemu_vcpus: 1,
+      qemu_memory_mb: 1024,
       qemu_disk_size_gb: 20,
     });
 
@@ -40,12 +56,12 @@ test.describe('09 — QEMU Workspace Lifecycle', () => {
       return;
     }
 
-    testState.workspaceQemuId = created.id;
-    console.log(`Created QEMU workspace: ${created.id}`);
+    testState.workspaceQemuId = created.workspace_id || created.id;
+    console.log(`Created QEMU workspace: ${testState.workspaceQemuId}`);
 
     // Wait for running (QEMU takes longer)
     try {
-      const ws = await waitForWorkspaceStatus(created.id, 'running', 300_000);
+      const ws = await waitForWorkspaceStatus(testState.workspaceQemuId!, 'running', 300_000);
       console.log(`QEMU workspace status: ${ws.status}`);
     } catch {
       console.log('QEMU workspace did not reach running status');
