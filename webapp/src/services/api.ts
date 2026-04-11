@@ -110,8 +110,11 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
 
-  // On 401, try refreshing the token and retry once
-  if (res.status === 401) {
+  // On 401, try refreshing the token and retry once.
+  // Skip for auth endpoints — they return 401 for invalid credentials
+  // and should not trigger a token refresh or redirect loop.
+  const isAuthEndpoint = path.startsWith('/auth/')
+  if (res.status === 401 && !isAuthEndpoint) {
     const refreshed = await tryRefreshToken()
     if (refreshed) {
       const retryHeaders: Record<string, string> = {
