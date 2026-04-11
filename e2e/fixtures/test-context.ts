@@ -22,6 +22,7 @@ export interface TestState {
   imageDefinitionQemuId?: string;
   imageDefinitionDockerBuildReady?: boolean;
   imageDefinitionQemuBuildReady?: boolean;
+  qemuImageArtifactId?: string;
 
   // Credentials
   credentialEnvId?: string;
