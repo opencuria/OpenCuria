@@ -282,8 +282,8 @@ function resetCreateServiceForm() {
   serviceSlugTouched.value = false
 }
 
-function closeCreateCredentialService() {
-  if (createServiceLoading.value) return
+function closeCreateCredentialService(force = false) {
+  if (createServiceLoading.value && !force) return
   showCreateServiceModal.value = false
   resetCreateServiceForm()
 }
@@ -314,7 +314,7 @@ async function createCredentialService() {
     credentialServices.value = [...credentialServices.value, created].sort((a, b) =>
       a.name.localeCompare(b.name)
     )
-    closeCreateCredentialService()
+    closeCreateCredentialService(true)
   } catch (e) {
     error.value = (e as Error).message || 'Failed to create credential service'
   } finally {
