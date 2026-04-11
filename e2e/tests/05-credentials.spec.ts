@@ -93,11 +93,6 @@ test.describe('05 — Credentials', () => {
       value: null,
     });
 
-    if (created._error) {
-      console.log(`SSH credential creation failed: ${JSON.stringify(created)}`);
-      return;
-    }
-
     testState.credentialSshId = created.id;
     console.log(`Created SSH credential: ${created.id}`);
   });
@@ -131,11 +126,6 @@ test.describe('05 — Credentials', () => {
       organization_credential: true,
     });
 
-    if (created._error) {
-      console.log(`Org credential creation: ${JSON.stringify(created)}`);
-      return;
-    }
-
     testState.credentialOrgId = created.id;
     console.log(`Created org credential: ${created.id}`);
   });
@@ -146,7 +136,6 @@ test.describe('05 — Credentials', () => {
     const updated = await api.patch(`/credentials/${testState.credentialEnvId}/`, {
       name: `${testState.prefix}-env-cred-renamed`,
     });
-    expect(updated._error).toBeFalsy();
 
     // Verify on UI
     await page.goto(`${BASE_URL}/credentials`);

@@ -51,21 +51,12 @@ test.describe('09 — QEMU Workspace Lifecycle', () => {
       qemu_disk_size_gb: 20,
     });
 
-    if (created._error) {
-      console.log(`QEMU workspace creation failed: ${JSON.stringify(created)}`);
-      return;
-    }
-
     testState.workspaceQemuId = created.workspace_id || created.id;
     console.log(`Created QEMU workspace: ${testState.workspaceQemuId}`);
 
-    // Wait for running (QEMU takes longer)
-    try {
-      const ws = await waitForWorkspaceStatus(testState.workspaceQemuId!, 'running', 300_000);
-      console.log(`QEMU workspace status: ${ws.status}`);
-    } catch {
-      console.log('QEMU workspace did not reach running status');
-    }
+    const ws = await waitForWorkspaceStatus(testState.workspaceQemuId!, 'running', 300_000);
+    console.log(`QEMU workspace status: ${ws.status}`);
+    expect(ws.status).toBe('running');
   });
 
   test('should show QEMU workspace in list', async ({ authedPage: page, testState }) => {

@@ -67,29 +67,16 @@ test.describe('04 — Image Definitions', () => {
       `/image-definitions/${testState.imageDefinitionDockerId}/runner-builds/`,
       { runner_id: testState.dockerRunnerId },
     );
+    console.log(`Build triggered: ${JSON.stringify(buildRes)}`);
 
-    // Build might fail if the definition has no proper Dockerfile,
-    // but the API call should succeed
-    if (buildRes._error) {
-      console.log(`Build trigger response: ${JSON.stringify(buildRes)}`);
-      // Some definitions might not be buildable without a proper config
-      // That's OK for testing the API path
-    } else {
-      console.log(`Build triggered: ${JSON.stringify(buildRes)}`);
-
-      // Wait for build to complete (with a reasonable timeout)
-      try {
-        const result = await waitForImageBuild(
-          testState.imageDefinitionDockerId!,
-          testState.dockerRunnerId!,
-          300_000,
-        );
-        console.log(`Build result: ${result?.status}`);
-        testState.imageDefinitionDockerBuildReady = result?.status === 'active';
-      } catch (e) {
-        console.log(`Build wait timed out or failed: ${e}`);
-      }
-    }
+    const result = await waitForImageBuild(
+      testState.imageDefinitionDockerId!,
+      testState.dockerRunnerId!,
+      300_000,
+    );
+    console.log(`Build result: ${result?.status}`);
+    expect(result?.status).toBe('active');
+    testState.imageDefinitionDockerBuildReady = true;
   });
 
   test('should create a QEMU image definition if QEMU runner exists', async ({ authedPage: page, testState }) => {
@@ -105,11 +92,6 @@ test.describe('04 — Image Definitions', () => {
       base_distro: 'ubuntu:24.04',
       is_active: true,
     });
-
-    if (created._error) {
-      console.log(`QEMU image creation failed: ${JSON.stringify(created)}`);
-      return;
-    }
 
     testState.imageDefinitionQemuId = created.id;
     console.log(`Created QEMU image def: ${created.id}`);
@@ -132,31 +114,19 @@ test.describe('04 — Image Definitions', () => {
       `/image-definitions/${testState.imageDefinitionQemuId}/runner-builds/`,
       { runner_id: testState.qemuRunnerId },
     );
-
-    if (buildRes._error) {
-      console.log(`QEMU build trigger failed: ${JSON.stringify(buildRes)}`);
-      return;
-    }
     console.log(`QEMU build triggered: ${buildRes.id} (status: ${buildRes.status})`);
 
-    // Wait for build to complete (QEMU builds can take a while)
-    try {
-      const result = await waitForImageBuild(
-        testState.imageDefinitionQemuId!,
-        testState.qemuRunnerId!,
-        600_000,
-      );
-      console.log(`QEMU build result: ${result?.status}`);
-      testState.imageDefinitionQemuBuildReady = result?.status === 'active';
-
-      // Find the image artifact for this build
-      if (result?.image_artifact_id) {
-        testState.qemuImageArtifactId = result.image_artifact_id;
-        console.log(`QEMU image artifact: ${result.image_artifact_id}`);
-      }
-    } catch (e) {
-      console.log(`QEMU build wait timed out or failed: ${e}`);
-    }
+    const result = await waitForImageBuild(
+      testState.imageDefinitionQemuId!,
+      testState.qemuRunnerId!,
+      600_000,
+    );
+    console.log(`QEMU build result: ${result?.status}`);
+    expect(result?.status).toBe('active');
+    expect(result?.image_artifact_id).toBeTruthy();
+    testState.imageDefinitionQemuBuildReady = true;
+    testState.qemuImageArtifactId = result.image_artifact_id;
+    console.log(`QEMU image artifact: ${result.image_artifact_id}`);
   });
 
   test('should edit image definition via API', async ({ testState }) => {
@@ -165,7 +135,6 @@ test.describe('04 — Image Definitions', () => {
     const updated = await api.patch(`/image-definitions/${testState.imageDefinitionDockerId}/`, {
       description: 'E2E test Docker image — updated',
     });
-    expect(updated._error).toBeFalsy();
     expect(updated.description).toContain('updated');
   });
 });

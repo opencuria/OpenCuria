@@ -2,7 +2,7 @@
  * 08-workspace-docker.spec.ts — Test Docker workspace lifecycle.
  */
 import { test, expect } from '../fixtures/auth.fixture';
-import { api, waitForWorkspaceStatus } from '../fixtures/api-helper';
+import { api, pollUntil, waitForWorkspaceStatus } from '../fixtures/api-helper';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
@@ -88,45 +88,23 @@ test.describe('08 — Docker Workspace Lifecycle', () => {
       }
     }
 
-    // Wait for dialog close or navigation
-    await page.waitForTimeout(3000);
+    await expect(dialog).toBeHidden({ timeout: 15_000 });
 
-    // Check if workspace was created via API
-    const workspaces = await api.get('/workspaces/');
+    const workspaces = await pollUntil(
+      () => api.get('/workspaces/'),
+      (items: any[]) => Array.isArray(items) && items.some((w: any) => w.name === wsName),
+      { interval: 2000, timeout: 60_000 },
+    );
     const created = workspaces.find((w: any) => w.name === wsName);
+    expect(created).toBeTruthy();
 
-    if (created) {
-      testState.workspaceDockerId = created.id;
-      console.log(`Created Docker workspace: ${created.id} (status: ${created.status})`);
+    testState.workspaceDockerId = created.id;
+    console.log(`Created Docker workspace: ${created.id} (status: ${created.status})`);
 
-      // Wait for it to be running
-      if (created.status !== 'running') {
-        try {
-          const ws = await waitForWorkspaceStatus(created.id, 'running', 120_000);
-          console.log(`Workspace is now: ${ws.status}`);
-        } catch {
-          console.log('Workspace did not reach running status in time');
-        }
-      }
-    } else {
-      console.log('Workspace creation may have failed via UI — trying via API fallback');
-      // Create via API as fallback
-      const apiCreated = await api.post('/workspaces/', {
-        name: wsName,
-        image_definition_id: dockerImgId,
-      });
-
-      if (!apiCreated._error) {
-        testState.workspaceDockerId = apiCreated.id;
-        console.log(`Created Docker workspace via API: ${apiCreated.id}`);
-        try {
-          await waitForWorkspaceStatus(apiCreated.id, 'running', 120_000);
-        } catch {
-          console.log('Workspace did not reach running status');
-        }
-      } else {
-        console.log(`API fallback also failed: ${JSON.stringify(apiCreated)}`);
-      }
+    if (created.status !== 'running') {
+      const ws = await waitForWorkspaceStatus(created.id, 'running', 120_000);
+      console.log(`Workspace is now: ${ws.status}`);
+      expect(ws.status).toBe('running');
     }
   });
 
@@ -161,8 +139,7 @@ test.describe('08 — Docker Workspace Lifecycle', () => {
 
     const ws = await api.get(`/workspaces/${testState.workspaceDockerId}/`);
     if (ws.status === 'running') {
-      const stopRes = await api.post(`/workspaces/${testState.workspaceDockerId}/stop/`);
-      expect(stopRes._error).toBeFalsy();
+      await api.post(`/workspaces/${testState.workspaceDockerId}/stop/`);
 
       // Wait for stopped status
       const stopped = await waitForWorkspaceStatus(testState.workspaceDockerId!, 'stopped', 60_000);
@@ -178,8 +155,7 @@ test.describe('08 — Docker Workspace Lifecycle', () => {
 
     const ws = await api.get(`/workspaces/${testState.workspaceDockerId}/`);
     if (ws.status === 'stopped') {
-      const resumeRes = await api.post(`/workspaces/${testState.workspaceDockerId}/resume/`);
-      expect(resumeRes._error).toBeFalsy();
+      await api.post(`/workspaces/${testState.workspaceDockerId}/resume/`);
 
       // Wait for running
       const running = await waitForWorkspaceStatus(testState.workspaceDockerId!, 'running', 120_000);

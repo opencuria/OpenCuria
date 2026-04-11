@@ -9,6 +9,29 @@ const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || 'OpenCuria2026!';
 let cachedToken: string | null = null;
 let cachedOrgId: string | null = null;
 
+export class ApiRequestError extends Error {
+  status: number;
+  detail: unknown;
+  method: string;
+  path: string;
+
+  constructor(method: string, path: string, status: number, detail: unknown) {
+    super(`${method} ${path} failed with ${status}: ${formatDetail(detail)}`);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.detail = detail;
+    this.method = method;
+    this.path = path;
+  }
+}
+
+function formatDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return JSON.stringify(detail);
+  if (detail && typeof detail === 'object') return JSON.stringify(detail);
+  return 'Unknown error';
+}
+
 async function getAuth(): Promise<{ token: string; orgId: string }> {
   if (cachedToken && cachedOrgId) return { token: cachedToken, orgId: cachedOrgId };
 
@@ -46,7 +69,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
   if (res.status === 204) return undefined;
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    return { _error: true, status: res.status, detail: data?.detail || 'Unknown error' };
+    throw new ApiRequestError(method, path, res.status, data?.detail || data);
   }
   return data;
 }
@@ -137,8 +160,11 @@ export async function waitForImageBuild(
 export async function safeDelete(path: string): Promise<void> {
   try {
     await apiRequest('DELETE', path);
-  } catch {
-    // ignore
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 404) {
+      return;
+    }
+    throw error;
   }
 }
 
@@ -148,16 +174,19 @@ export async function safeDelete(path: string): Promise<void> {
 export async function safeStopAndDelete(workspaceId: string): Promise<void> {
   try {
     const ws = await api.get(`/workspaces/${workspaceId}/`);
-    if (ws && !ws._error && ws.status === 'running') {
+    if (ws?.status === 'running') {
       await api.post(`/workspaces/${workspaceId}/stop/`);
       await pollUntil(
         () => api.get(`/workspaces/${workspaceId}/`),
         (w: any) => w.status !== 'running',
         { interval: 2000, timeout: 60_000 },
-      ).catch(() => {});
+      );
     }
     await api.delete(`/workspaces/${workspaceId}/`);
-  } catch {
-    // ignore
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 404) {
+      return;
+    }
+    throw error;
   }
 }

@@ -3,7 +3,7 @@
  * This also tests all delete/revoke endpoints.
  */
 import { test, expect } from '../fixtures/auth.fixture';
-import { api, safeDelete, safeStopAndDelete } from '../fixtures/api-helper';
+import { ApiRequestError, api, safeDelete, safeStopAndDelete } from '../fixtures/api-helper';
 import { loadState, resetState } from '../fixtures/test-context';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
@@ -19,9 +19,14 @@ test.describe('99 — Cleanup', () => {
 
     // Verify it's gone or in terminal status
     await new Promise(r => setTimeout(r, 3000));
-    const ws = await api.get(`/workspaces/${testState.workspaceDockerId}/`);
-    const isGone = ws._error || ws.status === 'removed' || ws.status === 'deleting' || ws.status === 'stopped';
-    expect(isGone).toBeTruthy();
+    try {
+      const ws = await api.get(`/workspaces/${testState.workspaceDockerId}/`);
+      const isGone = ws.status === 'removed' || ws.status === 'deleting' || ws.status === 'stopped';
+      expect(isGone).toBeTruthy();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiRequestError);
+      expect((error as ApiRequestError).status).toBe(404);
+    }
   });
 
   test('should delete QEMU workspace', async ({ testState }) => {
@@ -48,8 +53,6 @@ test.describe('99 — Cleanup', () => {
       return;
     }
 
-    // Revoke via API first (more reliable), then delete
-    await api.patch(`/auth/api-keys/${testState.apiKeyId}/`, { is_active: false }).catch(() => {});
     await api.delete(`/auth/api-keys/${testState.apiKeyId}/`);
     console.log(`Deleted API key: ${testState.apiKeyId}`);
   });
@@ -122,13 +125,10 @@ test.describe('99 — Cleanup', () => {
 
     // There's no DELETE endpoint for credential services — only deactivation
     const res = await api.post(`/org-credential-services/${testState.credentialServiceId}/activation/`, {
-      is_active: false,
+      active: false,
     });
-    if (!res?._error) {
-      console.log(`Deactivated credential service: ${testState.credentialServiceId}`);
-    } else {
-      console.log(`Deactivation failed (may already be inactive): ${JSON.stringify(res)}`);
-    }
+    expect(res.is_active).toBe(false);
+    console.log(`Deactivated credential service: ${testState.credentialServiceId}`);
   });
 
   test('should delete captured images if any', async ({ testState }) => {
@@ -142,14 +142,14 @@ test.describe('99 — Cleanup', () => {
     const state = loadState();
     const prefix = state.prefix;
 
-    // Check all resource types (exclude credential services — no DELETE endpoint)
-    const [agents, imageDefs, skills, creds, apiKeys, workspaces] = await Promise.all([
+    const [agents, imageDefs, skills, creds, apiKeys, workspaces, credentialServices] = await Promise.all([
       api.get('/org-agent-definitions/'),
       api.get('/image-definitions/'),
       api.get('/skills/'),
       api.get('/credentials/'),
       api.get('/auth/api-keys/'),
       api.get('/workspaces/'),
+      api.get('/org-credential-services/'),
     ]);
 
     const check = (items: any[], label: string, extraFilter?: (i: any) => boolean) => {
@@ -167,6 +167,7 @@ test.describe('99 — Cleanup', () => {
     total += check(imageDefs, 'Image definitions');
     total += check(skills, 'Skills');
     total += check(creds, 'Credentials');
+    total += check(credentialServices, 'Credential services', (svc: any) => svc.is_active !== false);
     // API keys: DELETE endpoint only revokes (is_active=false), doesn't remove from list
     total += check(apiKeys, 'API keys', (k: any) => k.is_active !== false);
     total += check(workspaces.filter((w: any) => !['removed', 'deleting', 'stopped'].includes(w.status)), 'Workspaces');

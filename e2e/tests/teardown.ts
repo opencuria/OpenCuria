@@ -127,7 +127,7 @@ async function globalTeardown() {
     if (Array.isArray(credSvcs)) {
       for (const svc of credSvcs.filter((s: any) => isE2e(s.name))) {
         console.log(`  Deactivating credential service: ${svc.name} (${svc.id})`);
-        await post(`/org-credential-services/${svc.id}/activation/`, { is_active: false });
+        await post(`/org-credential-services/${svc.id}/activation/`, { active: false });
       }
     }
 

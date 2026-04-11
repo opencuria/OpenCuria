@@ -93,7 +93,6 @@ test.describe('06 — Skills', () => {
     const updated = await api.patch(`/skills/${testState.skillPersonalId}/`, {
       body: 'Updated: Expert E2E test writer with Playwright best practices.',
     });
-    expect(updated._error).toBeFalsy();
     expect(updated.body).toContain('Updated');
 
     // Verify on UI the skill still shows
