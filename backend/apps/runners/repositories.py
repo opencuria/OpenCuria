@@ -890,11 +890,19 @@ class ConversationRepository:
                     "read_at": chat._last_session_read_at,
                     "created_at": chat._last_session_created_at,
                 }
-            last_activity_at = (
-                chat._last_session_completed_at
-                or chat._last_session_created_at
-                or chat.updated_at
-            )
+            if chat._last_session_status in (
+                SessionStatus.PENDING,
+                SessionStatus.RUNNING,
+            ):
+                # For active sessions, stream output touches chat.updated_at, so
+                # this reflects true "last chat update" activity.
+                last_activity_at = chat.updated_at or chat._last_session_created_at
+            else:
+                last_activity_at = (
+                    chat._last_session_completed_at
+                    or chat._last_session_created_at
+                    or chat.updated_at
+                )
             rows.append(
                 {
                     "chat_id": chat.id,

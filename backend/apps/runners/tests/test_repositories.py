@@ -254,6 +254,38 @@ class TestConversationRepository:
         row = next(r for r in rows if r["chat_id"] == chat.id)
         assert row["updated_at"] == completed_at
 
+    def test_running_session_uses_chat_updated_at_as_last_activity(self):
+        org = Organization.objects.create(name="Org", slug=f"org-{uuid.uuid4().hex[:8]}")
+        user = User.objects.create_user(email=f"u-{uuid.uuid4().hex[:8]}@example.com", password="x")
+        runner = Runner.objects.create(
+            name="runner",
+            api_token_hash=hash_token("token-running"),
+            status=RunnerStatus.ONLINE,
+            organization=org,
+        )
+        workspace = WorkspaceRepository.create(
+            workspace_id=uuid.uuid4(),
+            runner=runner,
+            name="ws",
+            created_by=user,
+        )
+        chat = Chat.objects.create(workspace=workspace, name="Chat")
+
+        session = Session.objects.create(
+            chat=chat,
+            prompt="hello",
+            status=SessionStatus.RUNNING,
+        )
+        started_at = timezone.now() - timedelta(minutes=10)
+        Session.objects.filter(id=session.id).update(created_at=started_at)
+
+        latest_activity = timezone.now() - timedelta(seconds=5)
+        Chat.objects.filter(id=chat.id).update(updated_at=latest_activity)
+
+        rows = ConversationRepository.list_for_user(org.id, user.id)
+        row = next(r for r in rows if r["chat_id"] == chat.id)
+        assert row["updated_at"] == latest_activity
+
     def test_append_output_updates_workspace_and_chat_activity_timestamps(self):
         org = Organization.objects.create(name="Org", slug=f"org-{uuid.uuid4().hex[:8]}")
         user = User.objects.create_user(email=f"u-{uuid.uuid4().hex[:8]}@example.com", password="x")
