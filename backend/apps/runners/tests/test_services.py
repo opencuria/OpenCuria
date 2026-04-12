@@ -77,6 +77,48 @@ class TestRegisterRunner:
 
 @pytest.mark.django_db
 class TestDesktopStateCleanup:
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_without_attach_network_skips_backend_connect(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """QEMU desktops should not try to attach the backend to a Docker network."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        connect = AsyncMock()
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            service,
+            "_connect_backend_to_workspace_network",
+            connect,
+        )
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="10.100.0.2",
+            network_name="",
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "10.100.0.2",
+            "network_name": "",
+        }
+        connect.assert_not_awaited()
+        emit.assert_awaited_once()
+
     def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace, monkeypatch):
         """Stopping a workspace must clear any cached desktop session state."""
         task = Task.objects.create(

@@ -166,5 +166,42 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["image_path"], str(target_path))
 
 
+class QemuRuntimeDesktopProxyTests(unittest.TestCase):
+    def test_get_container_ip_returns_workspace_vm_ip(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+        runtime._get_workspace_vm_ip = MagicMock(return_value="10.100.0.2")
+
+        result = runtime.get_container_ip("instance-1", "workspace-1")
+
+        self.assertEqual(result, "10.100.0.2")
+        runtime._get_workspace_vm_ip.assert_called_once_with("instance-1")
+
+    def test_get_workspace_network_name_returns_empty_string(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+
+        self.assertEqual(runtime.get_workspace_network_name("workspace-1"), "")
+
+    def test_resolve_image_artifact_path_accepts_absolute_base_image_path(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+        runtime._snapshot_dir = Path("/var/lib/opencuria/snapshots")
+
+        result = runtime._resolve_image_artifact_path(
+            "/var/lib/opencuria/base-images/image.qcow2"
+        )
+
+        self.assertEqual(result, Path("/var/lib/opencuria/base-images/image.qcow2"))
+
+    def test_resolve_image_artifact_path_uses_snapshot_dir_for_snapshot_ids(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+        runtime._snapshot_dir = Path("/var/lib/opencuria/snapshots")
+
+        result = runtime._resolve_image_artifact_path("artifact-123")
+
+        self.assertEqual(
+            result,
+            Path("/var/lib/opencuria/snapshots/artifact-123.qcow2"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

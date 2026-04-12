@@ -25,6 +25,9 @@ class DummyService:
         self.run_command_calls = []
         self.run_command_side_effects: list[object] = []
         self.create_workspace_calls = []
+        self.start_desktop = AsyncMock()
+        self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
+        self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
     def _normalise_command_args(self, command_args):
         return command_args
@@ -212,6 +215,35 @@ class WebSocketMetricsPathTests(unittest.TestCase):
         )
         interface = WebSocketInterface(DummyService(), settings)
         self.assertEqual(interface._resolve_disk_usage_path(), "/tmp")
+
+
+class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
+        service = DummyService()
+        service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())
+        service.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
+        service.get_desktop_network_name = lambda workspace_id: ""
+
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+
+        task_id = "desktop-task-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:start_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        service.start_desktop.assert_awaited_once_with(workspace_id)
+        interface._sio.emit.assert_awaited_with(
+            "desktop:started",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "port": 6901,
+                "container_ip": "10.100.0.2",
+                "network_name": "",
+            },
+        )
 
 
 class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):

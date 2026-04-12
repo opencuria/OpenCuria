@@ -1369,7 +1369,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         return self._desktop_sessions.get(workspace_id)
 
     def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
-        """Get the container's IP address on its workspace network."""
+        """Get the upstream IP address for the workspace desktop proxy."""
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not hasattr(runtime, "get_container_ip"):
@@ -1377,7 +1377,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         return runtime.get_container_ip(info.instance_id, str(workspace_id))
 
     def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
-        """Get the Docker network name for a workspace."""
+        """Get the backend-attachable network for a workspace desktop proxy."""
         runtime = self._get_runtime(workspace_id)
         if not hasattr(runtime, "get_workspace_network_name"):
             raise RuntimeError("Runtime does not support desktop networking")

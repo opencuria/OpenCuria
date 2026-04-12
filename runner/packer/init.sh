@@ -70,8 +70,9 @@ apt-get install -y \
     libxrandr2 \
     libgbm1 \
     libpango-1.0-0 \
-    libcairo2 \
-    libasound2
+    libcairo2
+
+apt-get install -y libasound2t64 || apt-get install -y libasound2
 
 # Install KasmVNC
 wget -q -O /tmp/kasmvnc.deb \
@@ -80,8 +81,12 @@ apt-get install -y /tmp/kasmvnc.deb || true
 apt-get install -f -y
 rm -f /tmp/kasmvnc.deb
 
-# Install Chromium
-apt-get install -y chromium || apt-get install -y chromium-browser || true
+# Install a real browser binary. On Ubuntu cloud images the Chromium apt
+# packages route through snapd, so use the Chrome .deb directly.
+wget -q -O /tmp/google-chrome.deb \
+    https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+rm -f /tmp/google-chrome.deb
 
 # Pre-configure KasmVNC (skip interactive DE selection wizard)
 mkdir -p /root/.vnc
@@ -111,7 +116,7 @@ KASMCFG
 cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
 #!/bin/bash
 set -eu
-for browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do
+for browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do
     if [ "${browser#/}" != "$browser" ]; then
         if [ -x "$browser" ]; then
             exec "$browser" --no-sandbox --disable-gpu --start-maximized \

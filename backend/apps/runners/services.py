@@ -2308,15 +2308,18 @@ class RunnerService:
         if runner_id:
             self._desktop_workspace_runner[workspace_id] = runner_id
 
-        # Connect backend container to the workspace network so
-        # the ASGI proxy can reach KasmVNC inside the workspace.
-        try:
-            await self._connect_backend_to_workspace_network(network_name)
-        except Exception:
-            logger.exception(
-                "Failed to connect backend to workspace network %s",
-                network_name,
-            )
+        # Docker workspaces require the backend container to join the isolated
+        # workspace network before the ASGI proxy can reach KasmVNC. Other
+        # runtimes can leave this empty when the upstream IP is directly
+        # reachable from the backend.
+        if network_name:
+            try:
+                await self._connect_backend_to_workspace_network(network_name)
+            except Exception:
+                logger.exception(
+                    "Failed to connect backend to workspace network %s",
+                    network_name,
+                )
 
         logger.info(
             "Desktop started: workspace=%s, port=%s, ip=%s",
@@ -3146,14 +3149,17 @@ RUN apt-get update && apt-get install -y \\
     xfonts-base openbox dbus-x11 x11-xserver-utils \\
     libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
-    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \\
-    wget \\
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
+    wget ca-certificates \\
+    && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
     && wget -q -O /tmp/kasmvnc.deb \\
        "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb" \\
     && apt-get install -y /tmp/kasmvnc.deb || true \\
     && apt-get install -f -y \\
     && rm -f /tmp/kasmvnc.deb \\
-    && apt-get install -y chromium || apt-get install -y chromium-browser || true \\
+    && wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \\
+    && (apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y) \\
+    && rm -f /tmp/google-chrome.deb \\
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-configure KasmVNC (skip interactive wizard)
@@ -3161,7 +3167,7 @@ RUN mkdir -p /root/.vnc \\
     && touch /root/.vnc/.de-was-selected \\
     && echo -e "password\\npassword\\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
-    && printf '#!/bin/bash\\nset -eu\\nfor browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
+    && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
     && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
@@ -3180,7 +3186,8 @@ apt-get update
 apt-get install -y xfonts-base openbox dbus-x11 x11-xserver-utils \\
     libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
-    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 wget
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 wget ca-certificates
+(apt-get install -y libasound2t64 || apt-get install -y libasound2)
 
 wget -q -O /tmp/kasmvnc.deb \\
     "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
@@ -3188,7 +3195,9 @@ apt-get install -y /tmp/kasmvnc.deb || true
 apt-get install -f -y
 rm -f /tmp/kasmvnc.deb
 
-apt-get install -y chromium || apt-get install -y chromium-browser || true
+wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+rm -f /tmp/google-chrome.deb
 
 # Pre-configure KasmVNC
 mkdir -p /root/.vnc
@@ -3214,7 +3223,7 @@ KASMCFG
 cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
 #!/bin/bash
 set -eu
-for browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do
+for browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do
   if [ "${browser#/}" != "$browser" ]; then
     if [ -x "$browser" ]; then
       exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
