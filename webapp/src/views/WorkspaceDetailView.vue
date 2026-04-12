@@ -965,8 +965,12 @@ function handleToggleSessionReadState(sessionId: string): void {
 
           <!-- Chat content area -->
           <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+            <!-- Desktop overlay (covers chat like FileViewer) -->
+            <div v-if="desktopStore.isOpen && canPrompt" class="flex flex-col flex-1 min-h-0">
+              <WorkspaceDesktop :workspace-id="workspaceId" />
+            </div>
             <FileViewer
-              v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
+              v-else-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
             />
             <div
@@ -1105,16 +1109,7 @@ function handleToggleSessionReadState(sessionId: string): void {
           </div>
         </template>
 
-        <!-- Desktop panel (bottom, below terminal if both open) -->
-        <template v-if="desktopStore.isOpen && canPrompt">
-          <div
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onDesktopDragStart"
-          ></div>
-          <div class="shrink-0 relative" :style="{ height: desktopHeight + 'px' }">
-            <WorkspaceDesktop :workspace-id="workspaceId" />
-          </div>
-        </template>
+
       </div>
     </template>
 
