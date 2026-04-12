@@ -75,6 +75,77 @@ class TestRegisterRunner:
         assert runner.status == RunnerStatus.OFFLINE
 
 
+@pytest.mark.django_db
+class TestDesktopStateCleanup:
+    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace, monkeypatch):
+        """Stopping a workspace must clear any cached desktop session state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+        disconnect = AsyncMock()
+        monkeypatch.setattr(
+            service,
+            "_disconnect_backend_from_workspace_network",
+            disconnect,
+        )
+
+        service.handle_workspace_stopped(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.STOPPED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+        disconnect.assert_awaited_once_with("workspace-net")
+
+    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace, monkeypatch):
+        """Removing a workspace must also detach any desktop proxy state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.REMOVE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+        disconnect = AsyncMock()
+        monkeypatch.setattr(
+            service,
+            "_disconnect_backend_from_workspace_network",
+            disconnect,
+        )
+
+        service.handle_workspace_removed(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.REMOVED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+        disconnect.assert_awaited_once_with("workspace-net")
+
+
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspace:
     @pytest.mark.asyncio

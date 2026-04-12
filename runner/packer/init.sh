@@ -81,7 +81,7 @@ apt-get install -f -y
 rm -f /tmp/kasmvnc.deb
 
 # Install Chromium
-apt-get install -y chromium-browser || apt-get install -y chromium || true
+apt-get install -y chromium || apt-get install -y chromium-browser || true
 
 # Pre-configure KasmVNC (skip interactive DE selection wizard)
 mkdir -p /root/.vnc
@@ -107,6 +107,29 @@ network:
     pem_key:
 KASMCFG
 
+# Browser launcher — prefer real binaries and skip the Ubuntu snap wrapper.
+cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
+#!/bin/bash
+set -eu
+for browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do
+    if [ "${browser#/}" != "$browser" ]; then
+        if [ -x "$browser" ]; then
+            exec "$browser" --no-sandbox --disable-gpu --start-maximized \
+                --disable-dev-shm-usage --no-first-run
+        fi
+        continue
+    fi
+    if command -v "$browser" >/dev/null 2>&1; then
+        if [ "$browser" = "chromium-browser" ] && ! chromium-browser --version >/dev/null 2>&1; then
+            continue
+        fi
+        exec "$browser" --no-sandbox --disable-gpu --start-maximized \
+            --disable-dev-shm-usage --no-first-run
+    fi
+done
+echo "No supported browser binary found for desktop session" >&2
+BROWSER
+
 # xstartup — launched by vncserver for each session
 cat > /root/.vnc/xstartup <<'XSTARTUP'
 #!/bin/bash
@@ -114,11 +137,11 @@ export DISPLAY=:1
 export HOME=/root
 openbox-session &
 sleep 1
-chromium-browser --no-sandbox --disable-gpu --start-maximized \
-    --disable-dev-shm-usage --no-first-run 2>/dev/null &
+/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
 wait
 XSTARTUP
 chmod +x /root/.vnc/xstartup
+chmod +x /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop helper scripts
 cat >/usr/local/bin/opencuria-desktop-start <<'SCRIPT'

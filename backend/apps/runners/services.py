@@ -1574,6 +1574,7 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.STOPPED)
             self.workspaces.update_active_operation(workspace, None)
+        self._cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
 
@@ -1880,6 +1881,7 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.REMOVED)
             self.workspaces.update_active_operation(workspace, None)
+        self._cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
         logger.info("Workspace removed: %s", workspace_id)
@@ -2393,6 +2395,27 @@ class RunnerService:
     def get_desktop_info(self, workspace_id: str) -> dict | None:
         """Get desktop session info (container_ip, port, network) if active."""
         return self._active_desktops.get(workspace_id)
+
+    def _cleanup_desktop_state(self, workspace_id: str) -> None:
+        """Remove in-memory desktop state and detach the backend from its network."""
+        desktop_info = self._active_desktops.pop(workspace_id, None)
+        self._desktop_workspace_runner.pop(workspace_id, None)
+        if not desktop_info:
+            return
+
+        network_name = desktop_info.get("network_name")
+        if not network_name:
+            return
+
+        try:
+            async_to_sync(self._disconnect_backend_from_workspace_network)(
+                network_name
+            )
+        except Exception:
+            logger.exception(
+                "Failed to disconnect backend from workspace network %s",
+                network_name,
+            )
 
     @staticmethod
     async def _connect_backend_to_workspace_network(network_name: str) -> None:
@@ -3130,7 +3153,7 @@ RUN apt-get update && apt-get install -y \\
     && apt-get install -y /tmp/kasmvnc.deb || true \\
     && apt-get install -f -y \\
     && rm -f /tmp/kasmvnc.deb \\
-    && apt-get install -y chromium-browser || apt-get install -y chromium || true \\
+    && apt-get install -y chromium || apt-get install -y chromium-browser || true \\
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-configure KasmVNC (skip interactive wizard)
@@ -3138,8 +3161,9 @@ RUN mkdir -p /root/.vnc \\
     && touch /root/.vnc/.de-was-selected \\
     && echo -e "password\\npassword\\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
-    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\nchromium-browser --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run 2>/dev/null &\\nwait\\n' > /root/.vnc/xstartup \\
-    && chmod +x /root/.vnc/xstartup
+    && printf '#!/bin/bash\\nset -eu\\nfor browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
+    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
+    && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts
 RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\ntouch /root/.vnc/.de-was-selected\\nvncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0\\n' > /usr/local/bin/opencuria-desktop-start \\
@@ -3164,7 +3188,7 @@ apt-get install -y /tmp/kasmvnc.deb || true
 apt-get install -f -y
 rm -f /tmp/kasmvnc.deb
 
-apt-get install -y chromium-browser || apt-get install -y chromium || true
+apt-get install -y chromium || apt-get install -y chromium-browser || true
 
 # Pre-configure KasmVNC
 mkdir -p /root/.vnc
@@ -3187,16 +3211,37 @@ network:
     pem_key:
 KASMCFG
 
+cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
+#!/bin/bash
+set -eu
+for browser in chromium google-chrome google-chrome-stable /usr/lib/chromium/chromium; do
+  if [ "${browser#/}" != "$browser" ]; then
+    if [ -x "$browser" ]; then
+      exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
+    fi
+    continue
+  fi
+  if command -v "$browser" >/dev/null 2>&1; then
+    if [ "$browser" = "chromium-browser" ] && ! chromium-browser --version >/dev/null 2>&1; then
+      continue
+    fi
+    exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
+  fi
+done
+echo "No supported browser binary found for desktop session" >&2
+BROWSER
+
 cat >/root/.vnc/xstartup <<'XSTARTUP'
 #!/bin/bash
 export DISPLAY=:1
 export HOME=/root
 openbox-session &
 sleep 1
-chromium-browser --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run 2>/dev/null &
+/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
 wait
 XSTARTUP
 chmod +x /root/.vnc/xstartup
+chmod +x /usr/local/bin/opencuria-desktop-browser
 
 cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
 #!/bin/bash

@@ -19,10 +19,12 @@ import hmac
 import logging
 import re
 import time
+import uuid
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
 
 import aiohttp
+from asgiref.sync import sync_to_async
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,35 @@ def _verify_cookie(value: str) -> tuple[str, str] | None:
     if not hmac.compare_digest(sig, expected):
         return None
     return workspace_id, user_id
+
+
+@sync_to_async
+def _user_can_access_workspace(user_id: str, workspace_id: str) -> bool:
+    """Return whether the authenticated user may access the workspace desktop."""
+    from apps.organizations.models import Membership, MembershipRole
+    from .repositories import WorkspaceRepository
+
+    try:
+        workspace_uuid = uuid.UUID(workspace_id)
+        user_id_int = int(user_id)
+    except (TypeError, ValueError):
+        return False
+
+    workspace = WorkspaceRepository.get_by_id(workspace_uuid)
+    if workspace is None:
+        return False
+
+    membership = Membership.objects.filter(
+        user_id=user_id_int,
+        organization_id=workspace.runner.organization_id,
+    ).first()
+    if membership is None:
+        return False
+
+    if membership.role == MembershipRole.ADMIN:
+        return True
+
+    return workspace.created_by_id == user_id_int
 
 
 async def desktop_proxy_app(scope, receive, send):
@@ -108,7 +139,20 @@ async def desktop_proxy_app(scope, receive, send):
             await send({"type": "http.response.body", "body": b"Unauthorized"})
         return
 
-    # --- Check workspace access ---
+    # --- Check workspace access and desktop availability ---
+    if not await _user_can_access_workspace(user_id_str, workspace_id):
+        logger.warning(
+            "Desktop proxy denied workspace access (user=%s, workspace=%s)",
+            user_id_str,
+            workspace_id,
+        )
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 4004})
+        else:
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"Not Found"})
+        return
+
     desktop_info = _get_desktop_info(workspace_id)
     if desktop_info is None:
         logger.warning("Desktop proxy: no active session for workspace %s", workspace_id)
