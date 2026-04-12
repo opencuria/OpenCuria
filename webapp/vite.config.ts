@@ -28,6 +28,11 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      '/ws/desktop': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
 })

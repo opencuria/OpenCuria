@@ -52,6 +52,107 @@ echo "=== Configuring ext4 error behavior ==="
 # 'continue' logs the error but keeps the filesystem mounted read-write.
 tune2fs -e continue /dev/vda1
 
+echo "=== Installing KasmVNC desktop session support ==="
+apt-get update
+apt-get install -y \
+    xfonts-base \
+    openbox \
+    dbus-x11 \
+    x11-xserver-utils \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2
+
+# Install KasmVNC
+wget -q -O /tmp/kasmvnc.deb \
+    "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
+apt-get install -y /tmp/kasmvnc.deb || true
+apt-get install -f -y
+rm -f /tmp/kasmvnc.deb
+
+# Install Chromium
+apt-get install -y chromium-browser || apt-get install -y chromium || true
+
+# Pre-configure KasmVNC (skip interactive DE selection wizard)
+mkdir -p /root/.vnc
+touch /root/.vnc/.de-was-selected
+
+# Create a dummy VNC user so KasmVNC doesn't prompt for one
+echo -e "password\npassword\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true
+
+# KasmVNC config: HTTP mode, no SSL
+cat > /root/.vnc/kasmvnc.yaml <<'KASMCFG'
+desktop:
+  resolution:
+    width: 1920
+    height: 1080
+  allow_resize: true
+network:
+  protocol: http
+  interface: 0.0.0.0
+  websocket_port: 6901
+  ssl:
+    require_ssl: false
+    pem_certificate:
+    pem_key:
+KASMCFG
+
+# xstartup — launched by vncserver for each session
+cat > /root/.vnc/xstartup <<'XSTARTUP'
+#!/bin/bash
+export DISPLAY=:1
+export HOME=/root
+openbox-session &
+sleep 1
+chromium-browser --no-sandbox --disable-gpu --start-maximized \
+    --disable-dev-shm-usage --no-first-run 2>/dev/null &
+wait
+XSTARTUP
+chmod +x /root/.vnc/xstartup
+
+# Desktop start/stop helper scripts
+cat >/usr/local/bin/opencuria-desktop-start <<'SCRIPT'
+#!/bin/bash
+set -e
+export DISPLAY=:1
+export HOME=/root
+
+/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
+
+# Ensure KasmVNC pre-config exists
+mkdir -p /root/.vnc
+touch /root/.vnc/.de-was-selected
+
+vncserver :1 \
+    -geometry 1920x1080 \
+    -depth 24 \
+    -SecurityTypes None \
+    -websocketPort 6901 \
+    -disableBasicAuth \
+    -interface 0.0.0.0
+
+echo "Desktop session started on :1 (ws port 6901)"
+SCRIPT
+
+cat >/usr/local/bin/opencuria-desktop-stop <<'SCRIPT'
+#!/bin/bash
+HOME=/root vncserver -kill :1 2>/dev/null || true
+echo "Desktop session stopped"
+SCRIPT
+
+chmod +x /usr/local/bin/opencuria-desktop-start
+chmod +x /usr/local/bin/opencuria-desktop-stop
+
 echo "=== Cleanup ==="
 apt-get clean
 rm -rf /var/lib/apt/lists/*

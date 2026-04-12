@@ -100,6 +100,48 @@ class DockerRuntime(RuntimeBackend):
             )
             raise
 
+    def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
+        """Return the container IP on its workspace network."""
+        container = self._container(instance_id)
+        network_name = self._workspace_network_name(workspace_id)
+        networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+        net = networks.get(network_name)
+        if net and net.get("IPAddress"):
+            return net["IPAddress"]
+        # Fallback: return first available IP
+        for net_info in networks.values():
+            if net_info.get("IPAddress"):
+                return net_info["IPAddress"]
+        raise RuntimeError(f"No IP address found for container {instance_id}")
+
+    def get_workspace_network_name(self, workspace_id: str) -> str:
+        """Return the Docker network name for a workspace."""
+        return self._workspace_network_name(workspace_id)
+
+    def connect_to_network(self, container_name: str, network_name: str) -> None:
+        """Connect a container to a Docker network (idempotent)."""
+        client = self._get_client()
+        try:
+            network = client.networks.get(network_name)
+        except Exception:
+            raise RuntimeError(f"Network {network_name} not found")
+        try:
+            network.connect(container_name)
+        except Exception as exc:
+            # Already connected is fine
+            if "already exists" in str(exc).lower() or "endpoint with name" in str(exc).lower():
+                return
+            raise
+
+    def disconnect_from_network(self, container_name: str, network_name: str) -> None:
+        """Disconnect a container from a Docker network (idempotent)."""
+        client = self._get_client()
+        try:
+            network = client.networks.get(network_name)
+            network.disconnect(container_name, force=True)
+        except Exception:
+            pass  # Already disconnected or network gone
+
     # -- lifecycle -------------------------------------------------------------
 
     async def create_workspace(self, config: WorkspaceConfig) -> str:

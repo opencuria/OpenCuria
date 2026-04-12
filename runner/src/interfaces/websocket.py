@@ -841,6 +841,64 @@ class WebSocketInterface(Interface):
                     "terminal_close_failed", terminal_id=terminal_id
                 )
 
+        # -- desktop session events --------------------------------------------
+
+        @sio.on("task:start_desktop")
+        async def on_start_desktop(data: dict) -> None:
+            task_id = data["task_id"]
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
+            log.info("task_received", task="start_desktop")
+
+            try:
+                session = await self._service.start_desktop(workspace_id)
+
+                # Get container IP for backend proxy
+                container_ip = self._service.get_desktop_container_ip(workspace_id)
+                network_name = self._service.get_desktop_network_name(workspace_id)
+
+                await sio.emit(
+                    "desktop:started",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "port": session.port,
+                        "container_ip": container_ip,
+                        "network_name": network_name,
+                    },
+                )
+                log.info("desktop_started", port=session.port, container_ip=container_ip)
+            except Exception as exc:
+                await sio.emit(
+                    "workspace:error",
+                    {"task_id": task_id, "error": str(exc)},
+                )
+                log.exception("start_desktop_failed")
+
+        @sio.on("task:stop_desktop")
+        async def on_stop_desktop(data: dict) -> None:
+            task_id = data["task_id"]
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
+            log.info("task_received", task="stop_desktop")
+
+            try:
+                await self._service.stop_desktop(workspace_id)
+                await sio.emit(
+                    "desktop:stopped",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                    },
+                )
+                log.info("desktop_stopped")
+            except Exception as exc:
+                await sio.emit(
+                    "workspace:error",
+                    {"task_id": task_id, "error": str(exc)},
+                )
+                log.exception("stop_desktop_failed")
+
         # -- file explorer events ----------------------------------------------
 
         @sio.on("files:list")

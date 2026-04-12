@@ -80,6 +80,24 @@ export function startTerminal(
   return post<{ task_id: string }>(`/workspaces/${id}/terminal/`, { cols, rows })
 }
 
+// --- Desktop API ---
+
+export function startDesktop(id: string): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`)
+}
+
+export function stopDesktop(id: string): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`)
+}
+
+export function getDesktopStatus(
+  id: string,
+): Promise<{ active: boolean; proxy_url: string | null }> {
+  return get<{ active: boolean; proxy_url: string | null }>(
+    `/workspaces/${id}/desktop/status/`,
+  )
+}
+
 // --- Chat API ---
 
 export function listChats(workspaceId: string): Promise<Chat[]> {

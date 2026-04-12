@@ -432,6 +432,30 @@ class TerminalStartOut(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Desktop session schemas
+# ---------------------------------------------------------------------------
+
+
+class DesktopStartOut(Schema):
+    """Response schema after desktop start is dispatched."""
+
+    task_id: uuid.UUID
+
+
+class DesktopStopOut(Schema):
+    """Response schema after desktop stop is dispatched."""
+
+    task_id: uuid.UUID
+
+
+class DesktopStatusOut(Schema):
+    """Response schema for desktop session status check."""
+
+    active: bool
+    proxy_url: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Error schemas
 # ---------------------------------------------------------------------------
 

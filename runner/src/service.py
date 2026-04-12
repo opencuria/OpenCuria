@@ -28,7 +28,7 @@ from typing import Any
 import structlog
 
 from .config import RunnerSettings
-from .models import WorkspaceInfo
+from .models import DesktopSession, WorkspaceInfo
 from .runtime.base import ImageArtifactInfo, PtyHandle, RuntimeBackend, WorkspaceConfig
 
 logger = structlog.get_logger(__name__)
@@ -126,6 +126,7 @@ class WorkspaceService:
         self._settings = settings
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._terminals: dict[str, TerminalSession] = {}
+        self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
@@ -1303,6 +1304,84 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             logger.bind(terminal_id=terminal_id),
         )
         logger.info("terminal_closed", terminal_id=terminal_id)
+
+    # -- desktop session (KasmVNC) -----------------------------------------
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> DesktopSession:
+        """Start a KasmVNC desktop session inside the workspace container.
+
+        Idempotent: if a session is already running, returns the existing one.
+        """
+        existing = self._desktop_sessions.get(workspace_id)
+        if existing is not None:
+            logger.info("desktop_already_running", workspace_id=str(workspace_id))
+            return existing
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+
+        log = logger.bind(workspace_id=str(workspace_id))
+
+        # Execute the start script inside the container
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["/usr/local/bin/opencuria-desktop-start"],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            log.error("desktop_start_failed", exit_code=exit_code, output=output)
+            raise RuntimeError(f"Failed to start desktop session: {output}")
+
+        session = DesktopSession(
+            workspace_id=workspace_id,
+            instance_id=info.instance_id,
+        )
+        self._desktop_sessions[workspace_id] = session
+        log.info("desktop_started", port=session.port)
+        return session
+
+    async def stop_desktop(self, workspace_id: uuid.UUID) -> None:
+        """Stop a running desktop session."""
+        session = self._desktop_sessions.pop(workspace_id, None)
+        if session is None:
+            return
+
+        log = logger.bind(workspace_id=str(workspace_id))
+        try:
+            runtime = self._get_runtime(workspace_id)
+            info = self._get_cached(workspace_id)
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                ["/usr/local/bin/opencuria-desktop-stop"],
+            )
+            if exit_code != 0:
+                log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
+        except Exception:
+            log.exception("desktop_stop_failed")
+
+        log.info("desktop_stopped")
+
+    def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
+        """Return the active desktop session if any."""
+        return self._desktop_sessions.get(workspace_id)
+
+    def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
+        """Get the container's IP address on its workspace network."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_container_ip"):
+            raise RuntimeError("Runtime does not support desktop proxy")
+        return runtime.get_container_ip(info.instance_id, str(workspace_id))
+
+    def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
+        """Get the Docker network name for a workspace."""
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_workspace_network_name"):
+            raise RuntimeError("Runtime does not support desktop networking")
+        return runtime.get_workspace_network_name(str(workspace_id))
 
     # -- file operations -------------------------------------------------------
 
