@@ -93,7 +93,7 @@ mkdir -p /root/.vnc
 touch /root/.vnc/.de-was-selected
 
 # Create a dummy VNC user so KasmVNC doesn't prompt for one
-echo -e "password\npassword\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true
+printf "password\npassword\n" | vncpasswd -u root -w -r 2>/dev/null || true
 
 # KasmVNC config: HTTP mode, no SSL
 cat > /root/.vnc/kasmvnc.yaml <<'KASMCFG'
@@ -167,9 +167,18 @@ vncserver :1 \
     -SecurityTypes None \
     -websocketPort 6901 \
     -disableBasicAuth \
-    -interface 0.0.0.0
+    -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &
 
-echo "Desktop session started on :1 (ws port 6901)"
+for _ in $(seq 1 120); do
+    if pgrep -f "Xvnc.*:1" >/dev/null 2>&1 || pgrep -f "Xtigervnc.*:1" >/dev/null 2>&1; then
+        echo "Desktop session started on :1 (ws port 6901)"
+        exit 0
+    fi
+    sleep 0.25
+done
+
+echo "Desktop session failed to start" >&2
+exit 1
 SCRIPT
 
 cat >/usr/local/bin/opencuria-desktop-stop <<'SCRIPT'

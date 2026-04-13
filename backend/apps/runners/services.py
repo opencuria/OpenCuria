@@ -3165,14 +3165,14 @@ RUN apt-get update && apt-get install -y \\
 # Pre-configure KasmVNC (skip interactive wizard)
 RUN mkdir -p /root/.vnc \\
     && touch /root/.vnc/.de-was-selected \\
-    && echo -e "password\\npassword\\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true \\
+    && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
     && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\ntouch /root/.vnc/.de-was-selected\\nvncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0\\n' > /usr/local/bin/opencuria-desktop-start \\
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\ntouch /root/.vnc/.de-was-selected\\nvncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if pgrep -f \"Xvnc.*:1\" >/dev/null 2>&1 || pgrep -f \"Xtigervnc.*:1\" >/dev/null 2>&1; then\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \\
     && printf '#!/bin/bash\\nHOME=/root vncserver -kill :1 2>/dev/null || true\\n' > /usr/local/bin/opencuria-desktop-stop \\
     && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 """
@@ -3202,7 +3202,7 @@ rm -f /tmp/google-chrome.deb
 # Pre-configure KasmVNC
 mkdir -p /root/.vnc
 touch /root/.vnc/.de-was-selected
-echo -e "password\\npassword\\n" | vncpasswd -u opencuria -w -r 2>/dev/null || true
+printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true
 
 cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
 desktop:
@@ -3260,7 +3260,16 @@ export HOME=/root
 /usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
 mkdir -p /root/.vnc
 touch /root/.vnc/.de-was-selected
-vncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0
+vncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &
+for _ in $(seq 1 120); do
+  if pgrep -f "Xvnc.*:1" >/dev/null 2>&1 || pgrep -f "Xtigervnc.*:1" >/dev/null 2>&1; then
+    echo "Desktop session started on :1 (ws port 6901)"
+    exit 0
+  fi
+  sleep 0.25
+done
+echo "Desktop session failed to start" >&2
+exit 1
 DESKSTART
 
 cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
