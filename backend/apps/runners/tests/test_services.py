@@ -187,6 +187,45 @@ class TestDesktopStateCleanup:
         assert workspace_id not in service._desktop_workspace_runner
         disconnect.assert_awaited_once_with("workspace-net")
 
+    def test_heartbeat_restores_active_desktop_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Backend heartbeat should reconstruct live desktop sessions after restart."""
+        connect = AsyncMock()
+        monkeypatch.setattr(
+            service,
+            "_connect_backend_to_workspace_network",
+            connect,
+        )
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "172.19.0.3",
+                        "network_name": "workspace-net",
+                    },
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
+        connect.assert_awaited_once_with("workspace-net")
+
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspace:

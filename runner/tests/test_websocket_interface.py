@@ -21,6 +21,7 @@ class DummyService:
         self.cleanup_prompt_process_tracking = AsyncMock()
         self.sync_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
+        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.prepared_operation = object()
         self.run_command_calls = []
         self.run_command_side_effects: list[object] = []

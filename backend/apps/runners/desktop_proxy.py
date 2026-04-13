@@ -153,7 +153,7 @@ async def desktop_proxy_app(scope, receive, send):
             await send({"type": "http.response.body", "body": b"Not Found"})
         return
 
-    desktop_info = _get_desktop_info(workspace_id)
+    desktop_info = await _get_desktop_info(workspace_id)
     if desktop_info is None:
         logger.warning("Desktop proxy: no active session for workspace %s", workspace_id)
         if scope["type"] == "websocket":
@@ -384,6 +384,7 @@ async def _validate_token(token: str):
         return None
 
 
+@sync_to_async
 def _get_desktop_info(workspace_id: str) -> dict | None:
     """Get desktop session info from the RunnerService singleton."""
     from .sio_server import get_runner_service

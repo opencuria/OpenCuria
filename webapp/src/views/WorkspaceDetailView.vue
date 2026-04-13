@@ -429,6 +429,7 @@ onUnmounted(() => {
   lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
   cleanupSocket()
+  desktopStore.reset()
   terminalStore.reset()
   fileExplorerStore.reset()
   workspaceImageStore.reset()
@@ -443,6 +444,7 @@ onUnmounted(() => {
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
+    desktopStore.reset()
     fileExplorerStore.reset()
     workspaceStore.chats = []
     workspaceStore.activeChatId = null

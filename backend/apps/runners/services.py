@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import socket
 import uuid
 from datetime import datetime, timedelta
 
@@ -2284,7 +2286,7 @@ class RunnerService:
 
     async def handle_desktop_started(
         self,
-        task_id: str,
+        task_id: str | None,
         workspace_id: str,
         port: int,
         container_ip: str,
@@ -2294,32 +2296,41 @@ class RunnerService:
         """Handle desktop:started event from a runner."""
         from .sio_server import emit_to_frontend
 
-        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
-        if task:
-            if not self._validate_task_runner(task, runner_id):
+        task = None
+        if task_id:
+            task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
+            if task and not self._validate_task_runner(task, runner_id):
                 return
-            await sync_to_async(self.tasks.complete)(task)
 
-        self._active_desktops[workspace_id] = {
+        desktop_state = {
             "port": port,
             "container_ip": container_ip,
             "network_name": network_name,
         }
-        if runner_id:
-            self._desktop_workspace_runner[workspace_id] = runner_id
 
-        # Docker workspaces require the backend container to join the isolated
-        # workspace network before the ASGI proxy can reach KasmVNC. Other
-        # runtimes can leave this empty when the upstream IP is directly
-        # reachable from the backend.
-        if network_name:
-            try:
-                await self._connect_backend_to_workspace_network(network_name)
-            except Exception:
-                logger.exception(
-                    "Failed to connect backend to workspace network %s",
-                    network_name,
-                )
+        try:
+            self._record_active_desktop(
+                workspace_id,
+                desktop_state,
+                runner_id=runner_id,
+                attach_network=True,
+            )
+        except Exception as exc:
+            if task:
+                await sync_to_async(self.tasks.fail)(task, str(exc))
+            await emit_to_frontend(
+                "workspace:error",
+                {
+                    "workspace_id": workspace_id,
+                    "task_id": task_id,
+                    "error": str(exc),
+                },
+                workspace_id,
+            )
+            return
+
+        if task:
+            await sync_to_async(self.tasks.complete)(task)
 
         logger.info(
             "Desktop started: workspace=%s, port=%s, ip=%s",
@@ -2393,11 +2404,109 @@ class RunnerService:
 
     def is_desktop_active(self, workspace_id: str) -> bool:
         """Check if a desktop session is active for a workspace."""
-        return workspace_id in self._active_desktops
+        if workspace_id in self._active_desktops:
+            return True
+        return self.recover_desktop_state(workspace_id) is not None
 
     def get_desktop_info(self, workspace_id: str) -> dict | None:
         """Get desktop session info (container_ip, port, network) if active."""
-        return self._active_desktops.get(workspace_id)
+        desktop_info = self._active_desktops.get(workspace_id)
+        if desktop_info is not None:
+            return desktop_info
+        return self.recover_desktop_state(workspace_id)
+
+    def recover_desktop_state(self, workspace_id: str) -> dict | None:
+        """Best-effort recovery for Docker desktop sessions after backend restarts."""
+        from .models import Workspace
+
+        try:
+            workspace = Workspace.objects.select_related("runner").get(id=workspace_id)
+        except (Workspace.DoesNotExist, ValueError):
+            return None
+
+        if workspace.runtime_type != RuntimeType.DOCKER:
+            return None
+        if workspace.status != WorkspaceStatus.RUNNING:
+            return None
+
+        import docker as docker_sdk
+
+        container_name = f"opencuria-workspace-{workspace_id}"
+        network_name = f"opencuria-ws-{workspace_id}"
+
+        try:
+            client = docker_sdk.from_env()
+            container = client.containers.get(container_name)
+            container.reload()
+            networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+            network_info = networks.get(network_name, {})
+            container_ip = network_info.get("IPAddress")
+            if not container_ip:
+                return None
+
+            with socket.create_connection((container_ip, 6901), timeout=1):
+                pass
+
+            self._record_active_desktop(
+                workspace_id,
+                {
+                    "port": 6901,
+                    "container_ip": container_ip,
+                    "network_name": network_name,
+                },
+                runner_id=str(workspace.runner_id),
+                attach_network=True,
+            )
+            return self._active_desktops.get(workspace_id)
+        except Exception:
+            logger.debug(
+                "desktop_state_recovery_failed for workspace %s",
+                workspace_id,
+                exc_info=True,
+            )
+            return None
+
+    def _record_active_desktop(
+        self,
+        workspace_id: str,
+        desktop_state: dict,
+        *,
+        runner_id: str | None = None,
+        attach_network: bool,
+    ) -> None:
+        """Persist backend desktop state and optionally attach backend network."""
+        network_name = desktop_state.get("network_name", "")
+        if attach_network and network_name:
+            async_to_sync(self._connect_backend_to_workspace_network)(network_name)
+
+        self._active_desktops[workspace_id] = dict(desktop_state)
+        if runner_id:
+            self._desktop_workspace_runner[workspace_id] = runner_id
+
+    def _sync_desktop_state_from_heartbeat(
+        self,
+        workspace_id: str,
+        desktop_state: dict | None,
+        *,
+        runner_id: str,
+    ) -> None:
+        """Reconcile cached desktop state from runner heartbeats."""
+        if not desktop_state:
+            self._cleanup_desktop_state(workspace_id)
+            return
+
+        current = self._active_desktops.get(workspace_id)
+        current_runner = self._desktop_workspace_runner.get(workspace_id)
+        if current == desktop_state and current_runner == runner_id:
+            return
+
+        self._cleanup_desktop_state(workspace_id)
+        self._record_active_desktop(
+            workspace_id,
+            desktop_state,
+            runner_id=runner_id,
+            attach_network=True,
+        )
 
     def _cleanup_desktop_state(self, workspace_id: str) -> None:
         """Remove in-memory desktop state and detach the backend from its network."""
@@ -2421,14 +2530,22 @@ class RunnerService:
             )
 
     @staticmethod
+    def _backend_container_target() -> str:
+        """Return the identifier used to attach the backend to Docker networks."""
+        return (
+            os.environ.get("OPENCURIA_BACKEND_CONTAINER_NAME")
+            or os.environ.get("HOSTNAME")
+            or "opencuria_local_backend"
+        )
+
+    @staticmethod
     async def _connect_backend_to_workspace_network(network_name: str) -> None:
         """Connect the backend container to a workspace's Docker network."""
         import docker as docker_sdk
 
         def _connect():
             client = docker_sdk.from_env()
-            # Find the backend container
-            backend_name = "opencuria_local_backend"
+            backend_name = RunnerService._backend_container_target()
             try:
                 network = client.networks.get(network_name)
                 network.connect(backend_name)
@@ -2447,7 +2564,7 @@ class RunnerService:
 
         def _disconnect():
             client = docker_sdk.from_env()
-            backend_name = "opencuria_local_backend"
+            backend_name = RunnerService._backend_container_target()
             try:
                 network = client.networks.get(network_name)
                 network.disconnect(backend_name, force=True)
@@ -2639,10 +2756,12 @@ class RunnerService:
         self.runners.update_heartbeat(runner)
 
         # Build lookup of runner-reported workspace states
+        runner_ws_payloads: dict[str, dict] = {}
         runner_ws_states: dict[str, str] = {}
         for ws_data in workspaces:
             ws_id = ws_data.get("workspace_id", "")
             status = ws_data.get("status", "unknown")
+            runner_ws_payloads[ws_id] = ws_data
             runner_ws_states[ws_id] = status
 
         # Check backend workspaces for this runner
@@ -2678,6 +2797,7 @@ class RunnerService:
             ws_id_str = str(ws.id)
             cleanup_key = (runner_id_str, ws_id_str)
             runner_status = runner_ws_states.get(ws_id_str)
+            runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
             if ws.status in (
                 WorkspaceStatus.FAILED,
@@ -2719,6 +2839,7 @@ class RunnerService:
                         },
                         ws_id_str,
                     )
+                self._cleanup_desktop_state(ws_id_str)
             else:
                 # Map Docker container status to workspace status
                 new_status = self._map_instance_status(runner_status)
@@ -2746,6 +2867,19 @@ class RunnerService:
                         },
                         ws_id_str,
                     )
+
+                desktop_payload = runner_payload.get("desktop")
+                if (
+                    new_status == WorkspaceStatus.RUNNING
+                    or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
+                ):
+                    self._sync_desktop_state_from_heartbeat(
+                        ws_id_str,
+                        desktop_payload,
+                        runner_id=runner_id_str,
+                    )
+                else:
+                    self._cleanup_desktop_state(ws_id_str)
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
 

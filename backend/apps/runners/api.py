@@ -835,7 +835,8 @@ async def desktop_status(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
-        is_active = service.is_desktop_active(str(workspace_id))
+        desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
+        is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
         return 200, DesktopStatusOut(active=is_active, proxy_url=proxy_url)
     except NotFoundError as e:

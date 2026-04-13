@@ -1178,6 +1178,67 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             for info in self._cache.values()
         ]
 
+    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the cached desktop session still accepts connections."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        exit_code, _ = await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "if command -v python3 >/dev/null 2>&1; then "
+                    "python3 -c \"import socket,sys; "
+                    "sock=socket.socket(); sock.settimeout(1); "
+                    "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
+                    "sys.exit(0 if rc == 0 else 1)\"; "
+                    "else "
+                    "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
+                    "fi"
+                ),
+            ],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        return exit_code == 0
+
+    async def get_workspace_heartbeat_statuses(self) -> list[dict]:
+        """Return workspace heartbeat payload including live desktop sessions."""
+        payload: list[dict] = []
+        for info in self._cache.values():
+            workspace_id = info.workspace_id
+            item = {
+                "workspace_id": str(workspace_id),
+                "status": info.status,
+                "runtime_type": info.runtime_type,
+            }
+
+            session = self._desktop_sessions.get(workspace_id)
+            if session is not None:
+                try:
+                    if await self._is_desktop_session_live(workspace_id):
+                        item["desktop"] = {
+                            "port": session.port,
+                            "container_ip": self.get_desktop_container_ip(workspace_id),
+                            "network_name": self.get_desktop_network_name(workspace_id),
+                        }
+                    else:
+                        self._desktop_sessions.pop(workspace_id, None)
+                        logger.warning(
+                            "desktop_session_pruned_from_cache",
+                            workspace_id=str(workspace_id),
+                        )
+                except Exception:
+                    self._desktop_sessions.pop(workspace_id, None)
+                    logger.exception(
+                        "desktop_session_health_check_failed",
+                        workspace_id=str(workspace_id),
+                    )
+
+            payload.append(item)
+
+        return payload
+
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
         qemu_runtime = self._runtimes.get("qemu")
@@ -1317,8 +1378,14 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         """
         existing = self._desktop_sessions.get(workspace_id)
         if existing is not None:
-            logger.info("desktop_already_running", workspace_id=str(workspace_id))
-            return existing
+            if await self._is_desktop_session_live(workspace_id):
+                logger.info("desktop_already_running", workspace_id=str(workspace_id))
+                return existing
+            self._desktop_sessions.pop(workspace_id, None)
+            logger.warning(
+                "desktop_cached_session_stale",
+                workspace_id=str(workspace_id),
+            )
 
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)

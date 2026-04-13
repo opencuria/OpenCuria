@@ -42,6 +42,12 @@ const desktopIframeSrc = computed(() => {
 })
 
 async function startDesktop(): Promise<void> {
+  if (
+    desktopStore.workspaceId
+    && desktopStore.workspaceId !== props.workspaceId
+  ) {
+    desktopStore.reset()
+  }
   if (desktopStore.isConnecting || desktopStore.isConnected) return
   error.value = null
   desktopStore.setConnecting(props.workspaceId)
@@ -72,18 +78,21 @@ async function startDesktop(): Promise<void> {
   }
 }
 
-async function stopDesktop(): Promise<void> {
+async function stopDesktop(): Promise<boolean> {
   try {
     await workspacesApi.stopDesktop(props.workspaceId)
+    desktopStore.setDisconnected()
+    return true
   } catch {
-    // Ignore stop errors
+    error.value = 'Failed to stop desktop session'
+    return false
   }
-  desktopStore.setDisconnected()
 }
 
-function handleClose(): void {
-  stopDesktop()
-  desktopStore.close()
+async function handleClose(): Promise<void> {
+  if (await stopDesktop()) {
+    desktopStore.close()
+  }
 }
 
 function handleReconnect(): void {
@@ -94,6 +103,10 @@ function handleReconnect(): void {
 // --- Socket.IO event handlers ---
 
 onMounted(() => {
+  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId) {
+    desktopStore.reset()
+  }
+
   const removeStarted = onEvent('desktop:started', (data) => {
     if (data.workspace_id !== props.workspaceId) return
     desktopStore.setConnected(props.workspaceId, data.proxy_url)
@@ -132,6 +145,16 @@ watch(
   (open) => {
     if (open && !desktopStore.isConnected && !desktopStore.isConnecting) {
       startDesktop()
+    }
+  },
+)
+
+watch(
+  () => props.workspaceId,
+  (workspaceId, previousWorkspaceId) => {
+    if (workspaceId !== previousWorkspaceId) {
+      error.value = null
+      desktopStore.reset()
     }
   },
 )

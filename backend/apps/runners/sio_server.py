@@ -516,7 +516,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         await service.handle_desktop_started(
-            task_id=data["task_id"],
+            task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             port=data.get("port", 6901),
             container_ip=data.get("container_ip", ""),
