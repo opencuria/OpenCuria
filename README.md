@@ -125,12 +125,63 @@ Use:
 
 - [`runner/systemd/opencuria-runner.service`](./runner/systemd/opencuria-runner.service)
 - [`runner/.env.example`](./runner/.env.example)
+- [`runner/scripts/setup-native-qemu-runner.sh`](./runner/scripts/setup-native-qemu-runner.sh)
 
 Why native for QEMU:
 
 - better libvirt/KVM integration
 - simpler disk and snapshot permissions
 - less operational overhead than containerized libvirt
+
+Recommended host requirements:
+
+- Ubuntu 24.04 or another modern Debian/Ubuntu-based Linux host
+- KVM available (`/dev/kvm`)
+- root or sudo access
+- network reachability from runner host to the OpenCuria backend
+
+Example end-to-end setup on the runner host:
+
+```bash
+git clone https://github.com/opencuria/OpenCuria.git
+cd OpenCuria
+sudo ./runner/scripts/setup-native-qemu-runner.sh
+sudoedit /etc/opencuria/runner.env
+sudo systemctl start opencuria-runner.service
+sudo systemctl status opencuria-runner.service
+```
+
+The setup script is idempotent and handles:
+
+- apt package installation for QEMU/KVM, libvirt, Python build dependencies and ISO tooling
+- `/opt/opencuria/runner` installation via `rsync`
+- `.venv` creation plus `pip install -r requirements.txt`
+- creation of `/var/lib/opencuria/{images,disks,snapshots,base-images}`
+- installation of `/etc/opencuria/runner.env` without overwriting an existing file
+- installation and enablement of the `systemd` unit
+
+What to set in `/etc/opencuria/runner.env` before starting:
+
+- `RUNNER_API_TOKEN=<runner token from backend>`
+- `RUNNER_BACKEND_URL=http://<backend-host>:8000`
+- `RUNNER_ENABLED_RUNTIMES=qemu`
+
+Useful validation commands:
+
+```bash
+ls -l /dev/kvm
+virsh -c qemu:///system list --all
+systemctl status libvirtd
+journalctl -u opencuria-runner.service -f
+```
+
+If you update the checkout later, rerun the same script:
+
+```bash
+cd OpenCuria
+git pull
+sudo ./runner/scripts/setup-native-qemu-runner.sh --start
+```
 
 ## 📦 Images
 
