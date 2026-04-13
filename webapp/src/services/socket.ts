@@ -120,6 +120,17 @@ export interface TerminalClosedEvent {
   terminal_id: string
 }
 
+export interface DesktopStartedEvent {
+  workspace_id: string
+  task_id: string
+  proxy_url: string
+}
+
+export interface DesktopStoppedEvent {
+  workspace_id: string
+  task_id: string
+}
+
 export interface RunnerOfflineEvent {
   workspace_id: string
   runner_id: string
@@ -142,6 +153,8 @@ type EventMap = {
   'terminal:started': TerminalStartedEvent
   'terminal:output': TerminalOutputEvent
   'terminal:closed': TerminalClosedEvent
+  'desktop:started': DesktopStartedEvent
+  'desktop:stopped': DesktopStoppedEvent
   'files:list_result': FilesListResultEvent
   'files:content_result': FilesContentResultEvent
   'files:upload_result': FilesUploadResultEvent

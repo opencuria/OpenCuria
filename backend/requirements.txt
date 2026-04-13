@@ -10,6 +10,12 @@ daphne>=4.0,<5.0
 # Socket.IO (Runner WebSocket protocol)
 python-socketio>=5.0,<6.0
 
+# WebSocket proxy (desktop sessions)
+aiohttp>=3.9,<4.0
+
+# Docker SDK (desktop proxy network management)
+docker>=7.0,<8.0
+
 # CORS
 django-cors-headers>=4.0,<5.0
 

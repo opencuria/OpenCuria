@@ -28,7 +28,7 @@ from typing import Any
 import structlog
 
 from .config import RunnerSettings
-from .models import WorkspaceInfo
+from .models import DesktopSession, WorkspaceInfo
 from .runtime.base import ImageArtifactInfo, PtyHandle, RuntimeBackend, WorkspaceConfig
 
 logger = structlog.get_logger(__name__)
@@ -126,6 +126,7 @@ class WorkspaceService:
         self._settings = settings
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._terminals: dict[str, TerminalSession] = {}
+        self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
@@ -1177,6 +1178,94 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             for info in self._cache.values()
         ]
 
+    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the cached desktop session still accepts connections."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        exit_code, _ = await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "if command -v python3 >/dev/null 2>&1; then "
+                    "python3 -c \"import socket,sys; "
+                    "sock=socket.socket(); sock.settimeout(1); "
+                    "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
+                    "sys.exit(0 if rc == 0 else 1)\"; "
+                    "else "
+                    "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
+                    "fi"
+                ),
+            ],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        return exit_code == 0
+
+    async def get_workspace_heartbeat_statuses(self) -> list[dict]:
+        """Return workspace heartbeat payload including live desktop sessions."""
+        payload: list[dict] = []
+        for info in self._cache.values():
+            workspace_id = info.workspace_id
+            item = {
+                "workspace_id": str(workspace_id),
+                "status": info.status,
+                "runtime_type": info.runtime_type,
+            }
+
+            session = self._desktop_sessions.get(workspace_id)
+            if session is not None:
+                try:
+                    if await self._is_desktop_session_live(workspace_id):
+                        item["desktop"] = {
+                            "port": session.port,
+                            "container_ip": self.get_desktop_container_ip(workspace_id),
+                            "network_name": self.get_desktop_network_name(workspace_id),
+                        }
+                    else:
+                        self._desktop_sessions.pop(workspace_id, None)
+                        item["desktop"] = None
+                        logger.warning(
+                            "desktop_session_pruned_from_cache",
+                            workspace_id=str(workspace_id),
+                        )
+                except Exception:
+                    self._desktop_sessions.pop(workspace_id, None)
+                    item["desktop"] = None
+                    logger.exception(
+                        "desktop_session_health_check_failed",
+                        workspace_id=str(workspace_id),
+                    )
+
+            payload.append(item)
+
+        return payload
+
+    async def recover_desktop_sessions_from_runtime(self) -> None:
+        """Rebuild in-memory desktop sessions from live runtime state."""
+        for workspace_id, info in self._cache.items():
+            if info.status != "running" or workspace_id in self._desktop_sessions:
+                continue
+
+            try:
+                if not await self._is_desktop_session_live(workspace_id):
+                    continue
+            except Exception:
+                logger.exception(
+                    "desktop_session_recovery_failed",
+                    workspace_id=str(workspace_id),
+                )
+                continue
+
+            self._desktop_sessions[workspace_id] = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=info.instance_id,
+            )
+            logger.info(
+                "desktop_session_recovered",
+                workspace_id=str(workspace_id),
+            )
+
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
         qemu_runtime = self._runtimes.get("qemu")
@@ -1303,6 +1392,102 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             logger.bind(terminal_id=terminal_id),
         )
         logger.info("terminal_closed", terminal_id=terminal_id)
+
+    # -- desktop session (KasmVNC) -----------------------------------------
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> DesktopSession:
+        """Start a KasmVNC desktop session inside the workspace container.
+
+        Idempotent: if a session is already running, returns the existing one.
+        """
+        existing = self._desktop_sessions.get(workspace_id)
+        if existing is not None:
+            if await self._is_desktop_session_live(workspace_id):
+                logger.info("desktop_already_running", workspace_id=str(workspace_id))
+                return existing
+            self._desktop_sessions.pop(workspace_id, None)
+            logger.warning(
+                "desktop_cached_session_stale",
+                workspace_id=str(workspace_id),
+            )
+
+        if await self._is_desktop_session_live(workspace_id):
+            recovered = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=self._get_cached(workspace_id).instance_id,
+            )
+            self._desktop_sessions[workspace_id] = recovered
+            logger.info(
+                "desktop_session_recovered_on_start",
+                workspace_id=str(workspace_id),
+            )
+            return recovered
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+
+        log = logger.bind(workspace_id=str(workspace_id))
+
+        # Execute the start script inside the container
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["/usr/local/bin/opencuria-desktop-start"],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            log.error("desktop_start_failed", exit_code=exit_code, output=output)
+            raise RuntimeError(f"Failed to start desktop session: {output}")
+
+        session = DesktopSession(
+            workspace_id=workspace_id,
+            instance_id=info.instance_id,
+        )
+        self._desktop_sessions[workspace_id] = session
+        log.info("desktop_started", port=session.port)
+        return session
+
+    async def stop_desktop(self, workspace_id: uuid.UUID) -> None:
+        """Stop a running desktop session."""
+        session = self._desktop_sessions.pop(workspace_id, None)
+        if session is None:
+            return
+
+        log = logger.bind(workspace_id=str(workspace_id))
+        try:
+            runtime = self._get_runtime(workspace_id)
+            info = self._get_cached(workspace_id)
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                ["/usr/local/bin/opencuria-desktop-stop"],
+            )
+            if exit_code != 0:
+                log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
+        except Exception:
+            log.exception("desktop_stop_failed")
+
+        log.info("desktop_stopped")
+
+    def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
+        """Return the active desktop session if any."""
+        return self._desktop_sessions.get(workspace_id)
+
+    def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
+        """Get the upstream IP address for the workspace desktop proxy."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_container_ip"):
+            raise RuntimeError("Runtime does not support desktop proxy")
+        return runtime.get_container_ip(info.instance_id, str(workspace_id))
+
+    def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
+        """Get the backend-attachable network for a workspace desktop proxy."""
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_workspace_network_name"):
+            raise RuntimeError("Runtime does not support desktop networking")
+        return runtime.get_workspace_network_name(str(workspace_id))
 
     # -- file operations -------------------------------------------------------
 

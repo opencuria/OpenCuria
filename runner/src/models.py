@@ -27,3 +27,16 @@ class WorkspaceInfo:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+
+@dataclass
+class DesktopSession:
+    """In-memory representation of an active KasmVNC desktop session."""
+
+    workspace_id: uuid.UUID
+    instance_id: str
+    display: str = ":1"
+    port: int = 6901
+    started_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )

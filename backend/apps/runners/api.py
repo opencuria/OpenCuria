@@ -82,6 +82,9 @@ from .schemas import (
     WorkspaceFromImageArtifactIn,
     WorkspaceFromImageArtifactOut,
     TerminalStartOut,
+    DesktopStartOut,
+    DesktopStopOut,
+    DesktopStatusOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
     WorkspaceDetailOut,
@@ -745,6 +748,99 @@ async def start_terminal(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/",
+    response={202: DesktopStartOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Start desktop session",
+)
+async def start_desktop(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Start a KasmVNC desktop session in a workspace container."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        task = await service.start_desktop(workspace_id)
+        return 202, DesktopStartOut(task_id=task.id)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/stop/",
+    response={202: DesktopStopOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Stop desktop session",
+)
+async def stop_desktop(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Stop the desktop session in a workspace container."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        task = await service.stop_desktop(workspace_id)
+        return 202, DesktopStopOut(task_id=task.id)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.get(
+    "/{workspace_id}/desktop/status/",
+    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Get desktop session status",
+)
+async def desktop_status(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Check whether a desktop session is active for the workspace."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
+        is_active = desktop_info is not None
+        proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
+        return 200, DesktopStatusOut(active=is_active, proxy_url=proxy_url)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.patch(

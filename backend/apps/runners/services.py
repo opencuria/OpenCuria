@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import socket
 import uuid
 from datetime import datetime, timedelta
 
@@ -1574,6 +1576,7 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.STOPPED)
             self.workspaces.update_active_operation(workspace, None)
+        self._cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
 
@@ -1880,6 +1883,7 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.REMOVED)
             self.workspaces.update_active_operation(workspace, None)
+        self._cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
         logger.info("Workspace removed: %s", workspace_id)
@@ -1905,6 +1909,10 @@ class RunnerService:
     # Populated when a terminal starts so terminal:output can be validated
     # without a DB lookup on every single chunk.
     _terminal_workspace_runner: dict[str, str] = {}
+
+    # In-memory desktop session state
+    _active_desktops: dict[str, dict] = {}
+    _desktop_workspace_runner: dict[str, str] = {}
 
     async def start_terminal(
         self,
@@ -2182,6 +2190,385 @@ class RunnerService:
         )
 
     # ------------------------------------------------------------------
+    # Desktop session (KasmVNC)
+    # ------------------------------------------------------------------
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> "Task":
+        """Dispatch a start_desktop task to the runner."""
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+
+        self._ensure_workspace_available(workspace)
+
+        if workspace.status != WorkspaceStatus.RUNNING:
+            raise WorkspaceStateError(
+                f"Workspace '{workspace_id}' is '{workspace.status}', "
+                f"must be '{WorkspaceStatus.RUNNING}' to start a desktop"
+            )
+
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+
+        from common.utils import generate_uuid
+
+        task_id = generate_uuid()
+        task = await sync_to_async(self.tasks.create)(
+            task_id=task_id,
+            runner=runner,
+            task_type=TaskType.START_DESKTOP,
+            workspace=workspace,
+        )
+
+        await self._emit_to_runner(
+            runner,
+            "task:start_desktop",
+            {
+                "task_id": str(task_id),
+                "workspace_id": str(workspace_id),
+            },
+        )
+
+        await sync_to_async(self.tasks.mark_in_progress)(task)
+        logger.info(
+            "Dispatched start_desktop to runner %s (workspace=%s, task=%s)",
+            runner.id,
+            workspace_id,
+            task_id,
+        )
+        await sync_to_async(self.workspaces.touch_activity)(workspace)
+        return task
+
+    async def stop_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> "Task":
+        """Dispatch a stop_desktop task to the runner."""
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+
+        from common.utils import generate_uuid
+
+        task_id = generate_uuid()
+        task = await sync_to_async(self.tasks.create)(
+            task_id=task_id,
+            runner=runner,
+            task_type=TaskType.STOP_DESKTOP,
+            workspace=workspace,
+        )
+
+        await self._emit_to_runner(
+            runner,
+            "task:stop_desktop",
+            {
+                "task_id": str(task_id),
+                "workspace_id": str(workspace_id),
+            },
+        )
+
+        await sync_to_async(self.tasks.mark_in_progress)(task)
+        logger.info(
+            "Dispatched stop_desktop to runner %s (workspace=%s, task=%s)",
+            runner.id,
+            workspace_id,
+            task_id,
+        )
+        return task
+
+    async def handle_desktop_started(
+        self,
+        task_id: str | None,
+        workspace_id: str,
+        port: int,
+        container_ip: str,
+        network_name: str,
+        runner_id: str | None = None,
+    ) -> None:
+        """Handle desktop:started event from a runner."""
+        from .sio_server import emit_to_frontend
+
+        task = None
+        if task_id:
+            task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
+            if task and not self._validate_task_runner(task, runner_id):
+                return
+
+        desktop_state = {
+            "port": port,
+            "container_ip": container_ip,
+            "network_name": network_name,
+        }
+
+        try:
+            if network_name:
+                await self._connect_backend_to_workspace_network(network_name)
+            self._record_active_desktop(
+                workspace_id,
+                desktop_state,
+                runner_id=runner_id,
+            )
+        except Exception as exc:
+            if task:
+                await sync_to_async(self.tasks.fail)(task, str(exc))
+            await emit_to_frontend(
+                "workspace:error",
+                {
+                    "workspace_id": workspace_id,
+                    "task_id": task_id,
+                    "error": str(exc),
+                },
+                workspace_id,
+            )
+            return
+
+        if task:
+            await sync_to_async(self.tasks.complete)(task)
+
+        logger.info(
+            "Desktop started: workspace=%s, port=%s, ip=%s",
+            workspace_id,
+            port,
+            container_ip,
+        )
+
+        await emit_to_frontend(
+            "desktop:started",
+            {
+                "workspace_id": workspace_id,
+                "task_id": task_id,
+                "proxy_url": f"/ws/desktop/{workspace_id}/",
+            },
+            workspace_id,
+        )
+
+    async def handle_desktop_stopped(
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+    ) -> None:
+        """Handle desktop:stopped event from a runner."""
+        from .sio_server import emit_to_frontend
+
+        if runner_id:
+            cached = self._desktop_workspace_runner.get(workspace_id)
+            if cached is not None and cached != runner_id:
+                logger.warning(
+                    "desktop:stopped rejected: workspace %s is owned by "
+                    "runner %s, not %s",
+                    workspace_id,
+                    cached,
+                    runner_id,
+                )
+                return
+
+        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
+        if task:
+            if not self._validate_task_runner(task, runner_id):
+                return
+            await sync_to_async(self.tasks.complete)(task)
+
+        desktop_info = self._active_desktops.pop(workspace_id, None)
+        self._desktop_workspace_runner.pop(workspace_id, None)
+
+        # Disconnect backend from the workspace network
+        if desktop_info:
+            try:
+                await self._disconnect_backend_from_workspace_network(
+                    desktop_info["network_name"]
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to disconnect backend from workspace network %s",
+                    desktop_info.get("network_name"),
+                )
+
+        logger.info("Desktop stopped: workspace=%s", workspace_id)
+
+        await emit_to_frontend(
+            "desktop:stopped",
+            {
+                "workspace_id": workspace_id,
+                "task_id": task_id,
+            },
+            workspace_id,
+        )
+
+    def is_desktop_active(self, workspace_id: str) -> bool:
+        """Check if a desktop session is active for a workspace."""
+        if workspace_id in self._active_desktops:
+            return True
+        return self.recover_desktop_state(workspace_id) is not None
+
+    def get_desktop_info(self, workspace_id: str) -> dict | None:
+        """Get desktop session info (container_ip, port, network) if active."""
+        desktop_info = self._active_desktops.get(workspace_id)
+        if desktop_info is not None:
+            return desktop_info
+        return self.recover_desktop_state(workspace_id)
+
+    def recover_desktop_state(self, workspace_id: str) -> dict | None:
+        """Best-effort recovery for Docker desktop sessions after backend restarts."""
+        from .models import Workspace
+
+        try:
+            workspace = Workspace.objects.select_related("runner").get(id=workspace_id)
+        except (Workspace.DoesNotExist, ValueError):
+            return None
+
+        if workspace.runtime_type != RuntimeType.DOCKER:
+            return None
+        if workspace.status != WorkspaceStatus.RUNNING:
+            return None
+
+        import docker as docker_sdk
+
+        container_name = f"opencuria-workspace-{workspace_id}"
+        network_name = f"opencuria-ws-{workspace_id}"
+
+        try:
+            client = docker_sdk.from_env()
+            container = client.containers.get(container_name)
+            container.reload()
+            networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+            network_info = networks.get(network_name, {})
+            container_ip = network_info.get("IPAddress")
+            if not container_ip:
+                return None
+
+            async_to_sync(self._connect_backend_to_workspace_network)(network_name)
+            with socket.create_connection((container_ip, 6901), timeout=1):
+                pass
+
+            self._record_active_desktop(
+                workspace_id,
+                {
+                    "port": 6901,
+                    "container_ip": container_ip,
+                    "network_name": network_name,
+                },
+                runner_id=str(workspace.runner_id),
+            )
+            return self._active_desktops.get(workspace_id)
+        except Exception:
+            logger.debug(
+                "desktop_state_recovery_failed for workspace %s",
+                workspace_id,
+                exc_info=True,
+            )
+            return None
+
+    def _record_active_desktop(
+        self,
+        workspace_id: str,
+        desktop_state: dict,
+        *,
+        runner_id: str | None = None,
+    ) -> None:
+        """Persist backend desktop state without performing network I/O."""
+        self._active_desktops[workspace_id] = dict(desktop_state)
+        if runner_id:
+            self._desktop_workspace_runner[workspace_id] = runner_id
+
+    def _sync_desktop_state_from_heartbeat(
+        self,
+        workspace_id: str,
+        desktop_state: dict | None,
+        *,
+        runner_id: str,
+    ) -> None:
+        """Reconcile cached desktop state from runner heartbeats."""
+        if not desktop_state:
+            self._cleanup_desktop_state(workspace_id)
+            return
+
+        current = self._active_desktops.get(workspace_id)
+        current_runner = self._desktop_workspace_runner.get(workspace_id)
+        if current == desktop_state and current_runner == runner_id:
+            return
+
+        self._cleanup_desktop_state(workspace_id)
+        self._record_active_desktop(
+            workspace_id,
+            desktop_state,
+            runner_id=runner_id,
+        )
+
+    def _cleanup_desktop_state(self, workspace_id: str) -> None:
+        """Remove in-memory desktop state and detach the backend from its network."""
+        desktop_info = self._active_desktops.pop(workspace_id, None)
+        self._desktop_workspace_runner.pop(workspace_id, None)
+        if not desktop_info:
+            return
+
+        network_name = desktop_info.get("network_name")
+        if not network_name:
+            return
+
+        try:
+            async_to_sync(self._disconnect_backend_from_workspace_network)(
+                network_name
+            )
+        except Exception:
+            logger.exception(
+                "Failed to disconnect backend from workspace network %s",
+                network_name,
+            )
+
+    @staticmethod
+    def _backend_container_target() -> str:
+        """Return the identifier used to attach the backend to Docker networks."""
+        return (
+            os.environ.get("OPENCURIA_BACKEND_CONTAINER_NAME")
+            or os.environ.get("HOSTNAME")
+            or "opencuria_local_backend"
+        )
+
+    @staticmethod
+    async def _connect_backend_to_workspace_network(network_name: str) -> None:
+        """Connect the backend container to a workspace's Docker network."""
+        import docker as docker_sdk
+
+        def _connect():
+            client = docker_sdk.from_env()
+            backend_name = RunnerService._backend_container_target()
+            try:
+                network = client.networks.get(network_name)
+                network.connect(backend_name)
+            except Exception as exc:
+                err_str = str(exc).lower()
+                if "already exists" in err_str or "endpoint with name" in err_str:
+                    return  # already connected
+                raise
+
+        await asyncio.to_thread(_connect)
+
+    @staticmethod
+    async def _disconnect_backend_from_workspace_network(network_name: str) -> None:
+        """Disconnect the backend container from a workspace's Docker network."""
+        import docker as docker_sdk
+
+        def _disconnect():
+            client = docker_sdk.from_env()
+            backend_name = RunnerService._backend_container_target()
+            try:
+                network = client.networks.get(network_name)
+                network.disconnect(backend_name, force=True)
+            except Exception:
+                pass  # already disconnected or network gone
+
+        await asyncio.to_thread(_disconnect)
+
+    # ------------------------------------------------------------------
     # File explorer (stateless passthrough — no DB models)
     # ------------------------------------------------------------------
 
@@ -2364,10 +2751,12 @@ class RunnerService:
         self.runners.update_heartbeat(runner)
 
         # Build lookup of runner-reported workspace states
+        runner_ws_payloads: dict[str, dict] = {}
         runner_ws_states: dict[str, str] = {}
         for ws_data in workspaces:
             ws_id = ws_data.get("workspace_id", "")
             status = ws_data.get("status", "unknown")
+            runner_ws_payloads[ws_id] = ws_data
             runner_ws_states[ws_id] = status
 
         # Check backend workspaces for this runner
@@ -2403,6 +2792,7 @@ class RunnerService:
             ws_id_str = str(ws.id)
             cleanup_key = (runner_id_str, ws_id_str)
             runner_status = runner_ws_states.get(ws_id_str)
+            runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
             if ws.status in (
                 WorkspaceStatus.FAILED,
@@ -2444,6 +2834,7 @@ class RunnerService:
                         },
                         ws_id_str,
                     )
+                self._cleanup_desktop_state(ws_id_str)
             else:
                 # Map Docker container status to workspace status
                 new_status = self._map_instance_status(runner_status)
@@ -2470,6 +2861,20 @@ class RunnerService:
                             "status": new_status,
                         },
                         ws_id_str,
+                    )
+
+                if not (
+                    new_status == WorkspaceStatus.RUNNING
+                    or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
+                ):
+                    self._cleanup_desktop_state(ws_id_str)
+                    continue
+
+                if "desktop" in runner_payload:
+                    self._sync_desktop_state_from_heartbeat(
+                        ws_id_str,
+                        runner_payload.get("desktop"),
+                        runner_id=runner_id_str,
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
@@ -2866,6 +3271,146 @@ class RunnerService:
             "QEMU image definitions currently require an ubuntu:<version> base distro"
         )
 
+    @staticmethod
+    def _desktop_session_dockerfile_block() -> str:
+        """Return Dockerfile lines that install KasmVNC desktop session support."""
+        return """# --- KasmVNC desktop session support ---
+RUN apt-get update && apt-get install -y \\
+    xfonts-base openbox dbus-x11 x11-xserver-utils \\
+    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
+    wget ca-certificates \\
+    && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
+    && wget -q -O /tmp/kasmvnc.deb \\
+       "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb" \\
+    && apt-get install -y /tmp/kasmvnc.deb || true \\
+    && apt-get install -f -y \\
+    && rm -f /tmp/kasmvnc.deb \\
+    && wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \\
+    && (apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y) \\
+    && rm -f /tmp/google-chrome.deb \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-configure KasmVNC (skip interactive wizard)
+RUN mkdir -p /root/.vnc \\
+    && touch /root/.vnc/.de-was-selected \\
+    && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
+    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
+    && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
+    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
+    && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
+
+# Desktop start/stop scripts
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\ntouch /root/.vnc/.de-was-selected\\nvncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if pgrep -f \"Xvnc.*:1\" >/dev/null 2>&1 || pgrep -f \"Xtigervnc.*:1\" >/dev/null 2>&1; then\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \\
+    && printf '#!/bin/bash\\nHOME=/root vncserver -kill :1 2>/dev/null || true\\n' > /usr/local/bin/opencuria-desktop-stop \\
+    && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
+"""
+
+    @staticmethod
+    def _desktop_session_init_script_block() -> str:
+        """Return shell script lines that install KasmVNC in a QEMU init script."""
+        return """
+# --- KasmVNC desktop session support ---
+apt-get update
+apt-get install -y xfonts-base openbox dbus-x11 x11-xserver-utils \\
+    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 wget ca-certificates
+(apt-get install -y libasound2t64 || apt-get install -y libasound2)
+
+wget -q -O /tmp/kasmvnc.deb \\
+    "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
+apt-get install -y /tmp/kasmvnc.deb || true
+apt-get install -f -y
+rm -f /tmp/kasmvnc.deb
+
+wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+rm -f /tmp/google-chrome.deb
+
+# Pre-configure KasmVNC
+mkdir -p /root/.vnc
+touch /root/.vnc/.de-was-selected
+printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true
+
+cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
+desktop:
+  resolution:
+    width: 1920
+    height: 1080
+  allow_resize: true
+network:
+  protocol: http
+  interface: 0.0.0.0
+  websocket_port: 6901
+  ssl:
+    require_ssl: false
+    pem_certificate:
+    pem_key:
+KASMCFG
+
+cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
+#!/bin/bash
+set -eu
+for browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do
+  if [ "${browser#/}" != "$browser" ]; then
+    if [ -x "$browser" ]; then
+      exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
+    fi
+    continue
+  fi
+  if command -v "$browser" >/dev/null 2>&1; then
+    if [ "$browser" = "chromium-browser" ] && ! chromium-browser --version >/dev/null 2>&1; then
+      continue
+    fi
+    exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
+  fi
+done
+echo "No supported browser binary found for desktop session" >&2
+BROWSER
+
+cat >/root/.vnc/xstartup <<'XSTARTUP'
+#!/bin/bash
+export DISPLAY=:1
+export HOME=/root
+openbox-session &
+sleep 1
+/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
+wait
+XSTARTUP
+chmod +x /root/.vnc/xstartup
+chmod +x /usr/local/bin/opencuria-desktop-browser
+
+cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
+#!/bin/bash
+set -e
+export DISPLAY=:1
+export HOME=/root
+/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
+mkdir -p /root/.vnc
+touch /root/.vnc/.de-was-selected
+vncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &
+for _ in $(seq 1 120); do
+  if pgrep -f "Xvnc.*:1" >/dev/null 2>&1 || pgrep -f "Xtigervnc.*:1" >/dev/null 2>&1; then
+    echo "Desktop session started on :1 (ws port 6901)"
+    exit 0
+  fi
+  sleep 0.25
+done
+echo "Desktop session failed to start" >&2
+exit 1
+DESKSTART
+
+cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
+#!/bin/bash
+HOME=/root vncserver -kill :1 2>/dev/null || true
+DESKSTOP
+
+chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
+rm -rf /var/lib/apt/lists/*
+"""
+
     @classmethod
     def _build_qemu_init_script_content(cls, definition) -> str:
         """Build a shell init script for QEMU image definitions."""
@@ -2916,6 +3461,11 @@ class RunnerService:
                 "",
             ]
 
+        # Always include KasmVNC desktop session support (non-Alpine only)
+        distro_check = (definition.base_distro or "").lower()
+        if "alpine" not in distro_check:
+            lines += [cls._desktop_session_init_script_block(), ""]
+
         return "\n".join(lines).strip() + "\n"
 
     @classmethod
@@ -2940,6 +3490,10 @@ class RunnerService:
 
         if definition.custom_dockerfile:
             lines += [definition.custom_dockerfile.strip(), ""]
+
+        # Always include KasmVNC desktop session support (non-Alpine only)
+        if "alpine" not in (definition.base_distro or "").lower():
+            lines += [cls._desktop_session_dockerfile_block(), ""]
 
         lines += [
             'CMD ["tail", "-f", "/dev/null"]',

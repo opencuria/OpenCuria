@@ -17,6 +17,7 @@ django.setup()
 from django.core.asgi import get_asgi_application  # noqa: E402
 
 from apps.runners.sio_server import create_sio_app  # noqa: E402
+from apps.runners.desktop_proxy import desktop_proxy_app  # noqa: E402
 from apps.mcp_app.server import get_mcp_app  # noqa: E402
 
 django_asgi = get_asgi_application()
@@ -25,10 +26,12 @@ mcp_asgi = get_mcp_app()
 
 
 async def application(scope, receive, send):
-    """Route requests between Socket.IO, MCP, and Django."""
+    """Route requests between Socket.IO, MCP, Desktop proxy, and Django."""
     path = scope.get("path", "")
 
-    if (
+    if path.startswith("/ws/desktop/"):
+        await desktop_proxy_app(scope, receive, send)
+    elif (
         path.startswith("/ws/runner")
         or path.startswith("/ws/frontend")
         or path.startswith("/socket.io")

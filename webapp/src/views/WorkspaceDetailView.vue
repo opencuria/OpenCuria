@@ -5,6 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useConversationStore } from '@/stores/conversations'
 import { useSkillStore } from '@/stores/skills'
 import { useTerminalStore } from '@/stores/terminal'
+import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import * as agentsApi from '@/services/agents.api'
@@ -25,11 +26,12 @@ import ChatInput from '@/components/chat/ChatInput.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
+import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, X } from 'lucide-vue-next'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, X } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,6 +39,7 @@ const workspaceStore = useWorkspaceStore()
 const conversationStore = useConversationStore()
 const skillStore = useSkillStore()
 const terminalStore = useTerminalStore()
+const desktopStore = useDesktopStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
@@ -51,6 +54,7 @@ const agents = ref<Agent[]>([])
 const selectedOptions = ref<Record<string, string>>({})
 const selectedOptionsInitializedChatId = ref<string | null>(null)
 const terminalHeight = ref(300)
+const desktopHeight = ref(400)
 const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
 
@@ -425,6 +429,7 @@ onUnmounted(() => {
   lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
   cleanupSocket()
+  desktopStore.reset()
   terminalStore.reset()
   fileExplorerStore.reset()
   workspaceImageStore.reset()
@@ -439,6 +444,7 @@ onUnmounted(() => {
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
+    desktopStore.reset()
     fileExplorerStore.reset()
     workspaceStore.chats = []
     workspaceStore.activeChatId = null
@@ -651,6 +657,27 @@ function onDragStart(e: MouseEvent): void {
   const onMove = (ev: MouseEvent) => {
     const delta = startY - ev.clientY
     terminalHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
+  }
+
+  const onUp = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function onDesktopDragStart(e: MouseEvent): void {
+  e.preventDefault()
+  isDragging.value = true
+  const startY = e.clientY
+  const startH = desktopHeight.value
+
+  const onMove = (ev: MouseEvent) => {
+    const delta = startY - ev.clientY
+    desktopHeight.value = Math.max(200, Math.min(startH + delta, window.innerHeight * 0.8))
   }
 
   const onUp = () => {
@@ -940,8 +967,12 @@ function handleToggleSessionReadState(sessionId: string): void {
 
           <!-- Chat content area -->
           <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+            <!-- Desktop overlay (covers chat like FileViewer) -->
+            <div v-if="desktopStore.isOpen && canPrompt" class="flex flex-col flex-1 min-h-0">
+              <WorkspaceDesktop :workspace-id="workspaceId" />
+            </div>
             <FileViewer
-              v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
+              v-else-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
             />
             <div
@@ -984,6 +1015,15 @@ function handleToggleSessionReadState(sessionId: string): void {
                     >
                       <TerminalSquare :size="16" class="mr-2" />
                       Open Terminal
+                    </UiButton>
+                    <UiButton
+                      variant="outline"
+                      size="lg"
+                      :disabled="!canPrompt"
+                      @click="desktopStore.open()"
+                    >
+                      <Monitor :size="16" class="mr-2" />
+                      Open Desktop
                     </UiButton>
                   </div>
                 </div>
@@ -1038,6 +1078,16 @@ function handleToggleSessionReadState(sessionId: string): void {
                 >
                   <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
                 </UiButton>
+                <UiButton
+                  variant="ghost"
+                  size="icon-sm"
+                  class="shrink-0 mr-2 mb-2"
+                  :disabled="!canPrompt"
+                  :title="desktopStore.isOpen ? 'Hide desktop' : 'Open desktop'"
+                  @click="desktopStore.toggle()"
+                >
+                  <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
+                </UiButton>
               </template>
             </div>
           </div>
@@ -1060,6 +1110,8 @@ function handleToggleSessionReadState(sessionId: string): void {
             <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
         </template>
+
+
       </div>
     </template>
 

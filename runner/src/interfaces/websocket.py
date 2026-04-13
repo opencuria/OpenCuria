@@ -65,13 +65,13 @@ class WebSocketInterface(Interface):
         interval = self._settings.heartbeat_interval
         while True:
             try:
-                await asyncio.sleep(interval)
                 if not self._sio.connected:
+                    await asyncio.sleep(interval)
                     continue
 
                 # Sync cache from runtime to catch externally killed containers
                 await self._service.sync_from_runtime()
-                workspaces = self._service.get_workspace_statuses()
+                workspaces = await self._service.get_workspace_heartbeat_statuses()
 
                 await self._sio.emit(
                     "runner:heartbeat",
@@ -81,10 +81,12 @@ class WebSocketInterface(Interface):
                     "heartbeat_sent",
                     workspace_count=len(workspaces),
                 )
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("heartbeat_failed")
+                await asyncio.sleep(interval)
 
     # -- system metrics loop ---------------------------------------------------
 
@@ -235,6 +237,7 @@ class WebSocketInterface(Interface):
             logger.info("websocket_connected", url=self._settings.backend_url)
             # Sync cache from runtime before registering
             await self._service.sync_from_runtime()
+            await self._service.recover_desktop_sessions_from_runtime()
             # Announce this runner to the backend
             await sio.emit(
                 "runner:register",
@@ -243,6 +246,21 @@ class WebSocketInterface(Interface):
                     "status": "ready",
                 },
             )
+            # Re-announce any live desktop sessions so the backend can
+            # reconstruct proxy state immediately after reconnects/restarts.
+            for workspace in await self._service.get_workspace_heartbeat_statuses():
+                desktop = workspace.get("desktop")
+                if not desktop:
+                    continue
+                await sio.emit(
+                    "desktop:started",
+                    {
+                        "workspace_id": workspace["workspace_id"],
+                        "port": desktop["port"],
+                        "container_ip": desktop["container_ip"],
+                        "network_name": desktop["network_name"],
+                    },
+                )
             # Start heartbeat
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(
@@ -265,9 +283,11 @@ class WebSocketInterface(Interface):
             # Stop heartbeat on disconnect (will be restarted on reconnect)
             if self._heartbeat_task and not self._heartbeat_task.done():
                 self._heartbeat_task.cancel()
+            self._heartbeat_task = None
             # Stop metrics loop on disconnect
             if self._metrics_task and not self._metrics_task.done():
                 self._metrics_task.cancel()
+            self._metrics_task = None
             # Keep the health check loop running across reconnects — workspaces
             # can still be unreachable even when the backend connection is down.
             # The loop will restart automatically on the next connect() if needed.
@@ -840,6 +860,64 @@ class WebSocketInterface(Interface):
                 logger.exception(
                     "terminal_close_failed", terminal_id=terminal_id
                 )
+
+        # -- desktop session events --------------------------------------------
+
+        @sio.on("task:start_desktop")
+        async def on_start_desktop(data: dict) -> None:
+            task_id = data["task_id"]
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
+            log.info("task_received", task="start_desktop")
+
+            try:
+                session = await self._service.start_desktop(workspace_id)
+
+                # Get container IP for backend proxy
+                container_ip = self._service.get_desktop_container_ip(workspace_id)
+                network_name = self._service.get_desktop_network_name(workspace_id)
+
+                await sio.emit(
+                    "desktop:started",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "port": session.port,
+                        "container_ip": container_ip,
+                        "network_name": network_name,
+                    },
+                )
+                log.info("desktop_started", port=session.port, container_ip=container_ip)
+            except Exception as exc:
+                await sio.emit(
+                    "workspace:error",
+                    {"task_id": task_id, "error": str(exc)},
+                )
+                log.exception("start_desktop_failed")
+
+        @sio.on("task:stop_desktop")
+        async def on_stop_desktop(data: dict) -> None:
+            task_id = data["task_id"]
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
+            log.info("task_received", task="stop_desktop")
+
+            try:
+                await self._service.stop_desktop(workspace_id)
+                await sio.emit(
+                    "desktop:stopped",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                    },
+                )
+                log.info("desktop_stopped")
+            except Exception as exc:
+                await sio.emit(
+                    "workspace:error",
+                    {"task_id": task_id, "error": str(exc)},
+                )
+                log.exception("stop_desktop_failed")
 
         # -- file explorer events ----------------------------------------------
 

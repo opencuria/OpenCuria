@@ -506,6 +506,37 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
+    # --- Desktop session events from runner ---
+
+    @sio.on("desktop:started")
+    async def on_desktop_started(sid: str, data: dict):
+        """Handle desktop:started event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:started")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_started(
+            task_id=data.get("task_id"),
+            workspace_id=data["workspace_id"],
+            port=data.get("port", 6901),
+            container_ip=data.get("container_ip", ""),
+            network_name=data.get("network_name", ""),
+            runner_id=runner_id,
+        )
+
+    @sio.on("desktop:stopped")
+    async def on_desktop_stopped(sid: str, data: dict):
+        """Handle desktop:stopped event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:stopped")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_stopped(
+            task_id=data["task_id"],
+            workspace_id=data["workspace_id"],
+            runner_id=runner_id,
+        )
+
     # --- File explorer events from runner ---
 
     @sio.on("files:list_result")
