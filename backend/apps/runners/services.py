@@ -3301,9 +3301,9 @@ RUN mkdir -p /root/.vnc \\
     && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
-# Desktop start/stop scripts
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\ntouch /root/.vnc/.de-was-selected\\nvncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if pgrep -f \"Xvnc.*:1\" >/dev/null 2>&1 || pgrep -f \"Xtigervnc.*:1\" >/dev/null 2>&1; then\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \\
-    && printf '#!/bin/bash\\nHOME=/root vncserver -kill :1 2>/dev/null || true\\n' > /usr/local/bin/opencuria-desktop-stop \\
+# Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry 1920x1080 -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -AcceptSetDesktopSize -SendCutText -AcceptCutText >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
+    && printf '#!/bin/bash\\nfor pid in $(pgrep -f "Xvnc.*:1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
     && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 """
 
@@ -3389,10 +3389,30 @@ export DISPLAY=:1
 export HOME=/root
 /usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
 mkdir -p /root/.vnc
-touch /root/.vnc/.de-was-selected
-vncserver :1 -geometry 1920x1080 -depth 24 -SecurityTypes None -websocketPort 6901 -disableBasicAuth -interface 0.0.0.0 >/root/.vnc/server.log 2>&1 &
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
+# Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
+/usr/bin/Xvnc :1 \
+    -geometry 1920x1080 \
+    -depth 24 \
+    -rfbport 5901 \
+    -SecurityTypes None \
+    -disableBasicAuth \
+    -websocketPort 6901 \
+    -httpd /usr/share/kasmvnc/www \
+    -interface 0.0.0.0 \
+    -AlwaysShared \
+    -AcceptKeyEvents \
+    -AcceptPointerEvents \
+    -AcceptSetDesktopSize \
+    -SendCutText \
+    -AcceptCutText \
+    >>/root/.vnc/server.log 2>&1 &
+
 for _ in $(seq 1 120); do
-  if pgrep -f "Xvnc.*:1" >/dev/null 2>&1 || pgrep -f "Xtigervnc.*:1" >/dev/null 2>&1; then
+  if [ -e /tmp/.X11-unix/X1 ]; then
+    # Start the window manager and browser via xstartup
+    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
     echo "Desktop session started on :1 (ws port 6901)"
     exit 0
   fi
@@ -3404,7 +3424,14 @@ DESKSTART
 
 cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
 #!/bin/bash
-HOME=/root vncserver -kill :1 2>/dev/null || true
+# Stop Xvnc and all desktop processes
+for pid in $(pgrep -f 'Xvnc.*:1' 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+done
+for pid in $(pgrep -f 'openbox' 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+done
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 DESKSTOP
 
 chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop

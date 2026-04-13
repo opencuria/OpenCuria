@@ -11,6 +11,8 @@ services:
       POSTGRES_DB: ${DB_NAME:-opencuria}
       POSTGRES_USER: ${DB_USER:-opencuria}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    ports:
+      - "127.0.0.1:5432:5432"
     networks:
       - opencuria-net
     healthcheck:
@@ -25,6 +27,8 @@ services:
     restart: unless-stopped
     volumes:
       - redisdata:/data
+    ports:
+      - "127.0.0.1:6379:6379"
     networks:
       - opencuria-net
     healthcheck:
@@ -37,6 +41,9 @@ services:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     container_name: opencuria_backend
     restart: unless-stopped
+    # Host networking is required so the backend desktop proxy can reach
+    # QEMU/KVM VMs on libvirt NAT bridges (e.g. 10.100.x.x).
+    network_mode: host
     depends_on:
       db:
         condition: service_healthy
@@ -49,19 +56,15 @@ services:
       DB_NAME: ${DB_NAME:-opencuria}
       DB_USER: ${DB_USER:-opencuria}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
-      DB_HOST: db
+      DB_HOST: 127.0.0.1
       DB_PORT: "5432"
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://127.0.0.1:6379/0
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:8080,http://localhost:8000}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
       SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:-http://localhost:8080}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
       DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    networks:
-      - opencuria-net
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\""]
       interval: 15s
