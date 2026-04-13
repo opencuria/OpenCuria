@@ -79,6 +79,46 @@ class TestRegisterRunner:
 class TestDesktopStateCleanup:
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_attaches_network_and_completes_task(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Docker desktops should attach the backend network asynchronously."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        connect = AsyncMock()
+        emit = AsyncMock()
+        monkeypatch.setattr(service, "_connect_backend_to_workspace_network", connect)
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="172.19.0.3",
+            network_name="workspace-net",
+            runner_id=str(runner.id),
+        )
+
+        task.refresh_from_db()
+        assert task.status == TaskStatus.COMPLETED
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        connect.assert_awaited_once_with("workspace-net")
+        emit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
     async def test_desktop_started_without_attach_network_skips_backend_connect(
         self,
         service,
@@ -224,7 +264,87 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
         }
         assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
-        connect.assert_awaited_once_with("workspace-net")
+        connect.assert_not_awaited()
+
+    def test_heartbeat_missing_desktop_field_keeps_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Runner reconnects should not clear desktop state when the field is omitted."""
+        connect = AsyncMock()
+        disconnect = AsyncMock()
+        monkeypatch.setattr(service, "_connect_backend_to_workspace_network", connect)
+        monkeypatch.setattr(
+            service,
+            "_disconnect_backend_from_workspace_network",
+            disconnect,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(workspace_id) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        disconnect.assert_not_awaited()
+
+    def test_heartbeat_explicit_null_desktop_cleans_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """An explicit null desktop payload should clear stale desktop state."""
+        disconnect = AsyncMock()
+        monkeypatch.setattr(
+            service,
+            "_disconnect_backend_from_workspace_network",
+            disconnect,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": None,
+                }
+            ],
+        )
+
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+        disconnect.assert_awaited_once_with("workspace-net")
 
 
 @pytest.mark.django_db(transaction=True)

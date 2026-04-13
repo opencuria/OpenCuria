@@ -65,7 +65,24 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                     "workspace_id": str(self.workspace_id),
                     "status": "running",
                     "runtime_type": "docker",
+                    "desktop": None,
                 }
             ],
         )
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
+
+    async def test_recover_desktop_sessions_from_runtime_rebuilds_cache(self) -> None:
+        self.runtime.exec_command_wait.return_value = (0, "alive")
+
+        await self.service.recover_desktop_sessions_from_runtime()
+
+        session = self.service._desktop_sessions[self.workspace_id]
+        self.assertEqual(session.workspace_id, self.workspace_id)
+
+    async def test_start_desktop_recovers_live_session_missing_from_cache(self) -> None:
+        self.runtime.exec_command_wait.return_value = (0, "alive")
+
+        session = await self.service.start_desktop(self.workspace_id)
+
+        self.assertEqual(session.workspace_id, self.workspace_id)
+        self.assertEqual(self.runtime.exec_command_wait.await_count, 1)

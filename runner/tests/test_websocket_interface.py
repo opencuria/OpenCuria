@@ -20,6 +20,7 @@ class DummyService:
         self.terminate_prompt_process = AsyncMock()
         self.cleanup_prompt_process_tracking = AsyncMock()
         self.sync_from_runtime = AsyncMock()
+        self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.prepared_operation = object()
@@ -219,6 +220,40 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
 
 class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_recovers_desktop_sessions_before_reannounce(self) -> None:
+        service = DummyService()
+        service.get_workspace_heartbeat_statuses = AsyncMock(
+            return_value=[
+                {
+                    "workspace_id": str(uuid.uuid4()),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "127.0.0.1",
+                        "network_name": "workspace-net",
+                    },
+                }
+            ]
+        )
+
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+
+        await interface._sio.handlers["/"]["connect"]()
+
+        service.sync_from_runtime.assert_awaited_once()
+        service.recover_desktop_sessions_from_runtime.assert_awaited_once()
+        interface._sio.emit.assert_any_await(
+            "desktop:started",
+            {
+                "workspace_id": service.get_workspace_heartbeat_statuses.return_value[0]["workspace_id"],
+                "port": 6901,
+                "container_ip": "127.0.0.1",
+                "network_name": "workspace-net",
+            },
+        )
+
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
         service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())

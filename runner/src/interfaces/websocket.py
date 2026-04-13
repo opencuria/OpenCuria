@@ -237,6 +237,7 @@ class WebSocketInterface(Interface):
             logger.info("websocket_connected", url=self._settings.backend_url)
             # Sync cache from runtime before registering
             await self._service.sync_from_runtime()
+            await self._service.recover_desktop_sessions_from_runtime()
             # Announce this runner to the backend
             await sio.emit(
                 "runner:register",

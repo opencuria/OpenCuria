@@ -2309,11 +2309,12 @@ class RunnerService:
         }
 
         try:
+            if network_name:
+                await self._connect_backend_to_workspace_network(network_name)
             self._record_active_desktop(
                 workspace_id,
                 desktop_state,
                 runner_id=runner_id,
-                attach_network=True,
             )
         except Exception as exc:
             if task:
@@ -2444,6 +2445,7 @@ class RunnerService:
             if not container_ip:
                 return None
 
+            async_to_sync(self._connect_backend_to_workspace_network)(network_name)
             with socket.create_connection((container_ip, 6901), timeout=1):
                 pass
 
@@ -2455,7 +2457,6 @@ class RunnerService:
                     "network_name": network_name,
                 },
                 runner_id=str(workspace.runner_id),
-                attach_network=True,
             )
             return self._active_desktops.get(workspace_id)
         except Exception:
@@ -2472,13 +2473,8 @@ class RunnerService:
         desktop_state: dict,
         *,
         runner_id: str | None = None,
-        attach_network: bool,
     ) -> None:
-        """Persist backend desktop state and optionally attach backend network."""
-        network_name = desktop_state.get("network_name", "")
-        if attach_network and network_name:
-            async_to_sync(self._connect_backend_to_workspace_network)(network_name)
-
+        """Persist backend desktop state without performing network I/O."""
         self._active_desktops[workspace_id] = dict(desktop_state)
         if runner_id:
             self._desktop_workspace_runner[workspace_id] = runner_id
@@ -2505,7 +2501,6 @@ class RunnerService:
             workspace_id,
             desktop_state,
             runner_id=runner_id,
-            attach_network=True,
         )
 
     def _cleanup_desktop_state(self, workspace_id: str) -> None:
@@ -2868,18 +2863,19 @@ class RunnerService:
                         ws_id_str,
                     )
 
-                desktop_payload = runner_payload.get("desktop")
-                if (
+                if not (
                     new_status == WorkspaceStatus.RUNNING
                     or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
                 ):
+                    self._cleanup_desktop_state(ws_id_str)
+                    continue
+
+                if "desktop" in runner_payload:
                     self._sync_desktop_state_from_heartbeat(
                         ws_id_str,
-                        desktop_payload,
+                        runner_payload.get("desktop"),
                         runner_id=runner_id_str,
                     )
-                else:
-                    self._cleanup_desktop_state(ws_id_str)
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
 

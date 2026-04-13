@@ -1224,12 +1224,14 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                         }
                     else:
                         self._desktop_sessions.pop(workspace_id, None)
+                        item["desktop"] = None
                         logger.warning(
                             "desktop_session_pruned_from_cache",
                             workspace_id=str(workspace_id),
                         )
                 except Exception:
                     self._desktop_sessions.pop(workspace_id, None)
+                    item["desktop"] = None
                     logger.exception(
                         "desktop_session_health_check_failed",
                         workspace_id=str(workspace_id),
@@ -1238,6 +1240,31 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             payload.append(item)
 
         return payload
+
+    async def recover_desktop_sessions_from_runtime(self) -> None:
+        """Rebuild in-memory desktop sessions from live runtime state."""
+        for workspace_id, info in self._cache.items():
+            if info.status != "running" or workspace_id in self._desktop_sessions:
+                continue
+
+            try:
+                if not await self._is_desktop_session_live(workspace_id):
+                    continue
+            except Exception:
+                logger.exception(
+                    "desktop_session_recovery_failed",
+                    workspace_id=str(workspace_id),
+                )
+                continue
+
+            self._desktop_sessions[workspace_id] = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=info.instance_id,
+            )
+            logger.info(
+                "desktop_session_recovered",
+                workspace_id=str(workspace_id),
+            )
 
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
@@ -1386,6 +1413,18 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 "desktop_cached_session_stale",
                 workspace_id=str(workspace_id),
             )
+
+        if await self._is_desktop_session_live(workspace_id):
+            recovered = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=self._get_cached(workspace_id).instance_id,
+            )
+            self._desktop_sessions[workspace_id] = recovered
+            logger.info(
+                "desktop_session_recovered_on_start",
+                workspace_id=str(workspace_id),
+            )
+            return recovered
 
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
