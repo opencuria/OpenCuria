@@ -79,23 +79,21 @@ class TestRegisterRunner:
 class TestDesktopStateCleanup:
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
-    async def test_desktop_started_attaches_network_and_completes_task(
+    async def test_desktop_started_records_active_state_and_completes_task(
         self,
         service,
         runner,
         workspace,
         monkeypatch,
     ):
-        """Docker desktops should attach the backend network asynchronously."""
+        """Desktop sessions are tracked in backend state and proxied via the runner."""
         task = Task.objects.create(
             runner=runner,
             workspace=workspace,
             type=TaskType.START_DESKTOP,
             status=TaskStatus.IN_PROGRESS,
         )
-        connect = AsyncMock()
         emit = AsyncMock()
-        monkeypatch.setattr(service, "_connect_backend_to_workspace_network", connect)
         monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
 
         await service.handle_desktop_started(
@@ -114,32 +112,25 @@ class TestDesktopStateCleanup:
             "container_ip": "172.19.0.3",
             "network_name": "workspace-net",
         }
-        connect.assert_awaited_once_with("workspace-net")
         emit.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
-    async def test_desktop_started_without_attach_network_skips_backend_connect(
+    async def test_desktop_started_for_qemu_records_runner_proxied_state(
         self,
         service,
         runner,
         workspace,
         monkeypatch,
     ):
-        """QEMU desktops should not try to attach the backend to a Docker network."""
+        """QEMU desktops use the same runner-proxied state model as Docker."""
         task = Task.objects.create(
             runner=runner,
             workspace=workspace,
             type=TaskType.START_DESKTOP,
             status=TaskStatus.IN_PROGRESS,
         )
-        connect = AsyncMock()
         emit = AsyncMock()
-        monkeypatch.setattr(
-            service,
-            "_connect_backend_to_workspace_network",
-            connect,
-        )
         monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
 
         await service.handle_desktop_started(
@@ -156,10 +147,9 @@ class TestDesktopStateCleanup:
             "container_ip": "10.100.0.2",
             "network_name": "",
         }
-        connect.assert_not_awaited()
         emit.assert_awaited_once()
 
-    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace, monkeypatch):
+    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace):
         """Stopping a workspace must clear any cached desktop session state."""
         task = Task.objects.create(
             runner=runner,
@@ -174,12 +164,6 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
-        disconnect = AsyncMock()
-        monkeypatch.setattr(
-            service,
-            "_disconnect_backend_from_workspace_network",
-            disconnect,
-        )
 
         service.handle_workspace_stopped(
             str(task.id),
@@ -191,10 +175,9 @@ class TestDesktopStateCleanup:
         assert workspace.status == WorkspaceStatus.STOPPED
         assert workspace_id not in service._active_desktops
         assert workspace_id not in service._desktop_workspace_runner
-        disconnect.assert_awaited_once_with("workspace-net")
 
-    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace, monkeypatch):
-        """Removing a workspace must also detach any desktop proxy state."""
+    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace):
+        """Removing a workspace must also clear any desktop proxy state."""
         task = Task.objects.create(
             runner=runner,
             workspace=workspace,
@@ -208,12 +191,6 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
-        disconnect = AsyncMock()
-        monkeypatch.setattr(
-            service,
-            "_disconnect_backend_from_workspace_network",
-            disconnect,
-        )
 
         service.handle_workspace_removed(
             str(task.id),
@@ -225,23 +202,14 @@ class TestDesktopStateCleanup:
         assert workspace.status == WorkspaceStatus.REMOVED
         assert workspace_id not in service._active_desktops
         assert workspace_id not in service._desktop_workspace_runner
-        disconnect.assert_awaited_once_with("workspace-net")
 
     def test_heartbeat_restores_active_desktop_state(
         self,
         service,
         runner,
         workspace,
-        monkeypatch,
     ):
         """Backend heartbeat should reconstruct live desktop sessions after restart."""
-        connect = AsyncMock()
-        monkeypatch.setattr(
-            service,
-            "_connect_backend_to_workspace_network",
-            connect,
-        )
-
         service.handle_heartbeat(
             runner=runner,
             workspaces=[
@@ -264,24 +232,14 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
         }
         assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
-        connect.assert_not_awaited()
 
     def test_heartbeat_missing_desktop_field_keeps_existing_state(
         self,
         service,
         runner,
         workspace,
-        monkeypatch,
     ):
         """Runner reconnects should not clear desktop state when the field is omitted."""
-        connect = AsyncMock()
-        disconnect = AsyncMock()
-        monkeypatch.setattr(service, "_connect_backend_to_workspace_network", connect)
-        monkeypatch.setattr(
-            service,
-            "_disconnect_backend_from_workspace_network",
-            disconnect,
-        )
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
@@ -306,22 +264,14 @@ class TestDesktopStateCleanup:
             "container_ip": "172.19.0.3",
             "network_name": "workspace-net",
         }
-        disconnect.assert_not_awaited()
 
     def test_heartbeat_explicit_null_desktop_cleans_existing_state(
         self,
         service,
         runner,
         workspace,
-        monkeypatch,
     ):
         """An explicit null desktop payload should clear stale desktop state."""
-        disconnect = AsyncMock()
-        monkeypatch.setattr(
-            service,
-            "_disconnect_backend_from_workspace_network",
-            disconnect,
-        )
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
@@ -344,7 +294,6 @@ class TestDesktopStateCleanup:
 
         assert workspace_id not in service._active_desktops
         assert workspace_id not in service._desktop_workspace_runner
-        disconnect.assert_awaited_once_with("workspace-net")
 
 
 @pytest.mark.django_db(transaction=True)

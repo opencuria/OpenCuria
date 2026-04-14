@@ -14,7 +14,6 @@ import asyncio
 import logging
 import os
 import re
-import socket
 import uuid
 from datetime import datetime, timedelta
 
@@ -2308,27 +2307,11 @@ class RunnerService:
             "network_name": network_name,
         }
 
-        try:
-            if network_name:
-                await self._connect_backend_to_workspace_network(network_name)
-            self._record_active_desktop(
-                workspace_id,
-                desktop_state,
-                runner_id=runner_id,
-            )
-        except Exception as exc:
-            if task:
-                await sync_to_async(self.tasks.fail)(task, str(exc))
-            await emit_to_frontend(
-                "workspace:error",
-                {
-                    "workspace_id": workspace_id,
-                    "task_id": task_id,
-                    "error": str(exc),
-                },
-                workspace_id,
-            )
-            return
+        self._record_active_desktop(
+            workspace_id,
+            desktop_state,
+            runner_id=runner_id,
+        )
 
         if task:
             await sync_to_async(self.tasks.complete)(task)
@@ -2380,18 +2363,6 @@ class RunnerService:
         desktop_info = self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
 
-        # Disconnect backend from the workspace network
-        if desktop_info:
-            try:
-                await self._disconnect_backend_from_workspace_network(
-                    desktop_info["network_name"]
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to disconnect backend from workspace network %s",
-                    desktop_info.get("network_name"),
-                )
-
         logger.info("Desktop stopped: workspace=%s", workspace_id)
 
         await emit_to_frontend(
@@ -2405,67 +2376,11 @@ class RunnerService:
 
     def is_desktop_active(self, workspace_id: str) -> bool:
         """Check if a desktop session is active for a workspace."""
-        if workspace_id in self._active_desktops:
-            return True
-        return self.recover_desktop_state(workspace_id) is not None
+        return workspace_id in self._active_desktops
 
     def get_desktop_info(self, workspace_id: str) -> dict | None:
-        """Get desktop session info (container_ip, port, network) if active."""
-        desktop_info = self._active_desktops.get(workspace_id)
-        if desktop_info is not None:
-            return desktop_info
-        return self.recover_desktop_state(workspace_id)
-
-    def recover_desktop_state(self, workspace_id: str) -> dict | None:
-        """Best-effort recovery for Docker desktop sessions after backend restarts."""
-        from .models import Workspace
-
-        try:
-            workspace = Workspace.objects.select_related("runner").get(id=workspace_id)
-        except (Workspace.DoesNotExist, ValueError):
-            return None
-
-        if workspace.runtime_type != RuntimeType.DOCKER:
-            return None
-        if workspace.status != WorkspaceStatus.RUNNING:
-            return None
-
-        import docker as docker_sdk
-
-        container_name = f"opencuria-workspace-{workspace_id}"
-        network_name = f"opencuria-ws-{workspace_id}"
-
-        try:
-            client = docker_sdk.from_env()
-            container = client.containers.get(container_name)
-            container.reload()
-            networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-            network_info = networks.get(network_name, {})
-            container_ip = network_info.get("IPAddress")
-            if not container_ip:
-                return None
-
-            async_to_sync(self._connect_backend_to_workspace_network)(network_name)
-            with socket.create_connection((container_ip, 6901), timeout=1):
-                pass
-
-            self._record_active_desktop(
-                workspace_id,
-                {
-                    "port": 6901,
-                    "container_ip": container_ip,
-                    "network_name": network_name,
-                },
-                runner_id=str(workspace.runner_id),
-            )
-            return self._active_desktops.get(workspace_id)
-        except Exception:
-            logger.debug(
-                "desktop_state_recovery_failed for workspace %s",
-                workspace_id,
-                exc_info=True,
-            )
-            return None
+        """Get cached desktop session info if the runner reported one active."""
+        return self._active_desktops.get(workspace_id)
 
     def _record_active_desktop(
         self,
@@ -2504,69 +2419,9 @@ class RunnerService:
         )
 
     def _cleanup_desktop_state(self, workspace_id: str) -> None:
-        """Remove in-memory desktop state and detach the backend from its network."""
-        desktop_info = self._active_desktops.pop(workspace_id, None)
+        """Remove in-memory desktop state for a workspace."""
+        self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
-        if not desktop_info:
-            return
-
-        network_name = desktop_info.get("network_name")
-        if not network_name:
-            return
-
-        try:
-            async_to_sync(self._disconnect_backend_from_workspace_network)(
-                network_name
-            )
-        except Exception:
-            logger.exception(
-                "Failed to disconnect backend from workspace network %s",
-                network_name,
-            )
-
-    @staticmethod
-    def _backend_container_target() -> str:
-        """Return the identifier used to attach the backend to Docker networks."""
-        return (
-            os.environ.get("OPENCURIA_BACKEND_CONTAINER_NAME")
-            or os.environ.get("HOSTNAME")
-            or "opencuria_local_backend"
-        )
-
-    @staticmethod
-    async def _connect_backend_to_workspace_network(network_name: str) -> None:
-        """Connect the backend container to a workspace's Docker network."""
-        import docker as docker_sdk
-
-        def _connect():
-            client = docker_sdk.from_env()
-            backend_name = RunnerService._backend_container_target()
-            try:
-                network = client.networks.get(network_name)
-                network.connect(backend_name)
-            except Exception as exc:
-                err_str = str(exc).lower()
-                if "already exists" in err_str or "endpoint with name" in err_str:
-                    return  # already connected
-                raise
-
-        await asyncio.to_thread(_connect)
-
-    @staticmethod
-    async def _disconnect_backend_from_workspace_network(network_name: str) -> None:
-        """Disconnect the backend container from a workspace's Docker network."""
-        import docker as docker_sdk
-
-        def _disconnect():
-            client = docker_sdk.from_env()
-            backend_name = RunnerService._backend_container_target()
-            try:
-                network = client.networks.get(network_name)
-                network.disconnect(backend_name, force=True)
-            except Exception:
-                pass  # already disconnected or network gone
-
-        await asyncio.to_thread(_disconnect)
 
     # ------------------------------------------------------------------
     # File explorer (stateless passthrough — no DB models)

@@ -117,6 +117,10 @@ Key files:
 - [`runner/compose.yml`](./runner/compose.yml)
 - [`runner/.env.example`](./runner/.env.example)
 
+For Docker-only runner hosts, leave `RUNNER_QEMU_SSH_USER` at its default `root`
+unless you are intentionally customizing the QEMU guest image to use a different
+SSH login user.
+
 ### 3. Remote QEMU runner
 
 If a runner host should support QEMU/KVM, run it natively on Linux instead of inside a container.
@@ -125,6 +129,9 @@ Use:
 
 - [`runner/systemd/opencuria-runner.service`](./runner/systemd/opencuria-runner.service)
 - [`runner/.env.example`](./runner/.env.example)
+
+The default QEMU SSH user is `root`. This matches the shipped QEMU cloud-init
+and desktop setup, which provision and start the desktop session under `/root`.
 
 Why native for QEMU:
 
@@ -170,6 +177,13 @@ The old deployment files were replaced:
 - `docker-compose.yml` → [`compose.yml`](./compose.yml)
 - root production compose → [`compose.server.yml`](./compose.server.yml)
 - `runner/docker-compose.yml` → [`runner/compose.yml`](./runner/compose.yml)
+
+Runner deployment note:
+
+- Existing `runner/.env` or `/etc/opencuria/runner.env` files that still set
+  `RUNNER_QEMU_SSH_USER=ubuntu` should be updated to `RUNNER_QEMU_SSH_USER=root`.
+  The current QEMU desktop/runtime path is root-based; keeping `ubuntu` can break
+  desktop startup with `/root` permission errors.
 
 ## License
 

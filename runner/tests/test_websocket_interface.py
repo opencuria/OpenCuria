@@ -281,6 +281,80 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._fetch_desktop_http = AsyncMock(
+            return_value={
+                "status": 200,
+                "headers": [["Content-Type", "text/plain"]],
+                "body": "ZGVza3RvcA==",
+                "body_encoding": "base64",
+            }
+        )
+
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["desktop:proxy_http_request"]
+        result = await handler(
+            {
+                "workspace_id": str(workspace_id),
+                "path": "/vnc.html",
+                "query_string": "autoconnect=true",
+            }
+        )
+
+        interface._fetch_desktop_http.assert_awaited_once_with(
+            workspace_id,
+            "/vnc.html",
+            "autoconnect=true",
+        )
+        self.assertEqual(result["status"], 200)
+
+    async def test_desktop_proxy_ws_open_uses_runner_local_tunnel(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._open_desktop_proxy_tunnel = AsyncMock(
+            return_value={"ok": True, "subprotocol": "binary"}
+        )
+
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["desktop:proxy_ws_open"]
+        result = await handler(
+            {
+                "workspace_id": str(workspace_id),
+                "tunnel_id": "tunnel-1",
+                "subprotocols": ["binary"],
+            }
+        )
+
+        interface._open_desktop_proxy_tunnel.assert_awaited_once_with(
+            workspace_id,
+            "tunnel-1",
+            ["binary"],
+        )
+        self.assertEqual(result, {"ok": True, "subprotocol": "binary"})
+
+    async def test_desktop_proxy_ws_send_forwards_payload(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._send_desktop_proxy_tunnel_message = AsyncMock()
+
+        handler = interface._sio.handlers["/"]["desktop:proxy_ws_send"]
+        await handler(
+            {
+                "tunnel_id": "tunnel-1",
+                "data": "aGVsbG8=",
+                "encoding": "base64",
+            }
+        )
+
+        interface._send_desktop_proxy_tunnel_message.assert_awaited_once_with(
+            "tunnel-1",
+            text=None,
+            data="aGVsbG8=",
+            encoding="base64",
+        )
+
 
 class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_clone_failure_emits_workspace_id(self) -> None:

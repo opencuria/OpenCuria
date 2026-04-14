@@ -899,19 +899,18 @@ class QemuRuntime(RuntimeBackend):
         return self._get_workspace_vm_ip(instance_id)
 
     def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
-        """Return the VM IP used by the backend desktop proxy.
+        """Return the VM IP used by the runner desktop proxy.
 
-        The desktop proxy stores the upstream address under the historical
+        The desktop session payload stores the upstream address under the historical
         ``container_ip`` key for both Docker containers and QEMU VMs.
         """
         del workspace_id
         return self._get_workspace_vm_ip(instance_id)
 
     def get_workspace_network_name(self, workspace_id: str) -> str:
-        """Return the attachable backend network name for desktop proxying.
+        """Return the workspace network marker used in desktop session payloads.
 
-        QEMU desktops are reachable directly via the VM IP, so the backend does
-        not need to join an additional Docker network.
+        Runner-proxied QEMU desktops do not require an attachable Docker network.
         """
         del workspace_id
         return ""
