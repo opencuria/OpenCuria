@@ -10,6 +10,7 @@ import { ref } from 'vue'
 
 export const useDesktopStore = defineStore('desktop', () => {
   const isOpen = ref(false)
+  const isMinimized = ref(false)
   const isConnecting = ref(false)
   const isConnected = ref(false)
   const proxyUrl = ref<string | null>(null)
@@ -21,10 +22,22 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   function open(): void {
     isOpen.value = true
+    isMinimized.value = false
   }
 
   function close(): void {
     isOpen.value = false
+    isMinimized.value = false
+  }
+
+  function minimize(): void {
+    if (!isOpen.value) return
+    isMinimized.value = true
+  }
+
+  function restore(): void {
+    isOpen.value = true
+    isMinimized.value = false
   }
 
   function setConnecting(wsId: string): void {
@@ -47,6 +60,7 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   function reset(): void {
     isOpen.value = false
+    isMinimized.value = false
     isConnected.value = false
     isConnecting.value = false
     proxyUrl.value = null
@@ -55,6 +69,7 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   return {
     isOpen,
+    isMinimized,
     isConnecting,
     isConnected,
     proxyUrl,
@@ -62,6 +77,8 @@ export const useDesktopStore = defineStore('desktop', () => {
     toggle,
     open,
     close,
+    minimize,
+    restore,
     setConnecting,
     setConnected,
     setDisconnected,

@@ -14,7 +14,7 @@ import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
 import { UiButton, UiSpinner } from '@/components/ui'
-import { X, Monitor, RefreshCw } from 'lucide-vue-next'
+import { X, Monitor, RefreshCw, Minus } from 'lucide-vue-next'
 
 const props = defineProps<{
   workspaceId: string
@@ -89,10 +89,25 @@ async function stopDesktop(): Promise<boolean> {
   }
 }
 
+async function stopDesktopIfActive(targetWorkspaceId: string): Promise<void> {
+  if (desktopStore.workspaceId !== targetWorkspaceId) return
+  if (!desktopStore.isConnected && !desktopStore.isConnecting) return
+  try {
+    await workspacesApi.stopDesktop(targetWorkspaceId)
+  } catch {
+    // Ignore stop errors during teardown; state is reset locally below.
+  }
+  desktopStore.setDisconnected()
+}
+
 async function handleClose(): Promise<void> {
   if (await stopDesktop()) {
     desktopStore.close()
   }
+}
+
+function handleMinimize(): void {
+  desktopStore.minimize()
 }
 
 function handleReconnect(): void {
@@ -135,6 +150,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  void stopDesktopIfActive(props.workspaceId)
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 })
@@ -151,8 +167,11 @@ watch(
 
 watch(
   () => props.workspaceId,
-  (workspaceId, previousWorkspaceId) => {
+  async (workspaceId, previousWorkspaceId) => {
     if (workspaceId !== previousWorkspaceId) {
+      if (previousWorkspaceId) {
+        await stopDesktopIfActive(previousWorkspaceId)
+      }
       error.value = null
       desktopStore.reset()
     }
@@ -161,7 +180,7 @@ watch(
 </script>
 
 <template>
-  <div class="flex flex-col h-full bg-surface">
+  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] flex flex-col bg-surface">
     <!-- Header bar -->
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-border bg-surface shrink-0">
       <div class="flex items-center gap-2">
@@ -179,6 +198,14 @@ watch(
         />
       </div>
       <div class="flex items-center gap-1">
+        <UiButton
+          variant="ghost"
+          size="icon-sm"
+          title="Minimize desktop panel"
+          @click="handleMinimize"
+        >
+          <Minus :size="14" />
+        </UiButton>
         <UiButton
           v-if="desktopStore.isConnected"
           variant="ghost"

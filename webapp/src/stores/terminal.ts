@@ -10,6 +10,7 @@ import { ref } from 'vue'
 
 export const useTerminalStore = defineStore('terminal', () => {
   const isOpen = ref(false)
+  const isMinimized = ref(false)
   const isConnected = ref(false)
   const terminalId = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
@@ -20,10 +21,22 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   function open(): void {
     isOpen.value = true
+    isMinimized.value = false
   }
 
   function close(): void {
     isOpen.value = false
+    isMinimized.value = false
+  }
+
+  function minimize(): void {
+    if (!isOpen.value) return
+    isMinimized.value = true
+  }
+
+  function restore(): void {
+    isOpen.value = true
+    isMinimized.value = false
   }
 
   function setConnected(id: string, wsId: string): void {
@@ -39,6 +52,7 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   function reset(): void {
     isOpen.value = false
+    isMinimized.value = false
     isConnected.value = false
     terminalId.value = null
     workspaceId.value = null
@@ -46,12 +60,15 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   return {
     isOpen,
+    isMinimized,
     isConnected,
     terminalId,
     workspaceId,
     toggle,
     open,
     close,
+    minimize,
+    restore,
     setConnected,
     setDisconnected,
     reset,

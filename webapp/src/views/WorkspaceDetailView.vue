@@ -31,7 +31,7 @@ import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImage
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, X } from 'lucide-vue-next'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -235,6 +235,49 @@ function openTerminal(): void {
   if (!canPrompt.value) return
   terminalStore.open()
 }
+
+function handleTerminalButtonClick(): void {
+  if (!canPrompt.value) return
+  if (!terminalStore.isOpen) {
+    terminalStore.open()
+    return
+  }
+  if (terminalStore.isMinimized) {
+    terminalStore.restore()
+    return
+  }
+  terminalStore.minimize()
+}
+
+const terminalButtonTitle = computed(() => {
+  if (!terminalStore.isOpen) return 'Open terminal'
+  if (terminalStore.isMinimized) return 'Restore terminal'
+  return 'Minimize terminal'
+})
+
+function openDesktopPanel(): void {
+  if (!canPrompt.value) return
+  desktopStore.open()
+}
+
+function handleDesktopButtonClick(): void {
+  if (!canPrompt.value) return
+  if (!desktopStore.isOpen) {
+    desktopStore.open()
+    return
+  }
+  if (desktopStore.isMinimized) {
+    desktopStore.restore()
+    return
+  }
+  desktopStore.minimize()
+}
+
+const desktopButtonTitle = computed(() => {
+  if (!desktopStore.isOpen) return 'Open desktop'
+  if (desktopStore.isMinimized) return 'Restore desktop'
+  return 'Minimize desktop'
+})
 
 // Socket.IO event cleanup functions
 const cleanupFns: (() => void)[] = []
@@ -952,6 +995,8 @@ function handleToggleSessionReadState(sessionId: string): void {
       <div class="flex flex-col flex-1 min-h-0">
         <!-- Chat content area -->
         <div class="flex flex-1 min-h-0">
+          <WorkspaceDesktop v-if="desktopStore.isOpen && canPrompt" :workspace-id="workspaceId" />
+
           <!-- Chat sidebar (only for multi-chat agents) -->
           <ChatSidebar
             v-if="isMultiChat && hasChats"
@@ -967,12 +1012,8 @@ function handleToggleSessionReadState(sessionId: string): void {
 
           <!-- Chat content area -->
           <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
-            <!-- Desktop overlay (covers chat like FileViewer) -->
-            <div v-if="desktopStore.isOpen && canPrompt" class="flex flex-col flex-1 min-h-0">
-              <WorkspaceDesktop :workspace-id="workspaceId" />
-            </div>
             <FileViewer
-              v-else-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
+              v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
             />
             <div
@@ -1020,7 +1061,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                       variant="outline"
                       size="lg"
                       :disabled="!canPrompt"
-                      @click="desktopStore.open()"
+                      @click="openDesktopPanel"
                     >
                       <Monitor :size="16" class="mr-2" />
                       Open Desktop
@@ -1073,20 +1114,34 @@ function handleToggleSessionReadState(sessionId: string): void {
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
                   :disabled="!canPrompt"
-                  :title="terminalStore.isOpen ? 'Hide terminal' : 'Open terminal'"
-                  @click="terminalStore.toggle()"
+                  :title="terminalButtonTitle"
+                  @click="handleTerminalButtonClick"
                 >
-                  <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                  <span class="relative inline-flex">
+                    <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                    <span
+                      v-if="terminalStore.isOpen && terminalStore.isMinimized"
+                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                      title="Terminal minimized"
+                    />
+                  </span>
                 </UiButton>
                 <UiButton
                   variant="ghost"
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
                   :disabled="!canPrompt"
-                  :title="desktopStore.isOpen ? 'Hide desktop' : 'Open desktop'"
-                  @click="desktopStore.toggle()"
+                  :title="desktopButtonTitle"
+                  @click="handleDesktopButtonClick"
                 >
-                  <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
+                  <span class="relative inline-flex">
+                    <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
+                    <span
+                      v-if="desktopStore.isOpen && desktopStore.isMinimized"
+                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                      title="Desktop minimized"
+                    />
+                  </span>
                 </UiButton>
               </template>
             </div>
@@ -1103,10 +1158,15 @@ function handleToggleSessionReadState(sessionId: string): void {
         <template v-if="terminalStore.isOpen && canPrompt">
           <!-- Drag handle -->
           <div
+            v-show="!terminalStore.isMinimized"
             class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
             @mousedown="onDragStart"
           ></div>
-          <div class="shrink-0 relative" :style="{ height: terminalHeight + 'px' }">
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="shrink-0 relative"
+            :style="{ height: terminalHeight + 'px' }"
+          >
             <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
         </template>
