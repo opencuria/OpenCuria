@@ -236,6 +236,25 @@ function openTerminal(): void {
   terminalStore.open()
 }
 
+function handleTerminalButtonClick(): void {
+  if (!canPrompt.value) return
+  if (!terminalStore.isOpen) {
+    terminalStore.open()
+    return
+  }
+  if (terminalStore.isMinimized) {
+    terminalStore.restore()
+    return
+  }
+  terminalStore.minimize()
+}
+
+const terminalButtonTitle = computed(() => {
+  if (!terminalStore.isOpen) return 'Open terminal'
+  if (terminalStore.isMinimized) return 'Restore terminal'
+  return 'Minimize terminal'
+})
+
 function openDesktopPanel(): void {
   if (!canPrompt.value) return
   desktopStore.open()
@@ -1095,10 +1114,17 @@ function handleToggleSessionReadState(sessionId: string): void {
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
                   :disabled="!canPrompt"
-                  :title="terminalStore.isOpen ? 'Hide terminal' : 'Open terminal'"
-                  @click="terminalStore.toggle()"
+                  :title="terminalButtonTitle"
+                  @click="handleTerminalButtonClick"
                 >
-                  <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                  <span class="relative inline-flex">
+                    <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                    <span
+                      v-if="terminalStore.isOpen && terminalStore.isMinimized"
+                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                      title="Terminal minimized"
+                    />
+                  </span>
                 </UiButton>
                 <UiButton
                   variant="ghost"
@@ -1132,10 +1158,15 @@ function handleToggleSessionReadState(sessionId: string): void {
         <template v-if="terminalStore.isOpen && canPrompt">
           <!-- Drag handle -->
           <div
+            v-show="!terminalStore.isMinimized"
             class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
             @mousedown="onDragStart"
           ></div>
-          <div class="shrink-0 relative" :style="{ height: terminalHeight + 'px' }">
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="shrink-0 relative"
+            :style="{ height: terminalHeight + 'px' }"
+          >
             <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
         </template>
