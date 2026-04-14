@@ -537,6 +537,38 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
+    @sio.on("desktop:proxy_ws_frame")
+    async def on_desktop_proxy_ws_frame(sid: str, data: dict):
+        """Forward runner-originated desktop WebSocket frames to the proxy app."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_frame")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_frame
+
+        await push_runner_ws_frame(
+            data["tunnel_id"],
+            runner_id,
+            text=data.get("text"),
+            data=data.get("data"),
+            encoding=data.get("encoding"),
+        )
+
+    @sio.on("desktop:proxy_ws_closed")
+    async def on_desktop_proxy_ws_closed(sid: str, data: dict):
+        """Forward runner-originated desktop tunnel close notifications."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_closed")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_closed
+
+        await push_runner_ws_closed(
+            data["tunnel_id"],
+            runner_id,
+            code=int(data.get("code", 1000)),
+        )
+
     # --- File explorer events from runner ---
 
     @sio.on("files:list_result")
