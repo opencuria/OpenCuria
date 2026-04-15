@@ -2,18 +2,22 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import type { CSSProperties } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
+import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
 import { UiButton, UiSelect, UiSpinner } from '@/components/ui'
-import { X, Monitor, RefreshCw, Minus, RotateCw } from 'lucide-vue-next'
+import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from 'lucide-vue-next'
 
 const props = defineProps<{
   workspaceId: string
 }>()
 
 const desktopStore = useDesktopStore()
+const notifications = useNotificationStore()
 const error = ref<string | null>(null)
+const clipboardBusy = ref(false)
+const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
 const cleanupFns: (() => void)[] = []
 const viewportHostRef = ref<HTMLElement | null>(null)
 const viewportWidth = ref(0)
@@ -21,6 +25,8 @@ const viewportHeight = ref(0)
 const viewportPreset = ref('auto')
 const rotatePreset = ref(false)
 let resizeObserver: ResizeObserver | null = null
+let iframeKeydownCleanup: (() => void) | null = null
+let isDispatchingSyntheticPasteShortcut = false
 
 type ViewportPreset = {
   value: string
@@ -163,6 +169,161 @@ function toggleRotatePreset(): void {
   rotatePreset.value = !rotatePreset.value
 }
 
+async function copyFromVmClipboard(): Promise<boolean> {
+  if (!desktopStore.isConnected || clipboardBusy.value) return false
+  clipboardBusy.value = true
+  try {
+    const { text } = await workspacesApi.readDesktopClipboard(props.workspaceId)
+    await navigator.clipboard.writeText(text || '')
+    notifications.success('Copied from VM', 'VM clipboard copied to local clipboard.')
+    return true
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    notifications.error('Copy failed', msg)
+    return false
+  } finally {
+    clipboardBusy.value = false
+  }
+}
+
+async function pasteToVmClipboard(): Promise<boolean> {
+  if (!desktopStore.isConnected || clipboardBusy.value) return false
+  clipboardBusy.value = true
+  try {
+    const text = await navigator.clipboard.readText()
+    await workspacesApi.writeDesktopClipboard(props.workspaceId, text || '')
+    notifications.success('Pasted to VM', 'Local clipboard sent to VM clipboard.')
+    return true
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    notifications.error('Paste failed', msg)
+    return false
+  } finally {
+    clipboardBusy.value = false
+  }
+}
+
+function shouldHandleClipboardShortcut(event: KeyboardEvent): boolean {
+  if (!desktopStore.isOpen || desktopStore.isMinimized || !desktopStore.isConnected) return false
+  const target = event.target as HTMLElement | null
+  if (target?.closest('input, textarea, [contenteditable="true"]')) return false
+  return true
+}
+
+function parseClipboardShortcut(event: KeyboardEvent): 'copy' | 'paste' | null {
+  const key = event.key.toLowerCase()
+  const modifierPressed = event.metaKey || event.ctrlKey
+  if (!modifierPressed || event.altKey || event.shiftKey) return null
+  if (key === 'c') return 'copy'
+  if (key === 'v') return 'paste'
+  return null
+}
+
+function suppressClipboardEvent(event: KeyboardEvent): void {
+  event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+}
+
+function dispatchPasteShortcutToVm(event: KeyboardEvent): void {
+  const iframe = desktopIframeRef.value
+  const doc = iframe?.contentDocument
+  if (!iframe || !doc) return
+
+  const activeTarget = (doc.activeElement as HTMLElement | null) ?? doc.body ?? doc.documentElement
+  if (!activeTarget) return
+
+  const modifierKey = event.metaKey ? 'Meta' : 'Control'
+  const shortcutEventInit: KeyboardEventInit = {
+    key: 'v',
+    code: 'KeyV',
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    ctrlKey: modifierKey === 'Control',
+    metaKey: modifierKey === 'Meta',
+  }
+
+    isDispatchingSyntheticPasteShortcut = true
+  try {
+    activeTarget.dispatchEvent(
+      new KeyboardEvent('keydown', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
+    )
+    activeTarget.dispatchEvent(new KeyboardEvent('keydown', shortcutEventInit))
+    activeTarget.dispatchEvent(new KeyboardEvent('keyup', shortcutEventInit))
+    activeTarget.dispatchEvent(
+      new KeyboardEvent('keyup', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
+    )
+  } finally {
+    isDispatchingSyntheticPasteShortcut = false
+  }
+}
+
+async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
+  if (isDispatchingSyntheticPasteShortcut) return
+  if (!shouldHandleClipboardShortcut(event)) return
+  const shortcut = parseClipboardShortcut(event)
+  if (!shortcut) return
+
+  if (shortcut === 'copy') {
+    window.setTimeout(() => {
+      void copyFromVmClipboard()
+    }, 120)
+    return
+  }
+
+  suppressClipboardEvent(event)
+  const synced = await pasteToVmClipboard()
+  if (!synced) return
+  dispatchPasteShortcutToVm(event)
+}
+
+function handleDesktopIframeKeyup(event: KeyboardEvent): void {
+  if (isDispatchingSyntheticPasteShortcut) return
+  if (!shouldHandleClipboardShortcut(event)) return
+  if (parseClipboardShortcut(event) !== 'paste') return
+  suppressClipboardEvent(event)
+}
+
+function bindDesktopIframeKeydownListener(): void {
+  iframeKeydownCleanup?.()
+  iframeKeydownCleanup = null
+
+  const doc = desktopIframeRef.value?.contentDocument
+  const win = desktopIframeRef.value?.contentWindow
+  if (!doc || !win) return
+  const keydownListener = (event: KeyboardEvent) => {
+    void handleDesktopIframeKeydown(event)
+  }
+  const keyupListener = (event: KeyboardEvent) => {
+    handleDesktopIframeKeyup(event)
+  }
+  win.addEventListener('keydown', keydownListener, true)
+  win.addEventListener('keyup', keyupListener, true)
+  doc.addEventListener('keydown', keydownListener, true)
+  doc.addEventListener('keyup', keyupListener, true)
+  iframeKeydownCleanup = () => {
+    win.removeEventListener('keydown', keydownListener, true)
+    win.removeEventListener('keyup', keyupListener, true)
+    doc.removeEventListener('keydown', keydownListener, true)
+    doc.removeEventListener('keyup', keyupListener, true)
+  }
+}
+
+function onGlobalKeydown(event: KeyboardEvent): void {
+  if (!shouldHandleClipboardShortcut(event)) return
+  const shortcut = parseClipboardShortcut(event)
+  if (!shortcut) return
+
+  if (shortcut === 'copy') {
+    event.preventDefault()
+    void copyFromVmClipboard()
+  } else if (shortcut === 'paste') {
+    event.preventDefault()
+    void pasteToVmClipboard()
+  }
+}
+
 function observeViewportHost(): void {
   if (!viewportHostRef.value) return
   const refreshBounds = () => {
@@ -203,6 +364,7 @@ onMounted(() => {
     startDesktop()
   }
   observeViewportHost()
+  window.addEventListener('keydown', onGlobalKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -218,6 +380,9 @@ onBeforeUnmount(() => {
   cleanupFns.length = 0
   resizeObserver?.disconnect()
   resizeObserver = null
+  iframeKeydownCleanup?.()
+  iframeKeydownCleanup = null
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 watch(
@@ -239,6 +404,13 @@ watch(
       viewportPreset.value = 'auto'
       rotatePreset.value = false
     }
+  },
+)
+
+watch(
+  () => desktopIframeRef.value,
+  () => {
+    bindDesktopIframeKeydownListener()
   },
 )
 
@@ -290,10 +462,12 @@ watch(
         >
           <iframe
             v-if="viewportPreset === 'auto'"
+            ref="desktopIframeRef"
             :src="desktopIframeSrc"
             class="h-full w-full border-0"
             sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
             allow="clipboard-read; clipboard-write"
+            @load="bindDesktopIframeKeydownListener"
           />
           <div
             v-else
@@ -304,11 +478,13 @@ watch(
               :style="scaledFrameStyle"
             >
               <iframe
+                ref="desktopIframeRef"
                 :src="desktopIframeSrc"
                 class="block border-0"
                 :style="scaledIframeStyle"
                 sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
                 allow="clipboard-read; clipboard-write"
+                @load="bindDesktopIframeKeydownListener"
               />
             </div>
           </div>
@@ -334,6 +510,26 @@ watch(
             />
           </div>
           <div class="flex items-center gap-1">
+            <UiButton
+              variant="ghost"
+              size="icon-sm"
+              class="h-6 w-6 opacity-50 hover:opacity-100"
+              :disabled="!desktopStore.isConnected || clipboardBusy"
+              title="Copy VM clipboard to local clipboard"
+              @click="copyFromVmClipboard"
+            >
+              <Copy :size="11" />
+            </UiButton>
+            <UiButton
+              variant="ghost"
+              size="icon-sm"
+              class="h-6 w-6 opacity-50 hover:opacity-100"
+              :disabled="!desktopStore.isConnected || clipboardBusy"
+              title="Paste local clipboard into VM clipboard"
+              @click="pasteToVmClipboard"
+            >
+              <ClipboardPaste :size="11" />
+            </UiButton>
             <UiButton
               v-if="desktopStore.isConnected"
               variant="ghost"

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
+from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.credentials.services import CredentialSvc
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
@@ -2283,6 +2284,74 @@ class RunnerService:
         )
         return task
 
+    async def write_desktop_clipboard(
+        self,
+        workspace_id: uuid.UUID,
+        text: str,
+    ) -> None:
+        """Write plain text into a running desktop session clipboard."""
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+
+        self._ensure_workspace_available(workspace)
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+
+        if not self.is_desktop_active(str(workspace_id)):
+            raise ConflictError(
+                "Desktop session is not active. Start the desktop first."
+            )
+
+        response = await self._call_runner(
+            runner,
+            "desktop:clipboard_write",
+            {
+                "workspace_id": str(workspace_id),
+                "text": text,
+            },
+            timeout=120,
+        )
+        if isinstance(response, dict) and response.get("ok") is False:
+            raise RuntimeError(str(response.get("error") or "Clipboard write failed"))
+        await sync_to_async(self.workspaces.touch_activity)(workspace)
+
+    async def read_desktop_clipboard(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> str:
+        """Read plain text from a running desktop session clipboard."""
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+
+        self._ensure_workspace_available(workspace)
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+
+        if not self.is_desktop_active(str(workspace_id)):
+            raise ConflictError(
+                "Desktop session is not active. Start the desktop first."
+            )
+
+        response = await self._call_runner(
+            runner,
+            "desktop:clipboard_read",
+            {
+                "workspace_id": str(workspace_id),
+            },
+            timeout=120,
+        )
+        await sync_to_async(self.workspaces.touch_activity)(workspace)
+        if isinstance(response, dict) and response.get("ok") is False:
+            raise RuntimeError(str(response.get("error") or "Clipboard read failed"))
+        if not isinstance(response, dict):
+            return ""
+        value = response.get("text", "")
+        return value if isinstance(value, str) else str(value)
+
     async def handle_desktop_started(
         self,
         task_id: str | None,
@@ -3076,6 +3145,32 @@ class RunnerService:
 
         await self.sio.emit(event, data, to=runner.sid)
         logger.debug("Emitted %s to runner %s: %s", event, runner.id, data)
+
+    async def _call_runner(
+        self,
+        runner: "Runner",
+        event: str,
+        data: dict,
+        *,
+        timeout: int = 15,
+    ) -> dict:
+        """Send request/response Socket.IO call to a specific runner."""
+        if self.sio is None:
+            raise RuntimeError("No Socket.IO server configured")
+        if not runner.sid:
+            raise RunnerOfflineError(str(runner.id))
+
+        try:
+            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
+        except SocketIOTimeoutError as exc:
+            raise RuntimeError(
+                f"Runner call timed out for event '{event}'"
+            ) from exc
+        if response is None:
+            return {}
+        if isinstance(response, dict):
+            return response
+        return {"result": response}
 
     def _forward_to_frontend(
         self,

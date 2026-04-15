@@ -455,6 +455,18 @@ class DesktopStatusOut(Schema):
     proxy_url: str | None = None
 
 
+class DesktopClipboardWriteIn(Schema):
+    """Request schema for writing plain text into the VM clipboard."""
+
+    text: str
+
+
+class DesktopClipboardReadOut(Schema):
+    """Response schema for reading plain text from the VM clipboard."""
+
+    text: str
+
+
 # ---------------------------------------------------------------------------
 # Error schemas
 # ---------------------------------------------------------------------------
