@@ -44,10 +44,9 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
 
     Access rules mirror REST API behavior:
     - user must be member of the workspace runner's organization
-    - admins may access all org workspaces
-    - members may only access their own workspaces
+    - every user may only access their own workspaces
     """
-    from apps.organizations.models import Membership, MembershipRole
+    from apps.organizations.models import Membership
     from .repositories import WorkspaceRepository
 
     try:
@@ -65,9 +64,6 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
     ).first()
     if membership is None:
         return False
-
-    if membership.role == MembershipRole.ADMIN:
-        return True
 
     return workspace.created_by_id == user_id
 

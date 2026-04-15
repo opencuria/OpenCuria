@@ -527,6 +527,26 @@ def _error(msg: str) -> list[TextContent]:
     return [TextContent(type="text", text=f"Error: {msg}")]
 
 
+def _get_owned_workspace_or_error(api_key, org_id, workspace_id):
+    """Return an owned workspace or an MCP-formatted error payload."""
+    from apps.runners.sio_server import get_runner_service
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    svc = get_runner_service()
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    try:
+        workspace = svc.get_workspace_for_user(
+            workspace_id,
+            user=api_key.user,
+            organization_id=org_id,
+        )
+    except NotFoundError:
+        return None, _error("Workspace not found")
+    return workspace, None
+
+
 # ---------------------------------------------------------------------------
 # Tool execution logic
 # ---------------------------------------------------------------------------
@@ -540,7 +560,6 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
 
     runner_id = None
     if args.get("runner_id"):
@@ -553,7 +572,6 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
         runner_id=runner_id,
         organization_id=org_id,
         user=api_key.user,
-        is_admin=is_admin,
     )
     result = [
         {
@@ -570,10 +588,6 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
     import uuid as _uuid
 
     workspace_id_str = args.get("workspace_id")
@@ -584,40 +598,33 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    from apps.runners.sio_server import get_runner_service
+
     svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
-    try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
-
-        sessions = list(svc.list_sessions(workspace_id))
-        result = {
-            "id": str(workspace.id),
-            "name": workspace.name,
-            "status": str(workspace.status),
-            "runner_id": str(workspace.runner_id),
-            "runtime_type": str(workspace.runtime_type),
-            "created_at": workspace.created_at.isoformat(),
-            "sessions": [
-                {
-                    "id": str(s.id),
-                    "prompt": s.prompt,
-                    "status": str(s.status),
-                    "output": s.output,
-                    "created_at": s.created_at.isoformat(),
-                }
-                for s in sessions
-            ],
-        }
-        return _text(result)
-    except NotFoundError as e:
-        return _error(str(e))
+    sessions = list(svc.list_sessions(workspace_id))
+    result = {
+        "id": str(workspace.id),
+        "name": workspace.name,
+        "status": str(workspace.status),
+        "runner_id": str(workspace.runner_id),
+        "runtime_type": str(workspace.runtime_type),
+        "created_at": workspace.created_at.isoformat(),
+        "sessions": [
+            {
+                "id": str(s.id),
+                "prompt": s.prompt,
+                "status": str(s.status),
+                "output": s.output,
+                "created_at": s.created_at.isoformat(),
+            }
+            for s in sessions
+        ],
+    }
+    return _text(result)
 
 
 def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
@@ -681,8 +688,6 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError, ConflictError
 
     import asyncio
@@ -696,17 +701,14 @@ def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
     try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
 
         async def _stop():
             return await svc.stop_workspace(workspace_id)
@@ -720,8 +722,6 @@ def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError, ConflictError
 
     import asyncio
@@ -735,17 +735,14 @@ def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
     try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
 
         async def _resume():
             return await svc.resume_workspace(workspace_id)
@@ -759,8 +756,6 @@ def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError, ConflictError
 
     import asyncio
@@ -774,17 +769,14 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
     try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
 
         async def _remove():
             return await svc.remove_workspace(workspace_id)
@@ -798,8 +790,6 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_run_prompt(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError, ConflictError
 
     import asyncio
@@ -823,17 +813,14 @@ def _call_run_prompt(api_key, org_id, args: dict) -> list[TextContent]:
         except ValueError:
             return _error("Invalid chat_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
     try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
 
         async def _run():
             return await svc.run_prompt(
@@ -860,8 +847,6 @@ def _call_run_prompt(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_cancel_prompt(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError, ConflictError
 
     import asyncio
@@ -878,17 +863,14 @@ def _call_cancel_prompt(api_key, org_id, args: dict) -> list[TextContent]:
     except ValueError:
         return _error("Invalid workspace_id or session_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
     try:
-        workspace = svc.get_workspace(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            return _error("Workspace not found")
-        if not is_admin and workspace.created_by_id != api_key.user.id:
-            return _error("Workspace not found")
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
 
         async def _cancel():
             return await svc.cancel_session_prompt(workspace_id, session_id)
@@ -927,24 +909,24 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_list_agents(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
+    from apps.runners.sio_server import get_runner_service
 
     import uuid as _uuid
 
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
 
     workspace = None
     if args.get("workspace_id"):
         try:
             workspace_id = _uuid.UUID(args["workspace_id"])
-            workspace = svc.get_workspace(workspace_id)
-        except (ValueError, NotFoundError):
-            pass
+        except ValueError:
+            return _error("Invalid workspace_id UUID")
+        workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
 
     agents = svc.get_available_agents(
         organization_id=org_id,
@@ -960,9 +942,7 @@ def _call_list_conversations(api_key, org_id, args: dict) -> list[TextContent]:
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    is_admin = org_service.get_user_role(api_key.user, org_id) == "admin"
-
-    rows = ConversationRepository.list_for_user(org_id, api_key.user.id, is_admin)
+    rows = ConversationRepository.list_for_user(org_id, api_key.user.id)
     return _text(rows)
 
 
@@ -992,8 +972,6 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
 
 
 def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
     import asyncio
@@ -1008,11 +986,15 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-
     try:
+        workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+        from apps.runners.sio_server import get_runner_service
+
+        svc = get_runner_service()
+
         async def _create():
             return await svc.create_image_artifact(
                 workspace_id=workspace_id,

@@ -564,6 +564,55 @@ class TestCreateImageArtifactSecurity:
             )
 
 
+@pytest.mark.django_db
+class TestWorkspaceOwnerScoping:
+    def test_list_workspaces_and_lookup_are_owner_scoped(self, service):
+        user_model = get_user_model()
+        owner = user_model.objects.create_user(
+            email=f"owner-scope-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        admin = user_model.objects.create_user(
+            email=f"admin-scope-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        org = Organization.objects.create(
+            name=f"Owner Scope Org {uuid.uuid4().hex[:6]}",
+            slug=f"owner-scope-org-{uuid.uuid4().hex[:8]}",
+        )
+        runner = Runner.objects.create(
+            name="owner-scope-runner",
+            api_token_hash=uuid.uuid4().hex,
+            status=RunnerStatus.ONLINE,
+            sid="owner-scope-sid",
+            organization=org,
+            available_runtimes=["docker"],
+        )
+        owner_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Owner Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=owner,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Admin Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=admin,
+        )
+
+        visible = service.list_workspaces(organization_id=org.id, user=admin)
+
+        assert len(visible) == 1
+        assert visible[0].created_by_id == admin.id
+        with pytest.raises(WorkspaceNotFoundError):
+            service.get_workspace_for_user(
+                owner_workspace.id,
+                user=admin,
+                organization_id=org.id,
+            )
+
+
 @pytest.mark.django_db(transaction=True)
 class TestRuntimeCompatibilityGuards:
     @pytest.mark.asyncio
