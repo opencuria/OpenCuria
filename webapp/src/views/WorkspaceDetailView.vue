@@ -1000,17 +1000,18 @@ function handleToggleSessionReadState(sessionId: string): void {
             :workspace-id="workspaceId"
           >
             <template #sidebar-content>
-              <div class="hidden h-full min-h-0 w-full flex-col lg:flex">
-                <div class="min-h-0 flex-1 overflow-hidden">
+              <div class="h-full min-h-0 w-full flex flex-col">
+                <div class="min-h-0 flex flex-1 overflow-hidden">
                   <ChatContainer
                     :key="workspaceStore.activeChatId ?? 'desktop-sidebar'"
                     :sessions="displaySessions"
                     :is-multi-chat="isMultiChat"
                     :workspace-id="workspaceId"
+                    class="min-h-0 flex-1"
                     @toggle-read-state="handleToggleSessionReadState"
                   />
                 </div>
-                <div class="shrink-0 border-t border-border pt-2">
+                <div class="shrink-0 pt-2">
                   <ChatInput
                     ref="chatInputRef"
                     :agent-options="agentOptions"
@@ -1112,6 +1113,7 @@ function handleToggleSessionReadState(sessionId: string): void {
               :sessions="displaySessions"
               :is-multi-chat="isMultiChat"
               :workspace-id="workspaceId"
+              class="min-h-0 flex-1"
               @toggle-read-state="handleToggleSessionReadState"
             />
             <div

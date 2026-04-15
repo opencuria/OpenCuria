@@ -379,7 +379,7 @@ watch(
           Rotate
         </UiButton>
 
-        <div class="hidden min-h-0 flex-1 overflow-hidden border-t border-border pt-2 lg:flex">
+        <div class="hidden min-h-0 flex-1 overflow-hidden pt-2 lg:flex">
           <slot name="sidebar-content" />
         </div>
       </div>
