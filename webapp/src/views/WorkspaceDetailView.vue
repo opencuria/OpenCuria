@@ -995,23 +995,60 @@ function handleToggleSessionReadState(sessionId: string): void {
       <div class="flex flex-col flex-1 min-h-0">
         <!-- Chat content area -->
         <div class="flex flex-1 min-h-0">
-          <WorkspaceDesktop v-if="desktopStore.isOpen && canPrompt" :workspace-id="workspaceId" />
+          <WorkspaceDesktop
+            v-if="desktopStore.isOpen && !desktopStore.isMinimized && canPrompt"
+            :workspace-id="workspaceId"
+          >
+            <template #sidebar-content>
+              <div class="h-full min-h-0 w-full flex flex-col">
+                <div class="min-h-0 flex flex-1 overflow-hidden">
+                  <ChatContainer
+                    :key="workspaceStore.activeChatId ?? 'desktop-sidebar'"
+                    :sessions="displaySessions"
+                    :is-multi-chat="isMultiChat"
+                    :workspace-id="workspaceId"
+                    class="min-h-0 flex-1"
+                    @toggle-read-state="handleToggleSessionReadState"
+                  />
+                </div>
+                <div class="shrink-0 pt-2">
+                  <ChatInput
+                    ref="chatInputRef"
+                    :agent-options="agentOptions"
+                    :selected-options="selectedOptions"
+                    :skill-options="skillStore.skills"
+                    :disabled="!canPrompt || hasActiveSession || !isActiveChatWritable"
+                    :stoppable="canPrompt && hasActiveSession"
+                    :sending="sending"
+                    :workspace-id="workspaceId"
+                    :chat-id="workspaceStore.activeChatId"
+                    :busy-message="chatLockMessage"
+                    class="flex-1"
+                    @update:selected-options="selectedOptions = $event"
+                    @send="handleSend"
+                    @stop="handleStopPrompt"
+                  />
+                </div>
+              </div>
+            </template>
+          </WorkspaceDesktop>
 
-          <!-- Chat sidebar (only for multi-chat agents) -->
-          <ChatSidebar
-            v-if="isMultiChat && hasChats"
-            :chats="workspaceStore.chats"
-            :active-chat-id="workspaceStore.activeChatId"
-            :mobile-open="mobileChatListOpen"
-            @select="handleSelectChat"
-            @create="handleCreateChat"
-            @rename="handleRenameChat"
-            @delete="handleDeleteChat"
-            @close="mobileChatListOpen = false"
-          />
+          <template v-else>
+            <!-- Chat sidebar (only for multi-chat agents) -->
+            <ChatSidebar
+              v-if="isMultiChat && hasChats"
+              :chats="workspaceStore.chats"
+              :active-chat-id="workspaceStore.activeChatId"
+              :mobile-open="mobileChatListOpen"
+              @select="handleSelectChat"
+              @create="handleCreateChat"
+              @rename="handleRenameChat"
+              @delete="handleDeleteChat"
+              @close="mobileChatListOpen = false"
+            />
 
-          <!-- Chat content area -->
-          <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+            <!-- Chat content area -->
+            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
             <FileViewer
               v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
@@ -1076,6 +1113,7 @@ function handleToggleSessionReadState(sessionId: string): void {
               :sessions="displaySessions"
               :is-multi-chat="isMultiChat"
               :workspace-id="workspaceId"
+              class="min-h-0 flex-1"
               @toggle-read-state="handleToggleSessionReadState"
             />
             <div
@@ -1145,13 +1183,14 @@ function handleToggleSessionReadState(sessionId: string): void {
                 </UiButton>
               </template>
             </div>
-          </div>
+            </div>
 
-          <!-- File explorer panel (right side) -->
-          <FileExplorerPanel
-            v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
-            :workspace-id="workspaceId"
-          />
+            <!-- File explorer panel (right side) -->
+            <FileExplorerPanel
+              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
+              :workspace-id="workspaceId"
+            />
+          </template>
         </div>
 
         <!-- Terminal panel (bottom) -->
