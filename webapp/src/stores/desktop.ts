@@ -1,18 +1,19 @@
 /**
- * Terminal store — manages the interactive terminal panel state.
+ * Desktop session store — manages the KasmVNC desktop panel state.
  *
- * Tracks whether the terminal is open/connected and stores the
- * terminal_id received from the backend after PTY creation.
+ * Tracks whether the desktop viewer is open, whether a session is
+ * active, and stores the proxy URL for the KasmVNC iframe.
  */
 
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-export const useTerminalStore = defineStore('terminal', () => {
+export const useDesktopStore = defineStore('desktop', () => {
   const isOpen = ref(false)
   const isMinimized = ref(false)
+  const isConnecting = ref(false)
   const isConnected = ref(false)
-  const terminalId = ref<string | null>(null)
+  const proxyUrl = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
 
   function toggle(): void {
@@ -39,36 +40,46 @@ export const useTerminalStore = defineStore('terminal', () => {
     isMinimized.value = false
   }
 
-  function setConnected(id: string, wsId: string): void {
-    terminalId.value = id
+  function setConnecting(wsId: string): void {
     workspaceId.value = wsId
+    isConnecting.value = true
+  }
+
+  function setConnected(wsId: string, url: string): void {
+    workspaceId.value = wsId
+    proxyUrl.value = url
     isConnected.value = true
+    isConnecting.value = false
   }
 
   function setDisconnected(): void {
-    terminalId.value = null
+    proxyUrl.value = null
     isConnected.value = false
+    isConnecting.value = false
   }
 
   function reset(): void {
     isOpen.value = false
     isMinimized.value = false
     isConnected.value = false
-    terminalId.value = null
+    isConnecting.value = false
+    proxyUrl.value = null
     workspaceId.value = null
   }
 
   return {
     isOpen,
     isMinimized,
+    isConnecting,
     isConnected,
-    terminalId,
+    proxyUrl,
     workspaceId,
     toggle,
     open,
     close,
     minimize,
     restore,
+    setConnecting,
     setConnected,
     setDisconnected,
     reset,

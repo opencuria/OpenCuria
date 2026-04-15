@@ -18,6 +18,7 @@ services:
       DJANGO_SUPERUSER_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
     volumes:
       - backend-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     networks:

@@ -898,6 +898,23 @@ class QemuRuntime(RuntimeBackend):
         """
         return self._get_workspace_vm_ip(instance_id)
 
+    def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
+        """Return the VM IP used by the runner desktop proxy.
+
+        The desktop session payload stores the upstream address under the historical
+        ``container_ip`` key for both Docker containers and QEMU VMs.
+        """
+        del workspace_id
+        return self._get_workspace_vm_ip(instance_id)
+
+    def get_workspace_network_name(self, workspace_id: str) -> str:
+        """Return the workspace network marker used in desktop session payloads.
+
+        Runner-proxied QEMU desktops do not require an attachable Docker network.
+        """
+        del workspace_id
+        return ""
+
     # ── RuntimeBackend implementation ─────────────────────────────────
 
     async def create_workspace(self, config: WorkspaceConfig) -> str:
@@ -1675,7 +1692,7 @@ class QemuRuntime(RuntimeBackend):
         Creates a new QCOW2 overlay backed by the artifact image
         and starts a new VM.
         """
-        snapshot_path = self._snapshot_dir / f"{artifact_id}.qcow2"
+        snapshot_path = self._resolve_image_artifact_path(artifact_id)
         if not snapshot_path.exists():
             raise RuntimeError(
                 f"Image artifact {artifact_id} not found"
@@ -1747,3 +1764,10 @@ class QemuRuntime(RuntimeBackend):
             new_instance_id=new_instance_id,
         )
         return new_instance_id
+
+    def _resolve_image_artifact_path(self, artifact_id: str) -> Path:
+        """Resolve a clone source from either a snapshot id or a built image path."""
+        artifact_path = Path(artifact_id)
+        if artifact_path.is_absolute():
+            return artifact_path
+        return self._snapshot_dir / f"{artifact_id}.qcow2"

@@ -5,6 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useConversationStore } from '@/stores/conversations'
 import { useSkillStore } from '@/stores/skills'
 import { useTerminalStore } from '@/stores/terminal'
+import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import * as agentsApi from '@/services/agents.api'
@@ -25,11 +26,12 @@ import ChatInput from '@/components/chat/ChatInput.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
+import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, X } from 'lucide-vue-next'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,6 +39,7 @@ const workspaceStore = useWorkspaceStore()
 const conversationStore = useConversationStore()
 const skillStore = useSkillStore()
 const terminalStore = useTerminalStore()
+const desktopStore = useDesktopStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
@@ -51,6 +54,7 @@ const agents = ref<Agent[]>([])
 const selectedOptions = ref<Record<string, string>>({})
 const selectedOptionsInitializedChatId = ref<string | null>(null)
 const terminalHeight = ref(300)
+const desktopHeight = ref(400)
 const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
 
@@ -231,6 +235,49 @@ function openTerminal(): void {
   if (!canPrompt.value) return
   terminalStore.open()
 }
+
+function handleTerminalButtonClick(): void {
+  if (!canPrompt.value) return
+  if (!terminalStore.isOpen) {
+    terminalStore.open()
+    return
+  }
+  if (terminalStore.isMinimized) {
+    terminalStore.restore()
+    return
+  }
+  terminalStore.minimize()
+}
+
+const terminalButtonTitle = computed(() => {
+  if (!terminalStore.isOpen) return 'Open terminal'
+  if (terminalStore.isMinimized) return 'Restore terminal'
+  return 'Minimize terminal'
+})
+
+function openDesktopPanel(): void {
+  if (!canPrompt.value) return
+  desktopStore.open()
+}
+
+function handleDesktopButtonClick(): void {
+  if (!canPrompt.value) return
+  if (!desktopStore.isOpen) {
+    desktopStore.open()
+    return
+  }
+  if (desktopStore.isMinimized) {
+    desktopStore.restore()
+    return
+  }
+  desktopStore.minimize()
+}
+
+const desktopButtonTitle = computed(() => {
+  if (!desktopStore.isOpen) return 'Open desktop'
+  if (desktopStore.isMinimized) return 'Restore desktop'
+  return 'Minimize desktop'
+})
 
 // Socket.IO event cleanup functions
 const cleanupFns: (() => void)[] = []
@@ -425,6 +472,7 @@ onUnmounted(() => {
   lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
   cleanupSocket()
+  desktopStore.reset()
   terminalStore.reset()
   fileExplorerStore.reset()
   workspaceImageStore.reset()
@@ -439,6 +487,7 @@ onUnmounted(() => {
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
+    desktopStore.reset()
     fileExplorerStore.reset()
     workspaceStore.chats = []
     workspaceStore.activeChatId = null
@@ -651,6 +700,27 @@ function onDragStart(e: MouseEvent): void {
   const onMove = (ev: MouseEvent) => {
     const delta = startY - ev.clientY
     terminalHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
+  }
+
+  const onUp = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function onDesktopDragStart(e: MouseEvent): void {
+  e.preventDefault()
+  isDragging.value = true
+  const startY = e.clientY
+  const startH = desktopHeight.value
+
+  const onMove = (ev: MouseEvent) => {
+    const delta = startY - ev.clientY
+    desktopHeight.value = Math.max(200, Math.min(startH + delta, window.innerHeight * 0.8))
   }
 
   const onUp = () => {
@@ -925,21 +995,60 @@ function handleToggleSessionReadState(sessionId: string): void {
       <div class="flex flex-col flex-1 min-h-0">
         <!-- Chat content area -->
         <div class="flex flex-1 min-h-0">
-          <!-- Chat sidebar (only for multi-chat agents) -->
-          <ChatSidebar
-            v-if="isMultiChat && hasChats"
-            :chats="workspaceStore.chats"
-            :active-chat-id="workspaceStore.activeChatId"
-            :mobile-open="mobileChatListOpen"
-            @select="handleSelectChat"
-            @create="handleCreateChat"
-            @rename="handleRenameChat"
-            @delete="handleDeleteChat"
-            @close="mobileChatListOpen = false"
-          />
+          <WorkspaceDesktop
+            v-if="desktopStore.isOpen && !desktopStore.isMinimized && canPrompt"
+            :workspace-id="workspaceId"
+          >
+            <template #sidebar-content>
+              <div class="h-full min-h-0 w-full flex flex-col">
+                <div class="min-h-0 flex flex-1 overflow-hidden">
+                  <ChatContainer
+                    :key="workspaceStore.activeChatId ?? 'desktop-sidebar'"
+                    :sessions="displaySessions"
+                    :is-multi-chat="isMultiChat"
+                    :workspace-id="workspaceId"
+                    class="min-h-0 flex-1"
+                    @toggle-read-state="handleToggleSessionReadState"
+                  />
+                </div>
+                <div class="shrink-0 pt-2">
+                  <ChatInput
+                    ref="chatInputRef"
+                    :agent-options="agentOptions"
+                    :selected-options="selectedOptions"
+                    :skill-options="skillStore.skills"
+                    :disabled="!canPrompt || hasActiveSession || !isActiveChatWritable"
+                    :stoppable="canPrompt && hasActiveSession"
+                    :sending="sending"
+                    :workspace-id="workspaceId"
+                    :chat-id="workspaceStore.activeChatId"
+                    :busy-message="chatLockMessage"
+                    class="flex-1"
+                    @update:selected-options="selectedOptions = $event"
+                    @send="handleSend"
+                    @stop="handleStopPrompt"
+                  />
+                </div>
+              </div>
+            </template>
+          </WorkspaceDesktop>
 
-          <!-- Chat content area -->
-          <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+          <template v-else>
+            <!-- Chat sidebar (only for multi-chat agents) -->
+            <ChatSidebar
+              v-if="isMultiChat && hasChats"
+              :chats="workspaceStore.chats"
+              :active-chat-id="workspaceStore.activeChatId"
+              :mobile-open="mobileChatListOpen"
+              @select="handleSelectChat"
+              @create="handleCreateChat"
+              @rename="handleRenameChat"
+              @delete="handleDeleteChat"
+              @close="mobileChatListOpen = false"
+            />
+
+            <!-- Chat content area -->
+            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
             <FileViewer
               v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
@@ -985,6 +1094,15 @@ function handleToggleSessionReadState(sessionId: string): void {
                       <TerminalSquare :size="16" class="mr-2" />
                       Open Terminal
                     </UiButton>
+                    <UiButton
+                      variant="outline"
+                      size="lg"
+                      :disabled="!canPrompt"
+                      @click="openDesktopPanel"
+                    >
+                      <Monitor :size="16" class="mr-2" />
+                      Open Desktop
+                    </UiButton>
                   </div>
                 </div>
               </div>
@@ -995,6 +1113,7 @@ function handleToggleSessionReadState(sessionId: string): void {
               :sessions="displaySessions"
               :is-multi-chat="isMultiChat"
               :workspace-id="workspaceId"
+              class="min-h-0 flex-1"
               @toggle-read-state="handleToggleSessionReadState"
             />
             <div
@@ -1033,33 +1152,65 @@ function handleToggleSessionReadState(sessionId: string): void {
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
                   :disabled="!canPrompt"
-                  :title="terminalStore.isOpen ? 'Hide terminal' : 'Open terminal'"
-                  @click="terminalStore.toggle()"
+                  :title="terminalButtonTitle"
+                  @click="handleTerminalButtonClick"
                 >
-                  <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                  <span class="relative inline-flex">
+                    <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+                    <span
+                      v-if="terminalStore.isOpen && terminalStore.isMinimized"
+                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                      title="Terminal minimized"
+                    />
+                  </span>
+                </UiButton>
+                <UiButton
+                  variant="ghost"
+                  size="icon-sm"
+                  class="shrink-0 mr-2 mb-2"
+                  :disabled="!canPrompt"
+                  :title="desktopButtonTitle"
+                  @click="handleDesktopButtonClick"
+                >
+                  <span class="relative inline-flex">
+                    <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
+                    <span
+                      v-if="desktopStore.isOpen && desktopStore.isMinimized"
+                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                      title="Desktop minimized"
+                    />
+                  </span>
                 </UiButton>
               </template>
             </div>
-          </div>
+            </div>
 
-          <!-- File explorer panel (right side) -->
-          <FileExplorerPanel
-            v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
-            :workspace-id="workspaceId"
-          />
+            <!-- File explorer panel (right side) -->
+            <FileExplorerPanel
+              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
+              :workspace-id="workspaceId"
+            />
+          </template>
         </div>
 
         <!-- Terminal panel (bottom) -->
         <template v-if="terminalStore.isOpen && canPrompt">
           <!-- Drag handle -->
           <div
+            v-show="!terminalStore.isMinimized"
             class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
             @mousedown="onDragStart"
           ></div>
-          <div class="shrink-0 relative" :style="{ height: terminalHeight + 'px' }">
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="shrink-0 relative"
+            :style="{ height: terminalHeight + 'px' }"
+          >
             <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
         </template>
+
+
       </div>
     </template>
 

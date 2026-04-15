@@ -673,6 +673,9 @@ Distributed/server deployments use `compose.server.yml`:
 Standalone Docker runners use `runner/compose.yml`.
 Native Linux runner hosts that need QEMU/KVM should use the systemd unit at
 `runner/systemd/opencuria-runner.service` instead of containerizing libvirt.
+The default `RUNNER_QEMU_SSH_USER` is `root`; existing runner env files that
+still pin `ubuntu` should be migrated to `root` because the shipped QEMU desktop
+stack uses `/root` paths.
 
 ### Runner CI/CD
 

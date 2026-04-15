@@ -239,7 +239,20 @@ function cleanup(): void {
   pendingResize = null
 }
 
+function terminateTerminalSession(): void {
+  if (terminalStore.terminalId) {
+    sendTerminalClose(props.workspaceId, terminalStore.terminalId)
+    terminalStore.setDisconnected()
+    terminal?.writeln('\r\n\x1b[33m[Terminal session ended]\x1b[0m')
+  }
+}
+
+function handleMinimize(): void {
+  terminalStore.minimize()
+}
+
 function handleClose(): void {
+  terminateTerminalSession()
   terminalStore.close()
 }
 
@@ -298,7 +311,7 @@ watch(
         <button
           class="p-1 rounded hover:bg-[#1e3545] text-[#94a3b8] hover:text-white transition-colors"
           title="Minimize"
-          @click="terminalStore.close()"
+          @click="handleMinimize"
         >
           <Minus :size="14" />
         </button>

@@ -20,11 +20,16 @@ class DummyService:
         self.terminate_prompt_process = AsyncMock()
         self.cleanup_prompt_process_tracking = AsyncMock()
         self.sync_from_runtime = AsyncMock()
+        self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
+        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.prepared_operation = object()
         self.run_command_calls = []
         self.run_command_side_effects: list[object] = []
         self.create_workspace_calls = []
+        self.start_desktop = AsyncMock()
+        self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
+        self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
     def _normalise_command_args(self, command_args):
         return command_args
@@ -212,6 +217,143 @@ class WebSocketMetricsPathTests(unittest.TestCase):
         )
         interface = WebSocketInterface(DummyService(), settings)
         self.assertEqual(interface._resolve_disk_usage_path(), "/tmp")
+
+
+class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_recovers_desktop_sessions_before_reannounce(self) -> None:
+        service = DummyService()
+        service.get_workspace_heartbeat_statuses = AsyncMock(
+            return_value=[
+                {
+                    "workspace_id": str(uuid.uuid4()),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "127.0.0.1",
+                        "network_name": "workspace-net",
+                    },
+                }
+            ]
+        )
+
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+
+        await interface._sio.handlers["/"]["connect"]()
+
+        service.sync_from_runtime.assert_awaited_once()
+        service.recover_desktop_sessions_from_runtime.assert_awaited_once()
+        interface._sio.emit.assert_any_await(
+            "desktop:started",
+            {
+                "workspace_id": service.get_workspace_heartbeat_statuses.return_value[0]["workspace_id"],
+                "port": 6901,
+                "container_ip": "127.0.0.1",
+                "network_name": "workspace-net",
+            },
+        )
+
+    async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
+        service = DummyService()
+        service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())
+        service.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
+        service.get_desktop_network_name = lambda workspace_id: ""
+
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+
+        task_id = "desktop-task-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:start_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        service.start_desktop.assert_awaited_once_with(workspace_id)
+        interface._sio.emit.assert_awaited_with(
+            "desktop:started",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "port": 6901,
+                "container_ip": "10.100.0.2",
+                "network_name": "",
+            },
+        )
+
+    async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._fetch_desktop_http = AsyncMock(
+            return_value={
+                "status": 200,
+                "headers": [["Content-Type", "text/plain"]],
+                "body": "ZGVza3RvcA==",
+                "body_encoding": "base64",
+            }
+        )
+
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["desktop:proxy_http_request"]
+        result = await handler(
+            {
+                "workspace_id": str(workspace_id),
+                "path": "/vnc.html",
+                "query_string": "autoconnect=true",
+            }
+        )
+
+        interface._fetch_desktop_http.assert_awaited_once_with(
+            workspace_id,
+            "/vnc.html",
+            "autoconnect=true",
+        )
+        self.assertEqual(result["status"], 200)
+
+    async def test_desktop_proxy_ws_open_uses_runner_local_tunnel(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._open_desktop_proxy_tunnel = AsyncMock(
+            return_value={"ok": True, "subprotocol": "binary"}
+        )
+
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["desktop:proxy_ws_open"]
+        result = await handler(
+            {
+                "workspace_id": str(workspace_id),
+                "tunnel_id": "tunnel-1",
+                "subprotocols": ["binary"],
+            }
+        )
+
+        interface._open_desktop_proxy_tunnel.assert_awaited_once_with(
+            workspace_id,
+            "tunnel-1",
+            ["binary"],
+        )
+        self.assertEqual(result, {"ok": True, "subprotocol": "binary"})
+
+    async def test_desktop_proxy_ws_send_forwards_payload(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._send_desktop_proxy_tunnel_message = AsyncMock()
+
+        handler = interface._sio.handlers["/"]["desktop:proxy_ws_send"]
+        await handler(
+            {
+                "tunnel_id": "tunnel-1",
+                "data": "aGVsbG8=",
+                "encoding": "base64",
+            }
+        )
+
+        interface._send_desktop_proxy_tunnel_message.assert_awaited_once_with(
+            "tunnel-1",
+            text=None,
+            data="aGVsbG8=",
+            encoding="base64",
+        )
 
 
 class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):

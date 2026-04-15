@@ -502,6 +502,69 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
+    # --- Desktop session events from runner ---
+
+    @sio.on("desktop:started")
+    async def on_desktop_started(sid: str, data: dict):
+        """Handle desktop:started event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:started")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_started(
+            task_id=data.get("task_id"),
+            workspace_id=data["workspace_id"],
+            port=data.get("port", 6901),
+            container_ip=data.get("container_ip", ""),
+            network_name=data.get("network_name", ""),
+            runner_id=runner_id,
+        )
+
+    @sio.on("desktop:stopped")
+    async def on_desktop_stopped(sid: str, data: dict):
+        """Handle desktop:stopped event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:stopped")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_stopped(
+            task_id=data["task_id"],
+            workspace_id=data["workspace_id"],
+            runner_id=runner_id,
+        )
+
+    @sio.on("desktop:proxy_ws_frame")
+    async def on_desktop_proxy_ws_frame(sid: str, data: dict):
+        """Forward runner-originated desktop WebSocket frames to the proxy app."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_frame")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_frame
+
+        await push_runner_ws_frame(
+            data["tunnel_id"],
+            runner_id,
+            text=data.get("text"),
+            data=data.get("data"),
+            encoding=data.get("encoding"),
+        )
+
+    @sio.on("desktop:proxy_ws_closed")
+    async def on_desktop_proxy_ws_closed(sid: str, data: dict):
+        """Forward runner-originated desktop tunnel close notifications."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_closed")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_closed
+
+        await push_runner_ws_closed(
+            data["tunnel_id"],
+            runner_id,
+            code=int(data.get("code", 1000)),
+        )
+
     # --- File explorer events from runner ---
 
     @sio.on("files:list_result")

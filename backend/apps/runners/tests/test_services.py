@@ -75,6 +75,227 @@ class TestRegisterRunner:
         assert runner.status == RunnerStatus.OFFLINE
 
 
+@pytest.mark.django_db
+class TestDesktopStateCleanup:
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_records_active_state_and_completes_task(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Desktop sessions are tracked in backend state and proxied via the runner."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="172.19.0.3",
+            network_name="workspace-net",
+            runner_id=str(runner.id),
+        )
+
+        task.refresh_from_db()
+        assert task.status == TaskStatus.COMPLETED
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        emit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_for_qemu_records_runner_proxied_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """QEMU desktops use the same runner-proxied state model as Docker."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="10.100.0.2",
+            network_name="",
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "10.100.0.2",
+            "network_name": "",
+        }
+        emit.assert_awaited_once()
+
+    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace):
+        """Stopping a workspace must clear any cached desktop session state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_workspace_stopped(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.STOPPED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace):
+        """Removing a workspace must also clear any desktop proxy state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.REMOVE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_workspace_removed(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.REMOVED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+    def test_heartbeat_restores_active_desktop_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Backend heartbeat should reconstruct live desktop sessions after restart."""
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "172.19.0.3",
+                        "network_name": "workspace-net",
+                    },
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
+
+    def test_heartbeat_missing_desktop_field_keeps_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Runner reconnects should not clear desktop state when the field is omitted."""
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(workspace_id) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+
+    def test_heartbeat_explicit_null_desktop_cleans_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """An explicit null desktop payload should clear stale desktop state."""
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": None,
+                }
+            ],
+        )
+
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspace:
     @pytest.mark.asyncio

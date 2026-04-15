@@ -51,7 +51,7 @@ defineExpose({ hasActiveSession })
 </script>
 
 <template>
-  <UiScrollArea ref="scrollContainer" class="flex-1 px-3 sm:px-6 py-4">
+  <UiScrollArea ref="scrollContainer" class="min-h-0 h-full flex-1 px-3 sm:px-6 py-4">
     <div v-if="sortedSessions.length" class="flex flex-col gap-6 w-full max-w-3xl mx-auto">
       <ChatMessage
         v-for="session in sortedSessions"
