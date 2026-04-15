@@ -142,3 +142,37 @@ def test_mcp_list_agents_passes_owned_workspace_to_service(mcp_access_setup, mon
         "user": mcp_access_setup["admin_api_key"].user,
         "workspace": workspace,
     }
+
+
+@pytest.mark.django_db
+def test_mcp_list_agents_requires_org_membership_without_workspace_id(
+    mcp_access_setup, monkeypatch
+):
+    captured: dict[str, object] = {}
+
+    class FakeOrgService:
+        def require_membership(self, user, organization_id):
+            captured["user"] = user
+            captured["organization_id"] = organization_id
+
+    class FakeService:
+        def get_available_agents(self, *, organization_id, user, workspace=None):
+            return []
+
+    monkeypatch.setattr(
+        "apps.organizations.services.OrganizationService",
+        lambda: FakeOrgService(),
+    )
+    monkeypatch.setattr("apps.runners.sio_server.get_runner_service", lambda: FakeService())
+
+    result = _call_list_agents(
+        mcp_access_setup["admin_api_key"],
+        mcp_access_setup["org"].id,
+        {},
+    )
+
+    assert json.loads(_parse_text_payload(result)) == []
+    assert captured == {
+        "user": mcp_access_setup["admin_api_key"].user,
+        "organization_id": mcp_access_setup["org"].id,
+    }

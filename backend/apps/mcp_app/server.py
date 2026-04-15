@@ -909,11 +909,14 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_list_agents(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
     from apps.runners.sio_server import get_runner_service
 
     import uuid as _uuid
 
     svc = get_runner_service()
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
 
     workspace = None
     if args.get("workspace_id"):
