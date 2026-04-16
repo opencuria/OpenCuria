@@ -85,6 +85,8 @@ from .schemas import (
     DesktopStartOut,
     DesktopStopOut,
     DesktopStatusOut,
+    DesktopClipboardWriteIn,
+    DesktopClipboardReadOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
     WorkspaceDetailOut,
@@ -472,6 +474,8 @@ def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpd
         return 409, ErrorOut(detail=e.message, code=e.code)
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="validation_error")
+    except RuntimeError as e:
+        return 409, ErrorOut(detail=str(e), code="runner_call_failed")
 
 
 @runner_router.get(
@@ -616,6 +620,8 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+    except RuntimeError as e:
+        return 409, ErrorOut(detail=str(e), code="runner_call_failed")
 
 
 @workspace_router.get(
@@ -861,6 +867,72 @@ async def desktop_status(
         return 200, DesktopStatusOut(active=is_active, proxy_url=proxy_url)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/clipboard/write/",
+    response={200: DesktopClipboardReadOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Write text into desktop clipboard",
+)
+async def desktop_clipboard_write(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    payload: DesktopClipboardWriteIn,
+):
+    """Write plain text from the browser into the VM desktop clipboard."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        await service.write_desktop_clipboard(workspace_id, payload.text)
+        text = await service.read_desktop_clipboard(workspace_id)
+        return 200, DesktopClipboardReadOut(text=text)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/clipboard/read/",
+    response={200: DesktopClipboardReadOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Read text from desktop clipboard",
+)
+async def desktop_clipboard_read(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Read plain text from the VM desktop clipboard for local copy."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        text = await service.read_desktop_clipboard(workspace_id)
+        return 200, DesktopClipboardReadOut(text=text)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.patch(

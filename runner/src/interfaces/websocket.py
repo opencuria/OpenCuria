@@ -1108,6 +1108,31 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("stop_desktop_failed")
 
+        @sio.on("desktop:clipboard_write")
+        async def on_desktop_clipboard_write(data: dict) -> dict:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(workspace_id=str(workspace_id))
+            try:
+                await self._service.write_desktop_clipboard(
+                    workspace_id,
+                    data.get("text", ""),
+                )
+                return {"ok": True}
+            except Exception as exc:
+                log.exception("desktop_clipboard_write_failed")
+                return {"ok": False, "error": str(exc)}
+
+        @sio.on("desktop:clipboard_read")
+        async def on_desktop_clipboard_read(data: dict) -> dict:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(workspace_id=str(workspace_id))
+            try:
+                text = await self._service.read_desktop_clipboard(workspace_id)
+                return {"ok": True, "text": text}
+            except Exception as exc:
+                log.exception("desktop_clipboard_read_failed")
+                return {"ok": False, "error": str(exc)}
+
         @sio.on("desktop:proxy_http_request")
         async def on_desktop_proxy_http_request(data: dict) -> dict:
             workspace_id = uuid.UUID(data["workspace_id"])

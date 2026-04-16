@@ -98,6 +98,22 @@ export function getDesktopStatus(
   )
 }
 
+export function writeDesktopClipboard(
+  id: string,
+  text: string,
+): Promise<{ text: string }> {
+  return post<{ text: string }>(
+    `/workspaces/${id}/desktop/clipboard/write/`,
+    { text },
+  )
+}
+
+export function readDesktopClipboard(id: string): Promise<{ text: string }> {
+  return post<{ text: string }>(
+    `/workspaces/${id}/desktop/clipboard/read/`,
+  )
+}
+
 // --- Chat API ---
 
 export function listChats(workspaceId: string): Promise<Chat[]> {
