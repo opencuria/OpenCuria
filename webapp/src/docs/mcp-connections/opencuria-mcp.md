@@ -2,7 +2,7 @@
 
 The opencuria backend exposes a **Model Context Protocol (MCP)** server that lets AI agents (Claude Code, GitHub Copilot, etc.) control opencuria directly — create and manage workspaces, run prompts, handle credentials, and more — all from within their normal conversation flow.
 
-The MCP server is mounted at `/mcp/` on the opencuria backend and communicates over **Server-Sent Events (SSE)**.
+The MCP server is mounted at `/mcp` on the opencuria backend. The primary transport is **Streamable HTTP**. A legacy **SSE** endpoint remains available at `/mcp/sse` for older clients that explicitly require it.
 
 ---
 
@@ -43,13 +43,25 @@ Give it a descriptive name (e.g. `claude-code-local`) and select the permissions
 
 ### 2. Copy the backend URL
 
-The MCP SSE endpoint is:
+For modern MCP clients, use the primary MCP endpoint:
+
+```
+https://your-opencuria-backend.example.com/mcp
+```
+
+For local development:
+
+```
+http://localhost:8000/mcp
+```
+
+Legacy SSE-only clients can still use:
 
 ```
 https://your-opencuria-backend.example.com/mcp/sse
 ```
 
-For local development:
+Local legacy SSE endpoint:
 
 ```
 http://localhost:8000/mcp/sse
@@ -59,7 +71,7 @@ http://localhost:8000/mcp/sse
 
 ## Connecting with Claude Code
 
-Claude Code reads MCP server configuration from `.mcp.json` at the project root or from `~/.config/claude/mcp.json` for global configuration.
+Claude Code reads MCP server configuration from `.mcp.json` at the project root or from `~/.config/claude/mcp.json` for global configuration. For remote opencuria deployments, use the HTTP transport and point it at `/mcp`.
 
 ### Project-level config (.mcp.json)
 
@@ -69,8 +81,8 @@ Place the following file at the **root of your repository**:
 {
   "mcpServers": {
     "opencuria": {
-      "type": "sse",
-      "url": "http://localhost:8000/mcp/sse",
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
       "headers": {
         "Authorization": "Bearer kai_your_api_key_here"
       }
@@ -87,8 +99,8 @@ To make opencuria available in every project:
 {
   "mcpServers": {
     "opencuria": {
-      "type": "sse",
-      "url": "https://your-opencuria-backend.example.com/mcp/sse",
+      "type": "http",
+      "url": "https://your-opencuria-backend.example.com/mcp",
       "headers": {
         "Authorization": "Bearer kai_your_api_key_here"
       }
@@ -107,6 +119,13 @@ claude
 
 Claude will automatically connect to the opencuria MCP server and list it under **Connected MCP servers**. Verify with `/mcp` inside Claude Code.
 
+You can also add it directly from the CLI:
+
+```bash
+claude mcp add --transport http opencuria https://your-opencuria-backend.example.com/mcp \
+  --header "Authorization: Bearer kai_your_api_key_here"
+```
+
 ### Usage example
 
 ```
@@ -118,7 +137,7 @@ List all my opencuria workspaces and then run the prompt
 
 ## Connecting with GitHub Copilot CLI
 
-GitHub Copilot supports MCP servers via `~/.copilot/mcp.json` (or the path in `COPILOT_MCP_CONFIG`).
+GitHub Copilot supports MCP servers via `~/.copilot/mcp.json` (or the path in `COPILOT_MCP_CONFIG`). Use the HTTP MCP endpoint at `/mcp`.
 
 ### ~/.copilot/mcp.json
 
@@ -126,8 +145,8 @@ GitHub Copilot supports MCP servers via `~/.copilot/mcp.json` (or the path in `C
 {
   "mcpServers": {
     "opencuria": {
-      "type": "sse",
-      "url": "https://your-opencuria-backend.example.com/mcp/sse",
+      "type": "http",
+      "url": "https://your-opencuria-backend.example.com/mcp",
       "headers": {
         "Authorization": "Bearer kai_your_api_key_here"
       }
@@ -137,6 +156,22 @@ GitHub Copilot supports MCP servers via `~/.copilot/mcp.json` (or the path in `C
 ```
 
 After saving, restart Copilot CLI. On the next start it will connect and expose the opencuria tools.
+
+## Connecting with OpenAI Codex CLI
+
+Codex expects a Streamable HTTP MCP endpoint. Point it at `/mcp`, **not** `/mcp/sse`:
+
+```bash
+codex mcp add opencuria \
+  --url https://your-opencuria-backend.example.com/mcp \
+  --bearer-token-env-var OPENCURIA_API_KEY
+```
+
+Then export your API key before starting Codex:
+
+```bash
+export OPENCURIA_API_KEY=kai_your_api_key_here
+```
 
 ### Verifying the connection
 
@@ -255,8 +290,10 @@ source .venv/bin/activate
 python manage.py runserver 0.0.0.0:8000
 ```
 
-The MCP endpoint is at `http://localhost:8000/mcp/sse`.
+The primary MCP endpoint is `http://localhost:8000/mcp`.
 
-### SSE connection drops
+Legacy SSE clients should use `http://localhost:8000/mcp/sse`.
 
-The SSE connection is long-lived. If your network has aggressive idle timeouts, configure the MCP client to reconnect automatically. Most MCP clients handle this transparently.
+### Streaming connection drops
+
+If you are using the legacy SSE transport, the connection is long-lived. If your network has aggressive idle timeouts, configure the MCP client to reconnect automatically. Most MCP clients handle this transparently.
