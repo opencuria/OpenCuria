@@ -55,9 +55,10 @@ const agents = ref<Agent[]>([])
 const selectedOptions = ref<Record<string, string>>({})
 const selectedOptionsInitializedChatId = ref<string | null>(null)
 const terminalHeight = ref(300)
-const desktopHeight = ref(400)
 const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
+const mainChatPanelHost = ref<HTMLElement | null>(null)
+const desktopChatPanelHost = ref<HTMLElement | null>(null)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -276,6 +277,17 @@ const desktopButtonTitle = computed(() => {
   if (!desktopStore.isOpen) return 'Open desktop'
   if (desktopStore.isMinimized) return 'Restore desktop'
   return 'Minimize desktop'
+})
+
+const isDesktopPanelVisible = computed(
+  () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
+)
+
+const chatPanelTarget = computed<HTMLElement | null>(() => {
+  if (isDesktopPanelVisible.value) {
+    return desktopChatPanelHost.value
+  }
+  return mainChatPanelHost.value
 })
 
 // Socket.IO event cleanup functions
@@ -721,27 +733,6 @@ function onDragStart(e: MouseEvent): void {
   document.addEventListener('mouseup', onUp)
 }
 
-function onDesktopDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isDragging.value = true
-  const startY = e.clientY
-  const startH = desktopHeight.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startY - ev.clientY
-    desktopHeight.value = Math.max(200, Math.min(startH + delta, window.innerHeight * 0.8))
-  }
-
-  const onUp = () => {
-    isDragging.value = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
-
 /** Sessions to display: scoped to active chat in multi-chat mode. */
 const displaySessions = computed(() => {
   return workspaceStore.activeChatSessions
@@ -995,40 +986,11 @@ function handleToggleSessionReadState(sessionId: string): void {
         <!-- Chat content area -->
         <div class="flex flex-1 min-h-0">
           <WorkspaceDesktop
-            v-if="desktopStore.isOpen && !desktopStore.isMinimized && canPrompt"
+            v-if="isDesktopPanelVisible"
             :workspace-id="workspaceId"
           >
             <template #sidebar-content>
-              <div class="h-full min-h-0 w-full flex flex-col">
-                <div class="min-h-0 flex flex-1 overflow-hidden">
-                  <ChatContainer
-                    :key="workspaceStore.activeChatId ?? 'desktop-sidebar'"
-                    :sessions="displaySessions"
-                    :is-multi-chat="isMultiChat"
-                    :workspace-id="workspaceId"
-                    class="min-h-0 flex-1"
-                    @toggle-read-state="handleToggleSessionReadState"
-                  />
-                </div>
-                <div class="shrink-0 pt-2">
-                  <ChatInput
-                    ref="chatInputRef"
-                    :agent-options="agentOptions"
-                    :selected-options="selectedOptions"
-                    :skill-options="skillStore.skills"
-                    :disabled="!canPrompt || hasActiveSession || !isActiveChatWritable"
-                    :stoppable="canPrompt && hasActiveSession"
-                    :sending="sending"
-                    :workspace-id="workspaceId"
-                    :chat-id="workspaceStore.activeChatId"
-                    :busy-message="chatLockMessage"
-                    class="flex-1"
-                    @update:selected-options="selectedOptions = $event"
-                    @send="handleSend"
-                    @stop="handleStopPrompt"
-                  />
-                </div>
-              </div>
+              <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
             </template>
           </WorkspaceDesktop>
 
@@ -1052,8 +1014,96 @@ function handleToggleSessionReadState(sessionId: string): void {
               v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
               :workspace-id="workspaceId"
             />
-            <ChatContainer
+            <div
+              v-else-if="showWorkspaceEmptyState"
+              class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 py-10"
+            >
+              <div class="w-full max-w-3xl rounded-[2rem] border border-border/80 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.14),transparent_55%),linear-gradient(160deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-6 shadow-[0_30px_80px_rgba(15,23,42,0.18)] sm:p-10">
+                <div class="mx-auto flex max-w-xl flex-col items-center text-center">
+                  <div class="mb-5 flex h-18 w-18 items-center justify-center rounded-[1.5rem] border border-primary/20 bg-primary/10 text-primary shadow-[0_16px_40px_rgba(59,130,246,0.18)]">
+                    <MessageSquare :size="30" />
+                  </div>
+                  <p class="mb-2 text-xs font-semibold uppercase tracking-[0.28em] text-primary/80">
+                    Fresh Workspace
+                  </p>
+                  <h3 class="text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
+                    No chats yet in this workspace
+                  </h3>
+                  <p class="mt-3 max-w-lg text-sm leading-6 text-muted-fg sm:text-base">
+                    Start the first chat to pick an agent for this workspace.
+                  </p>
+                  <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
+                    <UiButton size="lg" class="min-w-52" @click="handleCreateChat">
+                      <Bot :size="16" class="mr-2" />
+                      Start First Chat
+                    </UiButton>
+                    <UiButton
+                      variant="outline"
+                      size="lg"
+                      :disabled="!canPrompt"
+                      @click="openFileExplorer"
+                    >
+                      <FolderTree :size="16" class="mr-2" />
+                      Open Files
+                    </UiButton>
+                    <UiButton
+                      variant="outline"
+                      size="lg"
+                      :disabled="!canPrompt"
+                      @click="openTerminal"
+                    >
+                      <TerminalSquare :size="16" class="mr-2" />
+                      Open Terminal
+                    </UiButton>
+                    <UiButton
+                      variant="outline"
+                      size="lg"
+                      :disabled="!canPrompt"
+                      @click="openDesktopPanel"
+                    >
+                      <Monitor :size="16" class="mr-2" />
+                      Open Desktop
+                    </UiButton>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div
               v-else
+              ref="mainChatPanelHost"
+              class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
+            ></div>
+            </div>
+
+            <!-- File explorer panel (right side) -->
+            <FileExplorerPanel
+              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
+              :workspace-id="workspaceId"
+            />
+          </template>
+        </div>
+
+        <!-- Terminal panel (bottom) -->
+        <template v-if="terminalStore.isOpen && canPrompt">
+          <!-- Drag handle -->
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
+            @mousedown="onDragStart"
+          ></div>
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="shrink-0 relative"
+            :style="{ height: terminalHeight + 'px' }"
+          >
+            <WorkspaceTerminal :workspace-id="workspaceId" />
+          </div>
+        </template>
+
+
+        <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
+          <div class="flex h-full min-h-0 w-full flex-col">
+            <ChatContainer
               :key="workspaceStore.activeChatId ?? 'default'"
               :sessions="displaySessions"
               :is-multi-chat="isMultiChat"
@@ -1061,10 +1111,10 @@ function handleToggleSessionReadState(sessionId: string): void {
               class="min-h-0 flex-1"
               @toggle-read-state="handleToggleSessionReadState"
             />
-
-            <!-- Bottom bar: Start Chat button (no chats) or normal ChatInput -->
-            <div class="flex items-center gap-0 min-w-0 overflow-x-hidden">
-              <!-- No chats yet: large "Start Chat" CTA replaces the input -->
+            <div
+              class="flex items-center gap-0 min-w-0 overflow-x-hidden"
+              :class="isDesktopPanelVisible ? 'pt-2' : ''"
+            >
               <button
                 v-if="!hasChats && !loadingChats"
                 class="group flex-1 flex items-center justify-center gap-3 m-3 sm:m-4 p-4 sm:p-5
@@ -1087,8 +1137,6 @@ function handleToggleSessionReadState(sessionId: string): void {
                   New Chat
                 </div>
               </button>
-
-              <!-- Has chats: normal input -->
               <ChatInput
                 v-else
                 ref="chatInputRef"
@@ -1106,9 +1154,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                 @send="handleSend"
                 @stop="handleStopPrompt"
               />
-
-              <!-- Tool buttons: always visible on desktop -->
-              <template v-if="isDesktop">
+              <template v-if="isDesktop && !isDesktopPanelVisible">
                 <UiButton
                   variant="ghost"
                   size="icon-sm"
@@ -1155,34 +1201,8 @@ function handleToggleSessionReadState(sessionId: string): void {
                 </UiButton>
               </template>
             </div>
-            </div>
-
-            <!-- File explorer panel (right side) -->
-            <FileExplorerPanel
-              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
-              :workspace-id="workspaceId"
-            />
-          </template>
-        </div>
-
-        <!-- Terminal panel (bottom) -->
-        <template v-if="terminalStore.isOpen && canPrompt">
-          <!-- Drag handle -->
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onDragStart"
-          ></div>
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="shrink-0 relative"
-            :style="{ height: terminalHeight + 'px' }"
-          >
-            <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
-        </template>
-
-
+        </Teleport>
       </div>
     </template>
 
