@@ -505,6 +505,7 @@ class WebSocketInterface(Interface):
                     qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
                     configure_commands=data.get("configure_commands", []),
                     env_vars=data.get("env_vars", {}),
+                    files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
                     workspace_id=workspace_id,
                     runtime_type=data.get("runtime_type", "docker"),
@@ -599,6 +600,7 @@ class WebSocketInterface(Interface):
                     prepared = await self._service.prepare_operation(
                         workspace_id,
                         env_vars=data.get("env_vars", {}),
+                        files=data.get("files", []),
                         ssh_keys=data.get("ssh_keys", []),
                     )
 
@@ -930,6 +932,7 @@ class WebSocketInterface(Interface):
                 prepared = await self._service.prepare_operation(
                     workspace_id,
                     env_vars=data.get("env_vars", {}),
+                    files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
                 )
                 if configure_commands:
@@ -1422,6 +1425,7 @@ class WebSocketInterface(Interface):
                     qemu_memory_mb=data.get("qemu_memory_mb"),
                     qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
                     env_vars=data.get("env_vars", {}),
+                    files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
                 )
                 await sio.emit(

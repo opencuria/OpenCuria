@@ -85,6 +85,44 @@ def test_admin_can_create_org_credential_service(client: Client):
 
 
 @pytest.mark.django_db
+def test_admin_can_create_file_org_credential_service(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="file-admin@org.test", password="secret")
+    admin.is_staff = True
+    admin.save(update_fields=["is_staff"])
+    org = Organization.objects.create(name="Files", slug="files-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    token = _create_api_key(
+        user=admin,
+        permissions=[
+            APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE.value,
+        ],
+    )
+
+    response = client.post(
+        "/api/v1/org-credential-services/",
+        data=json.dumps(
+            {
+                "name": "OpenAI Codex Auth Copy",
+                "slug": "openai-codex-auth-copy",
+                "credential_type": "file",
+                "target_path": "~/.codex/auth.json",
+                "description": "Codex auth file",
+                "label": "auth.json",
+            }
+        ),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["credential_type"] == "file"
+    assert payload["target_path"] == "~/.codex/auth.json"
+    assert payload["env_var_name"] == ""
+
+
+@pytest.mark.django_db
 def test_member_cannot_create_org_credential_service(client: Client):
     user_model = get_user_model()
     member = user_model.objects.create_user(email="member@org.test", password="secret")

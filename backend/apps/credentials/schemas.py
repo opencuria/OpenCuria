@@ -21,6 +21,7 @@ class CredentialServiceOut(Schema):
     description: str
     credential_type: str
     env_var_name: str
+    target_path: str
     label: str
 
 
@@ -32,6 +33,7 @@ class CredentialServiceCreateIn(Schema):
     description: str = ""
     credential_type: str
     env_var_name: str = ""
+    target_path: str = ""
     label: str = ""
 
 
@@ -65,6 +67,7 @@ class CredentialOut(Schema):
     service_slug: str
     credential_type: str
     env_var_name: str
+    target_path: str
     has_public_key: bool
     created_by_id: int
     created_at: datetime
@@ -86,6 +89,7 @@ class CredentialServiceWithActivationOut(Schema):
     description: str
     credential_type: str
     env_var_name: str
+    target_path: str
     label: str
     is_active: bool = False
 

@@ -186,6 +186,9 @@ async function navigateToCredentials(): Promise<void> {
               <Key :size="10" />
               SSH Key
             </span>
+            <span v-else-if="cred.target_path" class="text-xs text-muted-fg">
+              {{ cred.target_path }}
+            </span>
             <span v-else-if="cred.env_var_name" class="text-xs text-muted-fg">
               {{ cred.env_var_name }}
             </span>

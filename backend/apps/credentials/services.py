@@ -10,6 +10,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from django.utils.text import slugify
 
@@ -27,8 +28,18 @@ class ResolvedCredentials:
     """Result of resolving a set of credential IDs."""
 
     env_vars: dict[str, str] = field(default_factory=dict)
+    files: list["ResolvedCredentialFile"] = field(default_factory=list)
     ssh_keys: list[str] = field(default_factory=list)
     credentials: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ResolvedCredentialFile:
+    """A credential file that should exist during workspace operations."""
+
+    target_path: str
+    content: str
+    mode: int = 0o600
 
 
 class CredentialServiceSvc:
@@ -56,6 +67,7 @@ class CredentialServiceSvc:
         description: str,
         credential_type: str,
         env_var_name: str,
+        target_path: str,
         label: str,
     ):
         """Create a credential service with validation."""
@@ -73,13 +85,21 @@ class CredentialServiceSvc:
             raise ValueError("Invalid credential type")
 
         cleaned_env = env_var_name.strip().upper()
+        cleaned_target_path = target_path.strip()
         if credential_type == CredentialType.ENV:
             if not cleaned_env:
                 raise ValueError("env_var_name is required for env credentials")
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cleaned_env):
                 raise ValueError("env_var_name must be a valid environment variable name")
+            cleaned_target_path = ""
+        elif credential_type == CredentialType.FILE:
+            cleaned_env = ""
+            if not cleaned_target_path:
+                raise ValueError("target_path is required for file credentials")
+            self._validate_target_path(cleaned_target_path)
         else:
             cleaned_env = ""
+            cleaned_target_path = ""
 
         return self.services.create(
             name=name,
@@ -87,8 +107,32 @@ class CredentialServiceSvc:
             description=description.strip(),
             credential_type=credential_type,
             env_var_name=cleaned_env,
+            target_path=cleaned_target_path,
             label=label.strip(),
         )
+
+    def _validate_target_path(self, target_path: str) -> None:
+        """Validate a workspace file target path."""
+
+        if "\x00" in target_path:
+            raise ValueError("target_path must not contain null bytes")
+
+        normalized = target_path.strip()
+        if not normalized:
+            raise ValueError("target_path is required for file credentials")
+        if normalized in {"~", "${HOME}", "/"} or normalized.endswith("/"):
+            raise ValueError("target_path must point to a file path")
+
+        path_without_home = normalized
+        if normalized.startswith("~/"):
+            path_without_home = normalized[2:]
+        elif normalized.startswith("${HOME}/"):
+            path_without_home = normalized[len("${HOME}/") :]
+        elif normalized.startswith("/"):
+            path_without_home = normalized[1:]
+
+        if any(part in {"", ".", ".."} for part in PurePosixPath(path_without_home).parts):
+            raise ValueError("target_path must not contain empty, '.' or '..' segments")
 
 
 class CredentialSvc:
@@ -265,6 +309,7 @@ class CredentialSvc:
 
         Decrypts each credential and categorises it by type:
         - env credentials become {env_var_name: plaintext} entries.
+        - file credentials become target-path/content pairs.
         - ssh_key credentials become decrypted private keys in a list.
 
         Resolves credentials that are visible to the user in the org
@@ -308,6 +353,13 @@ class CredentialSvc:
             plaintext = decrypt_value(cred.encrypted_value)
             if svc.credential_type == CredentialType.SSH_KEY:
                 result.ssh_keys.append(plaintext)
+            elif svc.credential_type == CredentialType.FILE and svc.target_path:
+                result.files.append(
+                    ResolvedCredentialFile(
+                        target_path=svc.target_path,
+                        content=plaintext,
+                    )
+                )
             elif svc.credential_type == CredentialType.ENV and svc.env_var_name:
                 result.env_vars[svc.env_var_name] = plaintext
 

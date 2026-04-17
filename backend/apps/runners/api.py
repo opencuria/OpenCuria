@@ -587,7 +587,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
                 detail="An image artifact must be selected to create a workspace",
                 code="image_artifact_required",
             )
-        # Resolve credential IDs to env_vars and ssh_keys
+        # Resolve credential IDs to env_vars, files and ssh_keys
         credential_svc = CredentialSvc()
         resolved = await sync_to_async(credential_svc.resolve_credentials)(
             payload.credential_ids,
@@ -603,6 +603,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
             env_vars=resolved.env_vars,
+            files=resolved.files,
             ssh_keys=resolved.ssh_keys,
             credentials=resolved.credentials,
             runner_id=payload.runner_id,

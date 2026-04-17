@@ -734,6 +734,7 @@ class RunnerService:
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
         runner_id: uuid.UUID | None = None,
@@ -889,6 +890,14 @@ class RunnerService:
                 "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
                 "configure_commands": [],
                 "env_vars": env_vars or {},
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in (files or [])
+                ],
                 "ssh_keys": ssh_keys or [],
                 "image_artifact_id": str(image_artifact_id),
                 "image_tag": (
@@ -1121,6 +1130,14 @@ class RunnerService:
                 "configure_commands": configure_commands,
                 "fallback_configure_commands": fallback_configure_commands,
                 "env_vars": workspace_credentials.env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in workspace_credentials.files
+                ],
                 "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
@@ -1983,6 +2000,14 @@ class RunnerService:
                 "rows": rows,
                 "configure_commands": configure_commands,
                 "env_vars": workspace_credentials.env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in workspace_credentials.files
+                ],
                 "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
@@ -3941,6 +3966,7 @@ rm -rf /var/lib/apt/lists/*
         image_artifact_id: uuid.UUID,
         name: str = "",
         env_vars: dict[str, str] | None = None,
+        files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
         user=None,
@@ -4027,6 +4053,7 @@ rm -rf /var/lib/apt/lists/*
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
             resolved_env_vars = env_vars or {}
+            resolved_files = files or []
             resolved_ssh_keys = ssh_keys or []
         else:
             artifact_credentials = await sync_to_async(list)(artifact.credentials.all())
@@ -4042,9 +4069,11 @@ rm -rf /var/lib/apt/lists/*
                     user=user,
                 )
                 resolved_env_vars = resolved.env_vars
+                resolved_files = resolved.files
                 resolved_ssh_keys = resolved.ssh_keys
             else:
                 resolved_env_vars = env_vars or {}
+                resolved_files = files or []
                 resolved_ssh_keys = ssh_keys or []
 
         task_id = generate_uuid()
@@ -4072,6 +4101,14 @@ rm -rf /var/lib/apt/lists/*
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
                 "env_vars": resolved_env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in resolved_files
+                ],
                 "ssh_keys": resolved_ssh_keys,
             },
         )

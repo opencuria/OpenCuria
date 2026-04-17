@@ -60,6 +60,7 @@ interface CredentialServiceWithActivation {
   description: string
   credential_type: string
   env_var_name: string
+  target_path: string
   label: string
   is_active: boolean
 }
@@ -68,8 +69,9 @@ interface CredentialServiceCreateIn {
   name: string
   slug?: string
   description?: string
-  credential_type: 'env' | 'ssh_key'
+  credential_type: 'env' | 'file' | 'ssh_key'
   env_var_name?: string
+  target_path?: string
   label?: string
 }
 
@@ -126,13 +128,15 @@ const createServiceLoading = ref(false)
 const serviceName = ref('')
 const serviceSlug = ref('')
 const serviceDescription = ref('')
-const serviceCredentialType = ref<'env' | 'ssh_key'>('env')
+const serviceCredentialType = ref<'env' | 'file' | 'ssh_key'>('env')
 const serviceEnvVarName = ref('')
+const serviceTargetPath = ref('')
 const serviceLabel = ref('')
 const serviceSlugTouched = ref(false)
 
 const credentialTypeOptions = [
   { value: 'env', label: 'Environment Variable' },
+  { value: 'file', label: 'Credential File' },
   { value: 'ssh_key', label: 'SSH Key Pair' },
 ]
 
@@ -153,6 +157,9 @@ const isCreateServiceValid = computed(() => {
   if (!normalizedServiceSlug.value) return false
   if (serviceCredentialType.value === 'env') {
     return !!serviceEnvVarName.value.trim().match(/^[A-Z_][A-Z0-9_]*$/)
+  }
+  if (serviceCredentialType.value === 'file') {
+    return serviceTargetPath.value.trim().length > 0
   }
   return true
 })
@@ -278,6 +285,7 @@ function resetCreateServiceForm() {
   serviceDescription.value = ''
   serviceCredentialType.value = 'env'
   serviceEnvVarName.value = ''
+  serviceTargetPath.value = ''
   serviceLabel.value = ''
   serviceSlugTouched.value = false
 }
@@ -306,6 +314,8 @@ async function createCredentialService() {
     credential_type: serviceCredentialType.value,
     env_var_name:
       serviceCredentialType.value === 'env' ? serviceEnvVarName.value.trim().toUpperCase() : undefined,
+    target_path:
+      serviceCredentialType.value === 'file' ? serviceTargetPath.value.trim() : undefined,
     label: serviceLabel.value.trim(),
   }
 
@@ -817,6 +827,9 @@ function runCommand(agent: OrgAgentDefinition) {
               <p v-if="svc.env_var_name" class="text-xs text-muted-fg font-mono mt-0.5">
                 {{ svc.env_var_name }}
               </p>
+              <p v-if="svc.target_path" class="text-xs text-muted-fg font-mono mt-0.5">
+                {{ svc.target_path }}
+              </p>
             </div>
 
             <!-- Activation toggle -->
@@ -888,6 +901,17 @@ function runCommand(agent: OrgAgentDefinition) {
           />
           <p class="text-xs text-muted-fg mt-1">
             Must be uppercase snake case, e.g. <code>OPENAI_API_KEY</code>.
+          </p>
+        </div>
+
+        <div v-else-if="serviceCredentialType === 'file'">
+          <label class="text-sm font-medium text-fg mb-1.5 block">Target Path</label>
+          <UiInput
+            v-model="serviceTargetPath"
+            placeholder="~/.codex/auth.json"
+          />
+          <p class="text-xs text-muted-fg mt-1">
+            Supports absolute paths, <code>~/...</code>, <code>${HOME}/...</code>, and relative paths resolved against HOME.
           </p>
         </div>
 
