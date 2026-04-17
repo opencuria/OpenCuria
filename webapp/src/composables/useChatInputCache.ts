@@ -1,9 +1,13 @@
-import { computed } from 'vue'
+import { computed, toValue, type MaybeRefOrGetter } from 'vue'
 
-export function useChatInputCache(workspaceId: string, chatId?: string | null) {
+export function useChatInputCache(
+  workspaceId: MaybeRefOrGetter<string>,
+  chatId?: MaybeRefOrGetter<string | null | undefined>,
+) {
   const cacheKey = computed(() => {
-    const chatIdStr = chatId || 'default'
-    return `chat-input-${workspaceId}-${chatIdStr}`
+    const resolvedWorkspaceId = toValue(workspaceId)
+    const resolvedChatId = toValue(chatId) || 'default'
+    return `chat-input-${resolvedWorkspaceId}-${resolvedChatId}`
   })
 
   const loadFromCache = (): string => {

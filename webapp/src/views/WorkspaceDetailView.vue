@@ -55,9 +55,10 @@ const agents = ref<Agent[]>([])
 const selectedOptions = ref<Record<string, string>>({})
 const selectedOptionsInitializedChatId = ref<string | null>(null)
 const terminalHeight = ref(300)
-const desktopHeight = ref(400)
 const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
+const mainChatPanelHost = ref<HTMLElement | null>(null)
+const desktopChatPanelHost = ref<HTMLElement | null>(null)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -285,6 +286,17 @@ const desktopButtonTitle = computed(() => {
   if (!desktopStore.isOpen) return 'Open desktop'
   if (desktopStore.isMinimized) return 'Restore desktop'
   return 'Minimize desktop'
+})
+
+const isDesktopPanelVisible = computed(
+  () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
+)
+
+const chatPanelTarget = computed<HTMLElement | null>(() => {
+  if (isDesktopPanelVisible.value) {
+    return desktopChatPanelHost.value
+  }
+  return mainChatPanelHost.value
 })
 
 // Socket.IO event cleanup functions
@@ -730,27 +742,6 @@ function onDragStart(e: MouseEvent): void {
   document.addEventListener('mouseup', onUp)
 }
 
-function onDesktopDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isDragging.value = true
-  const startY = e.clientY
-  const startH = desktopHeight.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startY - ev.clientY
-    desktopHeight.value = Math.max(200, Math.min(startH + delta, window.innerHeight * 0.8))
-  }
-
-  const onUp = () => {
-    isDragging.value = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
-
 /** Sessions to display: scoped to active chat in multi-chat mode. */
 const displaySessions = computed(() => {
   return workspaceStore.activeChatSessions
@@ -1004,40 +995,11 @@ function handleToggleSessionReadState(sessionId: string): void {
         <!-- Chat content area -->
         <div class="flex flex-1 min-h-0">
           <WorkspaceDesktop
-            v-if="desktopStore.isOpen && !desktopStore.isMinimized && canPrompt"
+            v-if="isDesktopPanelVisible"
             :workspace-id="workspaceId"
           >
             <template #sidebar-content>
-              <div class="h-full min-h-0 w-full flex flex-col">
-                <div class="min-h-0 flex flex-1 overflow-hidden">
-                  <ChatContainer
-                    :key="workspaceStore.activeChatId ?? 'desktop-sidebar'"
-                    :sessions="displaySessions"
-                    :is-multi-chat="isMultiChat"
-                    :workspace-id="workspaceId"
-                    class="min-h-0 flex-1"
-                    @toggle-read-state="handleToggleSessionReadState"
-                  />
-                </div>
-                <div class="shrink-0 pt-2">
-                  <ChatInput
-                    ref="chatInputRef"
-                    :agent-options="agentOptions"
-                    :selected-options="selectedOptions"
-                    :skill-options="skillStore.skills"
-                    :disabled="!canPrompt || hasActiveSession || !isActiveChatWritable"
-                    :stoppable="canPrompt && hasActiveSession"
-                    :sending="sending"
-                    :workspace-id="workspaceId"
-                    :chat-id="workspaceStore.activeChatId"
-                    :busy-message="chatLockMessage"
-                    class="flex-1"
-                    @update:selected-options="selectedOptions = $event"
-                    @send="handleSend"
-                    @stop="handleStopPrompt"
-                  />
-                </div>
-              </div>
+              <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
             </template>
           </WorkspaceDesktop>
 
@@ -1115,8 +1077,42 @@ function handleToggleSessionReadState(sessionId: string): void {
                 </div>
               </div>
             </div>
+            <div
+              v-else-if="hasChats || loadingChats"
+              ref="mainChatPanelHost"
+              class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
+            ></div>
+            </div>
+
+            <!-- File explorer panel (right side) -->
+            <FileExplorerPanel
+              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
+              :workspace-id="workspaceId"
+            />
+          </template>
+        </div>
+
+        <!-- Terminal panel (bottom) -->
+        <template v-if="terminalStore.isOpen && canPrompt">
+          <!-- Drag handle -->
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
+            @mousedown="onDragStart"
+          ></div>
+          <div
+            v-show="!terminalStore.isMinimized"
+            class="shrink-0 relative"
+            :style="{ height: terminalHeight + 'px' }"
+          >
+            <WorkspaceTerminal :workspace-id="workspaceId" />
+          </div>
+        </template>
+
+
+        <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
+          <div class="flex h-full min-h-0 w-full flex-col">
             <ChatContainer
-              v-else
               :key="workspaceStore.activeChatId ?? 'default'"
               :sessions="displaySessions"
               :is-multi-chat="isMultiChat"
@@ -1125,8 +1121,8 @@ function handleToggleSessionReadState(sessionId: string): void {
               @toggle-read-state="handleToggleSessionReadState"
             />
             <div
-              v-if="hasChats || loadingChats"
               class="flex items-center gap-0 min-w-0 overflow-x-hidden"
+              :class="isDesktopPanelVisible ? 'pt-2' : ''"
             >
               <ChatInput
                 ref="chatInputRef"
@@ -1144,7 +1140,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                 @send="handleSend"
                 @stop="handleStopPrompt"
               />
-              <template v-if="isDesktop">
+              <template v-if="isDesktop && !isDesktopPanelVisible">
                 <UiButton
                   variant="ghost"
                   size="icon-sm"
@@ -1191,34 +1187,8 @@ function handleToggleSessionReadState(sessionId: string): void {
                 </UiButton>
               </template>
             </div>
-            </div>
-
-            <!-- File explorer panel (right side) -->
-            <FileExplorerPanel
-              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
-              :workspace-id="workspaceId"
-            />
-          </template>
-        </div>
-
-        <!-- Terminal panel (bottom) -->
-        <template v-if="terminalStore.isOpen && canPrompt">
-          <!-- Drag handle -->
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onDragStart"
-          ></div>
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="shrink-0 relative"
-            :style="{ height: terminalHeight + 'px' }"
-          >
-            <WorkspaceTerminal :workspace-id="workspaceId" />
           </div>
-        </template>
-
-
+        </Teleport>
       </div>
     </template>
 
