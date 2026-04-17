@@ -12,8 +12,10 @@ from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
 from apps.runners.models import Chat, Runner, Session, Workspace
 from apps.mcp_app.server import (
     _call_get_workspace,
+    _call_list_chat_sessions,
     _call_list_agents,
     _call_list_conversations,
+    _call_list_workspace_chats,
     _call_list_workspaces,
 )
 from common.utils import hash_token
@@ -94,6 +96,42 @@ def test_mcp_get_workspace_rejects_foreign_admin_access(mcp_access_setup):
     )
 
     assert _parse_text_payload(result) == "Error: Workspace not found"
+
+
+@pytest.mark.django_db
+def test_mcp_get_workspace_omits_sessions(mcp_access_setup):
+    result = _call_get_workspace(
+        mcp_access_setup["admin_api_key"],
+        mcp_access_setup["org"].id,
+        {"workspace_id": str(mcp_access_setup["admin_workspace"].id)},
+    )
+
+    payload = json.loads(_parse_text_payload(result))
+    assert payload["id"] == str(mcp_access_setup["admin_workspace"].id)
+    assert "sessions" not in payload
+
+
+@pytest.mark.django_db
+def test_mcp_chat_tools_are_owner_scoped(mcp_access_setup):
+    result = _call_list_workspace_chats(
+        mcp_access_setup["admin_api_key"],
+        mcp_access_setup["org"].id,
+        {"workspace_id": str(mcp_access_setup["admin_workspace"].id)},
+    )
+    payload = json.loads(_parse_text_payload(result))
+    assert [entry["workspace_id"] for entry in payload] == [
+        str(mcp_access_setup["admin_workspace"].id)
+    ]
+
+    foreign = _call_list_chat_sessions(
+        mcp_access_setup["admin_api_key"],
+        mcp_access_setup["org"].id,
+        {
+            "workspace_id": str(mcp_access_setup["owner_workspace"].id),
+            "chat_id": str(mcp_access_setup["owner_workspace"].chats.first().id),
+        },
+    )
+    assert _parse_text_payload(foreign) == "Error: Workspace not found"
 
 
 @pytest.mark.django_db

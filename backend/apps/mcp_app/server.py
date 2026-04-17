@@ -11,6 +11,8 @@ Tools and their required permissions
 -------------------------------------
 - list_workspaces        → workspaces:read
 - get_workspace          → workspaces:read
+- list_workspace_chats   → conversations:read
+- list_chat_sessions     → conversations:read
 - create_workspace       → workspaces:create
 - stop_workspace         → workspaces:stop
 - resume_workspace       → workspaces:resume
@@ -85,13 +87,36 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="get_workspace",
-        description="Get details of a single workspace including sessions.",
+        description="Get details of a single workspace without chat session history.",
         inputSchema={
             "type": "object",
             "properties": {
                 "workspace_id": {"type": "string", "description": "Workspace UUID."}
             },
             "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="list_workspace_chats",
+        description="List chats for a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."}
+            },
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="list_chat_sessions",
+        description="List sessions for a specific chat in a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "chat_id": {"type": "string", "description": "Chat UUID."},
+            },
+            "required": ["workspace_id", "chat_id"],
         },
     ),
     Tool(
@@ -461,6 +486,8 @@ _TOOLS: list[Tool] = [
 _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspaces": APIKeyPermission.WORKSPACES_READ,
     "get_workspace": APIKeyPermission.WORKSPACES_READ,
+    "list_workspace_chats": APIKeyPermission.CONVERSATIONS_READ,
+    "list_chat_sessions": APIKeyPermission.CONVERSATIONS_READ,
     "create_workspace": APIKeyPermission.WORKSPACES_CREATE,
     "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
@@ -599,10 +626,6 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     if error is not None:
         return error
 
-    from apps.runners.sio_server import get_runner_service
-
-    svc = get_runner_service()
-    sessions = list(svc.list_sessions(workspace_id))
     result = {
         "id": str(workspace.id),
         "name": workspace.name,
@@ -610,18 +633,97 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "runner_id": str(workspace.runner_id),
         "runtime_type": str(workspace.runtime_type),
         "created_at": workspace.created_at.isoformat(),
-        "sessions": [
-            {
-                "id": str(s.id),
-                "prompt": s.prompt,
-                "status": str(s.status),
-                "output": s.output,
-                "created_at": s.created_at.isoformat(),
-            }
-            for s in sessions
-        ],
     }
     return _text(result)
+
+
+def _call_list_workspace_chats(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    from django.db.models import Count
+    from apps.runners.models import Chat
+
+    chats = (
+        Chat.objects.filter(workspace_id=workspace.id)
+        .annotate(_session_count=Count("sessions"))
+        .order_by("-created_at")
+    )
+    return _text(
+        [
+            {
+                "id": str(chat.id),
+                "workspace_id": str(chat.workspace_id),
+                "name": chat.name,
+                "agent_definition_id": (
+                    str(chat.agent_definition_id) if chat.agent_definition_id else None
+                ),
+                "agent_type": chat.agent_type,
+                "session_count": chat._session_count,
+                "created_at": chat.created_at.isoformat(),
+                "updated_at": chat.updated_at.isoformat(),
+            }
+            for chat in chats
+        ]
+    )
+
+
+def _call_list_chat_sessions(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    workspace_id_str = args.get("workspace_id")
+    chat_id_str = args.get("chat_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    if not chat_id_str:
+        return _error("chat_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+        chat_id = _uuid.UUID(chat_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id or chat_id UUID")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    from apps.runners.models import Chat
+    from apps.runners.sio_server import get_runner_service
+
+    chat = Chat.objects.filter(id=chat_id, workspace_id=workspace.id).first()
+    if chat is None:
+        return _error("Chat not found in workspace")
+
+    svc = get_runner_service()
+    sessions = list(svc.list_chat_sessions(chat_id))
+    return _text(
+        [
+            {
+                "id": str(session.id),
+                "chat_id": str(session.chat_id),
+                "prompt": session.prompt,
+                "status": str(session.status),
+                "output": session.output,
+                "error_message": session.error_message,
+                "created_at": session.created_at.isoformat(),
+                "completed_at": (
+                    session.completed_at.isoformat() if session.completed_at else None
+                ),
+            }
+            for session in sessions
+        ]
+    )
 
 
 def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
@@ -837,7 +939,7 @@ def _call_run_prompt(api_key, org_id, args: dict) -> list[TextContent]:
             "task_id": str(task.id),
             "chat_id": str(chat.id),
             "status": str(session.status),
-            "message": "Prompt dispatched. Use get_workspace to see output.",
+            "message": "Prompt dispatched. Use list_chat_sessions to see output.",
         })
     except (NotFoundError, ConflictError) as e:
         return _error(str(e))
@@ -1883,6 +1985,8 @@ def _call_duplicate_org_agent_definition(api_key, org_id, args: dict) -> list[Te
 _TOOL_HANDLERS = {
     "list_workspaces": _call_list_workspaces,
     "get_workspace": _call_get_workspace,
+    "list_workspace_chats": _call_list_workspace_chats,
+    "list_chat_sessions": _call_list_chat_sessions,
     "create_workspace": _call_create_workspace,
     "stop_workspace": _call_stop_workspace,
     "resume_workspace": _call_resume_workspace,

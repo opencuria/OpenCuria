@@ -115,12 +115,6 @@ class WorkspaceOut(Schema):
     credential_ids: list[uuid.UUID] = []
 
 
-class WorkspaceDetailOut(WorkspaceOut):
-    """Response schema for a workspace with its sessions."""
-
-    sessions: list[SessionOut] = []
-
-
 class WorkspaceCreateIn(Schema):
     """Request schema for creating a workspace."""
 
@@ -700,7 +694,3 @@ class ImageDefinitionDuplicateIn(Schema):
     """Request schema for duplicating an image definition into the org."""
 
     name: str | None = None
-
-
-# Fix forward reference in WorkspaceDetailOut
-WorkspaceDetailOut.model_rebuild()

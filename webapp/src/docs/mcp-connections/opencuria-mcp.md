@@ -194,7 +194,9 @@ The tools your agent can access depend on the permissions assigned to the API ke
 | Tool | Required permission | Description |
 |---|---|---|
 | `list_workspaces` | `workspaces:read` | List workspaces in the active organization |
-| `get_workspace` | `workspaces:read` | Get details of a single workspace including sessions |
+| `get_workspace` | `workspaces:read` | Get details of a single workspace without chat session history |
+| `list_workspace_chats` | `conversations:read` | List chats for a workspace |
+| `list_chat_sessions` | `conversations:read` | List sessions for a specific chat |
 | `create_workspace` | `workspaces:create` | Create a new workspace on a runner |
 | `stop_workspace` | `workspaces:stop` | Stop a running workspace |
 | `resume_workspace` | `workspaces:resume` | Resume a stopped workspace |
