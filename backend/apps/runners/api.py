@@ -89,7 +89,6 @@ from .schemas import (
     DesktopClipboardReadOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
-    WorkspaceDetailOut,
     WorkspaceOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
@@ -626,10 +625,10 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
 
 @workspace_router.get(
     "/{workspace_id}/",
-    response={200: WorkspaceDetailOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: WorkspaceOut, 403: ErrorOut, 404: ErrorOut},
 )
 def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return a workspace with its sessions."""
+    """Return workspace details without chat session history."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
     org_id = _get_org_id(request)
@@ -637,11 +636,9 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        service = _get_service()
-        sessions = service.list_sessions(workspace_id)
-        session_list = list(sessions)
         from .enums import RunnerStatus as RS
-        return 200, WorkspaceDetailOut(
+        from .models import Session
+        return 200, WorkspaceOut(
             id=workspace.id,
             runner_id=workspace.runner_id,
             status=workspace.status,
@@ -668,13 +665,12 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             ),
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
-            has_active_session=any(
-                s.status in (SessionStatus.PENDING, SessionStatus.RUNNING)
-                for s in session_list
-            ),
+            has_active_session=Session.objects.filter(
+                chat__workspace_id=workspace_id,
+                status__in=(SessionStatus.PENDING, SessionStatus.RUNNING),
+            ).exists(),
             runner_online=workspace.runner.status == RS.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
-            sessions=[_session_to_out(s) for s in session_list],
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)

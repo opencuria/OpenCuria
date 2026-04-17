@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { PENDING_CHAT_ID } from '@/stores/workspaces'
 import { useConversationStore } from '@/stores/conversations'
 import { useSkillStore } from '@/stores/skills'
 import { useTerminalStore } from '@/stores/terminal'
@@ -86,9 +87,7 @@ const hasActiveSession = computed(() => {
   // Workspace-level flag from API covers all chats in this workspace
   if (workspace.value?.has_active_session) return true
   // Also check local session state for immediate optimistic feedback
-  const sessions = isMultiChat.value
-    ? workspaceStore.activeChatSessions
-    : workspace.value?.sessions ?? []
+  const sessions = workspaceStore.activeChatSessions
   return sessions.some((s) => isSessionActive(s.status))
 })
 
@@ -216,6 +215,15 @@ async function loadWorkspaceChats(
   } finally {
     loadingChats.value = false
   }
+}
+
+async function loadActiveChatSessions(): Promise<void> {
+  const chatId = workspaceStore.activeChatId
+  if (!chatId || chatId === PENDING_CHAT_ID) {
+    workspaceStore.activeSessions = []
+    return
+  }
+  await workspaceStore.fetchChatSessions(workspaceId.value, chatId)
 }
 
 function handleAgentPickerOpenChange(isOpen: boolean): void {
@@ -479,6 +487,7 @@ onUnmounted(() => {
   workspaceStore.activeWorkspace = null
   workspaceStore.chats = []
   workspaceStore.activeChatId = null
+  workspaceStore.activeSessions = []
   workspaceStore.supportsMultiChat = false
   loadingChats.value = false
 })
@@ -491,6 +500,7 @@ watch(workspaceId, (newId, oldId) => {
     fileExplorerStore.reset()
     workspaceStore.chats = []
     workspaceStore.activeChatId = null
+    workspaceStore.activeSessions = []
     loadingChats.value = true
     workspaceStore.fetchWorkspaceDetail(newId)
     loadAvailableAgents(newId)
@@ -507,6 +517,14 @@ watch(
       workspaceStore.setActiveChat(chatId)
     }
   },
+)
+
+watch(
+  () => workspaceStore.activeChatId,
+  () => {
+    void loadActiveChatSessions()
+  },
+  { immediate: true },
 )
 
 // Initialise selectedOptions from the active chat context:
@@ -735,17 +753,7 @@ function onDesktopDragStart(e: MouseEvent): void {
 
 /** Sessions to display: scoped to active chat in multi-chat mode. */
 const displaySessions = computed(() => {
-  if (isMultiChat.value) {
-    // activeChatSessions already returns [] when no chat is selected
-    return workspaceStore.activeChatSessions
-  }
-  const sessions = workspace.value?.sessions ?? []
-  // Guard against race condition: if sessions already have chat_ids (i.e. this is
-  // actually a multi-chat workspace) but isMultiChat hasn't been determined yet
-  // (agents are still loading), return nothing to avoid triggering image fetches
-  // for sessions from other chats.
-  if (sessions.some((s) => s.chat_id) && !workspaceStore.activeChatId) return []
-  return sessions
+  return workspaceStore.activeChatSessions
 })
 
 const activeConversationKey = computed(() => `${workspaceId.value}:${workspaceStore.activeChatId ?? 'workspace'}`)

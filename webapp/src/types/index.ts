@@ -226,9 +226,7 @@ export interface Workspace {
   credential_ids: string[]
 }
 
-export interface WorkspaceDetail extends Workspace {
-  sessions: Session[]
-}
+export type WorkspaceDetail = Workspace
 
 export interface WorkspaceCreateIn {
   name: string

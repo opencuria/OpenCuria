@@ -40,6 +40,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   // --- State ---
   const workspaces = ref<Workspace[]>([])
   const activeWorkspace = ref<WorkspaceDetail | null>(null)
+  const activeSessions = ref<Session[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
   const chats = ref<Chat[]>([])
@@ -63,10 +64,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   /** Sessions filtered to the active chat. Returns empty array if no active chat is selected. */
   const activeChatSessions = computed<Session[]>(() => {
-    if (!activeWorkspace.value || !activeChatId.value) return []
-    return activeWorkspace.value.sessions.filter(
-      (s) => s.chat_id === activeChatId.value,
-    )
+    if (!activeChatId.value) return []
+    return activeSessions.value
   })
 
   /** The currently selected chat object. */
@@ -232,12 +231,13 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       const fresh = await workspacesApi.getWorkspace(id)
 
       if (activeWorkspace.value?.id === fresh.id) {
-        // Smart merge: update scalar fields without replacing the whole object.
-        // This preserves object identity for sessions that haven't changed,
-        // so ChatMessage components don't re-render unnecessarily.
         activeWorkspace.value.status = fresh.status
         activeWorkspace.value.active_operation = fresh.active_operation
         activeWorkspace.value.name = fresh.name
+        activeWorkspace.value.runtime_type = fresh.runtime_type
+        activeWorkspace.value.qemu_vcpus = fresh.qemu_vcpus
+        activeWorkspace.value.qemu_memory_mb = fresh.qemu_memory_mb
+        activeWorkspace.value.qemu_disk_size_gb = fresh.qemu_disk_size_gb
         activeWorkspace.value.last_activity_at = fresh.last_activity_at
         activeWorkspace.value.auto_stop_timeout_minutes = fresh.auto_stop_timeout_minutes
         activeWorkspace.value.auto_stop_at = fresh.auto_stop_at
@@ -245,33 +245,64 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         activeWorkspace.value.has_active_session = fresh.has_active_session
         activeWorkspace.value.runner_online = fresh.runner_online
         activeWorkspace.value.credential_ids = fresh.credential_ids
-
-        // Merge sessions by ID: update in-place where possible to preserve
-        // object identity (avoids triggering watch/computed in ChatMessage).
-        const existingMap = new Map(activeWorkspace.value.sessions.map((s) => [s.id, s]))
-        const mergedSessions: Session[] = []
-        for (const fs of fresh.sessions) {
-          const existing = existingMap.get(fs.id)
-          if (existing) {
-            // Only update properties that actually changed to minimise reactivity triggers.
-            if (existing.output !== fs.output) existing.output = fs.output
-            if (existing.error_message !== fs.error_message) {
-              existing.error_message = fs.error_message
-            }
-            if (existing.status !== fs.status) existing.status = fs.status
-            if (existing.completed_at !== fs.completed_at) existing.completed_at = fs.completed_at
-            if (existing.agent_model !== fs.agent_model) existing.agent_model = fs.agent_model
-            mergedSessions.push(existing)
-          } else {
-            mergedSessions.push(fs)
-          }
-        }
-        activeWorkspace.value.sessions = mergedSessions
       } else {
         activeWorkspace.value = fresh
       }
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to load workspace'
+    } finally {
+      loading.value = false
+    }
+  }
+
+  function mergeSessions(freshSessions: Session[]): void {
+    const existingMap = new Map(activeSessions.value.map((session) => [session.id, session]))
+    const merged: Session[] = []
+
+    for (const freshSession of freshSessions) {
+      const existing = existingMap.get(freshSession.id)
+      if (existing) {
+        if (existing.prompt !== freshSession.prompt) existing.prompt = freshSession.prompt
+        if (existing.output !== freshSession.output) existing.output = freshSession.output
+        if (existing.error_message !== freshSession.error_message) {
+          existing.error_message = freshSession.error_message
+        }
+        if (existing.status !== freshSession.status) existing.status = freshSession.status
+        if (existing.read_at !== freshSession.read_at) existing.read_at = freshSession.read_at
+        if (existing.completed_at !== freshSession.completed_at) {
+          existing.completed_at = freshSession.completed_at
+        }
+        if (existing.agent_model !== freshSession.agent_model) {
+          existing.agent_model = freshSession.agent_model
+        }
+        if (existing.chat_id !== freshSession.chat_id) existing.chat_id = freshSession.chat_id
+        if (existing.agent_options !== freshSession.agent_options) {
+          existing.agent_options = freshSession.agent_options
+        }
+        if (existing.skills !== freshSession.skills) existing.skills = freshSession.skills
+        merged.push(existing)
+      } else {
+        merged.push(freshSession)
+      }
+    }
+
+    activeSessions.value = merged
+  }
+
+  async function fetchChatSessions(workspaceId: string, chatId: string): Promise<void> {
+    loading.value = true
+    error.value = null
+    try {
+      const freshSessions = await workspacesApi.getChatSessions(workspaceId, chatId)
+      mergeSessions(
+        freshSessions.map((session) => ({
+          ...session,
+          workspace_id: workspaceId,
+        })),
+      )
+    } catch (e: unknown) {
+      activeSessions.value = []
+      error.value = e instanceof Error ? e.message : 'Failed to load chat sessions'
     } finally {
       loading.value = false
     }
@@ -484,7 +515,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
           completed_at: null,
           skills: optimisticSkills,
         }
-        activeWorkspace.value.sessions.push(newSession)
+        activeSessions.value.push(newSession)
 
         // If this created/used a chat, make sure it's the active one
         if (result.chat_id && result.chat_id !== activeChatId.value) {
@@ -508,7 +539,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       return
     }
 
-    const activeSession = [...activeWorkspace.value.sessions]
+    const activeSession = [...activeSessions.value]
       .reverse()
       .find(
         (session) => isSessionActive(session.status),
@@ -540,11 +571,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         ? chats.value.some((chat) => chat.id === activeChatId.value)
         : false
       if (!activeChatExists) {
-        activeChatId.value = chats.value[0]?.id ?? null
+        setActiveChat(chats.value[0]?.id ?? null)
       }
     } catch {
       chats.value = []
       activeChatId.value = null
+      activeSessions.value = []
     }
   }
 
@@ -552,6 +584,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // Discard any pending chat when the user navigates to a real chat
     if (chatId !== PENDING_CHAT_ID) {
       chats.value = chats.value.filter((c) => !c.is_pending)
+    }
+    if (activeChatId.value !== chatId) {
+      activeSessions.value = []
     }
     activeChatId.value = chatId
   }
@@ -652,12 +687,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       await workspacesApi.deleteChat(workspaceId, chatId)
       chats.value = chats.value.filter((c) => c.id !== chatId)
 
-      // Remove sessions belonging to this chat from active workspace
-      if (activeWorkspace.value) {
-        activeWorkspace.value.sessions = activeWorkspace.value.sessions.filter(
-          (s) => s.chat_id !== chatId,
-        )
-      }
+      if (activeChatId.value === chatId) activeSessions.value = []
 
       // Switch to another chat if the active one was deleted
       if (activeChatId.value === chatId) {
@@ -794,9 +824,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   }
 
   function appendOutputChunk(sessionId: string, chunk: string): void {
-    if (!activeWorkspace.value) return
-
-    const session = activeWorkspace.value.sessions.find((s) => s.id === sessionId)
+    const session = activeSessions.value.find((s) => s.id === sessionId)
     if (session) {
       // Mirror the backend's append_output logic: join chunks with "\n"
       // so the live-streamed output matches what is stored in the database.
@@ -812,8 +840,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   }
 
   function setSessionStatusDetail(sessionId: string, detail: string): void {
-    if (!activeWorkspace.value) return
-    const session = activeWorkspace.value.sessions.find((s) => s.id === sessionId)
+    const session = activeSessions.value.find((s) => s.id === sessionId)
     if (!session) return
     session.status_detail = detail
   }
@@ -821,7 +848,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   function _refreshActiveSessionFlag(): void {
     if (!activeWorkspace.value) return
     const workspaceId = activeWorkspace.value.id
-    const stillActive = activeWorkspace.value.sessions.some(
+    const stillActive = activeSessions.value.some(
       (s) => isSessionActive(s.status),
     )
     const ws = workspaces.value.find((w) => w.id === workspaceId)
@@ -830,9 +857,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   }
 
   function markSessionComplete(sessionId: string): void {
-    if (!activeWorkspace.value) return
-
-    const session = activeWorkspace.value.sessions.find((s) => s.id === sessionId)
+    const session = activeSessions.value.find((s) => s.id === sessionId)
     if (session) {
       session.status = SessionStatus.COMPLETED
       session.read_at = null
@@ -844,9 +869,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   }
 
   function markSessionFailed(sessionId: string, errorMsg?: string): void {
-    if (!activeWorkspace.value) return
-
-    const session = activeWorkspace.value.sessions.find((s) => s.id === sessionId)
+    const session = activeSessions.value.find((s) => s.id === sessionId)
     if (session) {
       session.status = SessionStatus.FAILED
       session.read_at = null
@@ -869,6 +892,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // State
     workspaces,
     activeWorkspace,
+    activeSessions,
     loading,
     error,
     chats,
@@ -884,6 +908,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // Actions
     fetchWorkspaces,
     fetchWorkspaceDetail,
+    fetchChatSessions,
     createWorkspace,
     updateWorkspace,
     renameWorkspace,
