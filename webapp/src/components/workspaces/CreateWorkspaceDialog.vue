@@ -484,7 +484,7 @@ const isValid = computed(
 
       <!-- Normal: Credentials -->
       <div v-if="!isCapturedClone">
-        <label class="text-sm font-medium text-fg mb-1.5 block">Credentials <span class="text-muted-fg font-normal">(optional — for git/SSH access)</span></label>
+        <label class="text-sm font-medium text-fg mb-1.5 block">Credentials <span class="text-muted-fg font-normal">(optional)</span></label>
         <div v-if="credentialStore.credentials.length" class="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
           <button
             v-for="cred in credentialStore.credentials"
@@ -509,6 +509,7 @@ const isValid = computed(
               <Key :size="10" />
               SSH Key
             </span>
+            <span v-else-if="cred.target_path" class="text-xs text-muted-fg">{{ cred.target_path }}</span>
             <span v-else-if="cred.env_var_name" class="text-xs text-muted-fg">{{ cred.env_var_name }}</span>
           </button>
         </div>

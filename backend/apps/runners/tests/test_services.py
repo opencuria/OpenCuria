@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.credentials.models import CredentialService
-from apps.credentials.services import CredentialSvc
+from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
 from apps.runners.enums import (
     AgentCommandPhase,
     RunnerStatus,
@@ -328,6 +328,12 @@ class TestCreateWorkspace:
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
             env_vars={"GITHUB_TOKEN": "test-token"},
+            files=[
+                ResolvedCredentialFile(
+                    target_path="~/.codex/auth.json",
+                    content='{"access_token":"test"}',
+                )
+            ],
             ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
             user=user,
             organization_id=runner.organization_id,
@@ -339,6 +345,13 @@ class TestCreateWorkspace:
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
+        assert payload["files"] == [
+            {
+                "target_path": "~/.codex/auth.json",
+                "content": '{"access_token":"test"}',
+                "mode": 0o600,
+            }
+        ]
         assert len(payload["ssh_keys"]) == 1
 
     @pytest.mark.asyncio

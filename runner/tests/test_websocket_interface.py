@@ -42,7 +42,13 @@ class DummyService:
         async for line in _empty_output():
             yield line
 
-    async def prepare_operation(self, workspace_id, env_vars=None, ssh_keys=None):
+    async def prepare_operation(
+        self,
+        workspace_id,
+        env_vars=None,
+        files=None,
+        ssh_keys=None,
+    ):
         return self.prepared_operation
 
     async def cleanup_operation(self, prepared):

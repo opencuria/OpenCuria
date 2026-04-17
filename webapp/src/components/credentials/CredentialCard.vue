@@ -76,9 +76,16 @@ const canEdit = computed(() => {
             {{ credential.scope === 'organization' ? 'Organization' : 'Personal' }}
           </UiBadge>
           <UiBadge variant="outline">
-            {{ credential.credential_type === 'ssh_key' ? 'SSH Key' : 'ENV' }}
+            {{
+              credential.credential_type === 'ssh_key'
+                ? 'SSH Key'
+                : credential.credential_type === 'file'
+                  ? 'File'
+                  : 'ENV'
+            }}
           </UiBadge>
           <UiBadge v-if="credential.env_var_name" variant="muted">{{ credential.env_var_name }}</UiBadge>
+          <UiBadge v-if="credential.target_path" variant="muted">{{ credential.target_path }}</UiBadge>
         </div>
       </div>
 

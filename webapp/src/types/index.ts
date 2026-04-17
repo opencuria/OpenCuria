@@ -360,6 +360,7 @@ export interface CredentialService {
   description: string
   credential_type: string
   env_var_name: string
+  target_path: string
   label: string
 }
 
@@ -372,6 +373,7 @@ export interface Credential {
   service_slug: string
   credential_type: string
   env_var_name: string
+  target_path: string
   has_public_key: boolean
   created_by_id: number
   created_at: string

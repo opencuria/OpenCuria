@@ -1289,11 +1289,12 @@ class QemuRuntime(RuntimeBackend):
         rows: int = 24,
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        command: list[str] | None = None,
     ) -> PtyHandle:
         """Open an interactive PTY session via SSH."""
         ssh = await self._get_ssh(instance_id)
         cmd_str = self._build_shell_command(
-            ["/bin/bash", "-l"],
+            command or ["/bin/bash", "-l"],
             workdir=workdir or "/workspace",
             env=env,
         )
