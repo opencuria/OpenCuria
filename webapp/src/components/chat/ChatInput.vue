@@ -462,7 +462,7 @@ watch(imagePickerOpen, async (open) => {
       <div class="flex items-center gap-2 p-2 pl-3 pb-3">
         <!-- Scrollable options row (takes all remaining space) -->
         <div
-          class="flex-1 overflow-x-auto min-w-0 -mb-0.5 pb-0.5"
+          class="flex-1 min-w-0 overflow-x-auto px-1 py-1 -mx-1 -my-1"
           style="scrollbar-width: none; -webkit-overflow-scrolling: touch;"
         >
           <div class="flex items-center gap-1.5 min-w-max">
