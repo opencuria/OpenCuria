@@ -1275,47 +1275,53 @@ class RunnerService:
                 qemu_disk_size_gb=qemu_disk_size_gb,
                 current=current,
             )
-            await self._ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=resolved_qemu_vcpus,
-                requested_memory_mb=resolved_qemu_memory_mb,
-                requested_disk_size_gb=resolved_qemu_disk_size_gb,
-                exclude_workspace_id=workspace.id,
+            qemu_resources_changed = current != (
+                resolved_qemu_vcpus,
+                resolved_qemu_memory_mb,
+                resolved_qemu_disk_size_gb,
             )
-
-            workspace = await sync_to_async(self.workspaces.update_qemu_resources)(
-                workspace,
-                qemu_vcpus=resolved_qemu_vcpus,
-                qemu_memory_mb=resolved_qemu_memory_mb,
-                qemu_disk_size_gb=resolved_qemu_disk_size_gb,
-            )
-
-            if workspace.status == WorkspaceStatus.RUNNING:
-                runner = workspace.runner
-                if not runner.is_online:
-                    raise RunnerOfflineError(str(runner.id))
-
-                task_id = generate_uuid()
-                task = await sync_to_async(self.tasks.create)(
-                    task_id=task_id,
+            if qemu_resources_changed:
+                await self._ensure_qemu_active_capacity(
                     runner=runner,
-                    task_type=TaskType.UPDATE_WORKSPACE,
-                    workspace=workspace,
+                    requested_vcpus=resolved_qemu_vcpus,
+                    requested_memory_mb=resolved_qemu_memory_mb,
+                    requested_disk_size_gb=resolved_qemu_disk_size_gb,
+                    exclude_workspace_id=workspace.id,
                 )
-                await self._dispatch_workspace_task(
-                    runner=runner,
-                    event="task:update_workspace",
-                    task=task,
-                    workspace=workspace,
-                    operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
-                    payload={
-                        "task_id": str(task_id),
-                        "workspace_id": str(workspace_id),
-                        "qemu_vcpus": resolved_qemu_vcpus,
-                        "qemu_memory_mb": resolved_qemu_memory_mb,
-                        "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
-                    },
+
+                workspace = await sync_to_async(self.workspaces.update_qemu_resources)(
+                    workspace,
+                    qemu_vcpus=resolved_qemu_vcpus,
+                    qemu_memory_mb=resolved_qemu_memory_mb,
+                    qemu_disk_size_gb=resolved_qemu_disk_size_gb,
                 )
+
+                if workspace.status == WorkspaceStatus.RUNNING:
+                    runner = workspace.runner
+                    if not runner.is_online:
+                        raise RunnerOfflineError(str(runner.id))
+
+                    task_id = generate_uuid()
+                    task = await sync_to_async(self.tasks.create)(
+                        task_id=task_id,
+                        runner=runner,
+                        task_type=TaskType.UPDATE_WORKSPACE,
+                        workspace=workspace,
+                    )
+                    await self._dispatch_workspace_task(
+                        runner=runner,
+                        event="task:update_workspace",
+                        task=task,
+                        workspace=workspace,
+                        operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
+                        payload={
+                            "task_id": str(task_id),
+                            "workspace_id": str(workspace_id),
+                            "qemu_vcpus": resolved_qemu_vcpus,
+                            "qemu_memory_mb": resolved_qemu_memory_mb,
+                            "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
+                        },
+                    )
 
         return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
 

@@ -793,6 +793,46 @@ class TestWorkspaceOperationState:
         assert updated.active_operation == WorkspaceOperation.RESTARTING
 
     @pytest.mark.asyncio
+    async def test_running_qemu_update_skips_restart_for_unchanged_resources(
+        self, service, runner, workspace
+    ):
+        """No-op QEMU updates must not restart a running workspace."""
+        service._dispatch_workspace_task = AsyncMock()
+        workspace.runtime_type = "qemu"
+        workspace.qemu_vcpus = None
+        workspace.qemu_memory_mb = None
+        workspace.qemu_disk_size_gb = None
+        workspace.save(
+            update_fields=[
+                "runtime_type",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
+
+        updated = await service.update_workspace(
+            workspace.id,
+            qemu_vcpus=runner.qemu_default_vcpus,
+            qemu_memory_mb=runner.qemu_default_memory_mb,
+            qemu_disk_size_gb=runner.qemu_default_disk_size_gb,
+        )
+
+        workspace.refresh_from_db()
+        assert updated is not None
+        assert updated.active_operation is None
+        assert workspace.active_operation is None
+        assert workspace.qemu_vcpus is None
+        assert workspace.qemu_memory_mb is None
+        assert workspace.qemu_disk_size_gb is None
+        assert not Task.objects.filter(
+            workspace=workspace,
+            type=TaskType.UPDATE_WORKSPACE,
+        ).exists()
+        service._dispatch_workspace_task.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_busy_workspace_rejects_prompt(self, service, workspace):
         """Prompts must be blocked while a blocking workspace operation is active."""
         workspace.active_operation = WorkspaceOperation.RESTARTING
