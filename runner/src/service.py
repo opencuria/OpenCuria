@@ -65,6 +65,7 @@ class OperationCredentialContext:
 
     directory: str
     bootstrap_script: str
+    cleanup_script: str
     environment: dict[str, str]
 
     def build_bootstrap_snippet(
@@ -339,14 +340,16 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         env_vars: dict[str, str] | None,
+        files: list[dict[str, Any]] | None,
         ssh_keys: list[str] | None,
         log,
     ) -> OperationCredentialContext | None:
         """Create a temporary credential context for a single operation."""
 
         env_vars = env_vars or {}
+        credential_files = files or []
         ssh_keys = ssh_keys or []
-        if not env_vars and not ssh_keys:
+        if not env_vars and not credential_files and not ssh_keys:
             return None
 
         context_id = str(uuid.uuid4())
@@ -354,24 +357,82 @@ class WorkspaceService:
         ssh_dir = f"{context_dir}/ssh"
         bin_dir = f"{context_dir}/bin"
         bootstrap_path = f"{context_dir}/bootstrap.sh"
-        files: list[tuple[str, bytes, int]] = []
+        cleanup_path = f"{context_dir}/cleanup.sh"
+        files_dir = f"{context_dir}/files"
+        archive_files: list[tuple[str, bytes, int]] = []
         operation_env = {
             "OPENCURIA_CREDENTIAL_CONTEXT_DIR": context_dir,
         }
 
+        helper_lines = [
+            'opencuria_credential_home="${HOME:-/root}"',
+            "opencuria_resolve_credential_path() {",
+            '  raw_path="$1"',
+            "  tilde_prefix='~/'",
+            "  home_prefix='${HOME}/'",
+            '  if [ "$raw_path" = "~" ] || [ "$raw_path" = "${HOME}" ] || [ "$raw_path" = "${opencuria_credential_home}" ]; then',
+            '    printf "%s\\n" "$opencuria_credential_home"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#"$tilde_prefix"}" != "$raw_path" ]; then',
+            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$tilde_prefix"}"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#"$home_prefix"}" != "$raw_path" ]; then',
+            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$home_prefix"}"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#/}" != "$raw_path" ]; then',
+            '    printf "%s\\n" "$raw_path"',
+            '    return',
+            "  fi",
+            '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
+            "}",
+        ]
         bootstrap_lines = [
             "#!/bin/sh",
             "set -eu",
             'export PATH="/root/.local/bin:$PATH"',
+            *helper_lines,
         ]
         operation_env["PATH"] = (
             "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
+        cleanup_lines = [
+            "#!/bin/sh",
+            "set -eu",
+            *helper_lines,
+        ]
         for key, value in env_vars.items():
             bootstrap_lines.append(
                 f"export {key}={shlex.quote(str(value))}"
             )
             operation_env[key] = str(value)
+
+        if credential_files:
+            for index, credential_file in enumerate(credential_files, start=1):
+                source_relpath = f"files/credential_{index}"
+                source_abspath = f"{files_dir}/credential_{index}"
+                target_path = str(credential_file["target_path"])
+                mode = int(credential_file.get("mode", 0o600))
+                content = str(credential_file.get("content", ""))
+                archive_files.append(
+                    (
+                        source_relpath,
+                        content.encode("utf-8"),
+                        0o600,
+                    )
+                )
+                bootstrap_lines.extend(
+                    [
+                        f'target_path=$(opencuria_resolve_credential_path {shlex.quote(target_path)})',
+                        'mkdir -p "$(dirname "$target_path")"',
+                        f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
+                    ]
+                )
+                cleanup_lines.append(
+                    f'rm -f "$(opencuria_resolve_credential_path {shlex.quote(target_path)})"'
+                )
 
         if ssh_keys:
             known_hosts_path = f"{ssh_dir}/known_hosts"
@@ -387,10 +448,12 @@ class WorkspaceService:
                 key_relpath = f"ssh/{key_name}"
                 key_abspath = f"{ssh_dir}/{key_name}"
                 config_lines.append(f"    IdentityFile {key_abspath}")
-                files.append((key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600))
+                archive_files.append(
+                    (key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600)
+                )
 
-            files.append(("ssh/known_hosts", b"", 0o600))
-            files.append(
+            archive_files.append(("ssh/known_hosts", b"", 0o600))
+            archive_files.append(
                 ("ssh/config", ("\n".join(config_lines) + "\n").encode("utf-8"), 0o600)
             )
 
@@ -406,7 +469,7 @@ class WorkspaceService:
                 "#!/bin/sh\n"
                 f"exec /usr/bin/sftp -F {shlex.quote(config_path)} \"$@\"\n"
             ).encode("utf-8")
-            files.extend(
+            archive_files.extend(
                 [
                     ("bin/ssh", ssh_wrapper, 0o755),
                     ("bin/scp", scp_wrapper, 0o755),
@@ -432,7 +495,13 @@ class WorkspaceService:
             )
 
         bootstrap_content = ("\n".join(bootstrap_lines) + "\n").encode("utf-8")
-        files.append(("bootstrap.sh", bootstrap_content, 0o700))
+        cleanup_content = ("\n".join(cleanup_lines) + "\n").encode("utf-8")
+        archive_files.extend(
+            [
+                ("bootstrap.sh", bootstrap_content, 0o700),
+                ("cleanup.sh", cleanup_content, 0o700),
+            ]
+        )
 
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
@@ -442,17 +511,26 @@ class WorkspaceService:
         if exit_code != 0:
             raise RuntimeError(f"Failed to create credential context: {output}")
 
-        archive_data = self._build_tar_entries(files)
+        archive_data = self._build_tar_entries(archive_files)
         await runtime.put_archive(instance_id, context_dir, archive_data)
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", f". {shlex.quote(bootstrap_path)} >/dev/null"],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to materialize credential context: {output}")
         log.info(
             "operation_credential_context_created",
             has_env=bool(env_vars),
+            file_count=len(credential_files),
             ssh_key_count=len(ssh_keys),
             context_dir=context_dir,
         )
         return OperationCredentialContext(
             directory=context_dir,
             bootstrap_script=bootstrap_path,
+            cleanup_script=cleanup_path,
             environment=operation_env,
         )
 
@@ -470,8 +548,13 @@ class WorkspaceService:
 
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
-            command=["rm", "-rf", context.directory],
-            workdir="/tmp",
+            command=[
+                "sh",
+                "-lc",
+                f". {shlex.quote(context.cleanup_script)} >/dev/null 2>&1 || true; "
+                f"rm -rf {shlex.quote(context.directory)}",
+            ],
+            workdir="/root",
         )
         if exit_code != 0:
             log.warning(
@@ -553,6 +636,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_disk_size_gb: int | None = None,
         configure_commands: list[dict] | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         workspace_id: uuid.UUID | None = None,
         runtime_type: str = "docker",
@@ -567,6 +651,8 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 backend, each with ``args``, ``workdir``, ``env``,
                 ``description`` keys.
             env_vars: Optional environment variables available during initial
+                repository clone/configure steps.
+            files: Optional credential files available during initial
                 repository clone/configure steps.
             ssh_keys: Optional SSH private keys available during initial
                 repository clone/configure steps.
@@ -651,6 +737,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime,
             instance_id,
             env_vars,
+            files,
             ssh_keys,
             log,
         )
@@ -708,6 +795,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         self,
         workspace_id: uuid.UUID,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> PreparedOperation:
         """Resolve runtime target and create a reusable credential context."""
@@ -732,6 +820,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime,
             info.instance_id,
             env_vars,
+            files,
             ssh_keys,
             log,
         )
@@ -758,6 +847,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         configure_commands: list[dict],
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> None:
@@ -774,6 +864,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -803,6 +894,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         command: dict,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> AsyncIterator[str]:
@@ -811,6 +903,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -837,6 +930,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         command: dict,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> tuple[int, str]:
@@ -851,6 +945,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -1304,6 +1399,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         cols: int = 80,
         rows: int = 24,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> str:
@@ -1314,9 +1410,20 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
+        terminal_command = ["/bin/bash", "-l"]
+        if prepared.credential_context is not None:
+            terminal_command = [
+                "/bin/bash",
+                "-lc",
+                (
+                    f". {shlex.quote(prepared.credential_context.bootstrap_script)} "
+                    ">/dev/null 2>&1; exec /bin/bash -l"
+                ),
+            ]
 
         handle = await prepared.runtime.exec_pty(
             prepared.instance_id,
@@ -1331,6 +1438,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                     else {}
                 ),
             },
+            command=terminal_command,
         )
 
         terminal_id = str(uuid.uuid4())
@@ -1994,6 +2102,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> uuid.UUID:
         """Create a workspace from an image artifact.
@@ -2027,4 +2136,25 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             image_artifact_id=image_artifact_id,
             runtime_type=runtime_type,
         )
+
+        if env_vars or files or ssh_keys:
+            log = logger.bind(
+                workspace_id=str(new_workspace_id),
+                image_artifact_id=image_artifact_id,
+                runtime_type=runtime_type,
+            )
+            credential_context = await self._create_operation_credential_context(
+                runtime,
+                instance_id,
+                env_vars,
+                files,
+                ssh_keys,
+                log,
+            )
+            await self._cleanup_operation_credential_context(
+                runtime,
+                instance_id,
+                credential_context,
+                log,
+            )
         return new_workspace_id

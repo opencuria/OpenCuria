@@ -380,6 +380,7 @@ class DockerRuntime(RuntimeBackend):
         rows: int = 24,
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        command: list[str] | None = None,
     ) -> PtyHandle:
         """Create a PTY-enabled exec instance and return a handle."""
 
@@ -390,7 +391,7 @@ class DockerRuntime(RuntimeBackend):
                 environment.update(env)
             exec_id = api.exec_create(
                 instance_id,
-                cmd=["/bin/bash", "-l"],
+                cmd=command or ["/bin/bash", "-l"],
                 tty=True,
                 stdin=True,
                 stdout=True,

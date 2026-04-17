@@ -68,6 +68,7 @@ def _credential_to_out(cred) -> CredentialOut:
         service_slug=svc.slug,
         credential_type=svc.credential_type,
         env_var_name=svc.env_var_name,
+        target_path=svc.target_path,
         has_public_key=bool(cred.public_key),
         created_by_id=cred.created_by_id,
         created_at=cred.created_at,
@@ -83,6 +84,7 @@ def _credential_service_to_out(service, *, is_active: bool | None = None):
         description=service.description,
         credential_type=service.credential_type,
         env_var_name=service.env_var_name,
+        target_path=service.target_path,
         label=service.label,
     )
     if is_active is None:
@@ -361,6 +363,7 @@ def create_org_credential_service(request: HttpRequest, payload: CredentialServi
             description=payload.description,
             credential_type=payload.credential_type,
             env_var_name=payload.env_var_name,
+            target_path=payload.target_path,
             label=payload.label,
         )
     except ValueError as e:

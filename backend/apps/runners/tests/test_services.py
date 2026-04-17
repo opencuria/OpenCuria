@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.credentials.models import CredentialService
-from apps.credentials.services import CredentialSvc
+from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
 from apps.runners.enums import (
     AgentCommandPhase,
     RunnerStatus,
@@ -328,6 +328,12 @@ class TestCreateWorkspace:
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
             env_vars={"GITHUB_TOKEN": "test-token"},
+            files=[
+                ResolvedCredentialFile(
+                    target_path="~/.codex/auth.json",
+                    content='{"access_token":"test"}',
+                )
+            ],
             ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
             user=user,
             organization_id=runner.organization_id,
@@ -339,6 +345,13 @@ class TestCreateWorkspace:
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
+        assert payload["files"] == [
+            {
+                "target_path": "~/.codex/auth.json",
+                "content": '{"access_token":"test"}',
+                "mode": 0o600,
+            }
+        ]
         assert len(payload["ssh_keys"]) == 1
 
     @pytest.mark.asyncio
@@ -778,6 +791,46 @@ class TestWorkspaceOperationState:
 
         assert updated is not None
         assert updated.active_operation == WorkspaceOperation.RESTARTING
+
+    @pytest.mark.asyncio
+    async def test_running_qemu_update_skips_restart_for_unchanged_resources(
+        self, service, runner, workspace
+    ):
+        """No-op QEMU updates must not restart a running workspace."""
+        service._dispatch_workspace_task = AsyncMock()
+        workspace.runtime_type = "qemu"
+        workspace.qemu_vcpus = None
+        workspace.qemu_memory_mb = None
+        workspace.qemu_disk_size_gb = None
+        workspace.save(
+            update_fields=[
+                "runtime_type",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
+
+        updated = await service.update_workspace(
+            workspace.id,
+            qemu_vcpus=runner.qemu_default_vcpus,
+            qemu_memory_mb=runner.qemu_default_memory_mb,
+            qemu_disk_size_gb=runner.qemu_default_disk_size_gb,
+        )
+
+        workspace.refresh_from_db()
+        assert updated is not None
+        assert updated.active_operation is None
+        assert workspace.active_operation is None
+        assert workspace.qemu_vcpus is None
+        assert workspace.qemu_memory_mb is None
+        assert workspace.qemu_disk_size_gb is None
+        assert not Task.objects.filter(
+            workspace=workspace,
+            type=TaskType.UPDATE_WORKSPACE,
+        ).exists()
+        service._dispatch_workspace_task.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_busy_workspace_rejects_prompt(self, service, workspace):

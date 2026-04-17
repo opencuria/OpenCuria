@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { UiDialog, UiInput, UiButton, UiSelect } from '@/components/ui'
+import { UiDialog, UiInput, UiButton, UiSelect, UiTextarea } from '@/components/ui'
 import { useCredentialStore } from '@/stores/credentials'
 import { useAuthStore } from '@/stores/auth'
 import type { CredentialService } from '@/types'
@@ -35,6 +35,7 @@ const selectedService = computed(() =>
 )
 
 const isSSHKey = computed(() => selectedService.value?.credential_type === 'ssh_key')
+const isFileCredential = computed(() => selectedService.value?.credential_type === 'file')
 
 const defaultName = computed(() => {
   if (selectedService.value) return `${selectedService.value.name} Credential`
@@ -118,16 +119,39 @@ function handleClose(): void {
         <span>An <strong>Ed25519 SSH key pair</strong> will be generated automatically. You can view the public key after creation.</span>
       </div>
 
+      <div
+        v-if="selectedServiceId && isFileCredential"
+        class="flex items-start gap-2 rounded-[var(--radius-md)] border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm text-fg"
+      >
+        <Info :size="16" class="mt-0.5 shrink-0 text-primary" />
+        <span>
+          This credential will be written to <strong>{{ selectedService?.target_path }}</strong>
+          during active workspace operations.
+        </span>
+      </div>
+
       <!-- Credential value (non-SSH only) -->
       <div v-if="selectedServiceId && !isSSHKey">
         <label class="text-sm font-medium text-fg mb-1.5 block">Value</label>
+        <UiTextarea
+          v-if="isFileCredential"
+          v-model="value"
+          :rows="10"
+          :placeholder="selectedService ? `Paste the contents for ${selectedService.target_path}` : 'Credential file contents'"
+        />
         <UiInput
+          v-else
           v-model="value"
           type="password"
           :placeholder="selectedService ? `Value for ${selectedService.env_var_name}` : 'Credential value'"
         />
         <p class="text-xs text-muted-fg mt-1">
-          This value will be encrypted and stored securely. It is never shown again.
+          <template v-if="isFileCredential">
+            Paste the complete file contents. They will be encrypted and stored securely.
+          </template>
+          <template v-else>
+            This value will be encrypted and stored securely. It is never shown again.
+          </template>
         </p>
       </div>
 

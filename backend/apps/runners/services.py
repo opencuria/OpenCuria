@@ -734,6 +734,7 @@ class RunnerService:
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
         runner_id: uuid.UUID | None = None,
@@ -889,6 +890,14 @@ class RunnerService:
                 "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
                 "configure_commands": [],
                 "env_vars": env_vars or {},
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in (files or [])
+                ],
                 "ssh_keys": ssh_keys or [],
                 "image_artifact_id": str(image_artifact_id),
                 "image_tag": (
@@ -1121,6 +1130,14 @@ class RunnerService:
                 "configure_commands": configure_commands,
                 "fallback_configure_commands": fallback_configure_commands,
                 "env_vars": workspace_credentials.env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in workspace_credentials.files
+                ],
                 "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
@@ -1258,47 +1275,53 @@ class RunnerService:
                 qemu_disk_size_gb=qemu_disk_size_gb,
                 current=current,
             )
-            await self._ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=resolved_qemu_vcpus,
-                requested_memory_mb=resolved_qemu_memory_mb,
-                requested_disk_size_gb=resolved_qemu_disk_size_gb,
-                exclude_workspace_id=workspace.id,
+            qemu_resources_changed = current != (
+                resolved_qemu_vcpus,
+                resolved_qemu_memory_mb,
+                resolved_qemu_disk_size_gb,
             )
-
-            workspace = await sync_to_async(self.workspaces.update_qemu_resources)(
-                workspace,
-                qemu_vcpus=resolved_qemu_vcpus,
-                qemu_memory_mb=resolved_qemu_memory_mb,
-                qemu_disk_size_gb=resolved_qemu_disk_size_gb,
-            )
-
-            if workspace.status == WorkspaceStatus.RUNNING:
-                runner = workspace.runner
-                if not runner.is_online:
-                    raise RunnerOfflineError(str(runner.id))
-
-                task_id = generate_uuid()
-                task = await sync_to_async(self.tasks.create)(
-                    task_id=task_id,
+            if qemu_resources_changed:
+                await self._ensure_qemu_active_capacity(
                     runner=runner,
-                    task_type=TaskType.UPDATE_WORKSPACE,
-                    workspace=workspace,
+                    requested_vcpus=resolved_qemu_vcpus,
+                    requested_memory_mb=resolved_qemu_memory_mb,
+                    requested_disk_size_gb=resolved_qemu_disk_size_gb,
+                    exclude_workspace_id=workspace.id,
                 )
-                await self._dispatch_workspace_task(
-                    runner=runner,
-                    event="task:update_workspace",
-                    task=task,
-                    workspace=workspace,
-                    operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
-                    payload={
-                        "task_id": str(task_id),
-                        "workspace_id": str(workspace_id),
-                        "qemu_vcpus": resolved_qemu_vcpus,
-                        "qemu_memory_mb": resolved_qemu_memory_mb,
-                        "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
-                    },
+
+                workspace = await sync_to_async(self.workspaces.update_qemu_resources)(
+                    workspace,
+                    qemu_vcpus=resolved_qemu_vcpus,
+                    qemu_memory_mb=resolved_qemu_memory_mb,
+                    qemu_disk_size_gb=resolved_qemu_disk_size_gb,
                 )
+
+                if workspace.status == WorkspaceStatus.RUNNING:
+                    runner = workspace.runner
+                    if not runner.is_online:
+                        raise RunnerOfflineError(str(runner.id))
+
+                    task_id = generate_uuid()
+                    task = await sync_to_async(self.tasks.create)(
+                        task_id=task_id,
+                        runner=runner,
+                        task_type=TaskType.UPDATE_WORKSPACE,
+                        workspace=workspace,
+                    )
+                    await self._dispatch_workspace_task(
+                        runner=runner,
+                        event="task:update_workspace",
+                        task=task,
+                        workspace=workspace,
+                        operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
+                        payload={
+                            "task_id": str(task_id),
+                            "workspace_id": str(workspace_id),
+                            "qemu_vcpus": resolved_qemu_vcpus,
+                            "qemu_memory_mb": resolved_qemu_memory_mb,
+                            "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
+                        },
+                    )
 
         return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
 
@@ -1983,6 +2006,14 @@ class RunnerService:
                 "rows": rows,
                 "configure_commands": configure_commands,
                 "env_vars": workspace_credentials.env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in workspace_credentials.files
+                ],
                 "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
@@ -3941,6 +3972,7 @@ rm -rf /var/lib/apt/lists/*
         image_artifact_id: uuid.UUID,
         name: str = "",
         env_vars: dict[str, str] | None = None,
+        files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
         user=None,
@@ -4027,6 +4059,7 @@ rm -rf /var/lib/apt/lists/*
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
             resolved_env_vars = env_vars or {}
+            resolved_files = files or []
             resolved_ssh_keys = ssh_keys or []
         else:
             artifact_credentials = await sync_to_async(list)(artifact.credentials.all())
@@ -4042,9 +4075,11 @@ rm -rf /var/lib/apt/lists/*
                     user=user,
                 )
                 resolved_env_vars = resolved.env_vars
+                resolved_files = resolved.files
                 resolved_ssh_keys = resolved.ssh_keys
             else:
                 resolved_env_vars = env_vars or {}
+                resolved_files = files or []
                 resolved_ssh_keys = ssh_keys or []
 
         task_id = generate_uuid()
@@ -4072,6 +4107,14 @@ rm -rf /var/lib/apt/lists/*
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
                 "env_vars": resolved_env_vars,
+                "files": [
+                    {
+                        "target_path": file.target_path,
+                        "content": file.content,
+                        "mode": file.mode,
+                    }
+                    for file in resolved_files
+                ],
                 "ssh_keys": resolved_ssh_keys,
             },
         )
