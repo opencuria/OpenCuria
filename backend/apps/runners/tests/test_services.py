@@ -355,6 +355,57 @@ class TestCreateWorkspace:
         assert len(payload["ssh_keys"]) == 1
 
     @pytest.mark.asyncio
+    async def test_runner_without_sid_fails_dispatch_and_rolls_back(
+        self,
+        service,
+        runner,
+        user,
+    ):
+        """A runner without an active socket session must not leave tasks hanging."""
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Base Workspace",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = RunnerImageBuild.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=RunnerImageBuild.Status.ACTIVE,
+            image_tag="opencuria/custom/base:1",
+        )
+        artifact = ImageArtifact.objects.create(
+            source_workspace=None,
+            created_by=user,
+            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
+            runner_image_build=build,
+            runner_artifact_id=build.image_tag,
+            name="Base Workspace Artifact",
+            status=ImageArtifact.ArtifactStatus.READY,
+        )
+
+        with pytest.raises(RunnerOfflineError):
+            await service.create_workspace(
+                name="Test Workspace",
+                repos=[],
+                image_artifact_id=artifact.id,
+                user=user,
+                organization_id=runner.organization_id,
+            )
+
+        task = Task.objects.latest("created_at")
+        assert task.type == TaskType.CREATE_WORKSPACE
+        assert task.status == TaskStatus.FAILED
+        assert "offline" in task.error.lower()
+
+        workspace = Workspace.objects.latest("created_at")
+        assert workspace.active_operation is None
+        assert workspace.status == WorkspaceStatus.CREATING
+
+    @pytest.mark.asyncio
     async def test_requires_image_selection(self, service, runner, user):
         """Creating a workspace without an image should be rejected."""
         with pytest.raises(ConflictError):
@@ -539,6 +590,32 @@ class TestCreateWorkspace:
                 image_artifact_id=image.id,
                 organization_id=local_runner.organization_id,
             )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRemoveWorkspace:
+    @pytest.mark.asyncio
+    async def test_runner_without_sid_fails_remove_dispatch_and_rolls_back(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Removing must fail fast when the runner has no active socket session."""
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+
+        with pytest.raises(RunnerOfflineError):
+            await service.remove_workspace(workspace.id)
+
+        task = Task.objects.latest("created_at")
+        assert task.type == TaskType.REMOVE_WORKSPACE
+        assert task.status == TaskStatus.FAILED
+        assert "offline" in task.error.lower()
+
+        workspace.refresh_from_db()
+        assert workspace.active_operation is None
+        assert workspace.status == WorkspaceStatus.RUNNING
 
 
 @pytest.mark.django_db(transaction=True)

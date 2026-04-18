@@ -627,9 +627,10 @@ class RunnerService:
                 await self._set_workspace_operation(workspace, operation)
             await self._emit_to_runner(runner, event, payload)
             await sync_to_async(self.tasks.mark_in_progress)(task)
-        except Exception:
+        except Exception as exc:
             if workspace is not None and operation is not None:
                 await self._set_workspace_operation(workspace, None)
+            await sync_to_async(self.tasks.fail)(task, str(exc))
             raise
 
     @staticmethod
@@ -3164,7 +3165,7 @@ class RunnerService:
         """Send a Socket.IO event to a specific runner by its SID."""
         if self.sio is None:
             logger.error("No Socket.IO server configured — cannot emit events")
-            return
+            raise RuntimeError("Socket.IO server is not configured")
 
         if not runner.sid:
             logger.error(
@@ -3172,7 +3173,7 @@ class RunnerService:
                 runner.id,
                 event,
             )
-            return
+            raise RunnerOfflineError(str(runner.id))
 
         await self.sio.emit(event, data, to=runner.sid)
         logger.debug("Emitted %s to runner %s: %s", event, runner.id, data)
