@@ -24,6 +24,7 @@ import { WorkspaceOperation, WorkspaceStatus, SessionStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { isSessionActive } from '@/lib/sessionState'
 import { useNotificationStore } from './notifications'
+import { useImageStore } from './images'
 import { useSkillStore } from './skills'
 
 /** Sentinel ID used for chats that have not yet been persisted to the backend. */
@@ -733,8 +734,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     data: ImageArtifactCreateIn,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
+    const imageStore = useImageStore()
     try {
       await workspacesApi.createWorkspaceImageArtifact(workspaceId, data)
+      await imageStore.fetchImages()
       notifications.success('Image capturing', 'Image is being captured.')
       return true
     } catch (e: unknown) {
@@ -749,9 +752,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     imageArtifactId: string,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
+    const imageStore = useImageStore()
     try {
       await workspacesApi.deleteWorkspaceImageArtifact(workspaceId, imageArtifactId)
       imageArtifacts.value = imageArtifacts.value.filter((artifact) => artifact.id !== imageArtifactId)
+      await imageStore.fetchImages()
       notifications.success('Image deleted', 'The image was removed.')
       return true
     } catch (e: unknown) {

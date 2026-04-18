@@ -57,6 +57,7 @@ export const useImageStore = defineStore('images', () => {
   async function createImageArtifact(data: ImageArtifactCreateIn): Promise<boolean> {
     try {
       await workspacesApi.createImageArtifact(data)
+      await fetchImages()
       notifications.success('Image creating', 'Image is being created. It will appear here when ready.')
       return true
     } catch (e) {
@@ -71,9 +72,11 @@ export const useImageStore = defineStore('images', () => {
       await workspacesApi.deleteImageArtifact(imageArtifactId)
       // Mark locally as deleting (will be confirmed via next fetch)
       const idx = images.value.findIndex((a) => a.id === imageArtifactId)
-      if (idx !== -1) {
-        images.value[idx] = { ...images.value[idx], status: 'deleting' }
+      const existing = idx !== -1 ? images.value[idx] : undefined
+      if (existing) {
+        images.value[idx] = { ...existing, status: 'deleting' }
       }
+      await fetchImages()
       notifications.success('Delete initiated', 'Image deletion has been initiated.')
       return true
     } catch (e: any) {

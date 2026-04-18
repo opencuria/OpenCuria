@@ -416,7 +416,12 @@ class WorkspaceRepository:
     ) -> QuerySet[Workspace]:
         """Return workspaces that still depend on an image instance."""
         return Workspace.objects.filter(base_image_instance_id=image_instance_id).exclude(
-            status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED]
+            status__in=[
+                WorkspaceStatus.PENDING_DELETION,
+                WorkspaceStatus.DELETING,
+                WorkspaceStatus.REMOVED,
+                WorkspaceStatus.DELETED,
+            ]
         )
 
     @staticmethod
@@ -1534,7 +1539,12 @@ class ImageBuildJobRepository:
             ws_count = Workspace.objects.filter(
                 base_image_instance=instance,
             ).exclude(
-                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED],
+                status__in=[
+                    WorkspaceStatus.PENDING_DELETION,
+                    WorkspaceStatus.DELETING,
+                    WorkspaceStatus.REMOVED,
+                    WorkspaceStatus.DELETED,
+                ],
             ).count()
             count += ws_count
         return count > 0, count
