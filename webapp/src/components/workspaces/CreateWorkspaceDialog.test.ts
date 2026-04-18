@@ -119,7 +119,7 @@ describe('CreateWorkspaceDialog', () => {
     createWorkspace.mockResolvedValue(true)
   })
 
-  it('creates a workspace from a captured image through the normal workspace flow', async () => {
+  it('creates a workspace from a captured image via the artifact clone flow', async () => {
     const wrapper = shallowMount(CreateWorkspaceDialog)
     const vm = wrapper.vm as typeof wrapper.vm & {
       open: boolean
@@ -129,6 +129,7 @@ describe('CreateWorkspaceDialog', () => {
       handleSubmit: () => Promise<void>
     }
 
+    createWorkspaceFromImageArtifact.mockResolvedValue('workspace-created-from-image')
     vm.open = true
     vm.name = 'Captured Clone'
     vm.selectedImageValue = 'captured:captured-image-1'
@@ -137,16 +138,10 @@ describe('CreateWorkspaceDialog', () => {
 
     await vm.handleSubmit()
 
-    expect(createWorkspace).toHaveBeenCalledWith({
+    expect(createWorkspaceFromImageArtifact).toHaveBeenCalledWith('captured-image-1', {
       name: 'Captured Clone',
-      repos: [],
       credential_ids: ['cred-1'],
-      runner_id: 'runner-1',
-      image_id: 'captured-image-1',
-      qemu_vcpus: 2,
-      qemu_memory_mb: 4096,
-      qemu_disk_size_gb: 50,
     })
-    expect(createWorkspaceFromImageArtifact).not.toHaveBeenCalled()
+    expect(createWorkspace).not.toHaveBeenCalled()
   })
 })

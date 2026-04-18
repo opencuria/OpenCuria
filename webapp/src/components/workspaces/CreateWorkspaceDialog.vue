@@ -120,6 +120,7 @@ const selectedImageOption = computed<SelectableImageOption | null>(() => {
 })
 
 const isFromImage = computed(() => !!selectedImageOption.value)
+const isCapturedClone = computed(() => selectedImageOption.value?.kind === 'captured')
 
 const compatibleRunnerOptions = computed(() => {
   const option = selectedImageOption.value
@@ -267,7 +268,7 @@ const qemuLimits = computed(() => {
 })
 
 watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
-  if (!open.value || runtimeType.value !== RuntimeType.QEMU) return
+  if (!open.value || runtimeType.value !== RuntimeType.QEMU || isCapturedClone.value) return
 
   const limits = qemuLimits.value
   const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
@@ -329,34 +330,46 @@ async function handleSubmit(): Promise<void> {
   const selectedOption = selectedImageOption.value
   if (!selectedOption) return
 
-  addRepo()
-
   submitting.value = true
 
-  const resolvedImageId =
-    selectedOption.kind === 'definition'
-      ? selectedDefinitionArtifactId.value
-      : selectedOption.imageArtifact?.id
+  let success: boolean
+  if (isCapturedClone.value) {
+    const workspaceId = await imageStore.createWorkspaceFromImageArtifact(
+      selectedOption.imageArtifact?.id || '',
+      {
+        name: name.value.trim(),
+        credential_ids: selectedCredentialIds.value,
+      },
+    )
+    success = !!workspaceId
+  } else {
+    addRepo()
 
-  if (!resolvedImageId) {
-    submitting.value = false
-    return
+    const resolvedImageId =
+      selectedOption.kind === 'definition'
+        ? selectedDefinitionArtifactId.value
+        : selectedOption.imageArtifact?.id
+
+    if (!resolvedImageId) {
+      submitting.value = false
+      return
+    }
+
+    success = await workspaceStore.createWorkspace({
+      name: name.value.trim(),
+      repos: repos.value,
+      credential_ids: selectedCredentialIds.value,
+      runner_id: runnerId.value || null,
+      image_id: resolvedImageId,
+      ...(runtimeType.value === RuntimeType.QEMU
+        ? {
+            qemu_vcpus: qemuVcpus.value,
+            qemu_memory_mb: qemuMemoryMb.value,
+            qemu_disk_size_gb: qemuDiskSizeGb.value,
+          }
+        : {}),
+    })
   }
-
-  const success = await workspaceStore.createWorkspace({
-    name: name.value.trim(),
-    repos: repos.value,
-    credential_ids: selectedCredentialIds.value,
-    runner_id: runnerId.value || null,
-    image_id: resolvedImageId,
-    ...(runtimeType.value === RuntimeType.QEMU
-      ? {
-          qemu_vcpus: qemuVcpus.value,
-          qemu_memory_mb: qemuMemoryMb.value,
-          qemu_disk_size_gb: qemuDiskSizeGb.value,
-        }
-      : {}),
-  })
 
   submitting.value = false
 
@@ -484,7 +497,7 @@ const isValid = computed(
         </p>
       </div>
 
-      <div>
+      <div v-if="!isCapturedClone">
         <label class="text-sm font-medium text-fg mb-1.5 block">Repositories <span class="text-muted-fg font-normal">(optional)</span></label>
         <div class="flex gap-2">
           <UiInput
@@ -514,7 +527,11 @@ const isValid = computed(
       </div>
 
       <div v-if="activeTab === 'advanced'">
-        <div class="space-y-4">
+        <div v-if="isCapturedClone" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3 text-sm text-muted-fg">
+          Captured image clones keep runner, runtime and resources from the image. Advanced options are disabled.
+        </div>
+
+        <div v-else class="space-y-4">
           <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
             <label class="text-sm font-medium text-fg mb-1.5 block">Runner</label>
             <UiSelect
