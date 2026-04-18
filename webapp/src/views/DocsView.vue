@@ -125,7 +125,7 @@ const renderedHtml = computed(() => {
   if (!currentDoc.value) return ''
   const renderer = buildRenderer()
   const raw = marked.parse(currentDoc.value.raw, { renderer }) as string
-  return DOMPurify.sanitize(raw)
+  return DOMPurify.sanitize(raw, { ADD_TAGS: ['details', 'summary'] })
 })
 
 interface TocEntry {
