@@ -32,7 +32,7 @@ import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImage
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, Plus } from 'lucide-vue-next'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2 } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -129,6 +129,15 @@ const showImminentAutoStop = computed(() => {
   const remainingMs = new Date(workspace.value.auto_stop_at).getTime() - Date.now()
   return remainingMs > 0 && remainingMs <= 10 * 60 * 1000
 })
+const showWorkspaceEmptyState = computed(
+  () =>
+    Boolean(workspace.value) &&
+    !workspaceStore.loading &&
+    !loadingChats.value &&
+    !hasChats.value &&
+    !fileExplorerStore.isViewingFile &&
+    !fileExplorerStore.isLoadingContent,
+)
 
 const currentAgent = computed(() => {
   const agentDefinitionId = workspaceStore.activeChat?.agent_definition_id
@@ -1069,7 +1078,7 @@ function handleToggleSessionReadState(sessionId: string): void {
               </div>
             </div>
             <div
-              v-else
+              v-else-if="hasChats || loadingChats"
               ref="mainChatPanelHost"
               class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
             ></div>
@@ -1115,30 +1124,7 @@ function handleToggleSessionReadState(sessionId: string): void {
               class="flex items-center gap-0 min-w-0 overflow-x-hidden"
               :class="isDesktopPanelVisible ? 'pt-2' : ''"
             >
-              <button
-                v-if="!hasChats && !loadingChats"
-                class="group flex-1 flex items-center justify-center gap-3 m-3 sm:m-4 p-4 sm:p-5
-                       rounded-xl border border-dashed border-border
-                       hover:border-primary/60
-                       bg-surface hover:bg-primary/5
-                       shadow-sm hover:shadow-md
-                       transition-all duration-300 cursor-pointer
-                       focus:outline-none focus:ring-2 focus:ring-primary/30"
-                @click="handleCreateChat"
-              >
-                <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 group-hover:bg-primary/20 text-primary transition-colors duration-300">
-                  <Bot :size="17" />
-                </div>
-                <span class="text-sm font-medium text-muted-fg group-hover:text-primary transition-colors duration-300">
-                  Start a chat — choose an agent
-                </span>
-                <div class="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-primary/25 group-hover:border-primary/50 bg-primary/5 group-hover:bg-primary/15 text-xs font-medium text-primary transition-all duration-300">
-                  <Plus :size="12" />
-                  New Chat
-                </div>
-              </button>
               <ChatInput
-                v-else
                 ref="chatInputRef"
                 :agent-options="agentOptions"
                 :selected-options="selectedOptions"
