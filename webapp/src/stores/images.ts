@@ -72,9 +72,11 @@ export const useImageStore = defineStore('images', () => {
       await workspacesApi.deleteImageArtifact(imageArtifactId)
       // Mark locally as deleting (will be confirmed via next fetch)
       const idx = images.value.findIndex((a) => a.id === imageArtifactId)
-      const existing = idx !== -1 ? images.value[idx] : undefined
-      if (existing) {
-        images.value[idx] = { ...existing, status: 'deleting' }
+      if (idx !== -1) {
+        const imageArtifact = images.value[idx]
+        if (imageArtifact) {
+          images.value[idx] = { ...imageArtifact, status: 'deleting' }
+        }
       }
       await fetchImages()
       notifications.success('Delete initiated', 'Image deletion has been initiated.')
