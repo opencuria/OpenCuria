@@ -7,6 +7,15 @@ from django.db import migrations, models
 from django.utils import timezone
 
 
+def _table_exists(schema_editor, table_name):
+    return table_name in schema_editor.connection.introspection.table_names()
+
+
+def _ensure_table(schema_editor, model):
+    if not _table_exists(schema_editor, model._meta.db_table):
+        schema_editor.create_model(model)
+
+
 def _copy_image_artifacts_forward(apps, schema_editor):
     ImageArtifact = apps.get_model("runners", "ImageArtifact")
     ImageDefinition = apps.get_model("runners", "ImageDefinition")
@@ -16,6 +25,8 @@ def _copy_image_artifacts_forward(apps, schema_editor):
 
     old_m2m = ImageArtifact.credentials.through
     new_m2m = ImageInstance.credentials.through
+
+    _ensure_table(schema_editor, old_m2m)
 
     status_map = {
         "creating": "capturing",
