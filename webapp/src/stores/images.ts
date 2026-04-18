@@ -72,7 +72,10 @@ export const useImageStore = defineStore('images', () => {
       // Mark locally as deleting (will be confirmed via next fetch)
       const idx = images.value.findIndex((a) => a.id === imageArtifactId)
       if (idx !== -1) {
-        images.value[idx] = { ...images.value[idx], status: 'deleting' }
+        const image = images.value[idx]
+        if (image) {
+          images.value[idx] = { ...image, status: 'deleting' }
+        }
       }
       notifications.success('Delete initiated', 'Image deletion has been initiated.')
       return true

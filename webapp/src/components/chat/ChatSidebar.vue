@@ -9,6 +9,7 @@ const props = defineProps<{
   chats: Chat[]
   activeChatId: string | null
   mobileOpen?: boolean
+  overlayMode?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -63,7 +64,8 @@ function formatDate(dateStr: string): string {
   <!-- Mobile overlay backdrop -->
   <div
     v-if="mobileOpen"
-    class="fixed inset-0 z-40 bg-black/50 md:hidden"
+    class="fixed inset-0 z-40 bg-black/50"
+    :class="props.overlayMode ? '' : 'md:hidden'"
     @click="emit('close')"
   />
 
@@ -71,14 +73,17 @@ function formatDate(dateStr: string): string {
   <div
     class="flex flex-col h-full border-r border-border bg-surface shrink-0 relative transition-all duration-200"
     :class="[
-      isCollapsed ? 'md:w-12' : 'md:w-64',
+      !props.overlayMode && isCollapsed ? 'md:w-12' : 'md:w-64',
       mobileOpen
         ? 'fixed left-0 top-0 bottom-0 z-50 w-72 flex'
-        : 'hidden md:flex',
+        : props.overlayMode
+          ? 'hidden'
+          : 'hidden md:flex',
     ]"
   >
     <!-- Collapse toggle button (desktop only) -->
     <button
+      v-if="!props.overlayMode"
       class="hidden md:flex absolute -right-3 top-3 z-10 w-6 h-6 rounded-full bg-surface border border-border hover:bg-surface-hover transition-colors items-center justify-center"
       @click="isCollapsed = !isCollapsed"
       :title="isCollapsed ? 'Expand chats' : 'Collapse chats'"
@@ -87,14 +92,18 @@ function formatDate(dateStr: string): string {
     </button>
 
     <!-- Header -->
-    <div class="flex items-center justify-between px-3 py-3 border-b border-border" :class="isCollapsed && !mobileOpen ? 'md:hidden' : ''">
+    <div
+      class="flex items-center justify-between px-3 py-3 border-b border-border"
+      :class="!props.overlayMode && isCollapsed && !mobileOpen ? 'md:hidden' : ''"
+    >
       <span class="text-sm font-medium text-fg">Chats</span>
       <div class="flex items-center gap-1">
         <UiButton variant="ghost" size="icon-sm" title="New chat" @click="emit('create')">
           <Plus :size="16" />
         </UiButton>
         <button
-          class="md:hidden w-7 h-7 rounded-full hover:bg-muted transition-colors flex items-center justify-center"
+          class="w-7 h-7 rounded-full hover:bg-muted transition-colors flex items-center justify-center"
+          :class="props.overlayMode ? '' : 'md:hidden'"
           @click="emit('close')"
         >
           <X :size="14" />
@@ -103,7 +112,10 @@ function formatDate(dateStr: string): string {
     </div>
 
     <!-- Collapsed state (desktop only): just icon + create -->
-    <div v-if="isCollapsed && !mobileOpen" class="hidden md:flex flex-col items-center py-3 border-b border-border gap-2">
+    <div
+      v-if="!props.overlayMode && isCollapsed && !mobileOpen"
+      class="hidden md:flex flex-col items-center py-3 border-b border-border gap-2"
+    >
       <MessageSquare :size="18" class="text-muted-fg" />
       <UiButton variant="ghost" size="icon-sm" @click="emit('create')" title="New chat">
         <Plus :size="16" />
@@ -111,7 +123,7 @@ function formatDate(dateStr: string): string {
     </div>
 
     <!-- Chat list (expanded on desktop, always shown on mobile overlay) -->
-    <UiScrollArea v-if="!isCollapsed || mobileOpen" class="flex-1">
+    <UiScrollArea v-if="props.overlayMode || !isCollapsed || mobileOpen" class="flex-1">
       <div class="flex flex-col gap-0.5 p-1.5">
         <div
           v-for="chat in chats"

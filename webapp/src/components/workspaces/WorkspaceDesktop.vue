@@ -510,6 +510,7 @@ watch(
             />
           </div>
           <div class="flex items-center gap-1">
+            <slot name="header-actions" />
             <UiButton
               variant="ghost"
               size="icon-sm"

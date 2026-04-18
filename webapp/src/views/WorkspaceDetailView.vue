@@ -998,7 +998,30 @@ function handleToggleSessionReadState(sessionId: string): void {
             v-if="isDesktopPanelVisible"
             :workspace-id="workspaceId"
           >
+            <template #header-actions>
+              <UiButton
+                v-if="isMultiChat"
+                variant="ghost"
+                size="icon-sm"
+                title="Switch chat"
+                @click="mobileChatListOpen = true"
+              >
+                <MessageSquare :size="16" />
+              </UiButton>
+            </template>
             <template #sidebar-content>
+              <ChatSidebar
+                v-if="isMultiChat"
+                :chats="workspaceStore.chats"
+                :active-chat-id="workspaceStore.activeChatId"
+                :mobile-open="mobileChatListOpen"
+                overlay-mode
+                @select="handleSelectChat"
+                @create="handleCreateChat"
+                @rename="handleRenameChat"
+                @delete="handleDeleteChat"
+                @close="mobileChatListOpen = false"
+              />
               <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
             </template>
           </WorkspaceDesktop>
