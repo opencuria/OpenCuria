@@ -8,6 +8,7 @@ import { useCredentialStore } from '@/stores/credentials'
 import { useImageStore } from '@/stores/images'
 import { RuntimeType } from '@/types'
 import { filterRunnersByRuntime, runnerSupportsRuntime } from '@/lib/runtimeSupport'
+import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
 import { X, Check, Key, Camera } from 'lucide-vue-next'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
@@ -306,12 +307,13 @@ watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
 
 function toggleCredential(id: string): void {
   if (isCapturedClone.value) return
-  const idx = selectedCredentialIds.value.indexOf(id)
-  if (idx === -1) {
-    selectedCredentialIds.value.push(id)
-  } else {
-    selectedCredentialIds.value.splice(idx, 1)
-  }
+  const credential = credentialStore.credentials.find((entry) => entry.id === id)
+  if (!credential) return
+  selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
+    selectedCredentialIds.value,
+    credential,
+    credentialStore.credentials,
+  )
 }
 
 function addRepo(): void {
@@ -417,6 +419,7 @@ const isValid = computed(
       !!selectedDefinitionArtifactId.value
     ),
 )
+
 </script>
 
 <template>

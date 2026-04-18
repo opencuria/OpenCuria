@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 
 from django.utils.text import slugify
 
-from common.exceptions import AuthenticationError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
 from .enums import CredentialType
@@ -334,6 +334,7 @@ class CredentialSvc:
                 ", ".join(str(m) for m in missing),
             )
 
+        self.assert_unique_workspace_credentials(credentials)
         return self._build_resolved_credentials(credentials)
 
     def resolve_workspace_credentials(self, workspace) -> ResolvedCredentials:
@@ -366,6 +367,18 @@ class CredentialSvc:
         return result
 
     # -- Internal helpers ---------------------------------------------------
+
+    def assert_unique_workspace_credentials(self, credentials: list) -> None:
+        """Reject attaching multiple credentials from the same service."""
+        seen_service_ids: set[uuid.UUID] = set()
+
+        for credential in credentials:
+            if credential.service_id in seen_service_ids:
+                raise ConflictError(
+                    "Only one credential per credential service can be attached "
+                    f"to a workspace. Conflicting service: {credential.service.name}."
+                )
+            seen_service_ids.add(credential.service_id)
 
     def _get_service_or_raise(self, service_id: uuid.UUID):
         service = self.service_repo.get_by_id(service_id)

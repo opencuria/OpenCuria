@@ -4444,6 +4444,7 @@ rm -rf /var/lib/apt/lists/*
         """
         from apps.credentials.services import CredentialSvc
 
+        credential_svc = CredentialSvc()
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -4497,6 +4498,29 @@ rm -rf /var/lib/apt/lists/*
                 requested_disk_size_gb=qemu_disk_size_gb,
             )
 
+        credentials_to_attach = credentials
+        resolved_env_vars = env_vars or {}
+        resolved_files = files or []
+        resolved_ssh_keys = ssh_keys or []
+
+        if credentials is not None:
+            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(credentials)
+        else:
+            image_credentials = await sync_to_async(list)(
+                image.credentials.all().select_related("service")
+            )
+            if image_credentials:
+                artifact_cred_ids = [c.id for c in image_credentials]
+                resolved = await sync_to_async(credential_svc.resolve_credentials)(
+                    artifact_cred_ids,
+                    org_id=organization_id,
+                    user=user,
+                )
+                credentials_to_attach = image_credentials
+                resolved_env_vars = resolved.env_vars
+                resolved_files = resolved.files
+                resolved_ssh_keys = resolved.ssh_keys
+
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
         if not name:
@@ -4514,32 +4538,11 @@ rm -rf /var/lib/apt/lists/*
             created_by=user,
         )
 
-        # Resolve credentials: use artifact's stored credentials if none provided
-        if credentials is not None:
-            await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
-            resolved_env_vars = env_vars or {}
-            resolved_files = files or []
-            resolved_ssh_keys = ssh_keys or []
-        else:
-            image_credentials = await sync_to_async(list)(image.credentials.all())
-            if image_credentials:
-                await sync_to_async(self.workspaces.set_credentials)(
-                    workspace, image_credentials
-                )
-                artifact_cred_ids = [c.id for c in image_credentials]
-                credential_svc = CredentialSvc()
-                resolved = await sync_to_async(credential_svc.resolve_credentials)(
-                    artifact_cred_ids,
-                    org_id=organization_id,
-                    user=user,
-                )
-                resolved_env_vars = resolved.env_vars
-                resolved_files = resolved.files
-                resolved_ssh_keys = resolved.ssh_keys
-            else:
-                resolved_env_vars = env_vars or {}
-                resolved_files = files or []
-                resolved_ssh_keys = ssh_keys or []
+        if credentials_to_attach is not None:
+            await sync_to_async(self.workspaces.set_credentials)(
+                workspace,
+                credentials_to_attach,
+            )
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
