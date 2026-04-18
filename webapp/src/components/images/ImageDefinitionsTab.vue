@@ -89,12 +89,16 @@ async function onModalSaved(payload: Partial<ImageDefinition>): Promise<void> {
 }
 
 async function removeDefinition(id: string): Promise<void> {
-  if (!confirm('Delete this image definition?')) return
+  if (!confirm('Delete this image definition? This will deactivate it and initiate deletion of all runner builds.')) return
   try {
     await workspacesApi.deleteImageDefinition(id)
     await loadDefinitions()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : 'Failed to delete image definition'
+  } catch (e: any) {
+    if (e?.response?.status === 409) {
+      error.value = e?.response?.data?.detail || 'Cannot delete: definition is in use or already being deleted.'
+    } else {
+      error.value = e instanceof Error ? e.message : 'Failed to delete image definition'
+    }
   }
 }
 
@@ -235,14 +239,22 @@ onUnmounted(() => {
                 <UiBadge :variant="definition.is_standard ? 'muted' : 'success'">
                   {{ definition.is_standard ? 'standard' : 'custom' }}
                 </UiBadge>
+                <UiBadge v-if="definition.status === 'deactivated'" variant="warning">deactivated</UiBadge>
+                <UiBadge v-else-if="definition.status === 'pending_deletion'" variant="error">
+                  <Loader2 :size="10" class="inline animate-spin mr-1" />pending deletion
+                </UiBadge>
+                <UiBadge v-else-if="definition.status === 'deleting'" variant="error">
+                  <Loader2 :size="10" class="inline animate-spin mr-1" />deleting
+                </UiBadge>
+                <UiBadge v-else-if="definition.status === 'deleted'" variant="muted">deleted</UiBadge>
               </div>
               <p class="text-xs text-muted-fg truncate">{{ definition.description || 'No description' }}</p>
               <p class="text-xs text-muted-fg">Base: {{ definition.base_distro }} · {{ summary(definition.id) }}</p>
             </div>
-            <UiButton variant="ghost" size="icon-sm" @click="duplicateDefinition(definition)">
+            <UiButton variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="duplicateDefinition(definition)">
               <Copy :size="14" />
             </UiButton>
-            <UiButton v-if="!definition.is_standard" variant="ghost" size="icon-sm" @click="openEdit(definition)">
+            <UiButton v-if="!definition.is_standard" variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="openEdit(definition)">
               <Pencil :size="14" />
             </UiButton>
             <UiButton
@@ -250,6 +262,7 @@ onUnmounted(() => {
               variant="ghost"
               size="icon-sm"
               class="text-error"
+              :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')"
               @click="removeDefinition(definition.id)"
             >
               <Trash2 :size="14" />
@@ -270,9 +283,9 @@ onUnmounted(() => {
                   <tr v-for="runner in compatibleRunners(definition)" :key="runner.id" class="border-t border-border/40">
                     <td class="py-2 pr-3">{{ runner.name || runner.id.slice(0, 8) }}</td>
                     <td class="py-2 pr-3">
-                      <UiBadge v-if="getBuild(definition.id, runner.id)" variant="muted">
+                      <UiBadge v-if="getBuild(definition.id, runner.id)" :variant="['pending_deletion', 'deleting', 'delete_failed'].includes(getBuild(definition.id, runner.id)?.status || '') ? 'error' : 'muted'">
                         <Loader2
-                          v-if="getBuild(definition.id, runner.id)?.status === 'pending' || getBuild(definition.id, runner.id)?.status === 'building'"
+                          v-if="['pending', 'building', 'pending_deletion', 'deleting'].includes(getBuild(definition.id, runner.id)?.status || '')"
                           :size="10"
                           class="inline animate-spin mr-1"
                         />

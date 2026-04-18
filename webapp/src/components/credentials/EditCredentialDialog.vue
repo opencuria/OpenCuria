@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { UiDialog, UiInput, UiButton } from '@/components/ui'
+import { UiDialog, UiInput, UiButton, UiTextarea } from '@/components/ui'
 import { useCredentialStore } from '@/stores/credentials'
 import type { Credential } from '@/types'
 
@@ -18,6 +18,12 @@ const open = ref(false)
 const name = ref('')
 const value = ref('')
 const submitting = ref(false)
+
+function credentialDescriptor(credential: Credential): string {
+  if (credential.credential_type === 'file') return credential.target_path
+  if (credential.credential_type === 'ssh_key') return 'SSH key pair'
+  return credential.env_var_name
+}
 
 watch(
   () => props.credential,
@@ -70,7 +76,7 @@ function handleClose(): void {
     <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
       <div v-if="credential">
         <p class="text-sm text-muted-fg mb-3">
-          {{ credential.service_name }} — {{ credential.env_var_name }}
+          {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
         </p>
       </div>
 
@@ -81,7 +87,14 @@ function handleClose(): void {
 
       <div>
         <label class="text-sm font-medium text-fg mb-1.5 block">New Value</label>
+        <UiTextarea
+          v-if="credential?.credential_type === 'file'"
+          v-model="value"
+          :rows="10"
+          placeholder="Leave empty to keep current file contents"
+        />
         <UiInput
+          v-else
           v-model="value"
           type="password"
           placeholder="Leave empty to keep current value"

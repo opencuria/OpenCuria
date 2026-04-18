@@ -9,7 +9,14 @@ from .models import Credential, CredentialService, OrgCredentialServiceActivatio
 
 @admin.register(CredentialService)
 class CredentialServiceAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "credential_type", "env_var_name", "created_at"]
+    list_display = [
+        "name",
+        "slug",
+        "credential_type",
+        "env_var_name",
+        "target_path",
+        "created_at",
+    ]
     search_fields = ["name", "slug"]
     prepopulated_fields = {"slug": ("name",)}
     fields = [
@@ -18,6 +25,7 @@ class CredentialServiceAdmin(admin.ModelAdmin):
         "description",
         "credential_type",
         "env_var_name",
+        "target_path",
         "label",
     ]
 

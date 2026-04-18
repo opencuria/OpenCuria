@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Count, Exists, OuterRef, Q, QuerySet, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery
 from django.utils import timezone
 
 from .enums import (
@@ -416,7 +416,41 @@ class WorkspaceRepository:
     ) -> QuerySet[Workspace]:
         """Return workspaces that still depend on an image instance."""
         return Workspace.objects.filter(base_image_instance_id=image_instance_id).exclude(
-            status=WorkspaceStatus.REMOVED
+            status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED]
+        )
+
+    @staticmethod
+    def mark_pending_deletion(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as pending deletion (runner offline)."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.PENDING_DELETION,
+            active_operation=None,
+            delete_requested_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_deleting(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as actively being deleted by runner."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETING,
+        )
+
+    @staticmethod
+    def mark_deleted(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as fully deleted after runner confirmation."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETED,
+            active_operation=None,
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(workspace_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark workspace deletion as failed."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETE_FAILED,
+            active_operation=None,
+            delete_last_error=error,
         )
 
 
@@ -854,7 +888,6 @@ class ConversationRepository:
     def list_for_user(
         organization_id: uuid.UUID,
         user_id: int,
-        is_admin: bool,
     ) -> list[dict]:
         """
         Return all conversations for a user, sorted by last activity DESC.
@@ -871,10 +904,9 @@ class ConversationRepository:
         ).order_by("-created_at")
 
         chat_qs = Chat.objects.select_related("workspace", "workspace__runner").filter(
-            workspace__runner__organization_id=organization_id
+            workspace__runner__organization_id=organization_id,
+            workspace__created_by_id=user_id,
         )
-        if not is_admin:
-            chat_qs = chat_qs.filter(workspace__created_by_id=user_id)
 
         chat_qs = chat_qs.annotate(
             _session_count=Count("sessions"),
@@ -903,11 +935,19 @@ class ConversationRepository:
                     "read_at": chat._last_session_read_at,
                     "created_at": chat._last_session_created_at,
                 }
-            last_activity_at = (
-                chat._last_session_completed_at
-                or chat._last_session_created_at
-                or chat.updated_at
-            )
+            if chat._last_session_status in (
+                SessionStatus.PENDING,
+                SessionStatus.RUNNING,
+            ):
+                # For active sessions, stream output touches chat.updated_at, so
+                # this reflects true "last chat update" activity.
+                last_activity_at = chat.updated_at or chat._last_session_created_at
+            else:
+                last_activity_at = (
+                    chat._last_session_completed_at
+                    or chat._last_session_created_at
+                    or chat.updated_at
+                )
             rows.append(
                 {
                     "chat_id": chat.id,
@@ -935,12 +975,13 @@ class ConversationRepository:
 
         ws_qs = (
             Workspace.objects.select_related("runner")
-            .filter(runner__organization_id=organization_id)
+            .filter(
+                runner__organization_id=organization_id,
+                created_by_id=user_id,
+            )
             .annotate(_has_chats=has_any_chat)
             .filter(_has_chats=False)
         )
-        if not is_admin:
-            ws_qs = ws_qs.filter(created_by_id=user_id)
 
         ws_qs = ws_qs.annotate(
             _session_count=Count("chats__sessions"),
@@ -1225,6 +1266,16 @@ class ImageInstanceRepository:
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.DELETING,
             deleting_task_id=deleting_task_id,
+            delete_started_at=timezone.now(),
+            delete_attempt_count=F("delete_attempt_count") + 1,
+        )
+
+    @staticmethod
+    def mark_pending_deletion(image_id: uuid.UUID) -> None:
+        """Mark an image instance as pending deletion (runner offline)."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.PENDING_DELETION,
+            delete_requested_at=timezone.now(),
         )
 
     @staticmethod
@@ -1234,6 +1285,15 @@ class ImageInstanceRepository:
             status=ImageInstance.Status.DELETED,
             deleting_task_id=None,
             deleted_at=timezone.now(),
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(image_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark an image instance deletion as failed."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.DELETE_FAILED,
+            delete_last_error=error,
         )
 
     @staticmethod
@@ -1241,7 +1301,7 @@ class ImageInstanceRepository:
         """Return image instances that still need runner-side deletion."""
         return ImageInstance.objects.filter(
             runner_id=runner_id,
-            status=ImageInstance.Status.DELETING,
+            status__in=[ImageInstance.Status.DELETING, ImageInstance.Status.PENDING_DELETION],
         ).exclude(runner_ref="").select_related(
             "runner",
             "origin_definition",
@@ -1276,6 +1336,47 @@ class ImageDefinitionRepository:
         ).filter(
             Q(organization__isnull=True) | Q(organization_id=organization_id)
         ).first()
+
+    @staticmethod
+    def deactivate(definition_id: uuid.UUID) -> None:
+        """Deactivate definition: immediately no longer selectable for new workspaces."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=False,
+            status=ImageDefinition.Status.DEACTIVATED,
+            deactivated_at=timezone.now(),
+        )
+
+    @staticmethod
+    def activate(definition_id: uuid.UUID) -> None:
+        """Re-activate a deactivated definition."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=True,
+            status=ImageDefinition.Status.ACTIVE,
+            deactivated_at=None,
+        )
+
+    @staticmethod
+    def mark_pending_deletion(definition_id: uuid.UUID) -> None:
+        """Mark definition pending deletion (waiting for build deletes)."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=False,
+            status=ImageDefinition.Status.PENDING_DELETION,
+        )
+
+    @staticmethod
+    def mark_deleting(definition_id: uuid.UUID) -> None:
+        """Mark definition as actively deleting its builds."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            status=ImageDefinition.Status.DELETING,
+        )
+
+    @staticmethod
+    def mark_deleted(definition_id: uuid.UUID) -> None:
+        """Mark definition as fully deleted after all builds are confirmed deleted."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            status=ImageDefinition.Status.DELETED,
+            deleted_at=timezone.now(),
+        )
 
 
 class ImageBuildJobRepository:
@@ -1365,3 +1466,75 @@ class ImageBuildJobRepository:
             | Q(image_definition__organization__isnull=True)
         ).delete()
         return deleted
+
+    @staticmethod
+    def mark_pending_deletion(build_job_id: uuid.UUID) -> None:
+        """Mark build job as pending deletion (runner offline)."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.PENDING_DELETION,
+            delete_requested_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_deleting(build_job_id: uuid.UUID, *, deleting_task_id: str) -> None:
+        """Mark build job as actively deleting on runner."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETING,
+            deleting_task_id=deleting_task_id,
+            delete_started_at=timezone.now(),
+            delete_attempt_count=F("delete_attempt_count") + 1,
+        )
+
+    @staticmethod
+    def mark_deleted(build_job_id: uuid.UUID) -> None:
+        """Mark build job as fully deleted after runner confirmation."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETED,
+            deleting_task_id=None,
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark build job deletion as failed."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETE_FAILED,
+            delete_last_error=error,
+        )
+
+    @staticmethod
+    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageBuildJob]:
+        """Return build jobs that need runner-side deletion."""
+        return ImageBuildJob.objects.filter(
+            runner_id=runner_id,
+            status__in=[
+                ImageBuildJob.Status.PENDING_DELETION,
+                ImageBuildJob.Status.DELETING,
+            ],
+        ).select_related("runner", "image_definition", "image_instance")
+
+    @staticmethod
+    def list_non_deleted_for_definition(
+        definition_id: uuid.UUID,
+    ) -> QuerySet[ImageBuildJob]:
+        """Return all build jobs for a definition that aren't deleted."""
+        return ImageBuildJob.objects.filter(
+            image_definition_id=definition_id,
+        ).exclude(status=ImageBuildJob.Status.DELETED)
+
+    @staticmethod
+    def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
+        """Check if any non-deleted workspaces depend on this build's image instance."""
+        from .models import ImageInstance as II
+        instances = II.objects.filter(
+            build_job_id=build_job_id,
+        ).exclude(status__in=[II.Status.DELETED])
+        count = 0
+        for instance in instances:
+            ws_count = Workspace.objects.filter(
+                base_image_instance=instance,
+            ).exclude(
+                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED],
+            ).count()
+            count += ws_count
+        return count > 0, count

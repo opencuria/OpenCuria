@@ -103,8 +103,8 @@ function handleWindowUpdate(): void {
 
 // Initialize cache composable
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
-  props.workspaceId || '',
-  props.chatId,
+  () => props.workspaceId || '',
+  () => props.chatId,
 )
 
 // Load cached input on mount and when workspace/chat changes
@@ -462,7 +462,7 @@ watch(imagePickerOpen, async (open) => {
       <div class="flex items-center gap-2 p-2 pl-3 pb-3">
         <!-- Scrollable options row (takes all remaining space) -->
         <div
-          class="flex-1 overflow-x-auto min-w-0 -mb-0.5 pb-0.5"
+          class="flex-1 min-w-0 overflow-x-auto px-1 py-1 -mx-1 -my-1"
           style="scrollbar-width: none; -webkit-overflow-scrolling: touch;"
         >
           <div class="flex items-center gap-1.5 min-w-max">
@@ -539,11 +539,11 @@ watch(imagePickerOpen, async (open) => {
         <Teleport to="body">
           <template v-if="skillDropdownOpen">
             <div
-              class="fixed inset-0 z-40"
+              class="fixed inset-0 z-[120]"
               @click="skillDropdownOpen = false"
             />
             <div
-              class="fixed z-50 -translate-y-full rounded-[var(--radius-md)] glass-strong py-1 max-h-56 overflow-y-auto"
+              class="fixed z-[121] -translate-y-full rounded-[var(--radius-md)] glass-strong py-1 max-h-56 overflow-y-auto"
               :style="skillDropdownStyle"
             >
               <button
@@ -588,12 +588,12 @@ watch(imagePickerOpen, async (open) => {
         <Teleport to="body">
           <template v-if="imagePickerOpen && workspaceId">
             <div
-              class="fixed inset-0 z-40"
+              class="fixed inset-0 z-[120]"
               @click="imagePickerOpen = false"
             />
             <WorkspaceFilePicker
               :workspace-id="workspaceId"
-              class="fixed z-50 -translate-y-full"
+              class="fixed z-[121] -translate-y-full"
               :style="imagePickerStyle"
               @select="handleImageSelected"
               @close="imagePickerOpen = false"

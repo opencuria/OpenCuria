@@ -5,7 +5,7 @@ Provides two models:
 
 - ``CredentialService`` -- admin-managed catalog of external services
   (e.g. GitHub, OpenAI, SSH Key). Each service has exactly one
-  credential type (``env`` or ``ssh_key``).
+  credential type (``env``, ``file`` or ``ssh_key``).
 - ``Credential`` -- user- or org-scoped credential instances, holding an
   encrypted value.  Ownership is mutually exclusive: either ``user`` or
   ``organization`` is set, but never both.  Personal credentials are
@@ -58,6 +58,16 @@ class CredentialService(models.Model):
         default="",
         help_text="Name of the environment variable (e.g. 'GITHUB_TOKEN'). "
         "Only used when credential_type is 'env'.",
+    )
+    target_path = models.CharField(
+        max_length=1024,
+        blank=True,
+        default="",
+        help_text=(
+            "Target file path inside the workspace (e.g. '~/.codex/auth.json'). "
+            "Only used when credential_type is 'file'. Relative paths are "
+            "resolved against the workspace HOME directory."
+        ),
     )
     label = models.CharField(
         max_length=255,

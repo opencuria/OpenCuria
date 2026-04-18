@@ -172,6 +172,10 @@ class Workspace(models.Model):
         default=timezone.now,
         help_text="Timestamp of the most recent user- or session-driven activity.",
     )
+    delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_confirmed_at = models.DateTimeField(null=True, blank=True)
+    delete_last_error = models.TextField(blank=True, default="")
+    delete_attempt_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -694,6 +698,13 @@ class RunnerSystemMetrics(models.Model):
 class ImageDefinition(models.Model):
     """DB-managed definition of a buildable workspace image."""
 
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        DEACTIVATED = "deactivated", "Deactivated"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -726,6 +737,14 @@ class ImageDefinition(models.Model):
     custom_dockerfile = models.TextField(blank=True, default="")
     custom_init_script = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        help_text="Lifecycle status of the image definition.",
+    )
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -768,6 +787,10 @@ class ImageBuildJob(models.Model):
         ACTIVE = "active", "Active"
         FAILED = "failed", "Failed"
         DEACTIVATED = "deactivated", "Deactivated"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
+        DELETE_FAILED = "delete_failed", "Delete Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     image_definition = models.ForeignKey(
@@ -793,6 +816,18 @@ class ImageBuildJob(models.Model):
         blank=True,
         related_name="build_jobs",
     )
+    deleting_task_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Task ID of the delete task while cleanup is pending.",
+    )
+    delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_started_at = models.DateTimeField(null=True, blank=True)
+    delete_confirmed_at = models.DateTimeField(null=True, blank=True)
+    delete_last_error = models.TextField(blank=True, default="")
+    delete_attempt_count = models.PositiveIntegerField(default=0)
     built_at = models.DateTimeField(null=True, blank=True)
     deactivated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -827,8 +862,10 @@ class ImageInstance(models.Model):
         CAPTURING = "capturing", "Capturing"
         READY = "ready", "Ready"
         RETIRED = "retired", "Retired"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
         DELETING = "deleting", "Deleting"
         DELETED = "deleted", "Deleted"
+        DELETE_FAILED = "delete_failed", "Delete Failed"
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -912,6 +949,30 @@ class ImageInstance(models.Model):
         blank=True,
         db_index=True,
         help_text="Task ID of the delete task while cleanup is pending.",
+    )
+    delete_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When deletion was first requested.",
+    )
+    delete_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the runner began physical deletion.",
+    )
+    delete_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the runner confirmed deletion.",
+    )
+    delete_last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Last error message from a deletion attempt.",
+    )
+    delete_attempt_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of deletion attempts.",
     )
     credentials = models.ManyToManyField(
         "credentials.Credential",

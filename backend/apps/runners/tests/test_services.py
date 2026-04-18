@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.credentials.models import CredentialService
-from apps.credentials.services import CredentialSvc
+from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
 from apps.runners.enums import (
     AgentCommandPhase,
     RunnerStatus,
@@ -75,6 +75,227 @@ class TestRegisterRunner:
         assert runner.status == RunnerStatus.OFFLINE
 
 
+@pytest.mark.django_db
+class TestDesktopStateCleanup:
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_records_active_state_and_completes_task(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Desktop sessions are tracked in backend state and proxied via the runner."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="172.19.0.3",
+            network_name="workspace-net",
+            runner_id=str(runner.id),
+        )
+
+        task.refresh_from_db()
+        assert task.status == TaskStatus.COMPLETED
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        emit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_started_for_qemu_records_runner_proxied_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """QEMU desktops use the same runner-proxied state model as Docker."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.START_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_started(
+            str(task.id),
+            str(workspace.id),
+            port=6901,
+            container_ip="10.100.0.2",
+            network_name="",
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "10.100.0.2",
+            "network_name": "",
+        }
+        emit.assert_awaited_once()
+
+    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace):
+        """Stopping a workspace must clear any cached desktop session state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_workspace_stopped(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.STOPPED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace):
+        """Removing a workspace must also clear any desktop proxy state."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.REMOVE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_workspace_removed(
+            str(task.id),
+            workspace_id,
+            runner_id=str(runner.id),
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.DELETED
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+    def test_heartbeat_restores_active_desktop_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Backend heartbeat should reconstruct live desktop sessions after restart."""
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "172.19.0.3",
+                        "network_name": "workspace-net",
+                    },
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
+
+    def test_heartbeat_missing_desktop_field_keeps_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Runner reconnects should not clear desktop state when the field is omitted."""
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(workspace_id) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+
+    def test_heartbeat_explicit_null_desktop_cleans_existing_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """An explicit null desktop payload should clear stale desktop state."""
+        workspace_id = str(workspace.id)
+        service._active_desktops[workspace_id] = {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+        }
+        service._desktop_workspace_runner[workspace_id] = str(runner.id)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": workspace_id,
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": None,
+                }
+            ],
+        )
+
+        assert workspace_id not in service._active_desktops
+        assert workspace_id not in service._desktop_workspace_runner
+
+
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspace:
     @pytest.mark.asyncio
@@ -109,6 +330,12 @@ class TestCreateWorkspace:
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
             env_vars={"GITHUB_TOKEN": "test-token"},
+            files=[
+                ResolvedCredentialFile(
+                    target_path="~/.codex/auth.json",
+                    content='{"access_token":"test"}',
+                )
+            ],
             ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
             user=user,
             organization_id=runner.organization_id,
@@ -120,6 +347,13 @@ class TestCreateWorkspace:
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
+        assert payload["files"] == [
+            {
+                "target_path": "~/.codex/auth.json",
+                "content": '{"access_token":"test"}',
+                "mode": 0o600,
+            }
+        ]
         assert len(payload["ssh_keys"]) == 1
         workspace.refresh_from_db()
         assert workspace.base_image_instance_id == artifact.id
@@ -353,6 +587,55 @@ class TestCreateImageArtifactSecurity:
             )
 
 
+@pytest.mark.django_db
+class TestWorkspaceOwnerScoping:
+    def test_list_workspaces_and_lookup_are_owner_scoped(self, service):
+        user_model = get_user_model()
+        owner = user_model.objects.create_user(
+            email=f"owner-scope-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        admin = user_model.objects.create_user(
+            email=f"admin-scope-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        org = Organization.objects.create(
+            name=f"Owner Scope Org {uuid.uuid4().hex[:6]}",
+            slug=f"owner-scope-org-{uuid.uuid4().hex[:8]}",
+        )
+        runner = Runner.objects.create(
+            name="owner-scope-runner",
+            api_token_hash=uuid.uuid4().hex,
+            status=RunnerStatus.ONLINE,
+            sid="owner-scope-sid",
+            organization=org,
+            available_runtimes=["docker"],
+        )
+        owner_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Owner Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=owner,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Admin Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=admin,
+        )
+
+        visible = service.list_workspaces(organization_id=org.id, user=admin)
+
+        assert len(visible) == 1
+        assert visible[0].created_by_id == admin.id
+        with pytest.raises(WorkspaceNotFoundError):
+            service.get_workspace_for_user(
+                owner_workspace.id,
+                user=admin,
+                organization_id=org.id,
+            )
+
+
 @pytest.mark.django_db(transaction=True)
 class TestImageDeletionLifecycle:
     @pytest.mark.asyncio
@@ -384,7 +667,7 @@ class TestImageDeletionLifecycle:
         assert image.status == ImageInstance.Status.RETIRED
 
     @pytest.mark.asyncio
-    async def test_delete_marks_image_deleting_when_runner_offline(
+    async def test_delete_marks_image_pending_deletion_when_runner_offline(
         self, service, runner, user
     ):
         runner.status = RunnerStatus.OFFLINE
@@ -392,7 +675,7 @@ class TestImageDeletionLifecycle:
         image = ImageInstance.objects.create(
             runner=runner,
             runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             name="Offline Cleanup",
             runner_ref="opencuria/custom/offline-cleanup:1",
             status=ImageInstance.Status.READY,
@@ -402,8 +685,8 @@ class TestImageDeletionLifecycle:
         await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.DELETING
-        assert image.deleting_task_id is not None
+        assert image.status == ImageInstance.Status.PENDING_DELETION
+        assert image.delete_requested_at is not None
 
     @pytest.mark.asyncio
     async def test_dispatch_pending_image_deletions_marks_task_in_progress(
@@ -630,6 +913,46 @@ class TestWorkspaceOperationState:
 
         assert updated is not None
         assert updated.active_operation == WorkspaceOperation.RESTARTING
+
+    @pytest.mark.asyncio
+    async def test_running_qemu_update_skips_restart_for_unchanged_resources(
+        self, service, runner, workspace
+    ):
+        """No-op QEMU updates must not restart a running workspace."""
+        service._dispatch_workspace_task = AsyncMock()
+        workspace.runtime_type = "qemu"
+        workspace.qemu_vcpus = None
+        workspace.qemu_memory_mb = None
+        workspace.qemu_disk_size_gb = None
+        workspace.save(
+            update_fields=[
+                "runtime_type",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
+
+        updated = await service.update_workspace(
+            workspace.id,
+            qemu_vcpus=runner.qemu_default_vcpus,
+            qemu_memory_mb=runner.qemu_default_memory_mb,
+            qemu_disk_size_gb=runner.qemu_default_disk_size_gb,
+        )
+
+        workspace.refresh_from_db()
+        assert updated is not None
+        assert updated.active_operation is None
+        assert workspace.active_operation is None
+        assert workspace.qemu_vcpus is None
+        assert workspace.qemu_memory_mb is None
+        assert workspace.qemu_disk_size_gb is None
+        assert not Task.objects.filter(
+            workspace=workspace,
+            type=TaskType.UPDATE_WORKSPACE,
+        ).exists()
+        service._dispatch_workspace_task.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_busy_workspace_rejects_prompt(self, service, workspace):

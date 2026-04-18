@@ -28,7 +28,7 @@ from typing import Any
 import structlog
 
 from .config import RunnerSettings
-from .models import WorkspaceInfo
+from .models import DesktopSession, WorkspaceInfo
 from .runtime.base import ImageArtifactInfo, PtyHandle, RuntimeBackend, WorkspaceConfig
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +65,7 @@ class OperationCredentialContext:
 
     directory: str
     bootstrap_script: str
+    cleanup_script: str
     environment: dict[str, str]
 
     def build_bootstrap_snippet(
@@ -126,6 +127,7 @@ class WorkspaceService:
         self._settings = settings
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._terminals: dict[str, TerminalSession] = {}
+        self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
@@ -338,14 +340,16 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         env_vars: dict[str, str] | None,
+        files: list[dict[str, Any]] | None,
         ssh_keys: list[str] | None,
         log,
     ) -> OperationCredentialContext | None:
         """Create a temporary credential context for a single operation."""
 
         env_vars = env_vars or {}
+        credential_files = files or []
         ssh_keys = ssh_keys or []
-        if not env_vars and not ssh_keys:
+        if not env_vars and not credential_files and not ssh_keys:
             return None
 
         context_id = str(uuid.uuid4())
@@ -353,24 +357,82 @@ class WorkspaceService:
         ssh_dir = f"{context_dir}/ssh"
         bin_dir = f"{context_dir}/bin"
         bootstrap_path = f"{context_dir}/bootstrap.sh"
-        files: list[tuple[str, bytes, int]] = []
+        cleanup_path = f"{context_dir}/cleanup.sh"
+        files_dir = f"{context_dir}/files"
+        archive_files: list[tuple[str, bytes, int]] = []
         operation_env = {
             "OPENCURIA_CREDENTIAL_CONTEXT_DIR": context_dir,
         }
 
+        helper_lines = [
+            'opencuria_credential_home="${HOME:-/root}"',
+            "opencuria_resolve_credential_path() {",
+            '  raw_path="$1"',
+            "  tilde_prefix='~/'",
+            "  home_prefix='${HOME}/'",
+            '  if [ "$raw_path" = "~" ] || [ "$raw_path" = "${HOME}" ] || [ "$raw_path" = "${opencuria_credential_home}" ]; then',
+            '    printf "%s\\n" "$opencuria_credential_home"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#"$tilde_prefix"}" != "$raw_path" ]; then',
+            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$tilde_prefix"}"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#"$home_prefix"}" != "$raw_path" ]; then',
+            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$home_prefix"}"',
+            '    return',
+            "  fi",
+            '  if [ "${raw_path#/}" != "$raw_path" ]; then',
+            '    printf "%s\\n" "$raw_path"',
+            '    return',
+            "  fi",
+            '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
+            "}",
+        ]
         bootstrap_lines = [
             "#!/bin/sh",
             "set -eu",
             'export PATH="/root/.local/bin:$PATH"',
+            *helper_lines,
         ]
         operation_env["PATH"] = (
             "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
+        cleanup_lines = [
+            "#!/bin/sh",
+            "set -eu",
+            *helper_lines,
+        ]
         for key, value in env_vars.items():
             bootstrap_lines.append(
                 f"export {key}={shlex.quote(str(value))}"
             )
             operation_env[key] = str(value)
+
+        if credential_files:
+            for index, credential_file in enumerate(credential_files, start=1):
+                source_relpath = f"files/credential_{index}"
+                source_abspath = f"{files_dir}/credential_{index}"
+                target_path = str(credential_file["target_path"])
+                mode = int(credential_file.get("mode", 0o600))
+                content = str(credential_file.get("content", ""))
+                archive_files.append(
+                    (
+                        source_relpath,
+                        content.encode("utf-8"),
+                        0o600,
+                    )
+                )
+                bootstrap_lines.extend(
+                    [
+                        f'target_path=$(opencuria_resolve_credential_path {shlex.quote(target_path)})',
+                        'mkdir -p "$(dirname "$target_path")"',
+                        f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
+                    ]
+                )
+                cleanup_lines.append(
+                    f'rm -f "$(opencuria_resolve_credential_path {shlex.quote(target_path)})"'
+                )
 
         if ssh_keys:
             known_hosts_path = f"{ssh_dir}/known_hosts"
@@ -386,10 +448,12 @@ class WorkspaceService:
                 key_relpath = f"ssh/{key_name}"
                 key_abspath = f"{ssh_dir}/{key_name}"
                 config_lines.append(f"    IdentityFile {key_abspath}")
-                files.append((key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600))
+                archive_files.append(
+                    (key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600)
+                )
 
-            files.append(("ssh/known_hosts", b"", 0o600))
-            files.append(
+            archive_files.append(("ssh/known_hosts", b"", 0o600))
+            archive_files.append(
                 ("ssh/config", ("\n".join(config_lines) + "\n").encode("utf-8"), 0o600)
             )
 
@@ -405,7 +469,7 @@ class WorkspaceService:
                 "#!/bin/sh\n"
                 f"exec /usr/bin/sftp -F {shlex.quote(config_path)} \"$@\"\n"
             ).encode("utf-8")
-            files.extend(
+            archive_files.extend(
                 [
                     ("bin/ssh", ssh_wrapper, 0o755),
                     ("bin/scp", scp_wrapper, 0o755),
@@ -431,7 +495,13 @@ class WorkspaceService:
             )
 
         bootstrap_content = ("\n".join(bootstrap_lines) + "\n").encode("utf-8")
-        files.append(("bootstrap.sh", bootstrap_content, 0o700))
+        cleanup_content = ("\n".join(cleanup_lines) + "\n").encode("utf-8")
+        archive_files.extend(
+            [
+                ("bootstrap.sh", bootstrap_content, 0o700),
+                ("cleanup.sh", cleanup_content, 0o700),
+            ]
+        )
 
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
@@ -441,17 +511,26 @@ class WorkspaceService:
         if exit_code != 0:
             raise RuntimeError(f"Failed to create credential context: {output}")
 
-        archive_data = self._build_tar_entries(files)
+        archive_data = self._build_tar_entries(archive_files)
         await runtime.put_archive(instance_id, context_dir, archive_data)
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", f". {shlex.quote(bootstrap_path)} >/dev/null"],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to materialize credential context: {output}")
         log.info(
             "operation_credential_context_created",
             has_env=bool(env_vars),
+            file_count=len(credential_files),
             ssh_key_count=len(ssh_keys),
             context_dir=context_dir,
         )
         return OperationCredentialContext(
             directory=context_dir,
             bootstrap_script=bootstrap_path,
+            cleanup_script=cleanup_path,
             environment=operation_env,
         )
 
@@ -469,8 +548,13 @@ class WorkspaceService:
 
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
-            command=["rm", "-rf", context.directory],
-            workdir="/tmp",
+            command=[
+                "sh",
+                "-lc",
+                f". {shlex.quote(context.cleanup_script)} >/dev/null 2>&1 || true; "
+                f"rm -rf {shlex.quote(context.directory)}",
+            ],
+            workdir="/root",
         )
         if exit_code != 0:
             log.warning(
@@ -552,6 +636,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_disk_size_gb: int | None = None,
         configure_commands: list[dict] | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         workspace_id: uuid.UUID | None = None,
         runtime_type: str = "docker",
@@ -566,6 +651,8 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 backend, each with ``args``, ``workdir``, ``env``,
                 ``description`` keys.
             env_vars: Optional environment variables available during initial
+                repository clone/configure steps.
+            files: Optional credential files available during initial
                 repository clone/configure steps.
             ssh_keys: Optional SSH private keys available during initial
                 repository clone/configure steps.
@@ -650,6 +737,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime,
             instance_id,
             env_vars,
+            files,
             ssh_keys,
             log,
         )
@@ -707,6 +795,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         self,
         workspace_id: uuid.UUID,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> PreparedOperation:
         """Resolve runtime target and create a reusable credential context."""
@@ -731,6 +820,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime,
             info.instance_id,
             env_vars,
+            files,
             ssh_keys,
             log,
         )
@@ -757,6 +847,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         configure_commands: list[dict],
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> None:
@@ -773,6 +864,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -802,6 +894,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         command: dict,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> AsyncIterator[str]:
@@ -810,6 +903,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -836,6 +930,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         command: dict,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> tuple[int, str]:
@@ -850,6 +945,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
@@ -1177,6 +1273,94 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             for info in self._cache.values()
         ]
 
+    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the cached desktop session still accepts connections."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        exit_code, _ = await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "if command -v python3 >/dev/null 2>&1; then "
+                    "python3 -c \"import socket,sys; "
+                    "sock=socket.socket(); sock.settimeout(1); "
+                    "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
+                    "sys.exit(0 if rc == 0 else 1)\"; "
+                    "else "
+                    "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
+                    "fi"
+                ),
+            ],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        return exit_code == 0
+
+    async def get_workspace_heartbeat_statuses(self) -> list[dict]:
+        """Return workspace heartbeat payload including live desktop sessions."""
+        payload: list[dict] = []
+        for info in self._cache.values():
+            workspace_id = info.workspace_id
+            item = {
+                "workspace_id": str(workspace_id),
+                "status": info.status,
+                "runtime_type": info.runtime_type,
+            }
+
+            session = self._desktop_sessions.get(workspace_id)
+            if session is not None:
+                try:
+                    if await self._is_desktop_session_live(workspace_id):
+                        item["desktop"] = {
+                            "port": session.port,
+                            "container_ip": self.get_desktop_container_ip(workspace_id),
+                            "network_name": self.get_desktop_network_name(workspace_id),
+                        }
+                    else:
+                        self._desktop_sessions.pop(workspace_id, None)
+                        item["desktop"] = None
+                        logger.warning(
+                            "desktop_session_pruned_from_cache",
+                            workspace_id=str(workspace_id),
+                        )
+                except Exception:
+                    self._desktop_sessions.pop(workspace_id, None)
+                    item["desktop"] = None
+                    logger.exception(
+                        "desktop_session_health_check_failed",
+                        workspace_id=str(workspace_id),
+                    )
+
+            payload.append(item)
+
+        return payload
+
+    async def recover_desktop_sessions_from_runtime(self) -> None:
+        """Rebuild in-memory desktop sessions from live runtime state."""
+        for workspace_id, info in self._cache.items():
+            if info.status != "running" or workspace_id in self._desktop_sessions:
+                continue
+
+            try:
+                if not await self._is_desktop_session_live(workspace_id):
+                    continue
+            except Exception:
+                logger.exception(
+                    "desktop_session_recovery_failed",
+                    workspace_id=str(workspace_id),
+                )
+                continue
+
+            self._desktop_sessions[workspace_id] = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=info.instance_id,
+            )
+            logger.info(
+                "desktop_session_recovered",
+                workspace_id=str(workspace_id),
+            )
+
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
         qemu_runtime = self._runtimes.get("qemu")
@@ -1215,6 +1399,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         cols: int = 80,
         rows: int = 24,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         prepared: PreparedOperation | None = None,
     ) -> str:
@@ -1225,9 +1410,20 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         prepared = prepared or await self.prepare_operation(
             workspace_id,
             env_vars=env_vars,
+            files=files,
             ssh_keys=ssh_keys,
         )
         log = prepared.log
+        terminal_command = ["/bin/bash", "-l"]
+        if prepared.credential_context is not None:
+            terminal_command = [
+                "/bin/bash",
+                "-lc",
+                (
+                    f". {shlex.quote(prepared.credential_context.bootstrap_script)} "
+                    ">/dev/null 2>&1; exec /bin/bash -l"
+                ),
+            ]
 
         handle = await prepared.runtime.exec_pty(
             prepared.instance_id,
@@ -1242,6 +1438,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                     else {}
                 ),
             },
+            command=terminal_command,
         )
 
         terminal_id = str(uuid.uuid4())
@@ -1303,6 +1500,169 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             logger.bind(terminal_id=terminal_id),
         )
         logger.info("terminal_closed", terminal_id=terminal_id)
+
+    # -- desktop session (KasmVNC) -----------------------------------------
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> DesktopSession:
+        """Start a KasmVNC desktop session inside the workspace container.
+
+        Idempotent: if a session is already running, returns the existing one.
+        """
+        existing = self._desktop_sessions.get(workspace_id)
+        if existing is not None:
+            if await self._is_desktop_session_live(workspace_id):
+                logger.info("desktop_already_running", workspace_id=str(workspace_id))
+                return existing
+            self._desktop_sessions.pop(workspace_id, None)
+            logger.warning(
+                "desktop_cached_session_stale",
+                workspace_id=str(workspace_id),
+            )
+
+        if await self._is_desktop_session_live(workspace_id):
+            recovered = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=self._get_cached(workspace_id).instance_id,
+            )
+            self._desktop_sessions[workspace_id] = recovered
+            logger.info(
+                "desktop_session_recovered_on_start",
+                workspace_id=str(workspace_id),
+            )
+            return recovered
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+
+        log = logger.bind(workspace_id=str(workspace_id))
+
+        # Execute the start script inside the container
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["/usr/local/bin/opencuria-desktop-start"],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            log.error("desktop_start_failed", exit_code=exit_code, output=output)
+            raise RuntimeError(f"Failed to start desktop session: {output}")
+
+        session = DesktopSession(
+            workspace_id=workspace_id,
+            instance_id=info.instance_id,
+        )
+        self._desktop_sessions[workspace_id] = session
+        log.info("desktop_started", port=session.port)
+        return session
+
+    async def stop_desktop(self, workspace_id: uuid.UUID) -> None:
+        """Stop a running desktop session."""
+        session = self._desktop_sessions.pop(workspace_id, None)
+        if session is None:
+            return
+
+        log = logger.bind(workspace_id=str(workspace_id))
+        try:
+            runtime = self._get_runtime(workspace_id)
+            info = self._get_cached(workspace_id)
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                ["/usr/local/bin/opencuria-desktop-stop"],
+            )
+            if exit_code != 0:
+                log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
+        except Exception:
+            log.exception("desktop_stop_failed")
+
+        log.info("desktop_stopped")
+
+    async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
+        """Write plain text into the desktop clipboard inside the workspace VM/container."""
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        command = (
+            "set -e;"
+            "TOOL='';"
+            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v apt-get >/dev/null 2>&1; then "
+            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
+            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
+            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; fi; "
+            "fi; "
+            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
+            f"printf %s '{encoded_text}' | base64 -d | "
+            "if [ \"$TOOL\" = 'xsel' ]; then "
+            "DISPLAY=:1 xsel --clipboard --input; "
+            "else DISPLAY=:1 timeout 3 xclip -selection clipboard -in >/dev/null 2>&1 || true; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to write desktop clipboard: {output}")
+
+    async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
+        """Read plain text from the desktop clipboard inside the workspace VM/container."""
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        command = (
+            "set -e;"
+            "TOOL='';"
+            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v apt-get >/dev/null 2>&1; then "
+            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
+            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
+            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; fi; "
+            "fi; "
+            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
+            "if [ \"$TOOL\" = 'xclip' ]; then "
+            "DISPLAY=:1 xclip -selection clipboard -o 2>/dev/null || true; "
+            "else DISPLAY=:1 xsel --clipboard --output 2>/dev/null || true; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to read desktop clipboard: {output}")
+        return output
+
+    def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
+        """Return the active desktop session if any."""
+        return self._desktop_sessions.get(workspace_id)
+
+    def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
+        """Get the upstream IP address for the workspace desktop proxy."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_container_ip"):
+            raise RuntimeError("Runtime does not support desktop proxy")
+        return runtime.get_container_ip(info.instance_id, str(workspace_id))
+
+    def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
+        """Get the backend-attachable network for a workspace desktop proxy."""
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_workspace_network_name"):
+            raise RuntimeError("Runtime does not support desktop networking")
+        return runtime.get_workspace_network_name(str(workspace_id))
 
     # -- file operations -------------------------------------------------------
 
@@ -1738,28 +2098,40 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         *,
         runtime_type: str,
         image_ref: str,
-    ) -> None:
-        """Delete a concrete runtime image reference without requiring a workspace."""
+    ) -> str:
+        """Delete a concrete runtime image reference without requiring a workspace.
+
+        Returns 'deleted' or 'already_absent' to indicate the result.
+        """
         if runtime_type == "docker":
             if not image_ref.strip():
                 raise RuntimeError("image_ref is required for docker image deletion")
             try:
                 import docker  # type: ignore[import-not-found]
+                from docker.errors import ImageNotFound  # type: ignore[import-not-found]
             except Exception as exc:
                 raise RuntimeError("docker SDK is not available") from exc
 
             client = docker.from_env()
-            await asyncio.to_thread(client.images.remove, image=image_ref, force=True)
-            logger.info("docker_image_deleted", image_ref=image_ref)
-            return
+            try:
+                await asyncio.to_thread(client.images.remove, image=image_ref, force=True)
+                logger.info("docker_image_deleted", image_ref=image_ref)
+                return "deleted"
+            except ImageNotFound:
+                logger.info("docker_image_already_absent", image_ref=image_ref)
+                return "already_absent"
 
         if runtime_type == "qemu":
             if not image_ref.strip():
                 raise RuntimeError("image_ref is required for qemu image deletion")
             runtime = self._get_runtime_by_type("qemu")
-            await runtime.delete_image_artifact(image_ref)
-            logger.info("qemu_image_deleted", image_ref=image_ref)
-            return
+            try:
+                await runtime.delete_image_artifact(image_ref)
+                logger.info("qemu_image_deleted", image_ref=image_ref)
+                return "deleted"
+            except FileNotFoundError:
+                logger.info("qemu_image_already_absent", image_ref=image_ref)
+                return "already_absent"
 
         raise RuntimeError(f"Unsupported runtime_type for image deletion: {runtime_type}")
 
@@ -1772,6 +2144,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
         env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> uuid.UUID:
         """Create a workspace from an image artifact.
@@ -1805,4 +2178,25 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             image_artifact_id=image_artifact_id,
             runtime_type=runtime_type,
         )
+
+        if env_vars or files or ssh_keys:
+            log = logger.bind(
+                workspace_id=str(new_workspace_id),
+                image_artifact_id=image_artifact_id,
+                runtime_type=runtime_type,
+            )
+            credential_context = await self._create_operation_credential_context(
+                runtime,
+                instance_id,
+                env_vars,
+                files,
+                ssh_keys,
+                log,
+            )
+            await self._cleanup_operation_credential_context(
+                runtime,
+                instance_id,
+                credential_context,
+                log,
+            )
         return new_workspace_id

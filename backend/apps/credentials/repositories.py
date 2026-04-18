@@ -43,6 +43,7 @@ class CredentialServiceRepository:
         description: str,
         credential_type: str,
         env_var_name: str,
+        target_path: str,
         label: str,
     ) -> CredentialService:
         """Create a credential service catalog entry."""
@@ -52,6 +53,7 @@ class CredentialServiceRepository:
             description=description,
             credential_type=credential_type,
             env_var_name=env_var_name,
+            target_path=target_path,
             label=label,
         )
 

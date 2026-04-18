@@ -115,12 +115,6 @@ class WorkspaceOut(Schema):
     credential_ids: list[uuid.UUID] = []
 
 
-class WorkspaceDetailOut(WorkspaceOut):
-    """Response schema for a workspace with its sessions."""
-
-    sessions: list[SessionOut] = []
-
-
 class WorkspaceCreateIn(Schema):
     """Request schema for creating a workspace."""
 
@@ -432,6 +426,42 @@ class TerminalStartOut(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Desktop session schemas
+# ---------------------------------------------------------------------------
+
+
+class DesktopStartOut(Schema):
+    """Response schema after desktop start is dispatched."""
+
+    task_id: uuid.UUID
+
+
+class DesktopStopOut(Schema):
+    """Response schema after desktop stop is dispatched."""
+
+    task_id: uuid.UUID
+
+
+class DesktopStatusOut(Schema):
+    """Response schema for desktop session status check."""
+
+    active: bool
+    proxy_url: str | None = None
+
+
+class DesktopClipboardWriteIn(Schema):
+    """Request schema for writing plain text into the VM clipboard."""
+
+    text: str
+
+
+class DesktopClipboardReadOut(Schema):
+    """Response schema for reading plain text from the VM clipboard."""
+
+    text: str
+
+
+# ---------------------------------------------------------------------------
 # Error schemas
 # ---------------------------------------------------------------------------
 
@@ -537,6 +567,9 @@ class ImageArtifactOut(Schema):
     runtime_type: str | None = None
     is_deactivated: bool = False
     source_runner_online: bool = False
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
     created_at: datetime
     created_by_id: int | None = None
     credential_ids: list[uuid.UUID] = []
@@ -589,12 +622,13 @@ class ImageBuildJobOut(Schema):
     runner_id: uuid.UUID
     image_artifact_id: uuid.UUID | None = None
     status: str
-    image_tag: str
-    image_path: str
     build_log: str
     build_task_id: uuid.UUID | None = None
     built_at: datetime | None = None
     deactivated_at: datetime | None = None
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -628,6 +662,7 @@ class ImageDefinitionOut(Schema):
     custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool
+    status: str = "active"
     created_at: datetime
     updated_at: datetime
 
@@ -664,7 +699,3 @@ class ImageDefinitionDuplicateIn(Schema):
     """Request schema for duplicating an image definition into the org."""
 
     name: str | None = None
-
-
-# Fix forward reference in WorkspaceDetailOut
-WorkspaceDetailOut.model_rebuild()

@@ -44,10 +44,9 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
 
     Access rules mirror REST API behavior:
     - user must be member of the workspace runner's organization
-    - admins may access all org workspaces
-    - members may only access their own workspaces
+    - every user may only access their own workspaces
     """
-    from apps.organizations.models import Membership, MembershipRole
+    from apps.organizations.models import Membership
     from .repositories import WorkspaceRepository
 
     try:
@@ -65,9 +64,6 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
     ).first()
     if membership is None:
         return False
-
-    if membership.role == MembershipRole.ADMIN:
-        return True
 
     return workspace.created_by_id == user_id
 
@@ -247,6 +243,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if runner is not None:
             await service.dispatch_pending_image_builds(runner)
             await service.dispatch_pending_image_deletions(runner)
+            await service.dispatch_pending_workspace_deletions(runner)
+            await service.dispatch_pending_build_job_deletions(runner)
 
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
@@ -325,6 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
+            already_absent=data.get("already_absent", False),
         )
 
     @sio.on("workspace:cleanup_unknown_done")
@@ -507,6 +506,69 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
+    # --- Desktop session events from runner ---
+
+    @sio.on("desktop:started")
+    async def on_desktop_started(sid: str, data: dict):
+        """Handle desktop:started event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:started")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_started(
+            task_id=data.get("task_id"),
+            workspace_id=data["workspace_id"],
+            port=data.get("port", 6901),
+            container_ip=data.get("container_ip", ""),
+            network_name=data.get("network_name", ""),
+            runner_id=runner_id,
+        )
+
+    @sio.on("desktop:stopped")
+    async def on_desktop_stopped(sid: str, data: dict):
+        """Handle desktop:stopped event from runner."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:stopped")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_desktop_stopped(
+            task_id=data["task_id"],
+            workspace_id=data["workspace_id"],
+            runner_id=runner_id,
+        )
+
+    @sio.on("desktop:proxy_ws_frame")
+    async def on_desktop_proxy_ws_frame(sid: str, data: dict):
+        """Forward runner-originated desktop WebSocket frames to the proxy app."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_frame")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_frame
+
+        await push_runner_ws_frame(
+            data["tunnel_id"],
+            runner_id,
+            text=data.get("text"),
+            data=data.get("data"),
+            encoding=data.get("encoding"),
+        )
+
+    @sio.on("desktop:proxy_ws_closed")
+    async def on_desktop_proxy_ws_closed(sid: str, data: dict):
+        """Forward runner-originated desktop tunnel close notifications."""
+        runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_closed")
+        if not runner_id:
+            return
+
+        from .desktop_proxy import push_runner_ws_closed
+
+        await push_runner_ws_closed(
+            data["tunnel_id"],
+            runner_id,
+            code=int(data.get("code", 1000)),
+        )
+
     # --- File explorer events from runner ---
 
     @sio.on("files:list_result")
@@ -565,17 +627,39 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("image_artifact:deleted")
     async def on_image_artifact_deleted(sid: str, data: dict):
-        """Handle image_artifact:deleted confirmation from runner."""
+        """Handle image_artifact:deleted or already_absent confirmation from runner."""
         runner_id = await _require_runner_id(sio, sid, "image_artifact:deleted")
         if not runner_id:
             return
         service = get_runner_service()
+        # Both 'deleted' and 'already_absent' result in the same handler
         await sync_to_async(service.handle_image_artifact_deleted)(
             task_id=data.get("task_id", ""),
             image_instance_id=data.get("image_instance_id", ""),
             runner_ref=data.get("image_artifact_id", ""),
             runner_id=runner_id,
         )
+        # Also check if this was a build job deletion
+        task_id = data.get("task_id", "")
+        if task_id:
+            await sync_to_async(service.handle_build_job_deleted)(
+                task_id=task_id,
+                runner_id=runner_id,
+            )
+
+    @sio.on("image_artifact:delete_failed")
+    async def on_image_artifact_delete_failed(sid: str, data: dict):
+        """Handle image artifact deletion failure from runner."""
+        runner_id = await _require_runner_id(sio, sid, "image_artifact:delete_failed")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_image_artifact_delete_failed)(
+            task_id=data.get("task_id", ""),
+            error=data.get("error", ""),
+            runner_id=runner_id,
+        )
+
     @sio.on("image_artifact:failed")
     async def on_image_artifact_failed(sid: str, data: dict):
         """Handle image_artifact:failed by marking the pending artifact as failed."""

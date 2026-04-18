@@ -226,6 +226,7 @@ class RuntimeBackend(abc.ABC):
         rows: int = 24,
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        command: list[str] | None = None,
     ) -> PtyHandle:
         """Create an interactive PTY shell inside the workspace.
 

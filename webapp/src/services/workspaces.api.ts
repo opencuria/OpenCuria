@@ -80,6 +80,40 @@ export function startTerminal(
   return post<{ task_id: string }>(`/workspaces/${id}/terminal/`, { cols, rows })
 }
 
+// --- Desktop API ---
+
+export function startDesktop(id: string): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`)
+}
+
+export function stopDesktop(id: string): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`)
+}
+
+export function getDesktopStatus(
+  id: string,
+): Promise<{ active: boolean; proxy_url: string | null }> {
+  return get<{ active: boolean; proxy_url: string | null }>(
+    `/workspaces/${id}/desktop/status/`,
+  )
+}
+
+export function writeDesktopClipboard(
+  id: string,
+  text: string,
+): Promise<{ text: string }> {
+  return post<{ text: string }>(
+    `/workspaces/${id}/desktop/clipboard/write/`,
+    { text },
+  )
+}
+
+export function readDesktopClipboard(id: string): Promise<{ text: string }> {
+  return post<{ text: string }>(
+    `/workspaces/${id}/desktop/clipboard/read/`,
+  )
+}
+
 // --- Chat API ---
 
 export function listChats(workspaceId: string): Promise<Chat[]> {
@@ -181,6 +215,14 @@ export function updateImageDefinition(id: string, data: Partial<ImageDefinition>
 
 export function deleteImageDefinition(id: string): Promise<void> {
   return del<void>(`/image-definitions/${id}/`)
+}
+
+export function deactivateImageDefinition(id: string): Promise<ImageDefinition> {
+  return post<ImageDefinition>(`/image-definitions/${id}/deactivate/`)
+}
+
+export function activateImageDefinition(id: string): Promise<ImageDefinition> {
+  return post<ImageDefinition>(`/image-definitions/${id}/activate/`)
 }
 
 export function listRunnerImageBuilds(definitionId: string): Promise<RunnerImageBuild[]> {

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { Pencil, Check, Key } from 'lucide-vue-next'
 
 import { UiButton, UiDialog, UiInput } from '@/components/ui'
-import type { Workspace } from '@/types'
+import type { Workspace, WorkspaceUpdateIn } from '@/types'
 import { RuntimeType } from '@/types'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
@@ -30,6 +30,14 @@ const qemuDiskSizeGb = ref(50)
 const submitting = ref(false)
 
 const btnSize = computed(() => (props.size === 'sm' ? 'icon-sm' as const : 'icon' as const))
+const qemuDefaults = computed(() => {
+  const runner = runnerStore.runnerById(props.workspace.runner_id)
+  return {
+    vcpus: runner?.qemu_default_vcpus ?? 2,
+    memoryMb: runner?.qemu_default_memory_mb ?? 4096,
+    diskSizeGb: runner?.qemu_default_disk_size_gb ?? 50,
+  }
+})
 
 const qemuLimits = computed(() => {
   const runner = runnerStore.runnerById(props.workspace.runner_id)
@@ -53,15 +61,28 @@ const qemuLimits = computed(() => {
   }
 })
 
+function resolveCurrentQemuResources(workspace: Workspace = props.workspace) {
+  return {
+    vcpus: workspace.qemu_vcpus ?? qemuDefaults.value.vcpus,
+    memoryMb: workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb,
+    diskSizeGb: workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb,
+  }
+}
+
+function syncFormWithWorkspace(workspace: Workspace): void {
+  const currentQemuResources = resolveCurrentQemuResources(workspace)
+  name.value = workspace.name
+  selectedCredentialIds.value = [...workspace.credential_ids]
+  qemuVcpus.value = currentQemuResources.vcpus
+  qemuMemoryMb.value = currentQemuResources.memoryMb
+  qemuDiskSizeGb.value = currentQemuResources.diskSizeGb
+}
+
 watch(
   () => props.workspace,
   (workspace) => {
     if (open.value) return
-    name.value = workspace.name
-    selectedCredentialIds.value = [...workspace.credential_ids]
-    qemuVcpus.value = workspace.qemu_vcpus ?? 2
-    qemuMemoryMb.value = workspace.qemu_memory_mb ?? 4096
-    qemuDiskSizeGb.value = workspace.qemu_disk_size_gb ?? 50
+    syncFormWithWorkspace(workspace)
   },
   { immediate: true, deep: true },
 )
@@ -82,26 +103,29 @@ async function handleOpen(): Promise<void> {
     await runnerStore.fetchRunners()
   }
   await credentialStore.fetchCredentials()
-  name.value = props.workspace.name
-  selectedCredentialIds.value = [...props.workspace.credential_ids]
-  qemuVcpus.value = props.workspace.qemu_vcpus ?? 2
-  qemuMemoryMb.value = props.workspace.qemu_memory_mb ?? 4096
-  qemuDiskSizeGb.value = props.workspace.qemu_disk_size_gb ?? 50
+  syncFormWithWorkspace(props.workspace)
 }
 
 async function handleSubmit(): Promise<void> {
   submitting.value = true
-  const success = await workspaceStore.updateWorkspace(props.workspace.id, {
+  const payload: WorkspaceUpdateIn = {
     name: name.value,
     credential_ids: selectedCredentialIds.value,
-    ...(props.workspace.runtime_type === RuntimeType.QEMU
-      ? {
-          qemu_vcpus: qemuVcpus.value,
-          qemu_memory_mb: qemuMemoryMb.value,
-          qemu_disk_size_gb: qemuDiskSizeGb.value,
-        }
-      : {}),
-  })
+  }
+  if (props.workspace.runtime_type === RuntimeType.QEMU) {
+    const currentQemuResources = resolveCurrentQemuResources()
+    if (qemuVcpus.value !== currentQemuResources.vcpus) {
+      payload.qemu_vcpus = qemuVcpus.value
+    }
+    if (qemuMemoryMb.value !== currentQemuResources.memoryMb) {
+      payload.qemu_memory_mb = qemuMemoryMb.value
+    }
+    if (qemuDiskSizeGb.value !== currentQemuResources.diskSizeGb) {
+      payload.qemu_disk_size_gb = qemuDiskSizeGb.value
+    }
+  }
+
+  const success = await workspaceStore.updateWorkspace(props.workspace.id, payload)
   submitting.value = false
 
   if (success) {
@@ -111,11 +135,7 @@ async function handleSubmit(): Promise<void> {
 
 function handleClose(): void {
   open.value = false
-  name.value = props.workspace.name
-  selectedCredentialIds.value = [...props.workspace.credential_ids]
-  qemuVcpus.value = props.workspace.qemu_vcpus ?? 2
-  qemuMemoryMb.value = props.workspace.qemu_memory_mb ?? 4096
-  qemuDiskSizeGb.value = props.workspace.qemu_disk_size_gb ?? 50
+  syncFormWithWorkspace(props.workspace)
 }
 
 async function navigateToCredentials(): Promise<void> {
@@ -185,6 +205,9 @@ async function navigateToCredentials(): Promise<void> {
             >
               <Key :size="10" />
               SSH Key
+            </span>
+            <span v-else-if="cred.target_path" class="text-xs text-muted-fg">
+              {{ cred.target_path }}
             </span>
             <span v-else-if="cred.env_var_name" class="text-xs text-muted-fg">
               {{ cred.env_var_name }}

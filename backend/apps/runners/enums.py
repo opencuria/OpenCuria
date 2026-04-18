@@ -31,6 +31,10 @@ class WorkspaceStatus(models.TextChoices):
     RUNNING = "running", "Running"
     STOPPED = "stopped", "Stopped"
     FAILED = "failed", "Failed"
+    PENDING_DELETION = "pending_deletion", "Pending Deletion"
+    DELETING = "deleting", "Deleting"
+    DELETED = "deleted", "Deleted"
+    DELETE_FAILED = "delete_failed", "Delete Failed"
     REMOVED = "removed", "Removed"
 
 
@@ -65,6 +69,8 @@ class TaskType(models.TextChoices):
     RESUME_WORKSPACE = "resume_workspace", "Resume Workspace"
     REMOVE_WORKSPACE = "remove_workspace", "Remove Workspace"
     START_TERMINAL = "start_terminal", "Start Terminal"
+    START_DESKTOP = "start_desktop", "Start Desktop"
+    STOP_DESKTOP = "stop_desktop", "Stop Desktop"
     CREATE_IMAGE_ARTIFACT = "create_image_artifact", "Create Image Artifact"
     DELETE_IMAGE = "delete_image", "Delete Image"
     CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT = (
