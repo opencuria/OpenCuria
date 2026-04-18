@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('runners', '0005_rename_runnerimagebuild_to_imagebuildjob'),
-        ('runners', '0007_merge_0006_imageartifact_and_codex_auth'),
+        ('runners', '0006_require_codex_auth_for_codex_cli'),
     ]
 
     operations = [
