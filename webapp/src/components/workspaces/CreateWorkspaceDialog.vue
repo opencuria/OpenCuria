@@ -299,7 +299,6 @@ watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
 }, { immediate: true })
 
 function toggleCredential(id: string): void {
-  if (isCapturedClone.value) return
   const credential = credentialStore.credentials.find((entry) => entry.id === id)
   if (!credential) return
   selectedCredentialIds.value = toggleWorkspaceCredentialSelection(

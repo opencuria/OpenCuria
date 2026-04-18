@@ -18,6 +18,7 @@ const credentialStore = {
     {
       id: 'cred-1',
       name: 'GitHub Token',
+      service_id: 'service-github',
       credential_type: 'env_var',
       env_var_name: 'GITHUB_TOKEN',
     },
@@ -126,6 +127,7 @@ describe('CreateWorkspaceDialog', () => {
       name: string
       selectedImageValue: string
       selectedCredentialIds: string[]
+      toggleCredential: (id: string) => void
       handleSubmit: () => Promise<void>
     }
 
@@ -133,7 +135,8 @@ describe('CreateWorkspaceDialog', () => {
     vm.open = true
     vm.name = 'Captured Clone'
     vm.selectedImageValue = 'captured:captured-image-1'
-    vm.selectedCredentialIds = ['cred-1']
+    await nextTick()
+    vm.toggleCredential('cred-1')
     await nextTick()
 
     await vm.handleSubmit()
@@ -142,6 +145,7 @@ describe('CreateWorkspaceDialog', () => {
       name: 'Captured Clone',
       credential_ids: ['cred-1'],
     })
+    expect(vm.selectedCredentialIds).toEqual(['cred-1'])
     expect(createWorkspace).not.toHaveBeenCalled()
   })
 })
