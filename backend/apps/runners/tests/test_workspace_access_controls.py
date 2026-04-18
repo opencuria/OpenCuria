@@ -11,7 +11,7 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.runners import api as runners_api
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
-from apps.runners.models import Chat, ImageArtifact, Runner, Session, Workspace
+from apps.runners.models import Chat, ImageInstance, Runner, Session, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -93,13 +93,14 @@ def workspace_access_setup(db):
         prompt="admin prompt",
         status=SessionStatus.COMPLETED,
     )
-    artifact = ImageArtifact.objects.create(
-        source_workspace=owner_workspace,
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        origin_workspace=owner_workspace,
         created_by=owner,
         name="Owner Snapshot",
-        runner_artifact_id="owner-snapshot-1",
-        status=ImageArtifact.ArtifactStatus.READY,
-        artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        runner_ref="owner-snapshot-1",
+        status=ImageInstance.Status.READY,
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
     )
     return {
         "org": org,

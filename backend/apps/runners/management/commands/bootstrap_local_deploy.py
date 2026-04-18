@@ -12,7 +12,7 @@ from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import RuntimeType
-from apps.runners.models import ImageDefinition, Runner, RunnerImageBuild
+from apps.runners.models import ImageDefinition, Runner, ImageBuildJob
 from common.utils import hash_token
 
 # Default packages installed in the workspace image.
@@ -249,7 +249,7 @@ class Command(BaseCommand):
         user,
         runner: Runner,
         definition_name: str,
-    ) -> RunnerImageBuild:
+    ) -> ImageBuildJob:
         """Seed the default image definition and a pending build record.
 
         The build is created with status ``pending`` and **no** task or
@@ -296,33 +296,29 @@ class Command(BaseCommand):
         if definition_updates:
             definition.save(update_fields=definition_updates)
 
-        build, created = RunnerImageBuild.objects.get_or_create(
+        build, created = ImageBuildJob.objects.get_or_create(
             image_definition=definition,
             runner=runner,
             defaults={
-                "status": RunnerImageBuild.Status.PENDING,
+                "status": ImageBuildJob.Status.PENDING,
             },
         )
 
         # If the build already exists and is active (from a previous
         # successful run), leave it alone so workspaces keep working.
-        if not created and build.status == RunnerImageBuild.Status.ACTIVE:
+        if not created and build.status == ImageBuildJob.Status.ACTIVE:
             return build
 
         # For new or non-active builds, ensure they are in pending state
         # so the runner will pick them up.
-        if not created and build.status != RunnerImageBuild.Status.PENDING:
-            build.status = RunnerImageBuild.Status.PENDING
+        if not created and build.status != ImageBuildJob.Status.PENDING:
+            build.status = ImageBuildJob.Status.PENDING
             build.build_task = None
-            build.image_tag = ""
-            build.image_path = ""
             build.built_at = None
             build.save(
                 update_fields=[
                     "status",
                     "build_task",
-                    "image_tag",
-                    "image_path",
                     "built_at",
                     "updated_at",
                 ]

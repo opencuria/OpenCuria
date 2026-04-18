@@ -1018,60 +1018,6 @@ function handleToggleSessionReadState(sessionId: string): void {
               :workspace-id="workspaceId"
             />
             <div
-              v-else-if="showWorkspaceEmptyState"
-              class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 py-10"
-            >
-              <div class="w-full max-w-3xl rounded-[2rem] border border-border/80 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.14),transparent_55%),linear-gradient(160deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-6 shadow-[0_30px_80px_rgba(15,23,42,0.18)] sm:p-10">
-                <div class="mx-auto flex max-w-xl flex-col items-center text-center">
-                  <div class="mb-5 flex h-18 w-18 items-center justify-center rounded-[1.5rem] border border-primary/20 bg-primary/10 text-primary shadow-[0_16px_40px_rgba(59,130,246,0.18)]">
-                    <MessageSquare :size="30" />
-                  </div>
-                  <p class="mb-2 text-xs font-semibold uppercase tracking-[0.28em] text-primary/80">
-                    Fresh Workspace
-                  </p>
-                  <h3 class="text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
-                    No chats yet in this workspace
-                  </h3>
-                  <p class="mt-3 max-w-lg text-sm leading-6 text-muted-fg sm:text-base">
-                    Start the first chat to pick an agent for this workspace.
-                  </p>
-                  <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
-                    <UiButton size="lg" class="min-w-52" @click="handleCreateChat">
-                      <Bot :size="16" class="mr-2" />
-                      Start First Chat
-                    </UiButton>
-                    <UiButton
-                      variant="outline"
-                      size="lg"
-                      :disabled="!canPrompt"
-                      @click="openFileExplorer"
-                    >
-                      <FolderTree :size="16" class="mr-2" />
-                      Open Files
-                    </UiButton>
-                    <UiButton
-                      variant="outline"
-                      size="lg"
-                      :disabled="!canPrompt"
-                      @click="openTerminal"
-                    >
-                      <TerminalSquare :size="16" class="mr-2" />
-                      Open Terminal
-                    </UiButton>
-                    <UiButton
-                      variant="outline"
-                      size="lg"
-                      :disabled="!canPrompt"
-                      @click="openDesktopPanel"
-                    >
-                      <Monitor :size="16" class="mr-2" />
-                      Open Desktop
-                    </UiButton>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div
               v-else
               ref="mainChatPanelHost"
               class="min-h-0 flex flex-1 min-w-0 overflow-hidden"

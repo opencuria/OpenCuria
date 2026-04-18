@@ -24,6 +24,7 @@ import { WorkspaceOperation, WorkspaceStatus, SessionStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { isSessionActive } from '@/lib/sessionState'
 import { useNotificationStore } from './notifications'
+import { useImageStore } from './images'
 import { useSkillStore } from './skills'
 
 /** Sentinel ID used for chats that have not yet been persisted to the backend. */
@@ -60,6 +61,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     stopped: workspaces.value.filter((w) => w.status === WorkspaceStatus.STOPPED),
     failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.FAILED),
     removed: workspaces.value.filter((w) => w.status === WorkspaceStatus.REMOVED),
+    pending_deletion: workspaces.value.filter((w) => w.status === WorkspaceStatus.PENDING_DELETION),
+    deleting: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETING),
+    deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
+    delete_failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETE_FAILED),
   }))
 
   /** Sessions filtered to the active chat. Returns empty array if no active chat is selected. */
@@ -100,7 +105,15 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const workspace =
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
-    return Boolean(workspace?.active_operation || pendingWorkspaceOperations.value[workspaceId])
+    if (!workspace) return Boolean(pendingWorkspaceOperations.value[workspaceId])
+    // Workspaces in deletion states are always "transitioning" (no actions allowed)
+    const deletionStates: string[] = [
+      WorkspaceStatus.PENDING_DELETION,
+      WorkspaceStatus.DELETING,
+      WorkspaceStatus.DELETED,
+    ]
+    if (deletionStates.includes(workspace.status)) return true
+    return Boolean(workspace.active_operation || pendingWorkspaceOperations.value[workspaceId])
   }
 
   function getWorkspaceTransitionLabel(workspaceId: string): string | null {
@@ -721,8 +734,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     data: ImageArtifactCreateIn,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
+    const imageStore = useImageStore()
     try {
       await workspacesApi.createWorkspaceImageArtifact(workspaceId, data)
+      await imageStore.fetchImages()
       notifications.success('Image capturing', 'Image is being captured.')
       return true
     } catch (e: unknown) {
@@ -737,9 +752,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     imageArtifactId: string,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
+    const imageStore = useImageStore()
     try {
       await workspacesApi.deleteWorkspaceImageArtifact(workspaceId, imageArtifactId)
       imageArtifacts.value = imageArtifacts.value.filter((artifact) => artifact.id !== imageArtifactId)
+      await imageStore.fetchImages()
       notifications.success('Image deleted', 'The image was removed.')
       return true
     } catch (e: unknown) {

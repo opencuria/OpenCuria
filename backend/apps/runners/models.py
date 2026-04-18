@@ -142,6 +142,17 @@ class Workspace(models.Model):
     qemu_vcpus = models.PositiveSmallIntegerField(null=True, blank=True)
     qemu_memory_mb = models.PositiveIntegerField(null=True, blank=True)
     qemu_disk_size_gb = models.PositiveIntegerField(null=True, blank=True)
+    base_image_instance = models.ForeignKey(
+        "runners.ImageInstance",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="dependent_workspaces",
+        help_text=(
+            "The concrete runtime image this workspace was created from. "
+            "Legacy workspaces created before image-instance tracking may be null."
+        ),
+    )
     credentials = models.ManyToManyField(
         "credentials.Credential",
         blank=True,
@@ -161,6 +172,10 @@ class Workspace(models.Model):
         default=timezone.now,
         help_text="Timestamp of the most recent user- or session-driven activity.",
     )
+    delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_confirmed_at = models.DateTimeField(null=True, blank=True)
+    delete_last_error = models.TextField(blank=True, default="")
+    delete_attempt_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -683,6 +698,13 @@ class RunnerSystemMetrics(models.Model):
 class ImageDefinition(models.Model):
     """DB-managed definition of a buildable workspace image."""
 
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        DEACTIVATED = "deactivated", "Deactivated"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
         "organizations.Organization",
@@ -715,6 +737,14 @@ class ImageDefinition(models.Model):
     custom_dockerfile = models.TextField(blank=True, default="")
     custom_init_script = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        help_text="Lifecycle status of the image definition.",
+    )
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -748,7 +778,7 @@ class ImageDefinition(models.Model):
         return f"ImageDefinition({self.name}, runtime={self.runtime_type})"
 
 
-class RunnerImageBuild(models.Model):
+class ImageBuildJob(models.Model):
     """Per-runner build/activation status for an image definition."""
 
     class Status(models.TextChoices):
@@ -757,6 +787,10 @@ class RunnerImageBuild(models.Model):
         ACTIVE = "active", "Active"
         FAILED = "failed", "Failed"
         DEACTIVATED = "deactivated", "Deactivated"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
+        DELETE_FAILED = "delete_failed", "Delete Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     image_definition = models.ForeignKey(
@@ -774,113 +808,191 @@ class RunnerImageBuild(models.Model):
         choices=Status.choices,
         default=Status.PENDING,
     )
-    image_tag = models.CharField(max_length=255, blank=True, default="")
-    image_path = models.CharField(max_length=512, blank=True, default="")
     build_log = models.TextField(blank=True, default="")
     build_task = models.ForeignKey(
         Task,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="runner_image_builds",
+        related_name="build_jobs",
     )
+    deleting_task_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Task ID of the delete task while cleanup is pending.",
+    )
+    delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_started_at = models.DateTimeField(null=True, blank=True)
+    delete_confirmed_at = models.DateTimeField(null=True, blank=True)
+    delete_last_error = models.TextField(blank=True, default="")
+    delete_attempt_count = models.PositiveIntegerField(default=0)
     built_at = models.DateTimeField(null=True, blank=True)
     deactivated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "runners_runner_image_build"
+        db_table = "runners_build_job"
         ordering = ["-updated_at", "-created_at"]
         constraints = [
             models.UniqueConstraint(
                 fields=["image_definition", "runner"],
-                name="uniq_runner_image_build_definition_runner",
+                name="uniq_build_job_definition_runner",
             )
         ]
 
     def __str__(self) -> str:
         return (
-            "RunnerImageBuild("
+            "ImageBuildJob("
             f"definition={self.image_definition_id}, runner={self.runner_id}, status={self.status})"
         )
 
 
-class ImageArtifact(models.Model):
-    """Concrete runtime artifact used to create or clone workspaces."""
+class ImageInstance(models.Model):
+    """Concrete runnable image instance tracked independently from definitions."""
 
-    class ArtifactKind(models.TextChoices):
-        CAPTURED = "captured", "Captured"
-        BUILT = "built", "Built"
+    class OriginType(models.TextChoices):
+        DEFINITION_BUILD = "definition_build", "Definition Build"
+        WORKSPACE_CAPTURE = "workspace_capture", "Workspace Capture"
 
-    class ArtifactStatus(models.TextChoices):
-        CREATING = "creating", "Creating"
+    class Status(models.TextChoices):
+        BUILDING = "building", "Building"
+        CAPTURING = "capturing", "Capturing"
         READY = "ready", "Ready"
+        RETIRED = "retired", "Retired"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETING = "deleting", "Deleting"
+        DELETED = "deleted", "Deleted"
+        DELETE_FAILED = "delete_failed", "Delete Failed"
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    source_workspace = models.ForeignKey(
-        Workspace,
+    runner = models.ForeignKey(
+        Runner,
         on_delete=models.CASCADE,
-        related_name="image_artifacts",
+        related_name="image_instances",
+    )
+    runtime_type = models.CharField(
+        max_length=20,
+        choices=RuntimeType.choices,
+        default=RuntimeType.DOCKER,
+    )
+    origin_type = models.CharField(
+        max_length=32,
+        choices=OriginType.choices,
+        default=OriginType.WORKSPACE_CAPTURE,
+    )
+    origin_definition = models.ForeignKey(
+        ImageDefinition,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        related_name="image_instances",
+    )
+    origin_workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.SET_NULL,
+        related_name="captured_image_instances",
+        null=True,
+        blank=True,
+    )
+    build_job = models.OneToOneField(
+        ImageBuildJob,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="image_instance",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="image_artifacts",
+        related_name="image_instances",
         null=True,
         blank=True,
-        help_text="The user who created this artifact.",
+        help_text="The user who created this image instance.",
     )
-    artifact_kind = models.CharField(
-        max_length=20,
-        choices=ArtifactKind.choices,
-        default=ArtifactKind.CAPTURED,
-    )
-    runner_image_build = models.OneToOneField(
-        RunnerImageBuild,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="artifact",
-    )
-    runner_artifact_id = models.CharField(
-        max_length=255,
+    runner_ref = models.CharField(
+        max_length=512,
         blank=True,
         default="",
-        help_text="Artifact identifier on the runner. Empty while creating.",
+        help_text=(
+            "Concrete runtime reference on the runner, e.g. a Docker image tag "
+            "or QCOW2 path."
+        ),
     )
     name = models.CharField(
         max_length=255,
-        help_text="Human-readable artifact name.",
+        help_text="Human-readable image instance name.",
     )
     size_bytes = models.BigIntegerField(
         default=0,
-        help_text="Artifact size in bytes.",
+        help_text="Image instance size in bytes.",
     )
     status = models.CharField(
         max_length=20,
-        choices=ArtifactStatus.choices,
-        default=ArtifactStatus.READY,
-        help_text="Artifact status: creating (in progress), ready (available), failed.",
+        choices=Status.choices,
+        default=Status.READY,
+        help_text="Lifecycle status of the image instance.",
     )
     creating_task_id = models.CharField(
         max_length=64,
         null=True,
         blank=True,
         db_index=True,
-        help_text="Task ID of the creation task, used to link runner events back to this record.",
+        help_text="Task ID of the creation/build task.",
     )
+    deleting_task_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Task ID of the delete task while cleanup is pending.",
+    )
+    delete_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When deletion was first requested.",
+    )
+    delete_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the runner began physical deletion.",
+    )
+    delete_confirmed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the runner confirmed deletion.",
+    )
+    delete_last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Last error message from a deletion attempt.",
+    )
+    delete_attempt_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of deletion attempts.",
+    )
+    credentials = models.ManyToManyField(
+        "credentials.Credential",
+        blank=True,
+        related_name="image_instances",
+        help_text=(
+            "Credentials associated with this image instance. "
+            "Workspace cloning must still supply credentials explicitly."
+        ),
+    )
+    deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "runners_image_artifact"
+        db_table = "runners_image_instance"
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
         return (
-            "ImageArtifact("
-            f"{self.name}, source_workspace={self.source_workspace_id}, kind={self.artifact_kind})"
+            "ImageInstance("
+            f"{self.name}, origin_type={self.origin_type}, status={self.status})"
         )

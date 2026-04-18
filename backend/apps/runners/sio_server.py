@@ -242,6 +242,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
         if runner is not None:
             await service.dispatch_pending_image_builds(runner)
+            await service.dispatch_pending_image_deletions(runner)
+            await service.dispatch_pending_workspace_deletions(runner)
+            await service.dispatch_pending_build_job_deletions(runner)
 
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
@@ -320,6 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
+            already_absent=data.get("already_absent", False),
         )
 
     @sio.on("workspace:cleanup_unknown_done")
@@ -623,15 +627,37 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("image_artifact:deleted")
     async def on_image_artifact_deleted(sid: str, data: dict):
-        """Handle image_artifact:deleted confirmation from runner."""
+        """Handle image_artifact:deleted or already_absent confirmation from runner."""
         runner_id = await _require_runner_id(sio, sid, "image_artifact:deleted")
         if not runner_id:
             return
-        logger.info(
-            "Image artifact deleted on runner %s: workspace=%s, artifact=%s",
-            runner_id,
-            data.get("workspace_id"),
-            data.get("image_artifact_id"),
+        service = get_runner_service()
+        # Both 'deleted' and 'already_absent' result in the same handler
+        await sync_to_async(service.handle_image_artifact_deleted)(
+            task_id=data.get("task_id", ""),
+            image_instance_id=data.get("image_instance_id", ""),
+            runner_ref=data.get("image_artifact_id", ""),
+            runner_id=runner_id,
+        )
+        # Also check if this was a build job deletion
+        task_id = data.get("task_id", "")
+        if task_id:
+            await sync_to_async(service.handle_build_job_deleted)(
+                task_id=task_id,
+                runner_id=runner_id,
+            )
+
+    @sio.on("image_artifact:delete_failed")
+    async def on_image_artifact_delete_failed(sid: str, data: dict):
+        """Handle image artifact deletion failure from runner."""
+        runner_id = await _require_runner_id(sio, sid, "image_artifact:delete_failed")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_image_artifact_delete_failed)(
+            task_id=data.get("task_id", ""),
+            error=data.get("error", ""),
+            runner_id=runner_id,
         )
 
     @sio.on("image_artifact:failed")
@@ -656,7 +682,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         await sync_to_async(service.handle_image_build_progress)(
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             line=data.get("line", ""),
             runner_id=runner_id,
         )
@@ -670,7 +696,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await sync_to_async(service.handle_image_built)(
             task_id=data.get("task_id", ""),
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             image_tag=data.get("image_tag", ""),
             image_path=data.get("image_path", ""),
             runner_id=runner_id,
@@ -685,7 +711,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await sync_to_async(service.handle_image_build_failed)(
             task_id=data.get("task_id", ""),
-            runner_image_build_id=data.get("runner_image_build_id", ""),
+            build_job_id=data.get("build_job_id", ""),
             error=data.get("error", ""),
             runner_id=runner_id,
         )

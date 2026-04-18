@@ -217,6 +217,14 @@ export function deleteImageDefinition(id: string): Promise<void> {
   return del<void>(`/image-definitions/${id}/`)
 }
 
+export function deactivateImageDefinition(id: string): Promise<ImageDefinition> {
+  return post<ImageDefinition>(`/image-definitions/${id}/deactivate/`)
+}
+
+export function activateImageDefinition(id: string): Promise<ImageDefinition> {
+  return post<ImageDefinition>(`/image-definitions/${id}/activate/`)
+}
+
 export function listRunnerImageBuilds(definitionId: string): Promise<RunnerImageBuild[]> {
   return get<RunnerImageBuild[]>(`/image-definitions/${definitionId}/runner-builds/`)
 }

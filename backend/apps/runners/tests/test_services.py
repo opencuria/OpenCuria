@@ -36,10 +36,10 @@ from apps.runners.models import (
     AgentDefinition,
     AgentDefinitionCredentialRelation,
     Chat,
-    ImageArtifact,
     ImageDefinition,
+    ImageInstance,
     Runner,
-    RunnerImageBuild,
+    ImageBuildJob,
     Session,
     Task,
     Workspace,
@@ -199,7 +199,7 @@ class TestDesktopStateCleanup:
         )
 
         workspace.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.REMOVED
+        assert workspace.status == WorkspaceStatus.DELETED
         assert workspace_id not in service._active_desktops
         assert workspace_id not in service._desktop_workspace_runner
 
@@ -308,20 +308,22 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/base:1",
+            status=ImageBuildJob.Status.ACTIVE,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        runner_ref = "opencuria/custom/base:1"
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=user,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Base Workspace Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
         workspace, task = await service.create_workspace(
             name="Test Workspace",
@@ -353,6 +355,8 @@ class TestCreateWorkspace:
             }
         ]
         assert len(payload["ssh_keys"]) == 1
+        workspace.refresh_from_db()
+        assert workspace.base_image_instance_id == artifact.id
 
     @pytest.mark.asyncio
     async def test_runner_without_sid_fails_dispatch_and_rolls_back(
@@ -371,20 +375,21 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/base:1",
+            status=ImageBuildJob.Status.ACTIVE,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=user,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            build_job=build,
+            runner_ref="opencuria/custom/base:1",
             name="Base Workspace Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(RunnerOfflineError):
@@ -465,20 +470,22 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=foreign_runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/foreign:1",
+            status=ImageBuildJob.Status.ACTIVE,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        runner_ref = "opencuria/custom/foreign:1"
+        artifact = ImageInstance.objects.create(
+            runner=foreign_runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=owner,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Foreign Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(NotFoundError):
@@ -507,20 +514,22 @@ class TestCreateWorkspace:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="opencuria/custom/base:definition",
+            status=ImageBuildJob.Status.ACTIVE,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
+        runner_ref = "opencuria/custom/base:definition"
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
             created_by=user,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag,
+            build_job=build,
+            runner_ref=runner_ref,
             name="Definition Artifact",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(
@@ -574,13 +583,15 @@ class TestCreateWorkspace:
             created_by=owner,
             runtime_type="docker",
         )
-        image = ImageArtifact.objects.create(
-            source_workspace=foreign_workspace,
+        image = ImageInstance.objects.create(
+            runner=foreign_runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=foreign_workspace,
             created_by=owner,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
-            runner_artifact_id="snapshot-1",
+            runner_ref="snapshot-1",
             name="Foreign Image",
-            status=ImageArtifact.ArtifactStatus.READY,
+            status=ImageInstance.Status.READY,
         )
 
         with pytest.raises(NotFoundError):
@@ -704,6 +715,189 @@ class TestWorkspaceOwnerScoping:
 
 
 @pytest.mark.django_db(transaction=True)
+class TestImageDeletionLifecycle:
+    @pytest.mark.asyncio
+    async def test_delete_retires_image_when_workspace_still_depends_on_it(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Reusable Base",
+            runner_ref="opencuria/custom/reusable:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Dependent Workspace",
+            status=WorkspaceStatus.STOPPED,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        with pytest.raises(ConflictError, match="was retired instead"):
+            await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.RETIRED
+
+    @pytest.mark.asyncio
+    async def test_delete_marks_image_pending_deletion_when_runner_offline(
+        self, service, runner, user
+    ):
+        runner.status = RunnerStatus.OFFLINE
+        runner.save(update_fields=["status"])
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            name="Offline Cleanup",
+            runner_ref="opencuria/custom/offline-cleanup:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+
+        await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.PENDING_DELETION
+        assert image.delete_requested_at is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_ignores_workspace_already_deleting(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Deleting Dependency Base",
+            runner_ref="opencuria/custom/deleting-dependency:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Deleting Workspace",
+            status=WorkspaceStatus.DELETING,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETING
+        assert image.deleting_task_id is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_build_job_ignores_workspace_already_deleting(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Build Deletion Base",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.ACTIVE,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            name="Build Deletion Artifact",
+            runner_ref="opencuria/custom/build-delete:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Deleting Build Workspace",
+            status=WorkspaceStatus.DELETING,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        await service.delete_build_job(build.id)
+
+        build.refresh_from_db()
+        image.refresh_from_db()
+        assert build.status == ImageBuildJob.Status.DELETING
+        assert image.status == ImageInstance.Status.DELETING
+        assert build.deleting_task_id is not None
+        assert image.deleting_task_id == build.deleting_task_id
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_image_deletions_marks_task_in_progress(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Pending Delete",
+            runner_ref="opencuria/custom/pending-delete:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(
+                Task.objects.create(
+                    runner=runner,
+                    type=TaskType.DELETE_IMAGE,
+                    status=TaskStatus.PENDING,
+                ).id
+            ),
+        )
+
+        dispatched = await service.dispatch_pending_image_deletions(runner)
+
+        assert [item.id for item in dispatched] == [image.id]
+        task = Task.objects.get(id=image.deleting_task_id)
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    def test_handle_image_artifact_deleted_marks_image_deleted(
+        self, service, runner, user
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Delete Confirmed",
+            runner_ref="opencuria/custom/delete-confirmed:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(task.id),
+        )
+
+        service.handle_image_artifact_deleted(
+            task_id=str(task.id),
+            image_instance_id=str(image.id),
+            runner_id=str(runner.id),
+        )
+
+        image.refresh_from_db()
+        task.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETED
+        assert task.status == TaskStatus.COMPLETED
+
+
+@pytest.mark.django_db(transaction=True)
 class TestRuntimeCompatibilityGuards:
     @pytest.mark.asyncio
     async def test_resume_workspace_rejects_runner_without_workspace_runtime(
@@ -728,7 +922,7 @@ class TestRuntimeCompatibilityGuards:
             service.update_runner_qemu_settings(runner.id, qemu_default_vcpus=4)
 
     @pytest.mark.asyncio
-    async def test_trigger_runner_image_build_rejects_unsupported_runtime(
+    async def test_trigger_build_job_rejects_unsupported_runtime(
         self, service, runner, user
     ):
         """Image definition builds must match a runner-supported runtime."""
@@ -743,7 +937,7 @@ class TestRuntimeCompatibilityGuards:
         )
 
         with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
-            await service.trigger_runner_image_build(
+            await service.trigger_build_job(
                 image_definition=definition,
                 runner=runner,
                 activate=True,
@@ -765,13 +959,15 @@ class TestRuntimeCompatibilityGuards:
             qemu_memory_mb=4096,
             qemu_disk_size_gb=50,
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="qemu",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
             created_by=user,
             name="QEMU Snapshot",
-            runner_artifact_id="artifact-qemu-1",
-            status=ImageArtifact.ArtifactStatus.READY,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+            runner_ref="artifact-qemu-1",
+            status=ImageInstance.Status.READY,
         )
         runner.available_runtimes = ["docker"]
         runner.save(update_fields=["available_runtimes"])
@@ -798,13 +994,15 @@ class TestCreateWorkspaceFromImageArtifact:
             created_by=user,
             runtime_type="docker",
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
             created_by=user,
             name="Captured Source",
-            runner_artifact_id="captured-artifact-1",
-            status=ImageArtifact.ArtifactStatus.READY,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+            runner_ref="captured-artifact-1",
+            status=ImageInstance.Status.READY,
         )
         credential_service = CredentialService.objects.create(
             name="GitHub Token",
@@ -851,14 +1049,31 @@ class TestCreateWorkspaceFromImageArtifact:
             created_by=user,
             runtime_type="docker",
         )
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
             created_by=user,
             name="Captured Source",
-            runner_artifact_id="captured-artifact-2",
-            status=ImageArtifact.ArtifactStatus.READY,
-            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+            runner_ref="captured-artifact-2",
+            status=ImageInstance.Status.READY,
         )
+        credential_service = CredentialService.objects.create(
+            name="GitHub Token",
+            slug=f"github-token-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="GITHUB_TOKEN",
+            label="GitHub PAT",
+        )
+        credential = CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name="GitHub PAT",
+            value="secret-token",
+            user=user,
+        )
+        artifact.credentials.set([credential])
 
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
@@ -1567,10 +1782,10 @@ class TestDispatchPendingImageBuilds:
             runtime_type="docker",
             base_distro="ubuntu:22.04",
         )
-        build = RunnerImageBuild.objects.create(
+        build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.PENDING,
+            status=ImageBuildJob.Status.PENDING,
             build_task=None,
         )
 
@@ -1582,13 +1797,13 @@ class TestDispatchPendingImageBuilds:
         # Build should now have a task and the SIO mock should have been called
         build.refresh_from_db()
         assert build.build_task is not None
-        assert build.status == RunnerImageBuild.Status.PENDING
+        assert build.status == ImageBuildJob.Status.PENDING
         sio_mock.emit.assert_called()
 
         # An artifact should have been created (in CREATING status)
-        artifact = ImageArtifact.objects.filter(runner_image_build=build).first()
+        artifact = ImageInstance.objects.filter(build_job=build).first()
         assert artifact is not None
-        assert artifact.status == ImageArtifact.ArtifactStatus.CREATING
+        assert artifact.status == ImageInstance.Status.BUILDING
 
     @pytest.mark.asyncio
     async def test_skips_builds_with_task(self, service, sio_mock, runner, user):
@@ -1605,10 +1820,10 @@ class TestDispatchPendingImageBuilds:
             type=TaskType.BUILD_IMAGE,
             status=TaskStatus.IN_PROGRESS,
         )
-        RunnerImageBuild.objects.create(
+        ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.PENDING,
+            status=ImageBuildJob.Status.PENDING,
             build_task=task,
         )
 
@@ -1625,11 +1840,10 @@ class TestDispatchPendingImageBuilds:
             runtime_type="docker",
             base_distro="ubuntu:22.04",
         )
-        RunnerImageBuild.objects.create(
+        ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
-            status=RunnerImageBuild.Status.ACTIVE,
-            image_tag="test:latest",
+            status=ImageBuildJob.Status.ACTIVE,
         )
 
         dispatched = await service.dispatch_pending_image_builds(runner)

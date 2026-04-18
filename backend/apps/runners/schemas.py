@@ -561,12 +561,15 @@ class ImageArtifactOut(Schema):
     size_bytes: int
     status: str
     artifact_kind: str = "captured"
-    runner_image_build_id: uuid.UUID | None = None
+    build_job_id: uuid.UUID | None = None
     source_definition_name: str | None = None
     source_runner_id: uuid.UUID | None = None
     runtime_type: str | None = None
     is_deactivated: bool = False
     source_runner_online: bool = False
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
     created_at: datetime
     created_by_id: int | None = None
 
@@ -606,7 +609,7 @@ class WorkspaceFromImageArtifactOut(Schema):
     status: str
 
 
-class RunnerImageBuildOut(Schema):
+class ImageBuildJobOut(Schema):
     """Response schema for runner-specific image build status."""
 
     id: uuid.UUID
@@ -614,24 +617,25 @@ class RunnerImageBuildOut(Schema):
     runner_id: uuid.UUID
     image_artifact_id: uuid.UUID | None = None
     status: str
-    image_tag: str
-    image_path: str
     build_log: str
     build_task_id: uuid.UUID | None = None
     built_at: datetime | None = None
     deactivated_at: datetime | None = None
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
     created_at: datetime
     updated_at: datetime
 
 
-class RunnerImageBuildCreateIn(Schema):
+class ImageBuildJobCreateIn(Schema):
     """Assign runner + trigger build for an image definition."""
 
     runner_id: uuid.UUID
     activate: bool = True
 
 
-class RunnerImageBuildUpdateIn(Schema):
+class ImageBuildJobUpdateIn(Schema):
     """Update runner build lifecycle state via actions."""
 
     action: str  # deactivate | activate | rebuild
@@ -653,6 +657,7 @@ class ImageDefinitionOut(Schema):
     custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool
+    status: str = "active"
     created_at: datetime
     updated_at: datetime
 
