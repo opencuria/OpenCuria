@@ -23,10 +23,14 @@ def _copy_image_artifacts_forward(apps, schema_editor):
     RunnerImageBuild = apps.get_model("runners", "RunnerImageBuild")
     Workspace = apps.get_model("runners", "Workspace")
 
-    old_m2m = ImageArtifact.credentials.through
+    old_credentials = ImageArtifact._meta.get_field("credentials") if any(
+        field.name == "credentials" for field in ImageArtifact._meta.local_many_to_many
+    ) else None
+    old_m2m = old_credentials.remote_field.through if old_credentials is not None else None
     new_m2m = ImageInstance.credentials.through
 
-    _ensure_table(schema_editor, old_m2m)
+    if old_m2m is not None:
+        _ensure_table(schema_editor, old_m2m)
 
     status_map = {
         "creating": "capturing",
@@ -82,11 +86,12 @@ def _copy_image_artifacts_forward(apps, schema_editor):
             updated_at=artifact.created_at,
         )
 
-    for rel in old_m2m.objects.all():
-        new_m2m.objects.get_or_create(
-            imageinstance_id=rel.imageartifact_id,
-            credential_id=rel.credential_id,
-        )
+    if old_m2m is not None:
+        for rel in old_m2m.objects.all():
+            new_m2m.objects.get_or_create(
+                imageinstance_id=rel.imageartifact_id,
+                credential_id=rel.credential_id,
+            )
 
     existing_build_ids = set(
         ImageInstance.objects.exclude(build_job_id__isnull=True).values_list(
@@ -137,7 +142,10 @@ def _copy_image_artifacts_backward(apps, schema_editor):
     ImageArtifact = apps.get_model("runners", "ImageArtifact")
     ImageInstance = apps.get_model("runners", "ImageInstance")
 
-    old_m2m = ImageArtifact.credentials.through
+    old_credentials = ImageArtifact._meta.get_field("credentials") if any(
+        field.name == "credentials" for field in ImageArtifact._meta.local_many_to_many
+    ) else None
+    old_m2m = old_credentials.remote_field.through if old_credentials is not None else None
     new_m2m = ImageInstance.credentials.through
 
     for image in ImageInstance.objects.select_related(
@@ -185,18 +193,19 @@ def _copy_image_artifacts_backward(apps, schema_editor):
             created_at=image.created_at,
         )
 
-    for rel in new_m2m.objects.all():
-        old_m2m.objects.get_or_create(
-            imageartifact_id=rel.imageinstance_id,
-            credential_id=rel.credential_id,
-        )
+    if old_m2m is not None:
+        for rel in new_m2m.objects.all():
+            old_m2m.objects.get_or_create(
+                imageartifact_id=rel.imageinstance_id,
+                credential_id=rel.credential_id,
+            )
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
         ('credentials', '0002_seed_global_credential_services'),
-        ('runners', '0003_fix_standard_qemu_image_definition'),
+        ('runners', '0007_merge_0006_imageartifact_and_codex_auth'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

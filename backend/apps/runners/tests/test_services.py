@@ -359,6 +359,58 @@ class TestCreateWorkspace:
         assert workspace.base_image_instance_id == artifact.id
 
     @pytest.mark.asyncio
+    async def test_runner_without_sid_fails_dispatch_and_rolls_back(
+        self,
+        service,
+        runner,
+        user,
+    ):
+        """A runner without an active socket session must not leave tasks hanging."""
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Base Workspace",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.ACTIVE,
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            created_by=user,
+            build_job=build,
+            runner_ref="opencuria/custom/base:1",
+            name="Base Workspace Artifact",
+            status=ImageInstance.Status.READY,
+        )
+
+        with pytest.raises(RunnerOfflineError):
+            await service.create_workspace(
+                name="Test Workspace",
+                repos=[],
+                image_artifact_id=artifact.id,
+                user=user,
+                organization_id=runner.organization_id,
+            )
+
+        task = Task.objects.latest("created_at")
+        assert task.type == TaskType.CREATE_WORKSPACE
+        assert task.status == TaskStatus.FAILED
+        assert "offline" in task.error.lower()
+
+        workspace = Workspace.objects.latest("created_at")
+        assert workspace.active_operation is None
+        assert workspace.status == WorkspaceStatus.CREATING
+
+    @pytest.mark.asyncio
     async def test_requires_image_selection(self, service, runner, user):
         """Creating a workspace without an image should be rejected."""
         with pytest.raises(ConflictError):
@@ -549,6 +601,32 @@ class TestCreateWorkspace:
                 image_artifact_id=image.id,
                 organization_id=local_runner.organization_id,
             )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRemoveWorkspace:
+    @pytest.mark.asyncio
+    async def test_runner_without_sid_fails_remove_dispatch_and_rolls_back(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        """Removing must fail fast when the runner has no active socket session."""
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+
+        with pytest.raises(RunnerOfflineError):
+            await service.remove_workspace(workspace.id)
+
+        task = Task.objects.latest("created_at")
+        assert task.type == TaskType.REMOVE_WORKSPACE
+        assert task.status == TaskStatus.FAILED
+        assert "offline" in task.error.lower()
+
+        workspace.refresh_from_db()
+        assert workspace.active_operation is None
+        assert workspace.status == WorkspaceStatus.RUNNING
 
 
 @pytest.mark.django_db(transaction=True)
@@ -901,6 +979,118 @@ class TestRuntimeCompatibilityGuards:
                 user=user,
                 organization_id=runner.organization_id,
             )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestCreateWorkspaceFromImageArtifact:
+    @pytest.mark.asyncio
+    async def test_uses_only_explicitly_supplied_credentials(
+        self, service, sio_mock, runner, user
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Source Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            runtime_type="docker",
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
+            created_by=user,
+            name="Captured Source",
+            runner_ref="captured-artifact-1",
+            status=ImageInstance.Status.READY,
+        )
+        credential_service = CredentialService.objects.create(
+            name="GitHub Token",
+            slug=f"github-token-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="GITHUB_TOKEN",
+            label="GitHub PAT",
+        )
+        credential = CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name="GitHub PAT",
+            value="secret-token",
+            user=user,
+        )
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Workspace",
+            env_vars={"GITHUB_TOKEN": "secret-token"},
+            credentials=[credential],
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        assert list(workspace.credentials.values_list("id", flat=True)) == [credential.id]
+
+        sio_mock.emit.assert_called_once()
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {"GITHUB_TOKEN": "secret-token"}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    async def test_does_not_restore_credentials_from_artifact_metadata(
+        self, service, sio_mock, runner, user
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Source Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            runtime_type="docker",
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
+            created_by=user,
+            name="Captured Source",
+            runner_ref="captured-artifact-2",
+            status=ImageInstance.Status.READY,
+        )
+        credential_service = CredentialService.objects.create(
+            name="GitHub Token",
+            slug=f"github-token-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="GITHUB_TOKEN",
+            label="GitHub PAT",
+        )
+        credential = CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name="GitHub PAT",
+            value="secret-token",
+            user=user,
+        )
+        artifact.credentials.set([credential])
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Without Credentials",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        assert workspace.credentials.count() == 0
+
+        sio_mock.emit.assert_called_once()
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
 
 
 @pytest.mark.django_db

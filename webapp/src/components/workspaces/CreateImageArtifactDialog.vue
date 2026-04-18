@@ -81,7 +81,7 @@ function handleClose(): void {
   <UiDialog
     :open="open"
     title="Capture Image"
-    description="Capture a point-in-time image of a running QEMU workspace. Attached credentials are saved in the image."
+    description="Capture a point-in-time image of a running QEMU workspace. Credentials are selected separately when creating a workspace from the image."
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
     <template #trigger>

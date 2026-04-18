@@ -1126,7 +1126,6 @@ class ImageInstanceRepository:
                 "build_job__runner",
                 "build_job__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1193,7 +1192,6 @@ class ImageInstanceRepository:
                 "build_job__runner",
                 "build_job__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1214,7 +1212,6 @@ class ImageInstanceRepository:
                 "build_job__runner",
                 "build_job__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1236,7 +1233,7 @@ class ImageInstanceRepository:
             "build_job",
             "build_job__runner",
             "build_job__image_definition",
-        ).prefetch_related("credentials__service")
+        )
 
     @staticmethod
     def list_by_user(user) -> "QuerySet[ImageInstance]":
@@ -1256,7 +1253,7 @@ class ImageInstanceRepository:
             "build_job",
             "build_job__runner",
             "build_job__image_definition",
-        ).prefetch_related("credentials__service")
+        )
 
     @staticmethod
     def mark_retired(image_id: uuid.UUID) -> None:

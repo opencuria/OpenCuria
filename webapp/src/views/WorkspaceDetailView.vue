@@ -119,6 +119,9 @@ const showWorkspaceTransitionLabel = computed(
   () => Boolean(workspaceTransitionLabel.value) && !isRunnerOfflineState.value,
 )
 const hasChats = computed(() => workspaceStore.chats.length > 0)
+const showWorkspaceEmptyState = computed(
+  () => !loadingChats.value && !hasChats.value,
+)
 const autoStopCountdownLabel = computed(() =>
   workspace.value?.auto_stop_at ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}` : null,
 )

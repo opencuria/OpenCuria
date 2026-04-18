@@ -669,9 +669,10 @@ class RunnerService:
                 await self._set_workspace_operation(workspace, operation)
             await self._emit_to_runner(runner, event, payload)
             await sync_to_async(self.tasks.mark_in_progress)(task)
-        except Exception:
+        except Exception as exc:
             if workspace is not None and operation is not None:
                 await self._set_workspace_operation(workspace, None)
+            await sync_to_async(self.tasks.fail)(task, str(exc))
             raise
 
     @staticmethod
@@ -1565,18 +1566,26 @@ class RunnerService:
         )
 
         if runner.is_online:
+            previous_status = workspace.status
             await sync_to_async(self.workspaces.mark_deleting)(workspace_id)
-            await self._dispatch_workspace_task(
-                runner=runner,
-                event="task:remove_workspace",
-                task=task,
-                workspace=workspace,
-                operation=self._task_workspace_operation(TaskType.REMOVE_WORKSPACE),
-                payload={
-                    "task_id": str(task_id),
-                    "workspace_id": str(workspace_id),
-                },
-            )
+            try:
+                await self._dispatch_workspace_task(
+                    runner=runner,
+                    event="task:remove_workspace",
+                    task=task,
+                    workspace=workspace,
+                    operation=self._task_workspace_operation(TaskType.REMOVE_WORKSPACE),
+                    payload={
+                        "task_id": str(task_id),
+                        "workspace_id": str(workspace_id),
+                    },
+                )
+            except Exception:
+                await sync_to_async(self.workspaces.update_status)(
+                    workspace,
+                    previous_status,
+                )
+                raise
         else:
             await sync_to_async(self.workspaces.mark_pending_deletion)(workspace_id)
 
@@ -3228,7 +3237,7 @@ class RunnerService:
         """Send a Socket.IO event to a specific runner by its SID."""
         if self.sio is None:
             logger.error("No Socket.IO server configured — cannot emit events")
-            return
+            raise RuntimeError("Socket.IO server is not configured")
 
         if not runner.sid:
             logger.error(
@@ -3236,7 +3245,7 @@ class RunnerService:
                 runner.id,
                 event,
             )
-            return
+            raise RunnerOfflineError(str(runner.id))
 
         await self.sio.emit(event, data, to=runner.sid)
         logger.debug("Emitted %s to runner %s: %s", event, runner.id, data)
@@ -3869,12 +3878,8 @@ rm -rf /var/lib/apt/lists/*
             workspace=workspace,
         )
 
-        # Capture credentials and create the artifact record upfront so the UI
-        # can immediately show the 'creating' state.
-        # Both .credentials and .created_by are fetched eagerly via get_by_id.
-        workspace_credentials = await sync_to_async(
-            lambda: list(workspace.credentials.all())
-        )()
+        # Create the artifact record upfront so the UI can immediately show the
+        # 'creating' state.
         created_by = await sync_to_async(lambda: workspace.created_by)()
         image = await sync_to_async(self.image_instances.create_pending)(
             runner=runner,
@@ -3884,7 +3889,6 @@ rm -rf /var/lib/apt/lists/*
             name=name,
             creating_task_id=str(task_id),
             created_by=created_by,
-            credentials=workspace_credentials,
         )
 
         await self._dispatch_workspace_task(
@@ -3935,7 +3939,6 @@ rm -rf /var/lib/apt/lists/*
             workspace = self.workspaces.get_by_id(uuid.UUID(workspace_id))
             if workspace is None:
                 raise WorkspaceNotFoundError(workspace_id)
-            workspace_credentials = list(workspace.credentials.all())
             self.image_instances.create(
                 runner=workspace.runner,
                 runtime_type=workspace.runtime_type,
@@ -3945,7 +3948,6 @@ rm -rf /var/lib/apt/lists/*
                 name=name,
                 size_bytes=size_bytes,
                 created_by=task.workspace.created_by if task.workspace else None,
-                credentials=workspace_credentials,
             )
 
         if task.workspace:
@@ -4438,12 +4440,10 @@ rm -rf /var/lib/apt/lists/*
     ) -> tuple["Workspace", "Task"]:
         """Create a workspace from an image artifact.
 
-        Credentials are automatically restored from the artifact if not
-        explicitly overridden. The caller should not need to pass credentials
-        when creating a workspace — they are stored on the artifact.
+        Credentials are explicitly supplied by the caller and injected for the
+        create operation only. Captured artifacts do not retain credential
+        associations.
         """
-        from apps.credentials.services import CredentialSvc
-
         credential_svc = CredentialSvc()
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
@@ -4498,28 +4498,12 @@ rm -rf /var/lib/apt/lists/*
                 requested_disk_size_gb=qemu_disk_size_gb,
             )
 
-        credentials_to_attach = credentials
         resolved_env_vars = env_vars or {}
         resolved_files = files or []
         resolved_ssh_keys = ssh_keys or []
 
         if credentials is not None:
             await sync_to_async(credential_svc.assert_unique_workspace_credentials)(credentials)
-        else:
-            image_credentials = await sync_to_async(list)(
-                image.credentials.all().select_related("service")
-            )
-            if image_credentials:
-                artifact_cred_ids = [c.id for c in image_credentials]
-                resolved = await sync_to_async(credential_svc.resolve_credentials)(
-                    artifact_cred_ids,
-                    org_id=organization_id,
-                    user=user,
-                )
-                credentials_to_attach = image_credentials
-                resolved_env_vars = resolved.env_vars
-                resolved_files = resolved.files
-                resolved_ssh_keys = resolved.ssh_keys
 
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
@@ -4538,11 +4522,8 @@ rm -rf /var/lib/apt/lists/*
             created_by=user,
         )
 
-        if credentials_to_attach is not None:
-            await sync_to_async(self.workspaces.set_credentials)(
-                workspace,
-                credentials_to_attach,
-            )
+        if credentials is not None:
+            await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(

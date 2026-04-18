@@ -572,7 +572,6 @@ class ImageArtifactOut(Schema):
     delete_last_error: str = ""
     created_at: datetime
     created_by_id: int | None = None
-    credential_ids: list[uuid.UUID] = []
 
 
 class ImageArtifactUpdateIn(Schema):
@@ -596,14 +595,10 @@ class ImageArtifactCreateOut(Schema):
 
 
 class WorkspaceFromImageArtifactIn(Schema):
-    """Request schema for creating a workspace from an image artifact.
-
-    Credentials are automatically restored from the artifact — no need to
-    specify them. The runner, runtime and resources come from the artifact's
-    source workspace.
-    """
+    """Request schema for creating a workspace from an image artifact."""
 
     name: str = ""
+    credential_ids: list[uuid.UUID] = []
 
 
 class WorkspaceFromImageArtifactOut(Schema):

@@ -979,8 +979,8 @@ class ImageInstance(models.Model):
         blank=True,
         related_name="image_instances",
         help_text=(
-            "Credentials attached when the image instance was created. "
-            "Used to automatically restore credentials when cloning from it."
+            "Credentials associated with this image instance. "
+            "Workspace cloning must still supply credentials explicitly."
         ),
     )
     deleted_at = models.DateTimeField(null=True, blank=True)

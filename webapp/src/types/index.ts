@@ -580,7 +580,6 @@ export interface ImageArtifact {
   delete_last_error?: string
   created_at: string
   created_by_id: number | null
-  credential_ids: string[]
 }
 
 export interface ImageArtifactCreateIn {
@@ -595,6 +594,7 @@ export interface ImageArtifactCreateOut {
 
 export interface ImageArtifactCloneIn {
   name?: string
+  credential_ids?: string[]
 }
 
 export interface ImageArtifactCloneOut {

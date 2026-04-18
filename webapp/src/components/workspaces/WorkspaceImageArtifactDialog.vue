@@ -44,7 +44,7 @@ function handleClose(): void {
   <UiDialog
     :open="open"
     title="Capture Image"
-    description="Save the current state of this workspace as an image. Attached credentials are stored in the image."
+    description="Save the current state of this workspace as an image. Credentials are selected separately when creating a workspace from the image."
     @update:open="(v) => (!v ? handleClose() : undefined)"
   >
     <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">

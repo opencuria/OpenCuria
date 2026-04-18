@@ -695,3 +695,145 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
 
     assert response.status_code == 200
     assert response.json()["id"] == str(build.id)
+
+
+@pytest.mark.django_db
+def test_list_image_artifacts_returns_valid_json_without_credential_ids(client: Client):
+    """
+    Regression test: the list endpoint must return valid JSON.
+
+    This test ensures the response is always serialisable JSON and that
+    credential_ids is not exposed on the artifact schema.
+    """
+    import json as _json
+
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="artifact-schema@test.com", password="secret")
+    org = Organization.objects.create(name="Schema Org", slug="schema-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="schema-runner",
+        api_token_hash=hash_token("schema-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+    )
+    ws = Workspace.objects.create(
+        runner=runner,
+        name="Schema WS",
+        status=WorkspaceStatus.RUNNING,
+        created_by=admin,
+    )
+    ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=ws,
+        created_by=admin,
+        name="Schema Image",
+        runner_ref="schema-art-1",
+        status=ImageInstance.Status.READY,
+    )
+
+    token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_READ.value])
+    response = client.get("/api/v1/image-artifacts/", **_auth_headers(token, str(org.id)))
+
+    assert response.status_code == 200, (
+        f"Expected 200 but got {response.status_code}. "
+        "If this is 500, a DB access error (e.g. missing table) is likely."
+    )
+    # Must be parseable JSON — any HTML traceback would raise ValueError here.
+    try:
+        data = _json.loads(response.content)
+    except ValueError as exc:
+        raise AssertionError(
+            f"Response is not valid JSON. Got: {response.content[:200]!r}"
+        ) from exc
+
+    assert isinstance(data, list)
+    assert len(data) == 1
+    artifact = data[0]
+
+    assert "credential_ids" not in artifact, (
+        "credential_ids must not appear on the image artifact response — "
+        "credentials are now selected explicitly when cloning."
+    )
+
+
+@pytest.mark.django_db
+def test_clone_workspace_from_image_sends_explicit_credential_ids(client: Client):
+    """
+    Regression test: the clone endpoint must accept an explicit credential_ids list.
+
+    Prior to this PR, credentials were restored automatically from the artifact.
+    After the PR, the caller must pass credential_ids explicitly (can be empty).
+
+    We verify that:
+    - Sending credential_ids=[] does not cause a 422 schema validation error.
+    - The endpoint is reachable and returns a parseable JSON error (409 is
+      expected here because no real runner is connected, but 422 would mean
+      the request schema rejected credential_ids).
+    """
+    import json as _json
+
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(email="clone-cred-ids@test.com", password="secret")
+    org = Organization.objects.create(name="Clone Cred Org", slug="clone-cred-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="clone-cred-runner",
+        api_token_hash=hash_token("clone-cred-runner-token"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+    )
+    ws = Workspace.objects.create(
+        runner=runner,
+        name="Clone Cred WS",
+        status=WorkspaceStatus.RUNNING,
+        created_by=admin,
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=ws,
+        created_by=admin,
+        name="Clone Cred Image",
+        runner_ref="clone-cred-art",
+        status=ImageInstance.Status.READY,
+    )
+
+    token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_CLONE.value])
+
+    # Request with no credential_ids field (old implicit behaviour) must still work.
+    response_no_creds = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
+        data=_json.dumps({"name": "cloned-ws-no-creds"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    # Runner is offline → 409, not 422 (which would indicate schema mismatch).
+    assert response_no_creds.status_code == 409, (
+        f"Expected 409 (runner offline), got {response_no_creds.status_code}. "
+        "A 422 here means credential_ids is unexpectedly required."
+    )
+
+    # Request with explicit credential_ids=[] must also be valid schema.
+    response_empty_creds = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
+        data=_json.dumps({"name": "cloned-ws-empty-creds", "credential_ids": []}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response_empty_creds.status_code == 409, (
+        f"Expected 409 (runner offline), got {response_empty_creds.status_code}. "
+        "A 422 means credential_ids:[] was not accepted by the request schema."
+    )
+
+    # Verify both responses are valid JSON (no traceback HTML).
+    for resp in (response_no_creds, response_empty_creds):
+        try:
+            _json.loads(resp.content)
+        except ValueError as exc:
+            raise AssertionError(
+                f"Response is not valid JSON: {resp.content[:200]!r}"
+            ) from exc
