@@ -203,5 +203,56 @@ class QemuRuntimeDesktopProxyTests(unittest.TestCase):
         )
 
 
+class QemuRuntimeImageArtifactDeletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_image_artifact_blocks_when_workspace_disk_depends_on_snapshot(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_dir = Path(tmpdir) / "snapshots"
+            disk_dir = Path(tmpdir) / "disks"
+            snapshot_dir.mkdir()
+            disk_dir.mkdir()
+
+            runtime._snapshot_dir = snapshot_dir
+            runtime._disk_dir = disk_dir
+
+            snapshot_path = snapshot_dir / "artifact-123.qcow2"
+            snapshot_path.write_bytes(b"snapshot")
+            (snapshot_dir / "artifact-123.meta").write_text("snapshot_id=artifact-123\n")
+            (disk_dir / "workspace-1.qcow2").write_bytes(b"overlay")
+
+            runtime._get_qcow2_backing_path = AsyncMock(return_value=snapshot_path.resolve())
+
+            with self.assertRaises(RuntimeError) as ctx:
+                await runtime.delete_image_artifact("artifact-123")
+
+            self.assertIn("workspace-1", str(ctx.exception))
+            self.assertTrue(snapshot_path.exists())
+
+    async def test_delete_image_artifact_removes_files_when_snapshot_has_no_dependents(self) -> None:
+        runtime = object.__new__(QemuRuntime)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_dir = Path(tmpdir) / "snapshots"
+            disk_dir = Path(tmpdir) / "disks"
+            snapshot_dir.mkdir()
+            disk_dir.mkdir()
+
+            runtime._snapshot_dir = snapshot_dir
+            runtime._disk_dir = disk_dir
+
+            snapshot_path = snapshot_dir / "artifact-123.qcow2"
+            meta_path = snapshot_dir / "artifact-123.meta"
+            snapshot_path.write_bytes(b"snapshot")
+            meta_path.write_text("snapshot_id=artifact-123\n")
+
+            runtime._get_qcow2_backing_path = AsyncMock(return_value=None)
+
+            await runtime.delete_image_artifact("artifact-123")
+
+            self.assertFalse(snapshot_path.exists())
+            self.assertFalse(meta_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

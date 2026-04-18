@@ -10,6 +10,7 @@ import abc
 import asyncio
 import io
 import ipaddress
+import json
 import re
 import shutil
 import subprocess
@@ -1651,6 +1652,13 @@ class QemuRuntime(RuntimeBackend):
         """Delete an image artifact and its metadata."""
         snapshot_path = self._snapshot_dir / f"{artifact_id}.qcow2"
         meta_path = snapshot_path.with_suffix(".meta")
+        dependent_workspaces = await self._find_snapshot_dependents(snapshot_path)
+        if dependent_workspaces:
+            workspace_list = ", ".join(sorted(dependent_workspaces))
+            raise RuntimeError(
+                "Cannot delete image artifact because it is still used by "
+                f"workspace disk(s): {workspace_list}"
+            )
         if snapshot_path.exists():
             snapshot_path.unlink()
         if meta_path.exists():
@@ -1772,3 +1780,48 @@ class QemuRuntime(RuntimeBackend):
         if artifact_path.is_absolute():
             return artifact_path
         return self._snapshot_dir / f"{artifact_id}.qcow2"
+
+    async def _find_snapshot_dependents(self, snapshot_path: Path) -> list[str]:
+        """Return workspace IDs whose QCOW2 overlays directly depend on a snapshot."""
+        if not snapshot_path.exists():
+            return []
+
+        target = snapshot_path.resolve()
+        dependents: list[str] = []
+        for disk_path in self._disk_dir.glob("*.qcow2"):
+            try:
+                backing_path = await self._get_qcow2_backing_path(disk_path)
+            except RuntimeError as exc:
+                logger.warning(
+                    "qcow2_backing_inspect_failed",
+                    disk_path=str(disk_path),
+                    error=str(exc),
+                )
+                continue
+            if backing_path is None:
+                continue
+            if backing_path == target:
+                dependents.append(disk_path.stem)
+        return dependents
+
+    async def _get_qcow2_backing_path(self, disk_path: Path) -> Path | None:
+        """Read the fully resolved backing file path from a QCOW2 disk."""
+        proc = await asyncio.create_subprocess_exec(
+            "qemu-img",
+            "info",
+            "--output=json",
+            str(disk_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to inspect QCOW2 backing file for {disk_path}: {stderr.decode()}"
+            )
+
+        info = json.loads(stdout.decode() or "{}")
+        backing = info.get("full-backing-filename") or info.get("backing-filename")
+        if not backing:
+            return None
+        return Path(backing).resolve()

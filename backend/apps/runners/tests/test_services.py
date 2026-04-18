@@ -689,6 +689,79 @@ class TestImageDeletionLifecycle:
         assert image.delete_requested_at is not None
 
     @pytest.mark.asyncio
+    async def test_delete_ignores_workspace_already_deleting(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            name="Deleting Dependency Base",
+            runner_ref="opencuria/custom/deleting-dependency:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Deleting Workspace",
+            status=WorkspaceStatus.DELETING,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETING
+        assert image.deleting_task_id is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_build_job_ignores_workspace_already_deleting(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Build Deletion Base",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.ACTIVE,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            name="Build Deletion Artifact",
+            runner_ref="opencuria/custom/build-delete:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Deleting Build Workspace",
+            status=WorkspaceStatus.DELETING,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        await service.delete_build_job(build.id)
+
+        build.refresh_from_db()
+        image.refresh_from_db()
+        assert build.status == ImageBuildJob.Status.DELETING
+        assert image.status == ImageInstance.Status.DELETING
+        assert build.deleting_task_id is not None
+        assert image.deleting_task_id == build.deleting_task_id
+
+    @pytest.mark.asyncio
     async def test_dispatch_pending_image_deletions_marks_task_in_progress(
         self, service, runner, user
     ):
