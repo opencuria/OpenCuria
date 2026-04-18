@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from apps.credentials.models import CredentialService
 from apps.credentials.services import CredentialServiceSvc, CredentialSvc
 from apps.organizations.models import Organization
+from common.exceptions import ConflictError
 
 
 @pytest.mark.django_db
@@ -76,3 +77,48 @@ def test_resolve_credentials_includes_file_entries() -> None:
     assert len(resolved.files) == 1
     assert resolved.files[0].target_path == "~/.codex/auth.json"
     assert resolved.files[0].content == '{"access_token":"xyz"}'
+
+
+@pytest.mark.django_db
+def test_resolve_credentials_rejects_multiple_credentials_for_same_service() -> None:
+    user_model = get_user_model()
+    user = user_model.objects.create_user(
+        email="duplicate-user@test.local",
+        password="secret",
+    )
+    organization = Organization.objects.create(
+        name="Duplicates",
+        slug=f"duplicates-{uuid.uuid4().hex[:8]}",
+    )
+    service = CredentialService.objects.create(
+        name="GitHub",
+        slug=f"github-{uuid.uuid4().hex[:8]}",
+        credential_type="env",
+        env_var_name="GITHUB_TOKEN",
+        label="Personal Access Token",
+    )
+
+    credential_svc = CredentialSvc()
+    personal_credential = credential_svc.create_personal_credential(
+        service_id=service.id,
+        name="Personal GitHub",
+        value="ghp-personal",
+        user=user,
+    )
+    org_credential = credential_svc.create_org_credential(
+        organization_id=organization.id,
+        service_id=service.id,
+        name="Org GitHub",
+        value="ghp-org",
+        user=user,
+    )
+
+    with pytest.raises(
+        ConflictError,
+        match="Only one credential per credential service can be attached to a workspace",
+    ):
+        credential_svc.resolve_credentials(
+            [personal_credential.id, org_credential.id],
+            org_id=organization.id,
+            user=user,
+        )
