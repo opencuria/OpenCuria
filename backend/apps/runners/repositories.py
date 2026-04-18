@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Count, Exists, OuterRef, Q, QuerySet, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery
 from django.utils import timezone
 
 from .enums import (
@@ -28,10 +28,10 @@ from .models import (
     AgentCommand,
     AgentDefinition,
     Chat,
-    ImageArtifact,
     ImageDefinition,
+    ImageInstance,
     Runner,
-    RunnerImageBuild,
+    ImageBuildJob,
     RunnerSystemMetrics,
     Session,
     Task,
@@ -298,6 +298,7 @@ class WorkspaceRepository:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        base_image_instance=None,
         created_by=None,
     ) -> Workspace:
         """Create a new workspace record."""
@@ -309,6 +310,7 @@ class WorkspaceRepository:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            base_image_instance=base_image_instance,
             status=WorkspaceStatus.CREATING,
             active_operation=WorkspaceOperation.CREATING,
             created_by=created_by,
@@ -406,6 +408,49 @@ class WorkspaceRepository:
             runner_id=runner_id,
             runtime_type="qemu",
             status=WorkspaceStatus.RUNNING,
+        )
+
+    @staticmethod
+    def list_by_base_image_instance(
+        image_instance_id: uuid.UUID,
+    ) -> QuerySet[Workspace]:
+        """Return workspaces that still depend on an image instance."""
+        return Workspace.objects.filter(base_image_instance_id=image_instance_id).exclude(
+            status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED]
+        )
+
+    @staticmethod
+    def mark_pending_deletion(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as pending deletion (runner offline)."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.PENDING_DELETION,
+            active_operation=None,
+            delete_requested_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_deleting(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as actively being deleted by runner."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETING,
+        )
+
+    @staticmethod
+    def mark_deleted(workspace_id: uuid.UUID) -> None:
+        """Mark workspace as fully deleted after runner confirmation."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETED,
+            active_operation=None,
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(workspace_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark workspace deletion as failed."""
+        Workspace.objects.filter(id=workspace_id).update(
+            status=WorkspaceStatus.DELETE_FAILED,
+            active_operation=None,
+            delete_last_error=error,
         )
 
 
@@ -987,75 +1032,94 @@ class ConversationRepository:
         return rows
 
 
-class ImageArtifactRepository:
-    """Data access for ImageArtifact records."""
+class ImageInstanceRepository:
+    """Data access for ImageInstance records."""
 
     @staticmethod
     def create(
         *,
-        source_workspace: "Workspace | None",
-        runner_artifact_id: str,
+        runner: Runner,
+        runtime_type: str,
+        origin_type: str,
+        runner_ref: str,
         name: str,
         size_bytes: int = 0,
-        artifact_kind: str = ImageArtifact.ArtifactKind.CAPTURED,
-        runner_image_build: RunnerImageBuild | None = None,
+        origin_definition: ImageDefinition | None = None,
+        origin_workspace: Workspace | None = None,
+        build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageArtifact":
-        """Create a new artifact record (immediately ready)."""
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
-            runner_artifact_id=runner_artifact_id,
+    ) -> "ImageInstance":
+        """Create a new image instance record (immediately ready)."""
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type=runtime_type,
+            origin_type=origin_type,
+            origin_definition=origin_definition,
+            origin_workspace=origin_workspace,
+            runner_ref=runner_ref,
             name=name,
             size_bytes=size_bytes,
-            artifact_kind=artifact_kind,
-            runner_image_build=runner_image_build,
+            status=ImageInstance.Status.READY,
+            build_job=build_job,
             created_by=created_by,
-            status=ImageArtifact.ArtifactStatus.READY,
         )
         if credentials:
-            artifact.credentials.set(credentials)
-        return artifact
+            image.credentials.set(credentials)
+        return image
 
     @staticmethod
     def create_pending(
         *,
-        source_workspace: "Workspace | None",
+        runner: Runner,
+        runtime_type: str,
+        origin_type: str,
         name: str,
         creating_task_id: str,
-        artifact_kind: str = ImageArtifact.ArtifactKind.CAPTURED,
-        runner_image_build: RunnerImageBuild | None = None,
+        origin_definition: ImageDefinition | None = None,
+        origin_workspace: Workspace | None = None,
+        build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageArtifact":
-        """Create an artifact record in 'creating' state before the runner finishes."""
-        artifact = ImageArtifact.objects.create(
-            source_workspace=source_workspace,
-            runner_artifact_id="",
+    ) -> "ImageInstance":
+        """Create an image instance before capture/build finishes."""
+        status = (
+            ImageInstance.Status.BUILDING
+            if origin_type == ImageInstance.OriginType.DEFINITION_BUILD
+            else ImageInstance.Status.CAPTURING
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type=runtime_type,
+            origin_type=origin_type,
+            origin_definition=origin_definition,
+            origin_workspace=origin_workspace,
+            runner_ref="",
             name=name,
             size_bytes=0,
-            artifact_kind=artifact_kind,
-            runner_image_build=runner_image_build,
+            build_job=build_job,
             created_by=created_by,
-            status=ImageArtifact.ArtifactStatus.CREATING,
+            status=status,
             creating_task_id=creating_task_id,
         )
         if credentials:
-            artifact.credentials.set(credentials)
-        return artifact
+            image.credentials.set(credentials)
+        return image
 
     @staticmethod
-    def get_by_task_id(task_id: str) -> "ImageArtifact | None":
-        """Find the artifact record being created by a given task."""
+    def get_by_task_id(task_id: str) -> "ImageInstance | None":
+        """Find the image instance being created by a given task."""
         return (
-            ImageArtifact.objects.filter(creating_task_id=task_id)
+            ImageInstance.objects.filter(creating_task_id=task_id)
             .select_related(
-                "source_workspace",
-                "source_workspace__runner",
+                "runner",
+                "origin_workspace",
+                "origin_workspace__runner",
                 "created_by",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "origin_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
@@ -1063,116 +1127,187 @@ class ImageArtifactRepository:
 
     @staticmethod
     def mark_ready(
-        artifact_id, *, runner_artifact_id: str, size_bytes: int
+        image_id, *, runner_ref: str, size_bytes: int
     ) -> None:
-        """Update a creating artifact to ready once the runner reports success."""
-        ImageArtifact.objects.filter(id=artifact_id).update(
-            status=ImageArtifact.ArtifactStatus.READY,
-            runner_artifact_id=runner_artifact_id,
+        """Update a creating image instance to ready once the runner reports success."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.READY,
+            runner_ref=runner_ref,
             size_bytes=size_bytes,
+            creating_task_id=None,
         )
 
     @staticmethod
-    def mark_failed(artifact_id) -> None:
-        """Mark an artifact as failed."""
-        ImageArtifact.objects.filter(id=artifact_id).update(
-            status=ImageArtifact.ArtifactStatus.FAILED,
+    def mark_failed(image_id) -> None:
+        """Mark an image instance as failed."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.FAILED,
         )
 
     @staticmethod
     def mark_failed_by_task_id(task_id: str) -> None:
-        """Mark any creating artifact associated with task_id as failed."""
-        ImageArtifact.objects.filter(
+        """Mark any creating image instance associated with task_id as failed."""
+        ImageInstance.objects.filter(
             creating_task_id=task_id,
-            status=ImageArtifact.ArtifactStatus.CREATING,
-        ).update(status=ImageArtifact.ArtifactStatus.FAILED)
+            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
+        ).update(status=ImageInstance.Status.FAILED)
 
     @staticmethod
     def timeout_stale(*, timeout_hours: int = 1) -> int:
-        """Mark stale 'creating' artifacts (older than timeout_hours) as failed.
+        """Mark stale creating image instances as failed.
 
-        Returns the number of artifacts that were timed out.
+        Returns the number of image instances that were timed out.
         """
         from datetime import timedelta
 
         cutoff = timezone.now() - timedelta(hours=timeout_hours)
-        count = ImageArtifact.objects.filter(
-            status=ImageArtifact.ArtifactStatus.CREATING,
+        count = ImageInstance.objects.filter(
+            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
             created_at__lt=cutoff,
-        ).update(status=ImageArtifact.ArtifactStatus.FAILED)
+        ).update(status=ImageInstance.Status.FAILED)
         return count
 
     @staticmethod
-    def update_name(artifact_id: uuid.UUID, name: str) -> bool:
-        """Rename an artifact. Returns True if updated."""
-        count = ImageArtifact.objects.filter(id=artifact_id).update(name=name)
+    def update_name(image_id: uuid.UUID, name: str) -> bool:
+        """Rename an image instance. Returns True if updated."""
+        count = ImageInstance.objects.filter(id=image_id).update(name=name)
         return count > 0
 
     @staticmethod
-    def get_by_id(artifact_id: uuid.UUID) -> "ImageArtifact | None":
-        """Fetch an artifact by ID, including source and runner info."""
+    def get_by_id(image_id: uuid.UUID) -> "ImageInstance | None":
+        """Fetch an image instance by ID, including source and runner info."""
         return (
-            ImageArtifact.objects.filter(id=artifact_id)
+            ImageInstance.objects.filter(id=image_id)
             .select_related(
-                "source_workspace",
-                "source_workspace__runner",
+                "runner",
+                "origin_workspace",
+                "origin_workspace__runner",
                 "created_by",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "origin_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
         )
 
     @staticmethod
-    def get_by_runner_image_build_id(
-        runner_image_build_id: uuid.UUID,
-    ) -> "ImageArtifact | None":
-        """Fetch a built artifact by its runner build relation."""
+    def get_by_build_job_id(
+        build_job_id: uuid.UUID,
+    ) -> "ImageInstance | None":
+        """Fetch a built image instance by its runner build relation."""
         return (
-            ImageArtifact.objects.filter(runner_image_build_id=runner_image_build_id)
+            ImageInstance.objects.filter(build_job_id=build_job_id)
             .select_related(
-                "source_workspace",
-                "source_workspace__runner",
+                "runner",
+                "origin_workspace",
+                "origin_workspace__runner",
                 "created_by",
-                "runner_image_build",
-                "runner_image_build__runner",
-                "runner_image_build__image_definition",
+                "origin_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
             )
             .prefetch_related("credentials__service")
             .first()
         )
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> "QuerySet[ImageArtifact]":
-        """Return all artifacts captured from a workspace."""
-        return ImageArtifact.objects.filter(source_workspace_id=workspace_id).select_related(
-            "source_workspace",
-            "source_workspace__runner",
+    def list_by_workspace(workspace_id: uuid.UUID) -> "QuerySet[ImageInstance]":
+        """Return all image instances captured from a workspace."""
+        return ImageInstance.objects.filter(
+            origin_workspace_id=workspace_id
+        ).exclude(
+            status=ImageInstance.Status.DELETED
+        ).exclude(
+            status=ImageInstance.Status.DELETING
+        ).select_related(
+            "runner",
+            "origin_workspace",
+            "origin_workspace__runner",
             "created_by",
-            "runner_image_build",
-            "runner_image_build__runner",
-            "runner_image_build__image_definition",
+            "origin_definition",
+            "build_job",
+            "build_job__runner",
+            "build_job__image_definition",
         ).prefetch_related("credentials__service")
 
     @staticmethod
-    def list_by_user(user) -> "QuerySet[ImageArtifact]":
-        """Return all artifacts created by a specific user."""
-        return ImageArtifact.objects.filter(created_by=user).select_related(
-            "source_workspace",
-            "source_workspace__runner",
+    def list_by_user(user) -> "QuerySet[ImageInstance]":
+        """Return all visible image instances created by a specific user."""
+        return ImageInstance.objects.filter(
+            created_by=user
+        ).exclude(
+            status=ImageInstance.Status.DELETED
+        ).exclude(
+            status=ImageInstance.Status.DELETING
+        ).select_related(
+            "runner",
+            "origin_workspace",
+            "origin_workspace__runner",
             "created_by",
-            "runner_image_build",
-            "runner_image_build__runner",
-            "runner_image_build__image_definition",
+            "origin_definition",
+            "build_job",
+            "build_job__runner",
+            "build_job__image_definition",
         ).prefetch_related("credentials__service")
 
     @staticmethod
-    def delete(artifact_id: uuid.UUID) -> bool:
-        """Delete an artifact record. Returns True if deleted."""
-        count, _ = ImageArtifact.objects.filter(id=artifact_id).delete()
-        return count > 0
+    def mark_retired(image_id: uuid.UUID) -> None:
+        """Mark an image instance retired so it cannot be used for new workspaces."""
+        ImageInstance.objects.filter(id=image_id).exclude(
+            status=ImageInstance.Status.DELETED
+        ).update(status=ImageInstance.Status.RETIRED)
+
+    @staticmethod
+    def mark_deleting(image_id: uuid.UUID, *, deleting_task_id: str | None) -> None:
+        """Mark an image instance as pending deletion."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.DELETING,
+            deleting_task_id=deleting_task_id,
+            delete_started_at=timezone.now(),
+            delete_attempt_count=F("delete_attempt_count") + 1,
+        )
+
+    @staticmethod
+    def mark_pending_deletion(image_id: uuid.UUID) -> None:
+        """Mark an image instance as pending deletion (runner offline)."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.PENDING_DELETION,
+            delete_requested_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_deleted(image_id: uuid.UUID) -> None:
+        """Mark an image instance as fully deleted."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.DELETED,
+            deleting_task_id=None,
+            deleted_at=timezone.now(),
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(image_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark an image instance deletion as failed."""
+        ImageInstance.objects.filter(id=image_id).update(
+            status=ImageInstance.Status.DELETE_FAILED,
+            delete_last_error=error,
+        )
+
+    @staticmethod
+    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageInstance]:
+        """Return image instances that still need runner-side deletion."""
+        return ImageInstance.objects.filter(
+            runner_id=runner_id,
+            status__in=[ImageInstance.Status.DELETING, ImageInstance.Status.PENDING_DELETION],
+        ).exclude(runner_ref="").select_related(
+            "runner",
+            "origin_definition",
+            "origin_workspace",
+            "build_job",
+        )
 
 
 class ImageDefinitionRepository:
@@ -1202,17 +1337,58 @@ class ImageDefinitionRepository:
             Q(organization__isnull=True) | Q(organization_id=organization_id)
         ).first()
 
+    @staticmethod
+    def deactivate(definition_id: uuid.UUID) -> None:
+        """Deactivate definition: immediately no longer selectable for new workspaces."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=False,
+            status=ImageDefinition.Status.DEACTIVATED,
+            deactivated_at=timezone.now(),
+        )
 
-class RunnerImageBuildRepository:
+    @staticmethod
+    def activate(definition_id: uuid.UUID) -> None:
+        """Re-activate a deactivated definition."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=True,
+            status=ImageDefinition.Status.ACTIVE,
+            deactivated_at=None,
+        )
+
+    @staticmethod
+    def mark_pending_deletion(definition_id: uuid.UUID) -> None:
+        """Mark definition pending deletion (waiting for build deletes)."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=False,
+            status=ImageDefinition.Status.PENDING_DELETION,
+        )
+
+    @staticmethod
+    def mark_deleting(definition_id: uuid.UUID) -> None:
+        """Mark definition as actively deleting its builds."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            status=ImageDefinition.Status.DELETING,
+        )
+
+    @staticmethod
+    def mark_deleted(definition_id: uuid.UUID) -> None:
+        """Mark definition as fully deleted after all builds are confirmed deleted."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            status=ImageDefinition.Status.DELETED,
+            deleted_at=timezone.now(),
+        )
+
+
+class ImageBuildJobRepository:
     """Data access for runner image build records."""
 
     @staticmethod
     def list_for_definition(
         image_definition_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
-    ) -> QuerySet[RunnerImageBuild]:
+    ) -> QuerySet[ImageBuildJob]:
         """List runner image builds, optionally scoped to an organization."""
-        queryset = RunnerImageBuild.objects.filter(
+        queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id
         )
         if organization_id is not None:
@@ -1220,16 +1396,21 @@ class RunnerImageBuildRepository:
                 Q(image_definition__organization_id=organization_id)
                 | Q(image_definition__organization__isnull=True)
             )
-        return queryset.select_related("runner", "image_definition", "build_task")
+        return queryset.select_related(
+            "runner",
+            "image_definition",
+            "build_task",
+            "image_instance",
+        )
 
     @staticmethod
     def get(
         image_definition_id: uuid.UUID,
         runner_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
-    ) -> RunnerImageBuild | None:
+    ) -> ImageBuildJob | None:
         """Fetch one runner image build, optionally scoped to an organization."""
-        queryset = RunnerImageBuild.objects.filter(
+        queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id,
             runner_id=runner_id,
         )
@@ -1238,23 +1419,33 @@ class RunnerImageBuildRepository:
                 Q(image_definition__organization_id=organization_id)
                 | Q(image_definition__organization__isnull=True)
             )
-        return queryset.select_related("runner", "image_definition", "build_task").first()
+        return queryset.select_related(
+            "runner",
+            "image_definition",
+            "build_task",
+            "image_instance",
+        ).first()
 
     @staticmethod
-    def get_by_id(runner_image_build_id: uuid.UUID) -> RunnerImageBuild | None:
+    def get_by_id(build_job_id: uuid.UUID) -> ImageBuildJob | None:
         """Fetch one runner image build by primary key."""
-        return RunnerImageBuild.objects.filter(
-            id=runner_image_build_id
-        ).select_related("runner", "image_definition", "build_task").first()
+        return ImageBuildJob.objects.filter(
+            id=build_job_id
+        ).select_related(
+            "runner",
+            "image_definition",
+            "build_task",
+            "image_instance",
+        ).first()
 
     @staticmethod
     def get_for_org(
         image_definition_id: uuid.UUID,
         runner_id: uuid.UUID,
         organization_id: uuid.UUID,
-    ) -> RunnerImageBuild | None:
+    ) -> ImageBuildJob | None:
         """Fetch one runner image build scoped to an organization."""
-        return RunnerImageBuildRepository.get(
+        return ImageBuildJobRepository.get(
             image_definition_id,
             runner_id,
             organization_id=organization_id,
@@ -1267,7 +1458,7 @@ class RunnerImageBuildRepository:
         organization_id: uuid.UUID,
     ) -> int:
         """Delete a runner image build scoped to an organization."""
-        deleted, _ = RunnerImageBuild.objects.filter(
+        deleted, _ = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id,
             runner_id=runner_id,
         ).filter(
@@ -1275,3 +1466,75 @@ class RunnerImageBuildRepository:
             | Q(image_definition__organization__isnull=True)
         ).delete()
         return deleted
+
+    @staticmethod
+    def mark_pending_deletion(build_job_id: uuid.UUID) -> None:
+        """Mark build job as pending deletion (runner offline)."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.PENDING_DELETION,
+            delete_requested_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_deleting(build_job_id: uuid.UUID, *, deleting_task_id: str) -> None:
+        """Mark build job as actively deleting on runner."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETING,
+            deleting_task_id=deleting_task_id,
+            delete_started_at=timezone.now(),
+            delete_attempt_count=F("delete_attempt_count") + 1,
+        )
+
+    @staticmethod
+    def mark_deleted(build_job_id: uuid.UUID) -> None:
+        """Mark build job as fully deleted after runner confirmation."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETED,
+            deleting_task_id=None,
+            delete_confirmed_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark build job deletion as failed."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.DELETE_FAILED,
+            delete_last_error=error,
+        )
+
+    @staticmethod
+    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageBuildJob]:
+        """Return build jobs that need runner-side deletion."""
+        return ImageBuildJob.objects.filter(
+            runner_id=runner_id,
+            status__in=[
+                ImageBuildJob.Status.PENDING_DELETION,
+                ImageBuildJob.Status.DELETING,
+            ],
+        ).select_related("runner", "image_definition", "image_instance")
+
+    @staticmethod
+    def list_non_deleted_for_definition(
+        definition_id: uuid.UUID,
+    ) -> QuerySet[ImageBuildJob]:
+        """Return all build jobs for a definition that aren't deleted."""
+        return ImageBuildJob.objects.filter(
+            image_definition_id=definition_id,
+        ).exclude(status=ImageBuildJob.Status.DELETED)
+
+    @staticmethod
+    def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
+        """Check if any non-deleted workspaces depend on this build's image instance."""
+        from .models import ImageInstance as II
+        instances = II.objects.filter(
+            build_job_id=build_job_id,
+        ).exclude(status__in=[II.Status.DELETED])
+        count = 0
+        for instance in instances:
+            ws_count = Workspace.objects.filter(
+                base_image_instance=instance,
+            ).exclude(
+                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.DELETED],
+            ).count()
+            count += ws_count
+        return count > 0, count

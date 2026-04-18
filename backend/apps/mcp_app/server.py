@@ -28,11 +28,11 @@ Tools and their required permissions
 - create_image_definition → image_definitions:write
 - update_image_definition → image_definitions:write
 - delete_image_definition → image_definitions:write
-- list_runner_image_builds → image_definitions:read
-- create_runner_image_build → image_definitions:manage_runners
-- update_runner_image_build → image_definitions:manage_runners
-- delete_runner_image_build → image_definitions:manage_runners
-- get_runner_image_build_log → image_definitions:read
+- list_build_jobs → image_definitions:read
+- create_build_job → image_definitions:manage_runners
+- update_build_job → image_definitions:manage_runners
+- delete_build_job → image_definitions:manage_runners
+- get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
 - list_org_agent_definitions         → org_agent_definitions:read
 - create_org_agent_definition        → org_agent_definitions:write
@@ -326,7 +326,7 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="list_runner_image_builds",
+        name="list_build_jobs",
         description="List runner image builds for an image definition.",
         inputSchema={
             "type": "object",
@@ -335,7 +335,7 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="create_runner_image_build",
+        name="create_build_job",
         description="Assign and activate an image definition on a runner (admin).",
         inputSchema={
             "type": "object",
@@ -348,7 +348,7 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="update_runner_image_build",
+        name="update_build_job",
         description="Update runner image build state (deactivate, activate, rebuild) (admin).",
         inputSchema={
             "type": "object",
@@ -361,7 +361,7 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="delete_runner_image_build",
+        name="delete_build_job",
         description="Remove a runner image build assignment (admin).",
         inputSchema={
             "type": "object",
@@ -373,7 +373,7 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="get_runner_image_build_log",
+        name="get_build_job_log",
         description="Get the build log for a runner image build.",
         inputSchema={
             "type": "object",
@@ -504,11 +504,11 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "duplicate_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "update_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "delete_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
-    "list_runner_image_builds": APIKeyPermission.IMAGE_DEFINITIONS_READ,
-    "create_runner_image_build": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
-    "update_runner_image_build": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
-    "delete_runner_image_build": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
-    "get_runner_image_build_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
+    "list_build_jobs": APIKeyPermission.IMAGE_DEFINITIONS_READ,
+    "create_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
+    "update_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
+    "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
+    "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
     "list_org_agent_definitions": APIKeyPermission.ORG_AGENT_DEFINITIONS_READ,
     "create_org_agent_definition": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
@@ -1052,13 +1052,13 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    svc.image_artifacts.timeout_stale(timeout_hours=1)
+    svc.image_instances.timeout_stale(timeout_hours=1)
     artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
     result = [
         {
             "id": str(s.id),
             "source_workspace_id": (
-                str(s.source_workspace_id) if s.source_workspace_id else None
+                str(s.origin_workspace_id) if s.origin_workspace_id else None
             ),
             "name": s.name,
             "status": str(s.status),
@@ -1316,7 +1316,7 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
     return _text({"deleted": True})
 
 
-def _call_list_runner_image_builds(api_key, org_id, args: dict) -> list[TextContent]:
+def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
     from apps.runners.sio_server import get_runner_service
@@ -1337,16 +1337,26 @@ def _call_list_runner_image_builds(api_key, org_id, args: dict) -> list[TextCont
         return _error("Image definition not found")
 
     svc = get_runner_service()
-    builds = svc.list_runner_image_builds(definition_id, org_id)
+    builds = svc.list_build_jobs(definition_id, org_id)
     return _text(
         [
             {
+                "image_tag": (
+                    build.image_instance.runner_ref
+                    if getattr(build, "image_instance", None) is not None
+                    and build.image_definition.runtime_type == "docker"
+                    else ""
+                ),
+                "image_path": (
+                    build.image_instance.runner_ref
+                    if getattr(build, "image_instance", None) is not None
+                    and build.image_definition.runtime_type == "qemu"
+                    else ""
+                ),
                 "id": str(build.id),
                 "image_definition_id": str(build.image_definition_id),
                 "runner_id": str(build.runner_id),
                 "status": build.status,
-                "image_tag": build.image_tag,
-                "image_path": build.image_path,
                 "build_log": build.build_log,
                 "build_task_id": str(build.build_task_id) if build.build_task_id else None,
                 "built_at": build.built_at.isoformat() if build.built_at else None,
@@ -1361,7 +1371,7 @@ def _call_list_runner_image_builds(api_key, org_id, args: dict) -> list[TextCont
     )
 
 
-def _call_create_runner_image_build(api_key, org_id, args: dict) -> list[TextContent]:
+def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository, RunnerRepository
     from apps.runners.sio_server import get_runner_service
@@ -1394,7 +1404,7 @@ def _call_create_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     svc = get_runner_service()
 
     async def _create():
-        return await svc.trigger_runner_image_build(
+        return await svc.trigger_build_job(
             image_definition=definition,
             runner=runner,
             activate=bool(args.get("activate", True)),
@@ -1407,10 +1417,10 @@ def _call_create_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     return _text({"id": str(build.id), "status": build.status})
 
 
-def _call_update_runner_image_build(api_key, org_id, args: dict) -> list[TextContent]:
+def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.models import RunnerImageBuild
-    from apps.runners.repositories import RunnerImageBuildRepository
+    from apps.runners.models import ImageBuildJob
+    from apps.runners.repositories import ImageBuildJobRepository
     from apps.runners.sio_server import get_runner_service
     from django.utils import timezone
 
@@ -1433,12 +1443,12 @@ def _call_update_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     if org_service.get_user_role(api_key.user, org_id) != "admin":
         return _error("Admin role required")
 
-    build = RunnerImageBuildRepository.get_for_org(definition_id, runner_id, org_id)
+    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
     if build is None:
         return _error("Runner image build not found")
 
     if action == "deactivate":
-        build.status = RunnerImageBuild.Status.DEACTIVATED
+        build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
         build.save(update_fields=["status", "deactivated_at", "updated_at"])
         return _text({"id": str(build.id), "status": build.status})
@@ -1449,7 +1459,7 @@ def _call_update_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     svc = get_runner_service()
 
     async def _rebuild():
-        return await svc.trigger_runner_image_build(
+        return await svc.trigger_build_job(
             image_definition=build.image_definition,
             runner=build.runner,
             activate=True,
@@ -1462,9 +1472,9 @@ def _call_update_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     return _text({"id": str(updated.id), "status": updated.status})
 
 
-def _call_delete_runner_image_build(api_key, org_id, args: dict) -> list[TextContent]:
+def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import RunnerImageBuildRepository
+    from apps.runners.repositories import ImageBuildJobRepository
 
     import uuid as _uuid
 
@@ -1483,15 +1493,15 @@ def _call_delete_runner_image_build(api_key, org_id, args: dict) -> list[TextCon
     if org_service.get_user_role(api_key.user, org_id) != "admin":
         return _error("Admin role required")
 
-    deleted = RunnerImageBuildRepository.delete_for_org(definition_id, runner_id, org_id)
+    deleted = ImageBuildJobRepository.delete_for_org(definition_id, runner_id, org_id)
     if not deleted:
         return _error("Runner image build not found")
     return _text({"deleted": True})
 
 
-def _call_get_runner_image_build_log(api_key, org_id, args: dict) -> list[TextContent]:
+def _call_get_build_job_log(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import RunnerImageBuildRepository
+    from apps.runners.repositories import ImageBuildJobRepository
 
     import uuid as _uuid
 
@@ -1508,7 +1518,7 @@ def _call_get_runner_image_build_log(api_key, org_id, args: dict) -> list[TextCo
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
 
-    build = RunnerImageBuildRepository.get_for_org(definition_id, runner_id, org_id)
+    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
     if build is None:
         return _error("Runner image build not found")
     return _text({"build_log": build.build_log})
@@ -2003,11 +2013,11 @@ _TOOL_HANDLERS = {
     "duplicate_image_definition": _call_duplicate_image_definition,
     "update_image_definition": _call_update_image_definition,
     "delete_image_definition": _call_delete_image_definition,
-    "list_runner_image_builds": _call_list_runner_image_builds,
-    "create_runner_image_build": _call_create_runner_image_build,
-    "update_runner_image_build": _call_update_runner_image_build,
-    "delete_runner_image_build": _call_delete_runner_image_build,
-    "get_runner_image_build_log": _call_get_runner_image_build_log,
+    "list_build_jobs": _call_list_build_jobs,
+    "create_build_job": _call_create_build_job,
+    "update_build_job": _call_update_build_job,
+    "delete_build_job": _call_delete_build_job,
+    "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
     "list_org_agent_definitions": _call_list_org_agent_definitions,
     "create_org_agent_definition": _call_create_org_agent_definition,

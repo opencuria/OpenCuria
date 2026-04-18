@@ -15,6 +15,10 @@ export enum WorkspaceStatus {
   STOPPED = 'stopped',
   FAILED = 'failed',
   REMOVED = 'removed',
+  PENDING_DELETION = 'pending_deletion',
+  DELETING = 'deleting',
+  DELETED = 'deleted',
+  DELETE_FAILED = 'delete_failed',
 }
 
 export enum WorkspaceOperation {
@@ -563,14 +567,17 @@ export interface ImageArtifact {
   runner_artifact_id: string
   name: string
   size_bytes: number | null
-  status: 'creating' | 'ready' | 'failed'
+  status: 'creating' | 'ready' | 'failed' | 'retired' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
   artifact_kind: 'built' | 'captured'
-  runner_image_build_id?: string | null
+  build_job_id?: string | null
   source_definition_name?: string | null
   source_runner_id?: string | null
   runtime_type?: RuntimeType | 'docker' | 'qemu' | null
   is_deactivated?: boolean
   source_runner_online?: boolean
+  delete_requested_at?: string | null
+  delete_confirmed_at?: string | null
+  delete_last_error?: string
   created_at: string
   created_by_id: number | null
   credential_ids: string[]
@@ -601,13 +608,14 @@ export interface RunnerImageBuild {
   image_definition_id: string
   runner_id: string
   image_artifact_id?: string | null
-  status: 'pending' | 'building' | 'active' | 'failed' | 'deactivated'
-  image_tag: string
-  image_path: string
+  status: 'pending' | 'building' | 'active' | 'failed' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
   build_log: string
   build_task_id?: string | null
   built_at?: string | null
   deactivated_at?: string | null
+  delete_requested_at?: string | null
+  delete_confirmed_at?: string | null
+  delete_last_error?: string
   created_at: string
   updated_at: string
 }
@@ -626,6 +634,7 @@ export interface ImageDefinition {
   custom_dockerfile: string
   custom_init_script: string
   is_active: boolean
+  status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted'
   created_at: string
   updated_at: string
 }

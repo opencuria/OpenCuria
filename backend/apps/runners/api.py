@@ -74,9 +74,9 @@ from .schemas import (
     RunnerSystemMetricsOut,
     SessionOut,
     SessionSkillOut,
-    RunnerImageBuildCreateIn,
-    RunnerImageBuildOut,
-    RunnerImageBuildUpdateIn,
+    ImageBuildJobCreateIn,
+    ImageBuildJobOut,
+    ImageBuildJobUpdateIn,
     TaskOut,
     TerminalStartIn,
     WorkspaceFromImageArtifactIn,
@@ -319,16 +319,16 @@ def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
     ).first()
 
 
-def _get_runner_image_build_for_org(
+def _get_build_job_for_org(
     org_id: uuid.UUID,
     definition_id: uuid.UUID,
     runner_id: uuid.UUID,
 ):
     """Return a runner image build scoped to an organization."""
-    from .models import RunnerImageBuild
+    from .models import ImageBuildJob
 
     return (
-        RunnerImageBuild.objects.filter(
+        ImageBuildJob.objects.filter(
             image_definition_id=definition_id,
             runner_id=runner_id,
             runner__organization_id=org_id,
@@ -1416,11 +1416,15 @@ image_artifact_router = Router(tags=["image-artifacts"])
 
 def _image_artifact_to_out(artifact) -> ImageArtifactOut:
     """Map an ImageArtifact ORM instance to ImageArtifactOut."""
-    runner_build = getattr(artifact, "runner_image_build", None)
-    source_workspace = getattr(artifact, "source_workspace", None)
+    runner_build = getattr(artifact, "build_job", None)
+    source_workspace = getattr(artifact, "origin_workspace", None)
     runtime_type = getattr(source_workspace, "runtime_type", None)
     source_runner_id = getattr(source_workspace, "runner_id", None)
     source_runner_online = False
+    image_runner = getattr(artifact, "runner", None)
+    if image_runner is not None and source_runner_id is None:
+        source_runner_id = image_runner.id
+        source_runner_online = image_runner.status == RS.ONLINE
     workspace_runner = getattr(source_workspace, "runner", None)
     if workspace_runner is not None:
         source_runner_online = workspace_runner.status == RS.ONLINE
@@ -1436,21 +1440,30 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
             source_definition_name = image_definition.name
             runtime_type = image_definition.runtime_type
         is_deactivated = getattr(runner_build, "status", "") == "deactivated"
+    if getattr(artifact, "status", "") == "retired":
+        is_deactivated = True
 
     return ImageArtifactOut(
         id=artifact.id,
-        source_workspace_id=artifact.source_workspace_id,
-        runner_artifact_id=artifact.runner_artifact_id,
+        source_workspace_id=artifact.origin_workspace_id,
+        runner_artifact_id=artifact.runner_ref,
         name=artifact.name,
         size_bytes=artifact.size_bytes,
         status=artifact.status,
-        artifact_kind=artifact.artifact_kind,
-        runner_image_build_id=artifact.runner_image_build_id,
+        artifact_kind=(
+            "built"
+            if getattr(artifact, "origin_type", "") == "definition_build"
+            else "captured"
+        ),
+        build_job_id=artifact.build_job_id,
         source_definition_name=source_definition_name,
         source_runner_id=source_runner_id,
         runtime_type=runtime_type,
         is_deactivated=is_deactivated,
         source_runner_online=source_runner_online,
+        delete_requested_at=getattr(artifact, "delete_requested_at", None),
+        delete_confirmed_at=getattr(artifact, "delete_confirmed_at", None),
+        delete_last_error=getattr(artifact, "delete_last_error", "") or "",
         created_at=artifact.created_at,
         created_by_id=artifact.created_by_id,
         credential_ids=[c.id for c in artifact.credentials.all()],
@@ -1471,7 +1484,7 @@ def list_image_artifacts(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    service.image_artifacts.timeout_stale(timeout_hours=1)
+    service.image_instances.timeout_stale(timeout_hours=1)
     artifacts = service.list_image_artifacts_for_user(user=request.user)
     return [_image_artifact_to_out(artifact) for artifact in artifacts]
 
@@ -1523,7 +1536,7 @@ async def rename_image_artifact(
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
-    artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
     if artifact is None:
         return 404, ErrorOut(detail="Image artifact not found", code="not_found")
     if artifact.created_by != request.user:
@@ -1532,16 +1545,16 @@ async def rename_image_artifact(
             code="forbidden",
         )
 
-    await sync_to_async(service.image_artifacts.update_name)(
+    await sync_to_async(service.image_instances.update_name)(
         image_artifact_id, payload.name.strip()
     )
-    updated = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    updated = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
     return 200, _image_artifact_to_out(updated)
 
 
 @image_artifact_router.delete(
     "/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut},
+    response={204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_image_artifact_global(
@@ -1555,7 +1568,7 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1567,6 +1580,8 @@ async def delete_image_artifact_global(
         return 204, None
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @image_artifact_router.post(
@@ -1592,7 +1607,7 @@ async def create_workspace_from_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1673,7 +1688,7 @@ async def create_workspace_image_artifact(
 
 @workspace_image_artifact_router.delete(
     "/{workspace_id}/image-artifacts/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut},
+    response={204: None, 404: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_workspace_image_artifact(
@@ -1700,6 +1715,8 @@ async def delete_workspace_image_artifact(
     except (NotFoundError, ValueError) as e:
         detail = e.message if isinstance(e, NotFoundError) else str(e)
         return 404, ErrorOut(detail=detail, code="not_found")
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_image_artifact_router.post(
@@ -1770,46 +1787,32 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         custom_dockerfile=defn.custom_dockerfile or "",
         custom_init_script=defn.custom_init_script or "",
         is_active=defn.is_active,
+        status=getattr(defn, "status", "active"),
         created_at=defn.created_at,
         updated_at=defn.updated_at,
     )
 
 
-def _runner_image_build_to_out(build) -> RunnerImageBuildOut:
+def _build_job_to_out(build) -> ImageBuildJobOut:
     artifact = None
     try:
-        artifact = getattr(build, "artifact", None)
+        artifact = getattr(build, "image_instance", None)
     except (ObjectDoesNotExist, SynchronousOnlyOperation):
         artifact = None
-    if (
-        artifact is None
-        and getattr(build, "status", "") == "active"
-        and (build.image_tag or build.image_path)
-    ):
-        from .models import ImageArtifact
 
-        artifact = ImageArtifact.objects.create(
-            source_workspace=None,
-            created_by=None,
-            artifact_kind=ImageArtifact.ArtifactKind.BUILT,
-            runner_image_build=build,
-            runner_artifact_id=build.image_tag or build.image_path,
-            name=f"{build.image_definition.name} ({build.runner.name})",
-            status=ImageArtifact.ArtifactStatus.READY,
-        )
-
-    return RunnerImageBuildOut(
+    return ImageBuildJobOut(
         id=build.id,
         image_definition_id=build.image_definition_id,
         runner_id=build.runner_id,
         image_artifact_id=getattr(artifact, "id", None),
         status=build.status,
-        image_tag=build.image_tag,
-        image_path=build.image_path,
         build_log=build.build_log,
         build_task_id=build.build_task_id,
         built_at=build.built_at,
         deactivated_at=build.deactivated_at,
+        delete_requested_at=getattr(build, "delete_requested_at", None),
+        delete_confirmed_at=getattr(build, "delete_confirmed_at", None),
+        delete_last_error=getattr(build, "delete_last_error", "") or "",
         created_at=build.created_at,
         updated_at=build.updated_at,
     )
@@ -1960,29 +1963,92 @@ def update_image_definition(
 
 @image_definition_router.delete(
     "/{definition_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut},
-    summary="Delete image definition",
+    response={202: ImageDefinitionOut, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    summary="Delete image definition (orchestrated)",
 )
-def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
+async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
+    """Orchestrated two-step delete: deactivate then delete all builds.
+
+    Definition is only fully deleted when all runner build deletes are confirmed.
+    """
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
+    if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from .models import ImageDefinition
 
-    definition = ImageDefinition.objects.filter(
-        id=definition_id, organization_id=org_id
-    ).first()
+    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
-    definition.delete()
-    return 204, None
+
+    service = _get_service()
+    try:
+        await service.delete_image_definition(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        if definition is None:
+            return 204, None
+        return 202, await sync_to_async(_image_definition_to_out)(definition)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 404, ErrorOut(detail=str(e), code="not_found")
+
+
+@image_definition_router.post(
+    "/{definition_id}/deactivate/",
+    response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    summary="Deactivate image definition",
+)
+async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.UUID):
+    """Deactivate a definition — immediately not selectable for new workspaces."""
+    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
+        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
+    org_id = _get_org_id(request)
+    if not await sync_to_async(_is_org_admin)(request.user, org_id):
+        return 403, ErrorOut(detail="Admin role required", code="forbidden")
+
+    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    if definition is None:
+        return 404, ErrorOut(detail="Image definition not found", code="not_found")
+
+    service = _get_service()
+    try:
+        await service.deactivate_image_definition(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        return 200, await sync_to_async(_image_definition_to_out)(definition)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@image_definition_router.post(
+    "/{definition_id}/activate/",
+    response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    summary="Activate image definition",
+)
+async def activate_image_definition(request: HttpRequest, definition_id: uuid.UUID):
+    """Re-activate a deactivated definition."""
+    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
+        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
+    org_id = _get_org_id(request)
+    if not await sync_to_async(_is_org_admin)(request.user, org_id):
+        return 403, ErrorOut(detail="Admin role required", code="forbidden")
+
+    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    if definition is None:
+        return 404, ErrorOut(detail="Image definition not found", code="not_found")
+
+    service = _get_service()
+    try:
+        await service.activate_image_definition(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        return 200, await sync_to_async(_image_definition_to_out)(definition)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @image_definition_router.get(
     "/{definition_id}/runner-builds/",
-    response={200: list[RunnerImageBuildOut], 403: ErrorOut, 404: ErrorOut},
+    response={200: list[ImageBuildJobOut], 403: ErrorOut, 404: ErrorOut},
     summary="List runner builds for image definition",
 )
 def list_image_definition_runner_builds(request: HttpRequest, definition_id: uuid.UUID):
@@ -1995,18 +2061,18 @@ def list_image_definition_runner_builds(request: HttpRequest, definition_id: uui
     if _get_image_definition_for_org(org_id, definition_id) is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     return 200, [
-        _runner_image_build_to_out(b)
-        for b in service.list_runner_image_builds(definition_id, org_id)
+        _build_job_to_out(b)
+        for b in service.list_build_jobs(definition_id, org_id)
     ]
 
 
 @image_definition_router.post(
     "/{definition_id}/runner-builds/",
-    response={202: RunnerImageBuildOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={202: ImageBuildJobOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Assign runner and activate image definition",
 )
 async def create_image_definition_runner_build(
-    request: HttpRequest, definition_id: uuid.UUID, payload: RunnerImageBuildCreateIn
+    request: HttpRequest, definition_id: uuid.UUID, payload: ImageBuildJobCreateIn
 ):
     if not check_api_key_permission(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
@@ -2024,7 +2090,7 @@ async def create_image_definition_runner_build(
 
     service = _get_service()
     try:
-        build = await service.trigger_runner_image_build(
+        build = await service.trigger_build_job(
             image_definition=definition,
             runner=runner,
             activate=payload.activate,
@@ -2032,19 +2098,19 @@ async def create_image_definition_runner_build(
         )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-    return 202, _runner_image_build_to_out(build)
+    return 202, _build_job_to_out(build)
 
 
 @image_definition_router.patch(
     "/{definition_id}/runner-builds/{runner_id}/",
-    response={200: RunnerImageBuildOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={200: ImageBuildJobOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Update runner build status",
 )
 async def update_image_definition_runner_build(
     request: HttpRequest,
     definition_id: uuid.UUID,
     runner_id: uuid.UUID,
-    payload: RunnerImageBuildUpdateIn,
+    payload: ImageBuildJobUpdateIn,
 ):
     if not check_api_key_permission(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
@@ -2054,9 +2120,9 @@ async def update_image_definition_runner_build(
     if not await _get_org_admin_flag_async(request, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
     from django.utils import timezone
-    from .models import RunnerImageBuild
+    from .models import ImageBuildJob
 
-    build = await sync_to_async(_get_runner_image_build_for_org)(
+    build = await sync_to_async(_get_build_job_for_org)(
         org_id,
         definition_id,
         runner_id,
@@ -2066,16 +2132,16 @@ async def update_image_definition_runner_build(
 
     action = payload.action.strip().lower()
     if action == "deactivate":
-        build.status = RunnerImageBuild.Status.DEACTIVATED
+        build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
         await sync_to_async(build.save)(update_fields=["status", "deactivated_at", "updated_at"])
-        return 200, _runner_image_build_to_out(build)
+        return 200, _build_job_to_out(build)
 
     service = _get_service()
     definition = build.image_definition
     runner = build.runner
     try:
-        rebuilt = await service.trigger_runner_image_build(
+        rebuilt = await service.trigger_build_job(
             image_definition=definition,
             runner=runner,
             activate=True,
@@ -2083,15 +2149,15 @@ async def update_image_definition_runner_build(
         )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-    return 200, _runner_image_build_to_out(rebuilt)
+    return 200, _build_job_to_out(rebuilt)
 
 
 @image_definition_router.delete(
     "/{definition_id}/runner-builds/{runner_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut},
-    summary="Remove runner assignment from image definition",
+    response={202: dict, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    summary="Delete runner build and its associated artifact",
 )
-def delete_image_definition_runner_build(
+async def delete_image_definition_runner_build(
     request: HttpRequest, definition_id: uuid.UUID, runner_id: uuid.UUID
 ):
     if not check_api_key_permission(
@@ -2099,16 +2165,21 @@ def delete_image_definition_runner_build(
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
     org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
+    if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    deleted = _get_service().runner_image_builds.delete_for_org(
-        definition_id,
-        runner_id,
-        org_id,
-    )
-    if not deleted:
+
+    build = await sync_to_async(_get_build_job_for_org)(org_id, definition_id, runner_id)
+    if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-    return 204, None
+
+    service = _get_service()
+    try:
+        await service.delete_build_job(build.id)
+        return 202, {"detail": "Build job deletion initiated"}
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 404, ErrorOut(detail=str(e), code="not_found")
 
 
 @image_definition_router.get(
@@ -2127,7 +2198,7 @@ def get_image_definition_runner_build_log(
     if _get_image_definition_for_org(org_id, definition_id) is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
-    build = _get_runner_image_build_for_org(org_id, definition_id, runner_id)
+    build = _get_build_job_for_org(org_id, definition_id, runner_id)
     if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
     return 200, {"build_log": build.build_log}

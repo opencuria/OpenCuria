@@ -14,7 +14,7 @@ from apps.runners.management.commands.bootstrap_local_deploy import (
     DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
     DEFAULT_WORKSPACE_PACKAGES,
 )
-from apps.runners.models import ImageArtifact, ImageDefinition, Runner, RunnerImageBuild
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
 from common.utils import hash_token
 
 
@@ -44,7 +44,7 @@ def test_bootstrap_creates_pending_build(db) -> None:
         organization=org,
         name="Local Docker Workspace",
     )
-    build = RunnerImageBuild.objects.get(image_definition=definition, runner=runner)
+    build = ImageBuildJob.objects.get(image_definition=definition, runner=runner)
 
     membership = Membership.objects.get(user=user, organization=org)
 
@@ -54,13 +54,12 @@ def test_bootstrap_creates_pending_build(db) -> None:
     assert runner.available_runtimes == [RuntimeType.DOCKER]
 
     # Build should be pending (not active) — the runner will build it
-    assert build.status == RunnerImageBuild.Status.PENDING
+    assert build.status == ImageBuildJob.Status.PENDING
     assert build.build_task is None
-    assert build.image_tag == ""
     assert build.built_at is None
 
     # No artifact should exist yet
-    assert not ImageArtifact.objects.filter(runner_image_build=build).exists()
+    assert not ImageInstance.objects.filter(build_job=build).exists()
 
     # Image definition should have the correct packages and Dockerfile
     assert definition.packages == DEFAULT_WORKSPACE_PACKAGES
@@ -110,13 +109,13 @@ def test_bootstrap_is_idempotent(db) -> None:
     org = Organization.objects.get(slug="repeat-org")
     runner = Runner.objects.get(name="repeat-runner", organization=org)
     definition = ImageDefinition.objects.get(organization=org)
-    builds = RunnerImageBuild.objects.filter(
+    builds = ImageBuildJob.objects.filter(
         image_definition=definition, runner=runner
     )
 
     assert builds.count() == 1
     build = builds.first()
-    assert build.status == RunnerImageBuild.Status.PENDING
+    assert build.status == ImageBuildJob.Status.PENDING
     assert runner.api_token_hash == hash_token("new-token")
 
 
@@ -141,15 +140,24 @@ def test_bootstrap_preserves_active_build(db) -> None:
     org = Organization.objects.get(slug="active-org")
     runner = Runner.objects.get(name="active-runner", organization=org)
     definition = ImageDefinition.objects.get(organization=org)
-    build = RunnerImageBuild.objects.get(
+    build = ImageBuildJob.objects.get(
         image_definition=definition, runner=runner
     )
 
     # Simulate a successful build
-    build.status = RunnerImageBuild.Status.ACTIVE
-    build.image_tag = "opencuria/custom/local-docker-workspace:test"
+    build.status = ImageBuildJob.Status.ACTIVE
     build.built_at = timezone.now()
-    build.save(update_fields=["status", "image_tag", "built_at"])
+    build.save(update_fields=["status", "built_at"])
+    ImageInstance.objects.create(
+        runner=runner,
+        runtime_type=RuntimeType.DOCKER,
+        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+        origin_definition=definition,
+        build_job=build,
+        runner_ref="opencuria/custom/local-docker-workspace:test",
+        name="Local Docker Workspace (active-runner)",
+        status=ImageInstance.Status.READY,
+    )
 
     # Run bootstrap again
     call_command(
@@ -167,8 +175,8 @@ def test_bootstrap_preserves_active_build(db) -> None:
     )
 
     build.refresh_from_db()
-    assert build.status == RunnerImageBuild.Status.ACTIVE
-    assert build.image_tag == "opencuria/custom/local-docker-workspace:test"
+    assert build.status == ImageBuildJob.Status.ACTIVE
+    assert build.image_instance.runner_ref == "opencuria/custom/local-docker-workspace:test"
 
 
 def test_bootstrap_resets_failed_build_to_pending(db) -> None:
@@ -190,12 +198,12 @@ def test_bootstrap_resets_failed_build_to_pending(db) -> None:
     org = Organization.objects.get(slug="failed-org")
     runner = Runner.objects.get(name="failed-runner", organization=org)
     definition = ImageDefinition.objects.get(organization=org)
-    build = RunnerImageBuild.objects.get(
+    build = ImageBuildJob.objects.get(
         image_definition=definition, runner=runner
     )
 
     # Simulate a failed build
-    build.status = RunnerImageBuild.Status.FAILED
+    build.status = ImageBuildJob.Status.FAILED
     build.save(update_fields=["status"])
 
     # Run bootstrap again
@@ -214,7 +222,6 @@ def test_bootstrap_resets_failed_build_to_pending(db) -> None:
     )
 
     build.refresh_from_db()
-    assert build.status == RunnerImageBuild.Status.PENDING
+    assert build.status == ImageBuildJob.Status.PENDING
     assert build.build_task is None
-    assert build.image_tag == ""
     assert build.built_at is None

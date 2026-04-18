@@ -60,6 +60,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     stopped: workspaces.value.filter((w) => w.status === WorkspaceStatus.STOPPED),
     failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.FAILED),
     removed: workspaces.value.filter((w) => w.status === WorkspaceStatus.REMOVED),
+    pending_deletion: workspaces.value.filter((w) => w.status === WorkspaceStatus.PENDING_DELETION),
+    deleting: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETING),
+    deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
+    delete_failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETE_FAILED),
   }))
 
   /** Sessions filtered to the active chat. Returns empty array if no active chat is selected. */
@@ -100,7 +104,15 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const workspace =
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
-    return Boolean(workspace?.active_operation || pendingWorkspaceOperations.value[workspaceId])
+    if (!workspace) return Boolean(pendingWorkspaceOperations.value[workspaceId])
+    // Workspaces in deletion states are always "transitioning" (no actions allowed)
+    const deletionStates: string[] = [
+      WorkspaceStatus.PENDING_DELETION,
+      WorkspaceStatus.DELETING,
+      WorkspaceStatus.DELETED,
+    ]
+    if (deletionStates.includes(workspace.status)) return true
+    return Boolean(workspace.active_operation || pendingWorkspaceOperations.value[workspaceId])
   }
 
   function getWorkspaceTransitionLabel(workspaceId: string): string | null {

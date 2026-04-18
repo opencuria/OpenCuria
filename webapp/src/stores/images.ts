@@ -69,12 +69,21 @@ export const useImageStore = defineStore('images', () => {
   async function deleteImageArtifact(imageArtifactId: string): Promise<boolean> {
     try {
       await workspacesApi.deleteImageArtifact(imageArtifactId)
-      images.value = images.value.filter((artifact) => artifact.id !== imageArtifactId)
-      notifications.success('Image deleted', 'The image was removed.')
+      // Mark locally as deleting (will be confirmed via next fetch)
+      const idx = images.value.findIndex((a) => a.id === imageArtifactId)
+      if (idx !== -1) {
+        images.value[idx] = { ...images.value[idx], status: 'deleting' }
+      }
+      notifications.success('Delete initiated', 'Image deletion has been initiated.')
       return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete image'
-      notifications.error('Delete failed', msg)
+    } catch (e: any) {
+      if (e?.response?.status === 409) {
+        const detail = e?.response?.data?.detail || 'Image is in use and cannot be deleted.'
+        notifications.error('Cannot delete', detail)
+      } else {
+        const msg = e instanceof Error ? e.message : 'Failed to delete image'
+        notifications.error('Delete failed', msg)
+      }
       return false
     }
   }
