@@ -1453,7 +1453,6 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
         source_runner_online=source_runner_online,
         created_at=artifact.created_at,
         created_by_id=artifact.created_by_id,
-        credential_ids=[c.id for c in artifact.credentials.all()],
     )
 
 
@@ -1600,10 +1599,19 @@ async def create_workspace_from_image_artifact_global(
                 detail="Not authorized to use this image artifact",
                 code="forbidden",
             )
+        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
+            payload.credential_ids,
+            org_id=org_id,
+            user=request.user,
+        )
 
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=image_artifact_id,
             name=payload.name,
+            env_vars=resolved.env_vars,
+            files=resolved.files,
+            ssh_keys=resolved.ssh_keys,
+            credentials=resolved.credentials,
             user=request.user,
             organization_id=org_id,
         )
@@ -1727,9 +1735,18 @@ async def create_workspace_from_workspace_image_artifact(
             workspace_id,
             image_artifact_id,
         )
+        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
+            payload.credential_ids,
+            org_id=org_id,
+            user=request.user,
+        )
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=image_artifact_id,
             name=payload.name,
+            env_vars=resolved.env_vars,
+            files=resolved.files,
+            ssh_keys=resolved.ssh_keys,
+            credentials=resolved.credentials,
             user=request.user,
             organization_id=org_id,
         )

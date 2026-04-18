@@ -873,15 +873,6 @@ class ImageArtifact(models.Model):
         db_index=True,
         help_text="Task ID of the creation task, used to link runner events back to this record.",
     )
-    credentials = models.ManyToManyField(
-        "credentials.Credential",
-        blank=True,
-        related_name="image_artifacts",
-        help_text=(
-            "Credentials attached when the artifact was created. "
-            "Used to automatically restore credentials when creating a workspace from this artifact."
-        ),
-    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

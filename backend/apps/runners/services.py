@@ -3800,19 +3800,14 @@ rm -rf /var/lib/apt/lists/*
             workspace=workspace,
         )
 
-        # Capture credentials and create the artifact record upfront so the UI
-        # can immediately show the 'creating' state.
-        # Both .credentials and .created_by are fetched eagerly via get_by_id.
-        workspace_credentials = await sync_to_async(
-            lambda: list(workspace.credentials.all())
-        )()
+        # Create the artifact record upfront so the UI can immediately show the
+        # 'creating' state.
         created_by = await sync_to_async(lambda: workspace.created_by)()
         artifact = await sync_to_async(self.image_artifacts.create_pending)(
             source_workspace=workspace,
             name=name,
             creating_task_id=str(task_id),
             created_by=created_by,
-            credentials=workspace_credentials,
         )
 
         await self._dispatch_workspace_task(
@@ -3863,14 +3858,12 @@ rm -rf /var/lib/apt/lists/*
             workspace = self.workspaces.get_by_id(uuid.UUID(workspace_id))
             if workspace is None:
                 raise WorkspaceNotFoundError(workspace_id)
-            workspace_credentials = list(workspace.credentials.all())
             self.image_artifacts.create(
                 source_workspace=workspace,
                 runner_artifact_id=artifact_id,
                 name=name,
                 size_bytes=size_bytes,
                 created_by=task.workspace.created_by if task.workspace else None,
-                credentials=workspace_credentials,
             )
 
         if task.workspace:
@@ -3980,12 +3973,10 @@ rm -rf /var/lib/apt/lists/*
     ) -> tuple["Workspace", "Task"]:
         """Create a workspace from an image artifact.
 
-        Credentials are automatically restored from the artifact if not
-        explicitly overridden. The caller should not need to pass credentials
-        when creating a workspace — they are stored on the artifact.
+        Credentials are explicitly supplied by the caller and injected for the
+        create operation only. Captured artifacts do not retain credential
+        associations.
         """
-        from apps.credentials.services import CredentialSvc
-
         artifact = await sync_to_async(self.image_artifacts.get_by_id)(image_artifact_id)
         if artifact is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -4055,32 +4046,11 @@ rm -rf /var/lib/apt/lists/*
             created_by=user,
         )
 
-        # Resolve credentials: use artifact's stored credentials if none provided
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
-            resolved_env_vars = env_vars or {}
-            resolved_files = files or []
-            resolved_ssh_keys = ssh_keys or []
-        else:
-            artifact_credentials = await sync_to_async(list)(artifact.credentials.all())
-            if artifact_credentials:
-                await sync_to_async(self.workspaces.set_credentials)(
-                    workspace, artifact_credentials
-                )
-                artifact_cred_ids = [c.id for c in artifact_credentials]
-                credential_svc = CredentialSvc()
-                resolved = await sync_to_async(credential_svc.resolve_credentials)(
-                    artifact_cred_ids,
-                    org_id=organization_id,
-                    user=user,
-                )
-                resolved_env_vars = resolved.env_vars
-                resolved_files = resolved.files
-                resolved_ssh_keys = resolved.ssh_keys
-            else:
-                resolved_env_vars = env_vars or {}
-                resolved_files = files or []
-                resolved_ssh_keys = ssh_keys or []
+        resolved_env_vars = env_vars or {}
+        resolved_files = files or []
+        resolved_ssh_keys = ssh_keys or []
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(

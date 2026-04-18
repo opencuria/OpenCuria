@@ -1000,7 +1000,6 @@ class ImageArtifactRepository:
         artifact_kind: str = ImageArtifact.ArtifactKind.CAPTURED,
         runner_image_build: RunnerImageBuild | None = None,
         created_by=None,
-        credentials: list | None = None,
     ) -> "ImageArtifact":
         """Create a new artifact record (immediately ready)."""
         artifact = ImageArtifact.objects.create(
@@ -1013,8 +1012,6 @@ class ImageArtifactRepository:
             created_by=created_by,
             status=ImageArtifact.ArtifactStatus.READY,
         )
-        if credentials:
-            artifact.credentials.set(credentials)
         return artifact
 
     @staticmethod
@@ -1026,7 +1023,6 @@ class ImageArtifactRepository:
         artifact_kind: str = ImageArtifact.ArtifactKind.CAPTURED,
         runner_image_build: RunnerImageBuild | None = None,
         created_by=None,
-        credentials: list | None = None,
     ) -> "ImageArtifact":
         """Create an artifact record in 'creating' state before the runner finishes."""
         artifact = ImageArtifact.objects.create(
@@ -1040,8 +1036,6 @@ class ImageArtifactRepository:
             status=ImageArtifact.ArtifactStatus.CREATING,
             creating_task_id=creating_task_id,
         )
-        if credentials:
-            artifact.credentials.set(credentials)
         return artifact
 
     @staticmethod
@@ -1057,7 +1051,6 @@ class ImageArtifactRepository:
                 "runner_image_build__runner",
                 "runner_image_build__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1121,7 +1114,6 @@ class ImageArtifactRepository:
                 "runner_image_build__runner",
                 "runner_image_build__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1140,7 +1132,6 @@ class ImageArtifactRepository:
                 "runner_image_build__runner",
                 "runner_image_build__image_definition",
             )
-            .prefetch_related("credentials__service")
             .first()
         )
 
@@ -1154,7 +1145,7 @@ class ImageArtifactRepository:
             "runner_image_build",
             "runner_image_build__runner",
             "runner_image_build__image_definition",
-        ).prefetch_related("credentials__service")
+        )
 
     @staticmethod
     def list_by_user(user) -> "QuerySet[ImageArtifact]":
@@ -1166,7 +1157,7 @@ class ImageArtifactRepository:
             "runner_image_build",
             "runner_image_build__runner",
             "runner_image_build__image_definition",
-        ).prefetch_related("credentials__service")
+        )
 
     @staticmethod
     def delete(artifact_id: uuid.UUID) -> bool:

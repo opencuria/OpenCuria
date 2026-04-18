@@ -708,6 +708,99 @@ class TestRuntimeCompatibilityGuards:
             )
 
 
+@pytest.mark.django_db(transaction=True)
+class TestCreateWorkspaceFromImageArtifact:
+    @pytest.mark.asyncio
+    async def test_uses_only_explicitly_supplied_credentials(
+        self, service, sio_mock, runner, user
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Source Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            runtime_type="docker",
+        )
+        artifact = ImageArtifact.objects.create(
+            source_workspace=source_workspace,
+            created_by=user,
+            name="Captured Source",
+            runner_artifact_id="captured-artifact-1",
+            status=ImageArtifact.ArtifactStatus.READY,
+            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        )
+        credential_service = CredentialService.objects.create(
+            name="GitHub Token",
+            slug=f"github-token-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="GITHUB_TOKEN",
+            label="GitHub PAT",
+        )
+        credential = CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name="GitHub PAT",
+            value="secret-token",
+            user=user,
+        )
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Workspace",
+            env_vars={"GITHUB_TOKEN": "secret-token"},
+            credentials=[credential],
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        assert list(workspace.credentials.values_list("id", flat=True)) == [credential.id]
+
+        sio_mock.emit.assert_called_once()
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {"GITHUB_TOKEN": "secret-token"}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    async def test_does_not_restore_credentials_from_artifact_metadata(
+        self, service, sio_mock, runner, user
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Source Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            runtime_type="docker",
+        )
+        artifact = ImageArtifact.objects.create(
+            source_workspace=source_workspace,
+            created_by=user,
+            name="Captured Source",
+            runner_artifact_id="captured-artifact-2",
+            status=ImageArtifact.ArtifactStatus.READY,
+            artifact_kind=ImageArtifact.ArtifactKind.CAPTURED,
+        )
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Without Credentials",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        assert workspace.credentials.count() == 0
+
+        sio_mock.emit.assert_called_once()
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+
+
 @pytest.mark.django_db
 class TestHandleWorkspaceCreated:
     def test_marks_workspace_running(self, service, runner, workspace):

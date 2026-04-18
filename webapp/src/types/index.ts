@@ -573,7 +573,6 @@ export interface ImageArtifact {
   source_runner_online?: boolean
   created_at: string
   created_by_id: number | null
-  credential_ids: string[]
 }
 
 export interface ImageArtifactCreateIn {
@@ -588,6 +587,7 @@ export interface ImageArtifactCreateOut {
 
 export interface ImageArtifactCloneIn {
   name?: string
+  credential_ids?: string[]
 }
 
 export interface ImageArtifactCloneOut {

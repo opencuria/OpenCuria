@@ -119,13 +119,7 @@ const selectedImageOption = computed<SelectableImageOption | null>(() => {
   return selectableOptionsByValue.value[selectedImageValue.value] ?? null
 })
 
-const selectedImageArtifact = computed<ImageArtifact | null>(() => {
-  if (!selectedImageOption.value || selectedImageOption.value.kind !== 'captured') return null
-  return selectedImageOption.value.imageArtifact ?? null
-})
-
 const isFromImage = computed(() => !!selectedImageOption.value)
-const isCapturedClone = computed(() => selectedImageOption.value?.kind === 'captured')
 
 const compatibleRunnerOptions = computed(() => {
   const option = selectedImageOption.value
@@ -175,9 +169,7 @@ watch(selectedImageOption, (option, previousOption) => {
   if (option) {
     runtimeType.value = option.runtimeType
   }
-  if (option?.kind === 'captured' && option.imageArtifact) {
-    selectedCredentialIds.value = [...option.imageArtifact.credential_ids]
-  } else if (previousOption?.kind === 'captured') {
+  if (previousOption) {
     selectedCredentialIds.value = []
   }
 })
@@ -275,7 +267,7 @@ const qemuLimits = computed(() => {
 })
 
 watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
-  if (!open.value || runtimeType.value !== RuntimeType.QEMU || isCapturedClone.value) return
+  if (!open.value || runtimeType.value !== RuntimeType.QEMU) return
 
   const limits = qemuLimits.value
   const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
@@ -305,7 +297,6 @@ watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
 }, { immediate: true })
 
 function toggleCredential(id: string): void {
-  if (isCapturedClone.value) return
   const idx = selectedCredentialIds.value.indexOf(id)
   if (idx === -1) {
     selectedCredentialIds.value.push(id)
@@ -342,42 +333,30 @@ async function handleSubmit(): Promise<void> {
 
   submitting.value = true
 
-  let success: boolean
+  const resolvedImageId =
+    selectedOption.kind === 'definition'
+      ? selectedDefinitionArtifactId.value
+      : selectedOption.imageArtifact?.id
 
-  if (isCapturedClone.value) {
-    const workspaceId = await imageStore.createWorkspaceFromImageArtifact(
-      selectedOption.imageArtifact?.id || '',
-      {
-      name: name.value.trim(),
-      },
-    )
-    success = !!workspaceId
-  } else {
-    const resolvedImageId =
-      selectedOption.kind === 'definition'
-        ? selectedDefinitionArtifactId.value
-        : selectedOption.imageArtifact?.id
-
-    if (!resolvedImageId) {
-      submitting.value = false
-      return
-    }
-
-    success = await workspaceStore.createWorkspace({
-      name: name.value.trim(),
-      repos: repos.value,
-      credential_ids: selectedCredentialIds.value,
-      runner_id: runnerId.value || null,
-      image_id: resolvedImageId,
-      ...(runtimeType.value === RuntimeType.QEMU
-        ? {
-            qemu_vcpus: qemuVcpus.value,
-            qemu_memory_mb: qemuMemoryMb.value,
-            qemu_disk_size_gb: qemuDiskSizeGb.value,
-          }
-        : {}),
-    })
+  if (!resolvedImageId) {
+    submitting.value = false
+    return
   }
+
+  const success = await workspaceStore.createWorkspace({
+    name: name.value.trim(),
+    repos: repos.value,
+    credential_ids: selectedCredentialIds.value,
+    runner_id: runnerId.value || null,
+    image_id: resolvedImageId,
+    ...(runtimeType.value === RuntimeType.QEMU
+      ? {
+          qemu_vcpus: qemuVcpus.value,
+          qemu_memory_mb: qemuMemoryMb.value,
+          qemu_disk_size_gb: qemuDiskSizeGb.value,
+        }
+      : {}),
+  })
 
   submitting.value = false
 
@@ -412,10 +391,7 @@ const isValid = computed(
   () =>
     name.value.trim().length > 0 &&
     !!selectedImageOption.value &&
-    (
-      selectedImageOption.value.kind === 'captured' ||
-      !!selectedDefinitionArtifactId.value
-    ),
+    (selectedImageOption.value.kind === 'captured' || !!selectedDefinitionArtifactId.value),
 )
 </script>
 
@@ -471,19 +447,7 @@ const isValid = computed(
         </p>
       </div>
 
-      <!-- When from image: show locked credential info -->
-      <div v-if="isCapturedClone && selectedImageArtifact">
-        <label class="text-sm font-medium text-fg mb-1.5 block">Credentials from image</label>
-        <div class="rounded-[var(--radius-md)] bg-bg-subtle border border-border p-3 text-sm text-muted-fg">
-          <span v-if="selectedImageArtifact.credential_ids.length">
-            {{ selectedImageArtifact.credential_ids.length }} credential(s) will be restored automatically.
-          </span>
-          <span v-else>No credentials stored in this image.</span>
-        </div>
-      </div>
-
-      <!-- Normal: Credentials -->
-      <div v-if="!isCapturedClone">
+      <div>
         <label class="text-sm font-medium text-fg mb-1.5 block">Credentials <span class="text-muted-fg font-normal">(optional)</span></label>
         <div v-if="credentialStore.credentials.length" class="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
           <button
@@ -520,8 +484,7 @@ const isValid = computed(
         </p>
       </div>
 
-      <!-- Repositories (locked only for captured-image clones) -->
-      <div v-if="!isCapturedClone">
+      <div>
         <label class="text-sm font-medium text-fg mb-1.5 block">Repositories <span class="text-muted-fg font-normal">(optional)</span></label>
         <div class="flex gap-2">
           <UiInput
@@ -551,11 +514,7 @@ const isValid = computed(
       </div>
 
       <div v-if="activeTab === 'advanced'">
-        <div v-if="isCapturedClone" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3 text-sm text-muted-fg">
-          Captured image clones keep runner, runtime and resources from the image. Advanced options are disabled.
-        </div>
-
-        <div v-else class="space-y-4">
+        <div class="space-y-4">
           <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
             <label class="text-sm font-medium text-fg mb-1.5 block">Runner</label>
             <UiSelect
