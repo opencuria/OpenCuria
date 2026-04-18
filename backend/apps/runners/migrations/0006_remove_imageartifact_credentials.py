@@ -7,9 +7,4 @@ class Migration(migrations.Migration):
         ("runners", "0005_fix_agent_command_template_defaults"),
     ]
 
-    operations = [
-        migrations.RemoveField(
-            model_name="imageartifact",
-            name="credentials",
-        ),
-    ]
+    operations = []

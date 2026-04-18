@@ -205,7 +205,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('credentials', '0002_seed_global_credential_services'),
-        ('runners', '0007_merge_0006_imageartifact_and_codex_auth'),
+        ('runners', '0003_fix_standard_qemu_image_definition'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
