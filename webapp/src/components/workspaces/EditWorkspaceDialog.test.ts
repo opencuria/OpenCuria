@@ -15,8 +15,32 @@ const credentialStore = {
     {
       id: 'cred-1',
       name: 'GitHub Token',
-      credential_type: 'env_var',
+      scope: 'personal',
+      service_id: 'service-github',
+      service_name: 'GitHub',
+      service_slug: 'github',
+      credential_type: 'env',
       env_var_name: 'GITHUB_TOKEN',
+      target_path: '',
+      has_public_key: false,
+      created_by_id: 1,
+      created_at: '2026-04-01T10:00:00.000Z',
+      updated_at: '2026-04-01T10:00:00.000Z',
+    },
+    {
+      id: 'cred-2',
+      name: 'GitHub Token (Org)',
+      scope: 'organization',
+      service_id: 'service-github',
+      service_name: 'GitHub',
+      service_slug: 'github',
+      credential_type: 'env',
+      env_var_name: 'GITHUB_TOKEN',
+      target_path: '',
+      has_public_key: false,
+      created_by_id: 1,
+      created_at: '2026-04-01T10:00:00.000Z',
+      updated_at: '2026-04-01T10:00:00.000Z',
     },
   ],
   fetchCredentials,
@@ -143,5 +167,20 @@ describe('EditWorkspaceDialog', () => {
       credential_ids: ['cred-1'],
       qemu_memory_mb: 8192,
     })
+  })
+
+  it('replaces the selected credential when another credential from the same service is chosen', async () => {
+    const wrapper = shallowMount(EditWorkspaceDialog, {
+      props: {
+        workspace: makeWorkspace(),
+      },
+    })
+
+    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
+    ;(wrapper.vm as typeof wrapper.vm & { toggleCredential: (id: string) => void }).toggleCredential('cred-2')
+
+    expect(
+      (wrapper.vm as typeof wrapper.vm & { selectedCredentialIds: string[] }).selectedCredentialIds,
+    ).toEqual(['cred-2'])
   })
 })

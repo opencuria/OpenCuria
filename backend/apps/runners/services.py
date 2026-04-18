@@ -4444,6 +4444,7 @@ rm -rf /var/lib/apt/lists/*
         create operation only. Captured artifacts do not retain credential
         associations.
         """
+        credential_svc = CredentialSvc()
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -4497,6 +4498,13 @@ rm -rf /var/lib/apt/lists/*
                 requested_disk_size_gb=qemu_disk_size_gb,
             )
 
+        resolved_env_vars = env_vars or {}
+        resolved_files = files or []
+        resolved_ssh_keys = ssh_keys or []
+
+        if credentials is not None:
+            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(credentials)
+
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
         if not name:
@@ -4516,9 +4524,6 @@ rm -rf /var/lib/apt/lists/*
 
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
-        resolved_env_vars = env_vars or {}
-        resolved_files = files or []
-        resolved_ssh_keys = ssh_keys or []
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(

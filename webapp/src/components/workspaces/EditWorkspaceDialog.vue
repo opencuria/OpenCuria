@@ -6,6 +6,7 @@ import { Pencil, Check, Key } from 'lucide-vue-next'
 import { UiButton, UiDialog, UiInput } from '@/components/ui'
 import type { Workspace, WorkspaceUpdateIn } from '@/types'
 import { RuntimeType } from '@/types'
+import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
@@ -88,12 +89,13 @@ watch(
 )
 
 function toggleCredential(id: string): void {
-  const index = selectedCredentialIds.value.indexOf(id)
-  if (index === -1) {
-    selectedCredentialIds.value.push(id)
-  } else {
-    selectedCredentialIds.value.splice(index, 1)
-  }
+  const credential = credentialStore.credentials.find((entry) => entry.id === id)
+  if (!credential) return
+  selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
+    selectedCredentialIds.value,
+    credential,
+    credentialStore.credentials,
+  )
 }
 
 async function handleOpen(): Promise<void> {
@@ -142,6 +144,7 @@ async function navigateToCredentials(): Promise<void> {
   handleClose()
   await router.push({ name: 'credentials' })
 }
+
 </script>
 
 <template>
