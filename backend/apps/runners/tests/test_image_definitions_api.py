@@ -548,8 +548,9 @@ def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
     )
 
     assert response.status_code == 409
+    assert "still used by 1 workspace(s)" in response.json()["detail"]
     image.refresh_from_db()
-    assert image.status == ImageInstance.Status.RETIRED
+    assert image.status == ImageInstance.Status.READY
 
 
 @pytest.mark.django_db

@@ -878,6 +878,7 @@ class WebSocketInterface(Interface):
                     {
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
+                        "result": "already_absent" if already_absent else "deleted",
                         "already_absent": already_absent,
                     },
                 )
@@ -1411,6 +1412,7 @@ class WebSocketInterface(Interface):
                         "workspace_id": str(workspace_id) if workspace_id else "",
                         "image_instance_id": image_instance_id,
                         "image_artifact_id": image_artifact_id,
+                        "result": result,
                         "already_absent": result == "already_absent",
                     },
                 )

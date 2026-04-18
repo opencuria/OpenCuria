@@ -184,12 +184,24 @@ class RunnerService:
 
         dispatched = []
         for image in pending_images:
-            if not image.deleting_task_id:
-                continue
-            task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(image.deleting_task_id))
-            if task is None:
-                continue
             try:
+                if image.deleting_task_id:
+                    task = await sync_to_async(self.tasks.get_by_id)(
+                        uuid.UUID(image.deleting_task_id)
+                    )
+                else:
+                    task = None
+                if task is None:
+                    task_id = generate_uuid()
+                    task = await sync_to_async(self.tasks.create)(
+                        task_id=task_id,
+                        runner=runner,
+                        task_type=TaskType.DELETE_IMAGE,
+                    )
+                await sync_to_async(self.image_instances.mark_deleting)(
+                    image.id,
+                    deleting_task_id=str(task.id),
+                )
                 await self._emit_to_runner(
                     runner,
                     "task:delete_image_artifact",
@@ -1750,11 +1762,23 @@ class RunnerService:
             TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
         }:
             self.workspaces.update_status(workspace, WorkspaceStatus.FAILED)
+        elif workspace and task.type == TaskType.REMOVE_WORKSPACE:
+            self.workspaces.mark_delete_failed(workspace.id, error=error)
 
         self.tasks.fail(task, error)
         logger.error("Workspace error (task=%s): %s", task_id, error)
 
         if workspace_id:
+            if workspace and task.type == TaskType.REMOVE_WORKSPACE:
+                self._forward_to_frontend(
+                    "workspace:status_changed",
+                    {
+                        "workspace_id": workspace_id,
+                        "status": WorkspaceStatus.DELETE_FAILED,
+                        "task_id": task_id,
+                    },
+                    workspace_id,
+                )
             self._forward_workspace_operation(workspace_id, None)
             self._forward_to_frontend(
                 "workspace:error",
@@ -1963,6 +1987,7 @@ class RunnerService:
         task_id: str,
         workspace_id: str,
         runner_id: str | None = None,
+        result: str = "deleted",
         already_absent: bool = False,
     ) -> None:
         """Handle workspace:removed event from a runner."""
@@ -1976,13 +2001,31 @@ class RunnerService:
         if not self._validate_task_runner(task, runner_id):
             return
 
+        delete_result = result or ("already_absent" if already_absent else "deleted")
+        if delete_result not in {"deleted", "already_absent"}:
+            error = f"Workspace delete was not confirmed: {delete_result}"
+            if task.workspace:
+                self.workspaces.mark_delete_failed(task.workspace.id, error=error)
+            self.tasks.fail(task, error)
+            logger.warning(
+                "Workspace delete failed confirmation: %s (%s)",
+                workspace_id,
+                delete_result,
+            )
+            return
+
         workspace = task.workspace
         if workspace:
             self.workspaces.mark_deleted(workspace.id)
         self._cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
-        logger.info("Workspace removed: %s (already_absent=%s)", workspace_id, already_absent)
+        logger.info(
+            "Workspace removed: %s (result=%s already_absent=%s)",
+            workspace_id,
+            delete_result,
+            already_absent,
+        )
 
         self._forward_to_frontend(
             "workspace:status_changed",
@@ -2834,6 +2877,15 @@ class RunnerService:
                     )
                 else:
                     self._pending_unknown_workspace_cleanup.discard(cleanup_key)
+                continue
+
+            if ws.status in (
+                WorkspaceStatus.PENDING_DELETION,
+                WorkspaceStatus.DELETING,
+                WorkspaceStatus.DELETE_FAILED,
+                WorkspaceStatus.DELETED,
+            ):
+                self._cleanup_desktop_state(ws_id_str)
                 continue
 
             # This workspace is backend-managed and non-terminal.
@@ -4035,9 +4087,8 @@ rm -rf /var/lib/apt/lists/*
             lambda: list(self.workspaces.list_by_base_image_instance(image_artifact_id))
         )()
         if dependent_workspaces:
-            await sync_to_async(self.image_instances.mark_retired)(image_artifact_id)
             raise ConflictError(
-                f"Image artifact '{image_artifact_id}' is still used by {len(dependent_workspaces)} workspace(s) and was retired instead"
+                f"Image artifact '{image_artifact_id}' is still used by {len(dependent_workspaces)} workspace(s)"
             )
 
         # Built images can only be deleted via their build job
@@ -4048,6 +4099,13 @@ rm -rf /var/lib/apt/lists/*
 
         runner = image.runner
         if not image.runner_ref:
+            if image.status in (
+                ImageInstance.Status.BUILDING,
+                ImageInstance.Status.CAPTURING,
+            ):
+                raise ConflictError(
+                    f"Image artifact '{image_artifact_id}' cannot be deleted while it is still {image.status}"
+                )
             await sync_to_async(self.image_instances.mark_deleted)(image_artifact_id)
             logger.info("Image artifact deleted without runner cleanup: %s", image_artifact_id)
             return
@@ -4085,11 +4143,20 @@ rm -rf /var/lib/apt/lists/*
         task_id: str,
         image_instance_id: str = "",
         runner_ref: str = "",
+        result: str = "deleted",
         runner_id: str | None = None,
     ) -> None:
         """Mark an image instance deleted after runner cleanup confirms it."""
         task = self.tasks.get_by_id(uuid.UUID(task_id)) if task_id else None
         if task is not None and not self._validate_task_runner(task, runner_id):
+            return
+
+        if result not in {"deleted", "already_absent"}:
+            self.handle_image_artifact_delete_failed(
+                task_id=task_id,
+                error=f"Delete was not confirmed: {result}",
+                runner_id=runner_id,
+            )
             return
 
         image = None
@@ -4122,6 +4189,20 @@ rm -rf /var/lib/apt/lists/*
         image = self.image_instances.get_by_task_id(task_id) if task_id else None
         if image is not None:
             self.image_instances.mark_delete_failed(image.id, error=error)
+            if image.build_job_id:
+                self.build_jobs.mark_delete_failed(image.build_job_id, error=error)
+                self._mark_definition_delete_failed(
+                    image.origin_definition_id,
+                    error=error or "Runner build cleanup failed",
+                )
+        elif task_id:
+            build = self._get_build_by_delete_task(task_id)
+            if build is not None:
+                self.build_jobs.mark_delete_failed(build.id, error=error)
+                self._mark_definition_delete_failed(
+                    build.image_definition_id,
+                    error=error or "Runner build cleanup failed",
+                )
         if task is not None:
             self.tasks.fail(task, error=error or "Delete failed on runner")
         logger.warning("Image artifact delete failed: task=%s error=%s", task_id, error)
@@ -4168,6 +4249,9 @@ rm -rf /var/lib/apt/lists/*
                 task_id=task_id,
                 runner=runner,
                 task_type=TaskType.DELETE_IMAGE,
+            )
+            await sync_to_async(self._mark_definition_deleting_if_needed)(
+                build.image_definition_id
             )
             await sync_to_async(self.build_jobs.mark_deleting)(
                 build_job_id, deleting_task_id=str(task.id)
@@ -4217,10 +4301,7 @@ rm -rf /var/lib/apt/lists/*
             return
 
         # Find build job by task_id
-        build = None
-        builds = list(ImageBuildJob.objects.filter(deleting_task_id=task_id))
-        if builds:
-            build = builds[0]
+        build = self._get_build_by_delete_task(task_id)
 
         if build is not None:
             self.build_jobs.mark_deleted(build.id)
@@ -4250,6 +4331,49 @@ rm -rf /var/lib/apt/lists/*
         if not remaining.exists():
             self.image_definitions.mark_deleted(definition_id)
             logger.info("Definition fully deleted: %s", definition_id)
+
+    def _get_build_by_delete_task(self, task_id: str):
+        """Return the build job currently linked to a delete task, if any."""
+        from .models import ImageBuildJob
+
+        return (
+            ImageBuildJob.objects.filter(deleting_task_id=task_id)
+            .select_related("image_definition", "image_instance")
+            .first()
+        )
+
+    def _mark_definition_delete_failed(
+        self,
+        definition_id: uuid.UUID | None,
+        *,
+        error: str,
+    ) -> None:
+        """Move a definition delete flow into DELETE_FAILED when a child cleanup fails."""
+        if definition_id is None:
+            return
+        definition = self.image_definitions.get_by_id(definition_id)
+        if definition is None:
+            return
+        if definition.status not in {
+            definition.Status.PENDING_DELETION,
+            definition.Status.DELETING,
+            definition.Status.DELETE_FAILED,
+        }:
+            return
+        self.image_definitions.mark_delete_failed(definition_id, error=error)
+
+    def _mark_definition_deleting_if_needed(self, definition_id: uuid.UUID | None) -> None:
+        """Promote a pending definition delete to deleting once runner cleanup starts."""
+        if definition_id is None:
+            return
+        definition = self.image_definitions.get_by_id(definition_id)
+        if definition is None:
+            return
+        if definition.status in {
+            definition.Status.PENDING_DELETION,
+            definition.Status.DELETE_FAILED,
+        }:
+            self.image_definitions.mark_deleting(definition_id)
 
     # ------------------------------------------------------------------
     # Image definition lifecycle
@@ -4294,6 +4418,8 @@ rm -rf /var/lib/apt/lists/*
 
         if definition.status == ImageDefinition.Status.DELETED:
             raise ConflictError("Definition is already deleted")
+        if definition.status == ImageDefinition.Status.DELETING:
+            raise ConflictError("Definition deletion is already in progress")
 
         # Step 1: Deactivate
         await sync_to_async(self.image_definitions.deactivate)(definition_id)
@@ -4312,15 +4438,25 @@ rm -rf /var/lib/apt/lists/*
         # Step 2: Mark definition as pending deletion and initiate build deletes
         await sync_to_async(self.image_definitions.mark_pending_deletion)(definition_id)
 
+        initiation_errors: list[str] = []
         for build in builds:
             if build.status == ImageBuildJob.Status.DELETED:
                 continue
             try:
                 await self.delete_build_job(build.id)
             except (ConflictError, ValueError) as e:
+                initiation_errors.append(str(e))
                 logger.warning(
                     "Could not initiate build job deletion %s: %s", build.id, e
                 )
+
+        if initiation_errors:
+            error = "; ".join(initiation_errors)
+            await sync_to_async(self.image_definitions.mark_delete_failed)(
+                definition_id,
+                error=error,
+            )
+            raise ConflictError(error)
 
         # Check if all are already done
         await sync_to_async(self._check_definition_deletion_complete)(definition_id)
@@ -4333,7 +4469,10 @@ rm -rf /var/lib/apt/lists/*
             lambda: list(
                 Workspace.objects.filter(
                     runner=runner,
-                    status=WorkspaceStatus.PENDING_DELETION,
+                    status__in=[
+                        WorkspaceStatus.PENDING_DELETION,
+                        WorkspaceStatus.DELETING,
+                    ],
                 )
             )
         )()
@@ -4395,16 +4534,24 @@ rm -rf /var/lib/apt/lists/*
                         runner=runner,
                         task_type=TaskType.DELETE_IMAGE,
                     )
-                    await sync_to_async(self.build_jobs.mark_deleting)(
-                        build.id, deleting_task_id=str(task.id)
-                    )
                 else:
                     task = await sync_to_async(self.tasks.get_by_id)(
                         uuid.UUID(build.deleting_task_id)
                     )
-                    if task is None:
-                        continue
+                if task is None:
+                    task_id = generate_uuid()
+                    task = await sync_to_async(self.tasks.create)(
+                        task_id=task_id,
+                        runner=runner,
+                        task_type=TaskType.DELETE_IMAGE,
+                    )
 
+                await sync_to_async(self._mark_definition_deleting_if_needed)(
+                    build.image_definition_id
+                )
+                await sync_to_async(self.build_jobs.mark_deleting)(
+                    build.id, deleting_task_id=str(task.id)
+                )
                 await sync_to_async(self.image_instances.mark_deleting)(
                     instance.id, deleting_task_id=str(task.id)
                 )
