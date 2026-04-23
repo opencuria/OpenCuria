@@ -8,6 +8,7 @@ import { UiDialog, UiInput, UiButton } from '@/components/ui'
 import { useImageArtifactStore } from '@/stores/imageArtifacts'
 import { useCredentialStore } from '@/stores/credentials'
 import { Check, Key } from 'lucide-vue-next'
+import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
 import type { ImageArtifact } from '@/types'
 
 const props = defineProps<{
@@ -31,12 +32,13 @@ onMounted(async () => {
 })
 
 function toggleCredential(id: string): void {
-  const idx = selectedCredentialIds.value.indexOf(id)
-  if (idx === -1) {
-    selectedCredentialIds.value.push(id)
-  } else {
-    selectedCredentialIds.value.splice(idx, 1)
-  }
+  const credential = credentialStore.credentials.find((entry) => entry.id === id)
+  if (!credential) return
+  selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
+    selectedCredentialIds.value,
+    credential,
+    credentialStore.credentials,
+  )
 }
 
 async function handleSubmit(): Promise<void> {
