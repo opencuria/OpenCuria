@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/opencuria/runner
-EnvironmentFile=/etc/opencuria/runner.env
-ExecStart=/opt/opencuria/runner/.venv/bin/python -m src
+WorkingDirectory=__RUNNER_DIR__
+EnvironmentFile=__RUNNER_DIR__/.env
+ExecStart=__RUNNER_DIR__/.venv/bin/python -m src
 Restart=always
 RestartSec=5
 

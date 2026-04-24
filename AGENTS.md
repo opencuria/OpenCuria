@@ -99,7 +99,8 @@ opencuria/
 │   ├── Dockerfile.runner          ← Runner daemon container image
 │   ├── compose.yml                ← Standalone Docker runner deployment
 │   ├── systemd/
-│   │   └── opencuria-runner.service ← Native Linux runner unit (for QEMU hosts)
+│   │   ├── opencuria-runner.service ← Native Linux runner unit template (for QEMU hosts)
+│   │   └── install-runner-service.sh ← Installs the unit with the current repo path + runner/.env
 │   ├── git-wrapper.sh             ← Blocks commits/pushes to main/master
 │   ├── workspace-entrypoint.sh    ← Configures git auth inside containers
 │   ├── requirements.txt           ← Python dependencies (pip)
@@ -672,7 +673,8 @@ Distributed/server deployments use `compose.server.yml`:
 
 Standalone Docker runners use `runner/compose.yml`.
 Native Linux runner hosts that need QEMU/KVM should use the systemd unit at
-`runner/systemd/opencuria-runner.service` instead of containerizing libvirt.
+`runner/systemd/opencuria-runner.service` via
+`runner/systemd/install-runner-service.sh` instead of containerizing libvirt.
 The default `RUNNER_QEMU_SSH_USER` is `root`; existing runner env files that
 still pin `ubuntu` should be migrated to `root` because the shipped QEMU desktop
 stack uses `/root` paths.
