@@ -195,8 +195,7 @@ Recommended setup flow:
    ```
 
 7. Install the systemd unit from the repo. The helper script renders the unit
-   with the real checkout path and keeps using `runner/.env` directly, so you
-   do not need a second config copy under `/etc`:
+   with the real checkout path and keeps using `runner/.env` directly:
 
    ```bash
    sudo ./runner/systemd/install-runner-service.sh
@@ -248,21 +247,6 @@ For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
 with `python -m src serve` while iterating.
-
-## 🔁 Migration Notes
-
-The old deployment files were replaced:
-
-- `docker-compose.yml` → [`compose.yml`](./compose.yml)
-- root production compose → [`compose.server.yml`](./compose.server.yml)
-- `runner/docker-compose.yml` → [`runner/compose.yml`](./runner/compose.yml)
-
-Runner deployment note:
-
-- Existing `runner/.env` files that still set `RUNNER_QEMU_SSH_USER=ubuntu`
-  should be updated to `RUNNER_QEMU_SSH_USER=root`. The current QEMU
-  desktop/runtime path is root-based; keeping `ubuntu` can break desktop startup
-  with `/root` permission errors.
 
 ## License
 
