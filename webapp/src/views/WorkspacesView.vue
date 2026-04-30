@@ -15,7 +15,7 @@ const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
 
 const searchQuery = ref('')
-const showRemoved = ref(false)
+const showDeleted = ref(false)
 const warningWorkspaceIds = ref<Record<string, boolean>>({})
 const storageBytesByWorkspaceId = ref<Record<string, number | null>>({})
 
@@ -69,9 +69,8 @@ const { start } = usePolling(fetchWorkspacesAndWarnings, 10000)
 const filteredWorkspaces = computed(() => {
   let workspaces = workspaceStore.workspaces
 
-  // Filter out removed workspaces by default
-  if (!showRemoved.value) {
-    workspaces = workspaces.filter((w) => w.status !== WorkspaceStatus.REMOVED)
+  if (!showDeleted.value) {
+    workspaces = workspaces.filter((w) => w.status !== WorkspaceStatus.DELETED)
   }
 
   // Apply search filter
@@ -127,18 +126,18 @@ onMounted(async () => {
       <!-- Filter: Show Removed -->
       <div
         class="flex items-center gap-3 px-4 py-2.5 rounded-[var(--radius-md)] border border-border bg-bg-subtle hover:bg-bg-muted transition-colors cursor-pointer select-none"
-        @click="showRemoved = !showRemoved"
+        @click="showDeleted = !showDeleted"
       >
         <div
           :class="[
             'w-5 h-5 rounded border-2 flex items-center justify-center transition-all',
-            showRemoved
+            showDeleted
               ? 'bg-primary border-primary'
               : 'bg-bg border-border',
           ]"
         >
           <svg
-            v-if="showRemoved"
+            v-if="showDeleted"
             class="w-3 h-3 text-white"
             fill="none"
             stroke="currentColor"
@@ -149,7 +148,7 @@ onMounted(async () => {
         </div>
         <div class="flex items-center gap-2">
           <Filter :size="16" class="text-muted-fg" />
-          <span class="text-sm font-medium text-fg">Show removed workspaces</span>
+          <span class="text-sm font-medium text-fg">Show deleted workspaces</span>
         </div>
       </div>
     </div>

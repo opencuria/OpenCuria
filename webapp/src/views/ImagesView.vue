@@ -144,6 +144,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                   <span class="font-medium text-fg text-sm min-w-0 break-words">{{ imageArtifact.name }}</span>
                   <button
                     v-if="imageArtifact.status !== 'creating' && editingId !== imageArtifact.id"
+                    :disabled="['pending_deletion', 'deleting'].includes(imageArtifact.status)"
                     class="text-muted-fg hover:text-fg transition-colors shrink-0"
                     title="Rename image"
                     @click="startRename(imageArtifact)"
@@ -155,6 +156,12 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                   <UiBadge v-if="imageArtifact.runtime_type" variant="muted">{{ imageArtifact.runtime_type }}</UiBadge>
                   <UiBadge v-if="imageArtifact.status === 'creating'" variant="warning">Creating…</UiBadge>
                   <UiBadge v-else-if="imageArtifact.status === 'failed'" variant="error">Failed</UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'pending_deletion'" variant="error">Pending deletion</UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'deleting'" variant="error" class="inline-flex items-center gap-1">
+                    <Loader2 :size="11" class="animate-spin" />
+                    Deleting
+                  </UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'delete_failed'" variant="error">Delete failed</UiBadge>
                   <UiBadge v-if="imageArtifact.is_deactivated" variant="muted">Deactivated</UiBadge>
                   <UiBadge
                     v-if="imageArtifact.source_runner_online === false"
@@ -209,7 +216,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 size="icon-sm"
                 title="Delete image"
                 class="text-error hover:text-error"
-                :disabled="deletingId === imageArtifact.id"
+                :disabled="deletingId === imageArtifact.id || ['pending_deletion', 'deleting'].includes(imageArtifact.status)"
                 @click="handleDelete(imageArtifact)"
               >
                 <UiSpinner v-if="deletingId === imageArtifact.id" :size="14" />

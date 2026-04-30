@@ -78,7 +78,7 @@ const workspaceTransitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),
 )
 const isRunnerOfflineState = computed(
-  () => !workspace.value?.runner_online && workspace.value?.status !== WorkspaceStatus.REMOVED,
+  () => !workspace.value?.runner_online && workspace.value?.status !== WorkspaceStatus.DELETED,
 )
 
 // Workspaces always support multiple chats now (agent is per-chat)
@@ -104,6 +104,7 @@ const statusVariant = computed(() => {
     case WorkspaceStatus.STOPPED:
       return 'muted'
     case WorkspaceStatus.FAILED:
+    case WorkspaceStatus.DELETE_FAILED:
       return 'error'
     default:
       return 'muted'
@@ -119,9 +120,6 @@ const showWorkspaceTransitionLabel = computed(
   () => Boolean(workspaceTransitionLabel.value) && !isRunnerOfflineState.value,
 )
 const hasChats = computed(() => workspaceStore.chats.length > 0)
-const showWorkspaceEmptyState = computed(
-  () => !loadingChats.value && !hasChats.value,
-)
 const autoStopCountdownLabel = computed(() =>
   workspace.value?.auto_stop_at ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}` : null,
 )
@@ -229,16 +227,6 @@ function handleAgentPickerOpenChange(isOpen: boolean): void {
   }
 }
 
-function openFileExplorer(): void {
-  if (!canPrompt.value) return
-  fileExplorerStore.open()
-}
-
-function openTerminal(): void {
-  if (!canPrompt.value) return
-  terminalStore.open()
-}
-
 function handleTerminalButtonClick(): void {
   if (!canPrompt.value) return
   if (!terminalStore.isOpen) {
@@ -257,11 +245,6 @@ const terminalButtonTitle = computed(() => {
   if (terminalStore.isMinimized) return 'Restore terminal'
   return 'Minimize terminal'
 })
-
-function openDesktopPanel(): void {
-  if (!canPrompt.value) return
-  desktopStore.open()
-}
 
 function handleDesktopButtonClick(): void {
   if (!canPrompt.value) return

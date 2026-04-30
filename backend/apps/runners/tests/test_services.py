@@ -628,6 +628,40 @@ class TestRemoveWorkspace:
         assert workspace.active_operation is None
         assert workspace.status == WorkspaceStatus.RUNNING
 
+    @pytest.mark.asyncio
+    async def test_remove_workspace_tracks_delete_metadata_and_offline_retry_state(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        runner.status = RunnerStatus.OFFLINE
+        runner.save(update_fields=["status"])
+
+        await service.remove_workspace(workspace.id)
+
+        workspace.refresh_from_db()
+        task = Task.objects.latest("created_at")
+        assert task.type == TaskType.REMOVE_WORKSPACE
+        assert workspace.status == WorkspaceStatus.PENDING_DELETION
+        assert workspace.delete_requested_at is not None
+        assert workspace.delete_started_at is None
+        assert workspace.delete_attempt_count == 0
+
+        runner.status = RunnerStatus.ONLINE
+        runner.sid = "runner-remove-retry"
+        runner.save(update_fields=["status", "sid"])
+
+        dispatched = await service.dispatch_pending_workspace_deletions(runner)
+
+        assert [item.id for item in dispatched] == [workspace.id]
+        workspace.refresh_from_db()
+        task.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.DELETING
+        assert workspace.delete_started_at is not None
+        assert workspace.delete_attempt_count == 1
+        assert task.status == TaskStatus.IN_PROGRESS
+
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateImageArtifactSecurity:
@@ -717,7 +751,7 @@ class TestWorkspaceOwnerScoping:
 @pytest.mark.django_db(transaction=True)
 class TestImageDeletionLifecycle:
     @pytest.mark.asyncio
-    async def test_delete_retires_image_when_workspace_still_depends_on_it(
+    async def test_delete_rejects_image_when_workspace_still_depends_on_it(
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
@@ -738,11 +772,11 @@ class TestImageDeletionLifecycle:
             base_image_instance=image,
         )
 
-        with pytest.raises(ConflictError, match="was retired instead"):
+        with pytest.raises(ConflictError, match="is still used by 1 workspace\\(s\\)"):
             await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.RETIRED
+        assert image.status == ImageInstance.Status.READY
 
     @pytest.mark.asyncio
     async def test_delete_marks_image_pending_deletion_when_runner_offline(
@@ -866,6 +900,29 @@ class TestImageDeletionLifecycle:
         task = Task.objects.get(id=image.deleting_task_id)
         assert task.status == TaskStatus.IN_PROGRESS
 
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_image_deletion_creates_task_when_missing(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            name="Pending Delete Without Task",
+            runner_ref="opencuria/custom/pending-delete-missing-task:1",
+            status=ImageInstance.Status.PENDING_DELETION,
+            created_by=user,
+        )
+
+        dispatched = await service.dispatch_pending_image_deletions(runner)
+
+        assert [item.id for item in dispatched] == [image.id]
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETING
+        assert image.deleting_task_id is not None
+        task = Task.objects.get(id=image.deleting_task_id)
+        assert task.status == TaskStatus.IN_PROGRESS
+
     def test_handle_image_artifact_deleted_marks_image_deleted(
         self, service, runner, user
     ):
@@ -895,6 +952,123 @@ class TestImageDeletionLifecycle:
         task.refresh_from_db()
         assert image.status == ImageInstance.Status.DELETED
         assert task.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_capturing_artifact_without_runner_ref(
+        self, service, runner, user
+    ):
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="qemu",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            name="Still Capturing",
+            runner_ref="",
+            status=ImageInstance.Status.CAPTURING,
+            created_by=user,
+        )
+
+        with pytest.raises(ConflictError, match="cannot be deleted while it is still capturing"):
+            await service.delete_image_artifact(image.id)
+
+        image.refresh_from_db()
+        assert image.status == ImageInstance.Status.CAPTURING
+
+    def test_handle_image_artifact_delete_failed_marks_build_and_definition_failed(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Delete Failure Definition",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+            status=ImageDefinition.Status.DELETING,
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.DELETING,
+            deleting_task_id=str(uuid.uuid4()),
+        )
+        task = Task.objects.create(
+            id=uuid.UUID(build.deleting_task_id),
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            name="Delete Failure Artifact",
+            runner_ref="opencuria/custom/delete-failure:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(task.id),
+        )
+
+        service.handle_image_artifact_delete_failed(
+            task_id=str(task.id),
+            error="runner refused delete",
+            runner_id=str(runner.id),
+        )
+
+        image.refresh_from_db()
+        build.refresh_from_db()
+        definition.refresh_from_db()
+        task.refresh_from_db()
+        assert image.status == ImageInstance.Status.DELETE_FAILED
+        assert build.status == ImageBuildJob.Status.DELETE_FAILED
+        assert definition.status == ImageDefinition.Status.DELETE_FAILED
+        assert "runner refused delete" in definition.delete_last_error
+        assert task.status == TaskStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_delete_image_definition_marks_definition_failed_when_build_delete_cannot_start(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name=f"Delete Definition Failure {uuid.uuid4().hex[:6]}",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.ACTIVE,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            name="Definition Failure Artifact",
+            runner_ref="opencuria/custom/definition-failure:1",
+            status=ImageInstance.Status.READY,
+            created_by=user,
+        )
+        Workspace.objects.create(
+            runner=runner,
+            name="Dependent Definition Workspace",
+            status=WorkspaceStatus.RUNNING,
+            runtime_type="docker",
+            created_by=user,
+            base_image_instance=image,
+        )
+
+        with pytest.raises(ConflictError, match="still used by 1 workspace\\(s\\)"):
+            await service.delete_image_definition(definition.id)
+
+        definition.refresh_from_db()
+        build.refresh_from_db()
+        assert definition.status == ImageDefinition.Status.DELETE_FAILED
+        assert "still used by 1 workspace(s)" in definition.delete_last_error
+        assert build.status == ImageBuildJob.Status.ACTIVE
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1145,6 +1319,36 @@ class TestHandleWorkspaceError:
         assert task.status == TaskStatus.FAILED
         assert task.error == "clone failed"
 
+    def test_marks_workspace_delete_failed_for_remove_task(self, service, runner, workspace):
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.REMOVE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace.status = WorkspaceStatus.DELETING
+        workspace.delete_requested_at = timezone.now()
+        workspace.delete_started_at = timezone.now()
+        workspace.save(
+            update_fields=[
+                "status",
+                "delete_requested_at",
+                "delete_started_at",
+                "updated_at",
+            ]
+        )
+
+        service.handle_workspace_error(
+            task_id=str(task.id),
+            error="runner delete failed",
+        )
+
+        workspace.refresh_from_db()
+        task.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.DELETE_FAILED
+        assert workspace.delete_last_error == "runner delete failed"
+        assert task.status == TaskStatus.FAILED
+
 
 @pytest.mark.django_db(transaction=True)
 class TestWorkspaceOperationState:
@@ -1305,6 +1509,23 @@ class TestHeartbeatReconciliation:
 
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.FAILED
+
+    def test_delete_state_not_overwritten_by_heartbeat(self, service):
+        runner = self._create_runner()
+        workspace = self._create_workspace(runner, WorkspaceStatus.DELETING)
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                }
+            ],
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.DELETING
 
     def test_unknown_runtime_workspace_triggers_cleanup_task(self, service, sio_mock):
         """Heartbeat should request runner cleanup for unknown runtime workspaces."""

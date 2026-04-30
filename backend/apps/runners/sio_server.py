@@ -323,6 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
+            result=data.get("result", "already_absent" if data.get("already_absent", False) else "deleted"),
             already_absent=data.get("already_absent", False),
         )
 
@@ -637,6 +638,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data.get("task_id", ""),
             image_instance_id=data.get("image_instance_id", ""),
             runner_ref=data.get("image_artifact_id", ""),
+            result=data.get("result", "already_absent" if data.get("already_absent", False) else "deleted"),
             runner_id=runner_id,
         )
         # Also check if this was a build job deletion

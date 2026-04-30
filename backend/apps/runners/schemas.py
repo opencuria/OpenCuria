@@ -108,6 +108,11 @@ class WorkspaceOut(Schema):
     last_activity_at: datetime
     auto_stop_timeout_minutes: int | None = None
     auto_stop_at: datetime | None = None
+    delete_requested_at: datetime | None = None
+    delete_started_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
+    delete_attempt_count: int = 0
     created_at: datetime
     updated_at: datetime
     has_active_session: bool = False
@@ -658,6 +663,11 @@ class ImageDefinitionOut(Schema):
     custom_init_script: str = ""
     is_active: bool
     status: str = "active"
+    delete_requested_at: datetime | None = None
+    delete_started_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
+    delete_attempt_count: int = 0
     created_at: datetime
     updated_at: datetime
 
