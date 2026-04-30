@@ -48,6 +48,12 @@ What this starts for you:
 
 No manual runner registration is needed in local mode.
 
+> [!NOTE]
+> The one-command local path is intentionally **Docker-only**. If you want
+> QEMU/KVM workspaces, keep using the local backend/webapp, but run a
+> **native Linux runner** with `RUNNER_ENABLED_RUNTIMES=qemu` or
+> `RUNNER_ENABLED_RUNTIMES=docker,qemu`.
+
 ## 🧭 What OpenCuria Is
 
 OpenCuria is a control plane for AI coding agents.
@@ -139,6 +145,73 @@ Why native for QEMU:
 - simpler disk and snapshot permissions
 - less operational overhead than containerized libvirt
 
+Recommended setup flow:
+
+1. Start the central services first (`compose.server.yml` or a local source setup
+   for backend + webapp).
+2. Create a runner API token in the backend UI/API.
+3. On the Linux runner host, install the native QEMU/libvirt dependencies plus
+   the Python build dependencies required by `libvirt-python`:
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y \
+     qemu-kvm \
+     libvirt-daemon-system \
+     libvirt-clients \
+     genisoimage \
+     build-essential \
+     python3-dev \
+     pkg-config \
+     libvirt-dev
+   ```
+
+4. Clone this repository onto the runner host, create the runner virtualenv,
+   and install dependencies:
+
+   ```bash
+   cd runner
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+5. Copy `runner/.env.example` to `runner/.env` and set at least:
+
+   ```dotenv
+   RUNNER_API_TOKEN=...
+   RUNNER_BACKEND_URL=http://<backend-host>:8000
+   RUNNER_ENABLED_RUNTIMES=qemu
+   # or: RUNNER_ENABLED_RUNTIMES=docker,qemu
+   ```
+
+6. Create the QEMU storage directories configured in that env file, for example:
+
+   ```bash
+   sudo install -d -m 755 \
+     /var/lib/opencuria/images \
+     /var/lib/opencuria/disks \
+     /var/lib/opencuria/snapshots
+   ```
+
+7. Install the systemd unit from the repo. The helper script renders the unit
+   with the real checkout path and keeps using `runner/.env` directly:
+
+   ```bash
+   sudo ./runner/systemd/install-runner-service.sh
+   sudo systemctl enable --now opencuria-runner
+   ```
+
+8. Follow the logs and confirm the runner shows up online in the backend:
+
+   ```bash
+   sudo journalctl -u opencuria-runner -f
+   ```
+
+QEMU image definitions currently require `ubuntu:<version>` as the base distro.
+When a QEMU image build is triggered, the runner downloads the matching Ubuntu
+cloud image into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.
+
 ## 📦 Images
 
 Published via GHCR:
@@ -170,20 +243,10 @@ Optional local workspace image build:
 
 After that you can run `backend`, `webapp`, and `runner` individually.
 
-## 🔁 Migration Notes
-
-The old deployment files were replaced:
-
-- `docker-compose.yml` → [`compose.yml`](./compose.yml)
-- root production compose → [`compose.server.yml`](./compose.server.yml)
-- `runner/docker-compose.yml` → [`runner/compose.yml`](./runner/compose.yml)
-
-Runner deployment note:
-
-- Existing `runner/.env` or `/etc/opencuria/runner.env` files that still set
-  `RUNNER_QEMU_SSH_USER=ubuntu` should be updated to `RUNNER_QEMU_SSH_USER=root`.
-  The current QEMU desktop/runtime path is root-based; keeping `ubuntu` can break
-  desktop startup with `/root` permission errors.
+For a local Linux setup with backend/webapp from source and a native QEMU
+runner on the same machine, use the same QEMU runner flow above, but point
+`RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
+with `python -m src serve` while iterating.
 
 ## License
 
