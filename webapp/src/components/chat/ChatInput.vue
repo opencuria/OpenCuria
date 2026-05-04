@@ -1,12 +1,30 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { UiSelect, UiTextarea, UiButton, UiBadge, UiDialog } from '@/components/ui'
-import { Send, Square, BookText, X, Image, Video, Loader2, CheckCircle, AlertCircle } from 'lucide-vue-next'
+import {
+  Send,
+  Square,
+  BookText,
+  X,
+  Image,
+  Video,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  File as FileIcon,
+  FileText,
+} from 'lucide-vue-next'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import type { AgentOption, Skill } from '@/types'
 import WorkspaceFilePicker from './WorkspaceFilePicker.vue'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { sendFilesUpload } from '@/services/socket'
+import {
+  buildWorkspaceReferenceMarkdown,
+  classifyWorkspaceFile,
+  extractWorkspacePathReferences,
+  type WorkspaceFileKind,
+} from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
   disabled?: boolean
@@ -144,6 +162,7 @@ const canSend = computed(
   () => prompt.value.trim().length > 0 && !props.disabled && !props.sending,
 )
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
+const canManageFiles = computed(() => !props.disabled && !props.sending && Boolean(props.workspaceId))
 
 const selectedSkills = computed(
   () => (props.skillOptions ?? []).filter((s) => selectedSkillIds.value.includes(s.id)),
@@ -151,37 +170,66 @@ const selectedSkills = computed(
 
 // --- Image preview in input ---
 
-/** Extract all /workspace/... image paths referenced in the current prompt. */
-const promptImagePaths = computed<string[]>(() => {
-  const re = /!\[[^\]]*\]\((\/workspace\/[^)]+)\)/g
-  const paths: string[] = []
-  let m
-  while ((m = re.exec(prompt.value)) !== null) {
-    const path = m[1]
-    if (path && imageStore.isImagePath(path)) paths.push(path)
+const localTextPreviews = ref<Record<string, string>>({})
+const localVideoPreviews = ref<Record<string, string>>({})
+
+type PromptFileReference = {
+  path: string
+  label: string
+  kind: WorkspaceFileKind
+}
+
+/** Extract all /workspace/... file references referenced in the current prompt. */
+const promptFileRefs = computed<PromptFileReference[]>(() => {
+  const refs = extractWorkspacePathReferences(prompt.value)
+  const deduped = new Map<string, PromptFileReference>()
+
+  for (const ref of refs) {
+    if (deduped.has(ref.path)) continue
+    deduped.set(ref.path, {
+      path: ref.path,
+      label: ref.label,
+      kind: classifyWorkspaceFile(ref.path),
+    })
   }
-  return paths
+
+  return [...deduped.values()]
 })
 
-/** Fetch images whenever the referenced paths change. */
+/** Fetch media whenever the referenced paths change. */
 watch(
-  promptImagePaths,
-  (paths) => {
+  promptFileRefs,
+  (refs) => {
     if (!props.workspaceId) return
-    for (const path of paths) {
-      imageStore.fetchImage(props.workspaceId, path)
+    for (const ref of refs) {
+      if (ref.kind === 'image') {
+        imageStore.fetchImage(props.workspaceId, ref.path)
+      } else if (ref.kind === 'video') {
+        imageStore.fetchVideo(props.workspaceId, ref.path)
+      }
     }
   },
   { immediate: true },
 )
 
-/** Resolved preview entries: path + data URL (if available). */
-const imagePreviewEntries = computed<Array<{ path: string; url: string | null }>>(() => {
-  return promptImagePaths.value.map((path) => ({
-    path,
-    // getImageUrl accesses imageCache[path] (reactive), so this computed is
-    // automatically invalidated only when that specific path changes.
-    url: imageStore.getImageUrl(path),
+const promptPreviewEntries = computed<Array<{
+  path: string
+  label: string
+  kind: WorkspaceFileKind
+  url: string | null
+  textPreview: string | null
+}>>(() => {
+  return promptFileRefs.value.map((ref) => ({
+    path: ref.path,
+    label: ref.label || ref.path.split('/').pop() || 'file',
+    kind: ref.kind,
+    url:
+      ref.kind === 'image'
+        ? imageStore.getImageUrl(ref.path)
+        : ref.kind === 'video'
+          ? imageStore.getVideoUrl(ref.path) || localVideoPreviews.value[ref.path] || null
+          : null,
+    textPreview: ref.kind === 'text' ? localTextPreviews.value[ref.path] || null : null,
   }))
 })
 
@@ -189,44 +237,56 @@ const imagePreviewEntries = computed<Array<{ path: string; url: string | null }>
 
 const MEDIA_UPLOAD_DIR = '/workspace/.user-uploaded-media'
 
-async function uploadMediaFile(file: File): Promise<void> {
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Failed to read file'))
+    reader.onload = () => resolve((reader.result as string) || '')
+    reader.readAsDataURL(file)
+  })
+}
+
+function makeTextPreview(raw: string): string {
+  return raw.replace(/\r\n/g, '\n').trim().slice(0, 320)
+}
+
+async function uploadWorkspaceFile(file: File): Promise<void> {
   if (!props.workspaceId) return
+  if (props.disabled || props.sending) return
 
   const MAX_SIZE = 10 * 1024 * 1024 // 10 MB
   if (file.size > MAX_SIZE) return
 
-  const isImage = file.type.startsWith('image/')
-  const isVideo = file.type.startsWith('video/')
-  if (!isImage && !isVideo) return
+  const kind = classifyWorkspaceFile(file.name, file.type || undefined)
 
-  const reader = new FileReader()
-  reader.onload = () => {
-    const dataUrl = reader.result as string
-    const base64 = dataUrl.split(',')[1] ?? ''
-    const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
-    const path = `${MEDIA_UPLOAD_DIR}/${safeFilename}`
+  const dataUrl = await readFileAsDataUrl(file)
+  const base64 = dataUrl.split(',')[1] ?? ''
+  const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const path = `${MEDIA_UPLOAD_DIR}/${safeFilename}`
 
-    // Optimistically cache images for immediate prompt preview.
-    if (isImage) {
-      imageStore.storeLocalImage(path, dataUrl)
-    }
-
-    // Insert markdown reference into prompt
-    const ref = `![${file.name}](${path})`
-    prompt.value = prompt.value ? `${prompt.value}\n${ref}` : ref
-
-    // Upload via WebSocket and track state for UI feedback
-    const requestId = nextUploadId()
-    imageStore.trackUpload(requestId, path)
-    sendFilesUpload(props.workspaceId!, requestId, MEDIA_UPLOAD_DIR, safeFilename, base64)
+  if (kind === 'image') {
+    imageStore.storeLocalImage(path, dataUrl)
+  } else if (kind === 'video') {
+    localVideoPreviews.value[path] = dataUrl
+  } else if (kind === 'text') {
+    const text = await file.text()
+    localTextPreviews.value[path] = makeTextPreview(text)
   }
-  reader.readAsDataURL(file)
+
+  // Insert markdown reference into prompt
+  const ref = buildWorkspaceReferenceMarkdown(file.name, path, kind)
+  prompt.value = prompt.value ? `${prompt.value}\n${ref}` : ref
+
+  // Upload via WebSocket and track state for UI feedback
+  const requestId = nextUploadId()
+  imageStore.trackUpload(requestId, path)
+  sendFilesUpload(props.workspaceId!, requestId, MEDIA_UPLOAD_DIR, safeFilename, base64)
 }
 
 // --- Drag & drop ---
 
 function handleDragOver(e: DragEvent): void {
-  if (!props.workspaceId) return
+  if (!canManageFiles.value) return
   e.preventDefault()
   isDragging.value = true
 }
@@ -239,13 +299,12 @@ function handleDragLeave(e: DragEvent): void {
 }
 
 function handleDrop(e: DragEvent): void {
+  if (!canManageFiles.value) return
   e.preventDefault()
   isDragging.value = false
-  const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
-    f.type.startsWith('image/') || f.type.startsWith('video/'),
-  )
+  const files = Array.from(e.dataTransfer?.files ?? [])
   for (const file of files) {
-    uploadMediaFile(file)
+    void uploadWorkspaceFile(file)
   }
 }
 
@@ -307,22 +366,27 @@ function handleKeydown(e: KeyboardEvent): void {
   }
 }
 
-function handleImageSelected(path: string, filename: string): void {
-  const ref = `![${filename}](${path})`
+function handleFileSelected(path: string, filename: string): void {
+  if (!canManageFiles.value) return
+  const kind = classifyWorkspaceFile(path)
+  const ref = buildWorkspaceReferenceMarkdown(filename, path, kind)
   prompt.value = prompt.value ? `${prompt.value}\n${ref}` : ref
   imagePickerOpen.value = false
 }
 
 function handlePickerUpload(file: File): void {
-  uploadMediaFile(file)
+  if (!canManageFiles.value) return
+  void uploadWorkspaceFile(file)
   imagePickerOpen.value = false
 }
 
-function removeImageRef(path: string): void {
-  // Remove markdown image references for this path from the prompt
+function removeFileRef(path: string): void {
+  // Remove markdown workspace references for this path from the prompt
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`\\n?!\\[[^\\]]*\\]\\(${escaped}\\)`, 'g')
+  const re = new RegExp(`\\n?!?\\[[^\\]]*\\]\\(${escaped}\\)`, 'g')
   prompt.value = prompt.value.replace(re, '').trimStart()
+  delete localTextPreviews.value[path]
+  delete localVideoPreviews.value[path]
 }
 
 watch(skillDropdownOpen, async (open) => {
@@ -334,9 +398,20 @@ watch(skillDropdownOpen, async (open) => {
 
 watch(imagePickerOpen, async (open) => {
   if (!open) return
+  if (!canManageFiles.value) {
+    imagePickerOpen.value = false
+    return
+  }
   skillDropdownOpen.value = false
   await nextTick()
   updateFloatingPositions()
+})
+
+watch(canManageFiles, (allowed) => {
+  if (!allowed) {
+    isDragging.value = false
+    imagePickerOpen.value = false
+  }
 })
 </script>
 
@@ -354,7 +429,7 @@ watch(imagePickerOpen, async (open) => {
         v-if="isDragging"
         class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-primary/10 pointer-events-none"
       >
-        <span class="text-primary text-sm font-medium">Drop image/video to upload</span>
+        <span class="text-primary text-sm font-medium">Drop files to upload</span>
       </div>
 
       <!-- Selected skill pills (shown above textarea) -->
@@ -376,29 +451,58 @@ watch(imagePickerOpen, async (open) => {
         </span>
       </div>
 
-      <!-- Image previews for referenced workspace images -->
+      <!-- File previews for referenced workspace files -->
       <div
-        v-if="imagePreviewEntries.length"
+        v-if="promptPreviewEntries.length"
         class="flex flex-wrap gap-2 px-4 pt-3 pb-0"
       >
         <div
-          v-for="entry in imagePreviewEntries"
+          v-for="entry in promptPreviewEntries"
           :key="entry.path"
           class="relative group/img inline-block"
         >
           <img
-            v-if="entry.url"
+            v-if="entry.kind === 'image' && entry.url"
             :src="entry.url"
-            :alt="entry.path.split('/').pop()"
+            :alt="entry.label"
             class="h-16 w-auto max-w-[120px] rounded-md object-cover border transition-colors"
             :class="imageStore.getUploadStatus(entry.path) === 'error' ? 'border-error' : 'border-border'"
           />
-          <!-- Loading placeholder (no URL yet) -->
+          <video
+            v-else-if="entry.kind === 'video' && entry.url"
+            :src="entry.url"
+            class="h-16 w-auto max-w-[160px] rounded-md object-cover border border-border bg-black"
+            muted
+            playsinline
+            preload="metadata"
+          />
+          <div
+            v-else-if="entry.kind === 'text'"
+            class="h-16 w-[180px] rounded-md border border-border bg-surface px-2 py-1.5 flex flex-col gap-1"
+          >
+            <div class="flex items-center gap-1.5 min-w-0">
+              <FileText :size="13" class="text-primary shrink-0" />
+              <span class="truncate text-[10px] font-medium text-fg">{{ entry.label }}</span>
+            </div>
+            <pre class="text-[10px] leading-4 text-muted-fg whitespace-pre-wrap break-words overflow-hidden">{{ entry.textPreview || 'Text file in workspace' }}</pre>
+          </div>
+          <div
+            v-else-if="entry.kind === 'binary'"
+            class="h-16 w-[180px] rounded-md border border-border bg-surface px-2 py-1.5 flex items-center gap-2"
+          >
+            <FileIcon :size="14" class="text-muted-fg shrink-0" />
+            <div class="min-w-0">
+              <div class="truncate text-[10px] font-medium text-fg">{{ entry.label }}</div>
+              <div class="text-[10px] text-muted-fg">Binary file</div>
+            </div>
+          </div>
+          <!-- Loading placeholder (no media URL yet) -->
           <div
             v-else
             class="h-16 w-20 rounded-md border border-border bg-muted flex items-center justify-center"
           >
-            <Image :size="18" class="text-muted-fg" />
+            <Video v-if="entry.kind === 'video'" :size="18" class="text-muted-fg" />
+            <Image v-else :size="18" class="text-muted-fg" />
           </div>
 
           <!-- Upload status overlay -->
@@ -441,7 +545,7 @@ watch(imagePickerOpen, async (open) => {
             type="button"
             class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-surface border border-border flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity hover:bg-error hover:border-error hover:text-white"
             :title="`Remove reference to ${entry.path.split('/').pop()}`"
-            @click="removeImageRef(entry.path)"
+            @click="removeFileRef(entry.path)"
           >
             <X :size="9" />
           </button>
@@ -495,21 +599,25 @@ watch(imagePickerOpen, async (open) => {
               </button>
             </div>
 
-            <!-- Workspace image picker -->
-            <div v-if="workspaceId" class="shrink-0">
+             <!-- Workspace file picker -->
+             <div v-if="workspaceId" class="shrink-0">
               <button
                 ref="imageButtonRef"
                 type="button"
                 class="flex items-center gap-1.5 h-8 px-2 py-1 rounded-lg text-xs transition-colors cursor-pointer"
-                :class="imagePickerOpen ? 'text-primary' : 'text-muted-fg'"
+                :class="[
+                  imagePickerOpen ? 'text-primary' : 'text-muted-fg',
+                  !canManageFiles ? 'opacity-50 cursor-not-allowed' : '',
+                ]"
                 style="background: var(--glass-bg-subtle); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);"
-                title="Insert workspace media or upload"
-                @click="imagePickerOpen = !imagePickerOpen"
+                :title="canManageFiles ? 'Insert workspace file or upload' : 'Workspace must be running to insert or upload files'"
+                :disabled="!canManageFiles"
+                @click="canManageFiles && (imagePickerOpen = !imagePickerOpen)"
               >
-                <Video :size="13" />
-                <span>Media</span>
-              </button>
-            </div>
+                <FileIcon :size="13" />
+                <span>Files</span>
+               </button>
+             </div>
           </div>
         </div>
 
@@ -593,9 +701,10 @@ watch(imagePickerOpen, async (open) => {
             />
             <WorkspaceFilePicker
               :workspace-id="workspaceId"
+              :disabled="!canManageFiles"
               class="fixed z-[121] -translate-y-full"
               :style="imagePickerStyle"
-              @select="handleImageSelected"
+              @select="handleFileSelected"
               @close="imagePickerOpen = false"
               @upload="handlePickerUpload"
             />

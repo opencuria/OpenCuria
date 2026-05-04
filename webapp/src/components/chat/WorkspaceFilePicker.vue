@@ -2,10 +2,12 @@
 import { ref, computed, watch } from 'vue'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import type { FileNode } from '@/types'
-import { Folder, Image, Video, File, ChevronLeft, Upload } from 'lucide-vue-next'
+import { Folder, Image, Video, File as FileIcon, ChevronLeft, Upload } from 'lucide-vue-next'
+import { classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
   workspaceId: string
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -17,40 +19,17 @@ const emit = defineEmits<{
 const uploadInputRef = ref<HTMLInputElement | null>(null)
 
 function triggerUpload(): void {
+  if (props.disabled) return
   uploadInputRef.value?.click()
 }
 
 function handleUploadInput(e: Event): void {
-  const files = Array.from((e.target as HTMLInputElement).files ?? []).filter((f) =>
-    f.type.startsWith('image/') || f.type.startsWith('video/'),
-  )
+  if (props.disabled) return
+  const files = Array.from((e.target as HTMLInputElement).files ?? [])
   for (const file of files) {
     emit('upload', file)
   }
   ;(e.target as HTMLInputElement).value = ''
-}
-
-const IMAGE_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'tiff', 'tif',
-])
-
-function isImage(name: string): boolean {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  return IMAGE_EXTENSIONS.has(ext)
-}
-
-const VIDEO_EXTENSIONS = new Set([
-  'mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v', 'avi', 'mkv', 'wmv', 'flv', 'mpeg',
-  'mpg', '3gp', '3g2', 'ts', 'm2ts',
-])
-
-function isVideo(name: string): boolean {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  return VIDEO_EXTENSIONS.has(ext)
-}
-
-function isMedia(name: string): boolean {
-  return isImage(name) || isVideo(name)
 }
 
 const fileExplorer = useFileExplorerStore()
@@ -96,7 +75,7 @@ function goUp(): void {
 }
 
 function selectFile(node: FileNode): void {
-  if (!isMedia(node.name)) return
+  if (props.disabled) return
   emit('select', node.path, node.name)
 }
 </script>
@@ -130,20 +109,22 @@ function selectFile(node: FileNode): void {
           v-for="node in currentNodes"
           :key="node.path"
           class="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left transition-colors"
-          :class="[
-              node.type === 'directory'
-                ? 'text-fg hover:bg-surface-hover cursor-pointer'
-                : isMedia(node.name)
-                  ? 'text-primary hover:bg-surface-hover cursor-pointer'
-                : 'text-muted-fg cursor-default opacity-50',
-            ]"
-            :disabled="node.type === 'file' && !isMedia(node.name)"
+            :class="[
+               node.type === 'directory'
+                 ? props.disabled
+                   ? 'text-fg/60 cursor-default'
+                   : 'text-fg hover:bg-surface-hover cursor-pointer'
+                 : props.disabled
+                   ? 'text-primary/60 cursor-default'
+                   : 'text-primary hover:bg-surface-hover cursor-pointer',
+             ]"
+            :disabled="props.disabled"
             @click="node.type === 'directory' ? navigate(node) : selectFile(node)"
           >
             <Folder v-if="node.type === 'directory'" :size="13" class="shrink-0" />
-            <Image v-else-if="isImage(node.name)" :size="13" class="shrink-0" />
-            <Video v-else-if="isVideo(node.name)" :size="13" class="shrink-0" />
-            <File v-else :size="13" class="shrink-0" />
+            <Image v-else-if="classifyWorkspaceFile(node.name) === 'image'" :size="13" class="shrink-0" />
+            <Video v-else-if="classifyWorkspaceFile(node.name) === 'video'" :size="13" class="shrink-0" />
+            <FileIcon v-else :size="13" class="shrink-0" />
             <span class="truncate flex-1">{{ node.name }}</span>
           </button>
 
@@ -155,11 +136,15 @@ function selectFile(node: FileNode): void {
 
     <!-- Footer: hint + upload button -->
     <div class="px-3 py-1.5 border-t border-border flex items-center justify-between gap-2 shrink-0">
-      <span class="text-[10px] text-muted-fg">Click media to insert its path</span>
+      <span class="text-[10px] text-muted-fg">
+        {{ props.disabled ? 'Start workspace to insert or upload files' : 'Click file to insert its path' }}
+      </span>
       <button
         type="button"
         class="flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 transition-colors shrink-0"
-        title="Upload image or video from your computer"
+        title="Upload file from your computer"
+        :disabled="props.disabled"
+        :class="props.disabled ? 'opacity-50 cursor-not-allowed' : ''"
         @click="triggerUpload"
       >
         <Upload :size="11" />
@@ -168,7 +153,6 @@ function selectFile(node: FileNode): void {
       <input
         ref="uploadInputRef"
         type="file"
-        accept="image/*,video/*"
         multiple
         class="hidden"
         @change="handleUploadInput"
