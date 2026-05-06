@@ -178,6 +178,8 @@ class RunnerService:
 
     async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
         """Dispatch pending image deletions that accumulated while runner was offline."""
+        from .models import ImageInstance
+
         pending_images = await sync_to_async(
             lambda: list(self.image_instances.list_pending_delete_for_runner(runner.id))
         )()
@@ -185,10 +187,19 @@ class RunnerService:
         dispatched = []
         for image in pending_images:
             try:
+                reused_active_task = False
                 if image.deleting_task_id:
-                    task = await sync_to_async(self.tasks.get_by_id)(
+                    existing_task = await sync_to_async(self.tasks.get_by_id)(
                         uuid.UUID(image.deleting_task_id)
                     )
+                    if existing_task and existing_task.status in {
+                        TaskStatus.PENDING,
+                        TaskStatus.IN_PROGRESS,
+                    }:
+                        task = existing_task
+                        reused_active_task = image.status == ImageInstance.Status.DELETING
+                    else:
+                        task = None
                 else:
                     task = None
                 if task is None:
@@ -198,10 +209,11 @@ class RunnerService:
                         runner=runner,
                         task_type=TaskType.DELETE_IMAGE,
                     )
-                await sync_to_async(self.image_instances.mark_deleting)(
-                    image.id,
-                    deleting_task_id=str(task.id),
-                )
+                if not reused_active_task:
+                    await sync_to_async(self.image_instances.mark_deleting)(
+                        image.id,
+                        deleting_task_id=str(task.id),
+                    )
                 await self._emit_to_runner(
                     runner,
                     "task:delete_image_artifact",
@@ -4489,6 +4501,9 @@ rm -rf /var/lib/apt/lists/*
                         status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
                     ).first()
                 )()
+                reused_active_task = (
+                    task is not None and ws.status == WorkspaceStatus.DELETING
+                )
                 if task is None:
                     task_id = generate_uuid()
                     task = await sync_to_async(self.tasks.create)(
@@ -4497,7 +4512,8 @@ rm -rf /var/lib/apt/lists/*
                         task_type=TaskType.REMOVE_WORKSPACE,
                         workspace=ws,
                     )
-                await sync_to_async(self.workspaces.mark_deleting)(ws.id)
+                if not reused_active_task:
+                    await sync_to_async(self.workspaces.mark_deleting)(ws.id)
                 await self._emit_to_runner(
                     runner,
                     "task:remove_workspace",
@@ -4517,6 +4533,8 @@ rm -rf /var/lib/apt/lists/*
 
     async def dispatch_pending_build_job_deletions(self, runner: "Runner") -> list:
         """Dispatch pending build job deletions that accumulated while runner was offline."""
+        from .models import ImageBuildJob, ImageInstance
+
         pending = await sync_to_async(
             lambda: list(self.build_jobs.list_pending_delete_for_runner(runner.id))
         )()
@@ -4527,17 +4545,24 @@ rm -rf /var/lib/apt/lists/*
             if not instance or not instance.runner_ref:
                 continue
             try:
+                reused_active_task = False
                 if not build.deleting_task_id:
-                    task_id = generate_uuid()
-                    task = await sync_to_async(self.tasks.create)(
-                        task_id=task_id,
-                        runner=runner,
-                        task_type=TaskType.DELETE_IMAGE,
-                    )
+                    task = None
                 else:
-                    task = await sync_to_async(self.tasks.get_by_id)(
+                    existing_task = await sync_to_async(self.tasks.get_by_id)(
                         uuid.UUID(build.deleting_task_id)
                     )
+                    if existing_task and existing_task.status in {
+                        TaskStatus.PENDING,
+                        TaskStatus.IN_PROGRESS,
+                    }:
+                        task = existing_task
+                        reused_active_task = (
+                            build.status == ImageBuildJob.Status.DELETING
+                            and instance.status == ImageInstance.Status.DELETING
+                        )
+                    else:
+                        task = None
                 if task is None:
                     task_id = generate_uuid()
                     task = await sync_to_async(self.tasks.create)(
@@ -4549,12 +4574,13 @@ rm -rf /var/lib/apt/lists/*
                 await sync_to_async(self._mark_definition_deleting_if_needed)(
                     build.image_definition_id
                 )
-                await sync_to_async(self.build_jobs.mark_deleting)(
-                    build.id, deleting_task_id=str(task.id)
-                )
-                await sync_to_async(self.image_instances.mark_deleting)(
-                    instance.id, deleting_task_id=str(task.id)
-                )
+                if not reused_active_task:
+                    await sync_to_async(self.build_jobs.mark_deleting)(
+                        build.id, deleting_task_id=str(task.id)
+                    )
+                    await sync_to_async(self.image_instances.mark_deleting)(
+                        instance.id, deleting_task_id=str(task.id)
+                    )
                 await self._emit_to_runner(
                     runner,
                     "task:delete_image_artifact",

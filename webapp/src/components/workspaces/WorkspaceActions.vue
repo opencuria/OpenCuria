@@ -21,7 +21,10 @@ const workspaceStore = useWorkspaceStore()
 const isTransitioning = computed(() => workspaceStore.isWorkspaceTransitioning(props.workspace.id))
 const transitionLabel = computed(() => workspaceStore.getWorkspaceTransitionLabel(props.workspace.id))
 const isRunnerOfflineState = computed(
-  () => !props.workspace.runner_online && props.workspace.status !== WorkspaceStatus.DELETED,
+  () =>
+    !props.workspace.runner_online &&
+    props.workspace.status !== WorkspaceStatus.DELETED &&
+    props.workspace.status !== WorkspaceStatus.REMOVED,
 )
 
 const canStop = computed(

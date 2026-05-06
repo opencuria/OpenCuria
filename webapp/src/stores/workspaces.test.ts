@@ -94,6 +94,23 @@ describe('workspace transition state', () => {
     expect(store.isWorkspaceTransitioning('workspace-stop')).toBe(false)
   })
 
+  it('treats legacy removed workspaces as completed removals', () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ id: 'workspace-remove' })]
+    store.pendingWorkspaceOperations['workspace-remove'] = {
+      operation: 'remove',
+      expectedStatus: WorkspaceStatus.DELETED,
+    }
+
+    store.updateWorkspaceStatus('workspace-remove', WorkspaceStatus.REMOVED)
+
+    expect(store.pendingWorkspaceOperations['workspace-remove']).toBeUndefined()
+    expect(store.workspacesByStatus.removed.map((workspace) => workspace.id)).toEqual([
+      'workspace-remove',
+    ])
+    expect(store.isWorkspaceTransitioning('workspace-remove')).toBe(true)
+  })
+
   it('selects the first chat after loading when no active chat is set', async () => {
     const store = useWorkspaceStore()
     vi.mocked(workspacesApi.listChats).mockResolvedValue([

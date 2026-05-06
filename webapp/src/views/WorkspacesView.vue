@@ -70,7 +70,9 @@ const filteredWorkspaces = computed(() => {
   let workspaces = workspaceStore.workspaces
 
   if (!showDeleted.value) {
-    workspaces = workspaces.filter((w) => w.status !== WorkspaceStatus.DELETED)
+    workspaces = workspaces.filter(
+      (w) => w.status !== WorkspaceStatus.DELETED && w.status !== WorkspaceStatus.REMOVED,
+    )
   }
 
   // Apply search filter

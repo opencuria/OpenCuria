@@ -60,6 +60,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     running: workspaces.value.filter((w) => w.status === WorkspaceStatus.RUNNING),
     stopped: workspaces.value.filter((w) => w.status === WorkspaceStatus.STOPPED),
     failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.FAILED),
+    removed: workspaces.value.filter((w) => w.status === WorkspaceStatus.REMOVED),
     pending_deletion: workspaces.value.filter((w) => w.status === WorkspaceStatus.PENDING_DELETION),
     deleting: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETING),
     deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
@@ -109,6 +110,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const deletionStates: string[] = [
       WorkspaceStatus.PENDING_DELETION,
       WorkspaceStatus.DELETING,
+      WorkspaceStatus.REMOVED,
       WorkspaceStatus.DELETED,
     ]
     if (deletionStates.includes(workspace.status)) return true
@@ -160,7 +162,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     if (!pending) return
     if (previousStatus && previousStatus === status) return
 
-    if (status === pending.expectedStatus) {
+    const removeCompleted =
+      pending.operation === 'remove' &&
+      (status === WorkspaceStatus.REMOVED || status === WorkspaceStatus.DELETED)
+    if (status === pending.expectedStatus || removeCompleted) {
       const workspaceName = getWorkspaceName(workspaceId)
       switch (pending.operation) {
         case 'create':

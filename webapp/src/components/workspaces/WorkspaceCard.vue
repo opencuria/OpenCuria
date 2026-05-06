@@ -31,7 +31,10 @@ const transitionLabel = computed(
   () => workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
 )
 const isRunnerOfflineState = computed(
-  () => !props.workspace.runner_online && props.workspace.status !== WorkspaceStatus.DELETED,
+  () =>
+    !props.workspace.runner_online &&
+    props.workspace.status !== WorkspaceStatus.DELETED &&
+    props.workspace.status !== WorkspaceStatus.REMOVED,
 )
 
 const statusVariant = computed(() => {
@@ -51,6 +54,7 @@ const statusVariant = computed(() => {
     case WorkspaceStatus.FAILED:
     case WorkspaceStatus.DELETE_FAILED:
       return 'error'
+    case WorkspaceStatus.REMOVED:
     case WorkspaceStatus.DELETED:
       return 'muted'
     default:
@@ -106,9 +110,9 @@ function formatStorage(bytes?: number | null): string {
                     ? 'bg-warning-muted text-warning'
                     : workspace.status === WorkspaceStatus.FAILED || workspace.status === WorkspaceStatus.DELETE_FAILED
                       ? 'bg-error-muted text-error'
-                      : workspace.status === WorkspaceStatus.DELETED
-                        ? 'bg-muted/50 text-muted-fg/50'
-                        : 'bg-muted text-muted-fg',
+                      : workspace.status === WorkspaceStatus.REMOVED || workspace.status === WorkspaceStatus.DELETED
+                         ? 'bg-muted/50 text-muted-fg/50'
+                         : 'bg-muted text-muted-fg',
             ]"
           >
             <Container :size="18" />

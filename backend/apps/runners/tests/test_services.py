@@ -662,6 +662,42 @@ class TestRemoveWorkspace:
         assert workspace.delete_attempt_count == 1
         assert task.status == TaskStatus.IN_PROGRESS
 
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_workspace_deletion_reuses_attempt_metadata(
+        self,
+        service,
+        runner,
+        workspace,
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.REMOVE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        started_at = timezone.now()
+        workspace.status = WorkspaceStatus.DELETING
+        workspace.delete_requested_at = started_at
+        workspace.delete_started_at = started_at
+        workspace.delete_attempt_count = 1
+        workspace.save(
+            update_fields=[
+                "status",
+                "delete_requested_at",
+                "delete_started_at",
+                "delete_attempt_count",
+                "updated_at",
+            ]
+        )
+
+        await service.dispatch_pending_workspace_deletions(runner)
+
+        workspace.refresh_from_db()
+        task.refresh_from_db()
+        assert workspace.delete_started_at == started_at
+        assert workspace.delete_attempt_count == 1
+        assert task.status == TaskStatus.IN_PROGRESS
+
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateImageArtifactSecurity:
@@ -921,6 +957,93 @@ class TestImageDeletionLifecycle:
         assert image.status == ImageInstance.Status.DELETING
         assert image.deleting_task_id is not None
         task = Task.objects.get(id=image.deleting_task_id)
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_image_deletion_reuses_attempt_metadata(
+        self, service, runner, user
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        started_at = timezone.now()
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            name="Deleting Image",
+            runner_ref="opencuria/custom/reused-delete:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(task.id),
+            delete_requested_at=started_at,
+            delete_started_at=started_at,
+            delete_attempt_count=1,
+        )
+
+        await service.dispatch_pending_image_deletions(runner)
+
+        image.refresh_from_db()
+        task.refresh_from_db()
+        assert image.delete_started_at == started_at
+        assert image.delete_attempt_count == 1
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pending_build_deletion_reuses_attempt_metadata(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name=f"Build Delete Retry {uuid.uuid4().hex[:6]}",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+            status=ImageDefinition.Status.DELETING,
+            delete_attempt_count=1,
+        )
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        started_at = timezone.now()
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.DELETING,
+            deleting_task_id=str(task.id),
+            delete_requested_at=started_at,
+            delete_started_at=started_at,
+            delete_attempt_count=1,
+        )
+        image = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            name="Build Delete Retry Artifact",
+            runner_ref="opencuria/custom/build-reused-delete:1",
+            status=ImageInstance.Status.DELETING,
+            created_by=user,
+            deleting_task_id=str(task.id),
+            delete_requested_at=started_at,
+            delete_started_at=started_at,
+            delete_attempt_count=1,
+        )
+
+        await service.dispatch_pending_build_job_deletions(runner)
+
+        build.refresh_from_db()
+        image.refresh_from_db()
+        task.refresh_from_db()
+        assert build.delete_started_at == started_at
+        assert build.delete_attempt_count == 1
+        assert image.delete_started_at == started_at
+        assert image.delete_attempt_count == 1
         assert task.status == TaskStatus.IN_PROGRESS
 
     def test_handle_image_artifact_deleted_marks_image_deleted(
