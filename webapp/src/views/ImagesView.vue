@@ -18,8 +18,12 @@ const capturedImages = computed(() =>
   imageStore.images.filter((entry) => entry.artifact_kind === 'captured'),
 )
 
+function isCaptureInProgress(imageArtifact: ImageArtifact): boolean {
+  return imageArtifact.status === 'creating' || imageArtifact.status === 'capturing'
+}
+
 const hasCreating = computed(() =>
-  capturedImages.value.some((image) => image.status === 'creating'),
+  capturedImages.value.some((image) => isCaptureInProgress(image)),
 )
 
 const { start } = usePolling(
@@ -112,14 +116,14 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
               <div
                 :class="[
                   'flex items-center justify-center w-10 h-10 rounded-[var(--radius-md)] shrink-0',
-                  imageArtifact.status === 'creating'
+                  isCaptureInProgress(imageArtifact)
                     ? 'bg-warning-muted text-warning'
                     : imageArtifact.status === 'failed'
                       ? 'bg-error-muted text-error'
                       : 'bg-muted text-muted-fg',
                 ]"
               >
-                <Loader2 v-if="imageArtifact.status === 'creating'" :size="18" class="animate-spin" />
+                <Loader2 v-if="isCaptureInProgress(imageArtifact)" :size="18" class="animate-spin" />
                 <AlertTriangle v-else-if="imageArtifact.status === 'failed'" :size="18" />
                 <Camera v-else :size="18" />
               </div>
@@ -143,7 +147,8 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 <div v-else class="flex items-start gap-2 mb-1">
                   <span class="font-medium text-fg text-sm min-w-0 break-words">{{ imageArtifact.name }}</span>
                   <button
-                    v-if="imageArtifact.status !== 'creating' && editingId !== imageArtifact.id"
+                    v-if="!isCaptureInProgress(imageArtifact) && editingId !== imageArtifact.id"
+                    :disabled="['pending_deletion', 'deleting'].includes(imageArtifact.status)"
                     class="text-muted-fg hover:text-fg transition-colors shrink-0"
                     title="Rename image"
                     @click="startRename(imageArtifact)"
@@ -153,8 +158,14 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 </div>
                 <div class="flex flex-wrap items-center gap-1.5 mb-1">
                   <UiBadge v-if="imageArtifact.runtime_type" variant="muted">{{ imageArtifact.runtime_type }}</UiBadge>
-                  <UiBadge v-if="imageArtifact.status === 'creating'" variant="warning">Creating…</UiBadge>
+                  <UiBadge v-if="isCaptureInProgress(imageArtifact)" variant="warning">Creating…</UiBadge>
                   <UiBadge v-else-if="imageArtifact.status === 'failed'" variant="error">Failed</UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'pending_deletion'" variant="error">Pending deletion</UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'deleting'" variant="error" class="inline-flex items-center gap-1">
+                    <Loader2 :size="11" class="animate-spin" />
+                    Deleting
+                  </UiBadge>
+                  <UiBadge v-else-if="imageArtifact.status === 'delete_failed'" variant="error">Delete failed</UiBadge>
                   <UiBadge v-if="imageArtifact.is_deactivated" variant="muted">Deactivated</UiBadge>
                   <UiBadge
                     v-if="imageArtifact.source_runner_online === false"
@@ -209,7 +220,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 size="icon-sm"
                 title="Delete image"
                 class="text-error hover:text-error"
-                :disabled="deletingId === imageArtifact.id"
+                :disabled="deletingId === imageArtifact.id || ['pending_deletion', 'deleting'].includes(imageArtifact.status)"
                 @click="handleDelete(imageArtifact)"
               >
                 <UiSpinner v-if="deletingId === imageArtifact.id" :size="14" />

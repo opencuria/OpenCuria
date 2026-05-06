@@ -110,6 +110,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const deletionStates: string[] = [
       WorkspaceStatus.PENDING_DELETION,
       WorkspaceStatus.DELETING,
+      WorkspaceStatus.REMOVED,
       WorkspaceStatus.DELETED,
     ]
     if (deletionStates.includes(workspace.status)) return true
@@ -161,7 +162,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     if (!pending) return
     if (previousStatus && previousStatus === status) return
 
-    if (status === pending.expectedStatus) {
+    const removeCompleted =
+      pending.operation === 'remove' &&
+      (status === WorkspaceStatus.REMOVED || status === WorkspaceStatus.DELETED)
+    if (status === pending.expectedStatus || removeCompleted) {
       const workspaceName = getWorkspaceName(workspaceId)
       switch (pending.operation) {
         case 'create':
@@ -181,7 +185,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       return
     }
 
-    if (status === WorkspaceStatus.FAILED) {
+    if (status === WorkspaceStatus.FAILED || status === WorkspaceStatus.DELETE_FAILED) {
       const workspaceName = getWorkspaceName(workspaceId)
       switch (pending.operation) {
         case 'create':
@@ -453,7 +457,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
     try {
       await workspacesApi.deleteWorkspace(id)
-      setPendingWorkspaceOperation(id, 'remove', WorkspaceStatus.REMOVED)
+      setPendingWorkspaceOperation(id, 'remove', WorkspaceStatus.DELETED)
       notifications.info('Removing workspace', `${getWorkspaceName(id)} is being removed…`)
       await fetchWorkspaces()
     } catch (e: unknown) {

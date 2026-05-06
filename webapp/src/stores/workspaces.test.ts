@@ -34,6 +34,11 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     last_activity_at: overrides.last_activity_at ?? '2026-03-29T10:00:00.000Z',
     auto_stop_timeout_minutes: overrides.auto_stop_timeout_minutes ?? null,
     auto_stop_at: overrides.auto_stop_at ?? null,
+    delete_requested_at: overrides.delete_requested_at ?? null,
+    delete_started_at: overrides.delete_started_at ?? null,
+    delete_confirmed_at: overrides.delete_confirmed_at ?? null,
+    delete_last_error: overrides.delete_last_error ?? '',
+    delete_attempt_count: overrides.delete_attempt_count ?? 0,
     created_at: overrides.created_at ?? '2026-03-29T10:00:00.000Z',
     updated_at: overrides.updated_at ?? '2026-03-29T10:00:00.000Z',
     has_active_session: overrides.has_active_session ?? false,
@@ -87,6 +92,23 @@ describe('workspace transition state', () => {
 
     expect(store.pendingWorkspaceOperations['workspace-stop']).toBeUndefined()
     expect(store.isWorkspaceTransitioning('workspace-stop')).toBe(false)
+  })
+
+  it('treats legacy removed workspaces as completed removals', () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ id: 'workspace-remove' })]
+    store.pendingWorkspaceOperations['workspace-remove'] = {
+      operation: 'remove',
+      expectedStatus: WorkspaceStatus.DELETED,
+    }
+
+    store.updateWorkspaceStatus('workspace-remove', WorkspaceStatus.REMOVED)
+
+    expect(store.pendingWorkspaceOperations['workspace-remove']).toBeUndefined()
+    expect(store.workspacesByStatus.removed.map((workspace) => workspace.id)).toEqual([
+      'workspace-remove',
+    ])
+    expect(store.isWorkspaceTransitioning('workspace-remove')).toBe(true)
   })
 
   it('selects the first chat after loading when no active chat is set', async () => {

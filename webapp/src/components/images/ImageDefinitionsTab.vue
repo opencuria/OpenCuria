@@ -55,7 +55,9 @@ function ensureBuildRefresh(definitionId: string): void {
   stopBuildRefresh()
   refreshTimer = window.setInterval(async () => {
     const builds = buildsByDefinition.value[definitionId] || []
-    const hasActiveBuild = builds.some((build) => ['pending', 'building'].includes(build.status))
+    const hasActiveBuild = builds.some((build) =>
+      ['pending', 'building', 'pending_deletion', 'deleting'].includes(build.status),
+    )
     if (!hasActiveBuild) {
       stopBuildRefresh()
       return
@@ -93,9 +95,10 @@ async function removeDefinition(id: string): Promise<void> {
   try {
     await workspacesApi.deleteImageDefinition(id)
     await loadDefinitions()
-  } catch (e: any) {
-    if (e?.response?.status === 409) {
-      error.value = e?.response?.data?.detail || 'Cannot delete: definition is in use or already being deleted.'
+  } catch (e: unknown) {
+    const response = (e as { response?: { status?: number; data?: { detail?: string } } })?.response
+    if (response?.status === 409) {
+      error.value = response.data?.detail || 'Cannot delete: definition is in use or already being deleted.'
     } else {
       error.value = e instanceof Error ? e.message : 'Failed to delete image definition'
     }
@@ -151,6 +154,18 @@ async function rebuild(definitionId: string, runnerId: string): Promise<void> {
   }
 }
 
+async function deleteRunnerBuild(definitionId: string, runnerId: string): Promise<void> {
+  if (!confirm('Delete this runner build and its associated artifact?')) return
+  actionLoading.value = `${definitionId}:${runnerId}:delete`
+  try {
+    await workspacesApi.deleteRunnerImageBuild(definitionId, runnerId)
+    await loadBuilds(definitionId)
+    ensureBuildRefresh(definitionId)
+  } finally {
+    actionLoading.value = null
+  }
+}
+
 async function activate(definitionId: string, runnerId: string): Promise<void> {
   actionLoading.value = `${definitionId}:${runnerId}:activate`
   try {
@@ -179,7 +194,7 @@ async function toggleExpand(definitionId: string): Promise<void> {
     await loadBuilds(definitionId)
     if (
       (buildsByDefinition.value[definitionId] || []).some((build) =>
-        ['pending', 'building'].includes(build.status),
+        ['pending', 'building', 'pending_deletion', 'deleting'].includes(build.status),
       )
     ) {
       ensureBuildRefresh(definitionId)
@@ -246,6 +261,7 @@ onUnmounted(() => {
                 <UiBadge v-else-if="definition.status === 'deleting'" variant="error">
                   <Loader2 :size="10" class="inline animate-spin mr-1" />deleting
                 </UiBadge>
+                <UiBadge v-else-if="definition.status === 'delete_failed'" variant="error">delete failed</UiBadge>
                 <UiBadge v-else-if="definition.status === 'deleted'" variant="muted">deleted</UiBadge>
               </div>
               <p class="text-xs text-muted-fg truncate">{{ definition.description || 'No description' }}</p>
@@ -303,6 +319,15 @@ onUnmounted(() => {
                           @click="assignOrActivate(definition.id, runner.id)"
                         >Assign & Activate</UiButton>
                         <UiButton
+                          v-else-if="getBuild(definition.id, runner.id)?.status === 'pending_deletion' || getBuild(definition.id, runner.id)?.status === 'deleting'"
+                          size="sm"
+                          variant="outline"
+                          disabled
+                        >
+                          <Loader2 :size="12" class="animate-spin" />
+                          Deleting…
+                        </UiButton>
+                        <UiButton
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'active'"
                           size="sm"
                           variant="outline"
@@ -333,6 +358,14 @@ onUnmounted(() => {
                           :disabled="actionLoading === `${definition.id}:${runner.id}:log`"
                           @click="viewLog(definition.id, runner.id)"
                         >View Log</UiButton>
+                        <UiButton
+                          v-if="['active', 'deactivated', 'failed', 'delete_failed'].includes(getBuild(definition.id, runner.id)?.status || '')"
+                          size="sm"
+                          variant="ghost"
+                          class="text-error"
+                          :disabled="actionLoading === `${definition.id}:${runner.id}:delete`"
+                          @click="deleteRunnerBuild(definition.id, runner.id)"
+                        >Delete runner build</UiButton>
                         <UiButton
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'pending' || getBuild(definition.id, runner.id)?.status === 'building'"
                           size="sm"

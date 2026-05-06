@@ -173,6 +173,7 @@ class Workspace(models.Model):
         help_text="Timestamp of the most recent user- or session-driven activity.",
     )
     delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_started_at = models.DateTimeField(null=True, blank=True)
     delete_confirmed_at = models.DateTimeField(null=True, blank=True)
     delete_last_error = models.TextField(blank=True, default="")
     delete_attempt_count = models.PositiveIntegerField(default=0)
@@ -704,6 +705,7 @@ class ImageDefinition(models.Model):
         PENDING_DELETION = "pending_deletion", "Pending Deletion"
         DELETING = "deleting", "Deleting"
         DELETED = "deleted", "Deleted"
+        DELETE_FAILED = "delete_failed", "Delete Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -744,6 +746,11 @@ class ImageDefinition(models.Model):
         help_text="Lifecycle status of the image definition.",
     )
     deactivated_at = models.DateTimeField(null=True, blank=True)
+    delete_requested_at = models.DateTimeField(null=True, blank=True)
+    delete_started_at = models.DateTimeField(null=True, blank=True)
+    delete_confirmed_at = models.DateTimeField(null=True, blank=True)
+    delete_last_error = models.TextField(blank=True, default="")
+    delete_attempt_count = models.PositiveIntegerField(default=0)
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -223,6 +223,11 @@ export interface Workspace {
   last_activity_at: string
   auto_stop_timeout_minutes: number | null
   auto_stop_at: string | null
+  delete_requested_at: string | null
+  delete_started_at: string | null
+  delete_confirmed_at: string | null
+  delete_last_error: string
+  delete_attempt_count: number
   created_at: string
   updated_at: string
   has_active_session: boolean
@@ -567,7 +572,17 @@ export interface ImageArtifact {
   runner_artifact_id: string
   name: string
   size_bytes: number | null
-  status: 'creating' | 'ready' | 'failed' | 'retired' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
+  status:
+    | 'creating'
+    | 'capturing'
+    | 'building'
+    | 'ready'
+    | 'failed'
+    | 'retired'
+    | 'pending_deletion'
+    | 'deleting'
+    | 'deleted'
+    | 'delete_failed'
   artifact_kind: 'built' | 'captured'
   build_job_id?: string | null
   source_definition_name?: string | null
@@ -634,7 +649,12 @@ export interface ImageDefinition {
   custom_dockerfile: string
   custom_init_script: string
   is_active: boolean
-  status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted'
+  status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
+  delete_requested_at?: string | null
+  delete_started_at?: string | null
+  delete_confirmed_at?: string | null
+  delete_last_error?: string
+  delete_attempt_count?: number
   created_at: string
   updated_at: string
 }

@@ -12,7 +12,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .enums import (
@@ -427,17 +428,25 @@ class WorkspaceRepository:
     @staticmethod
     def mark_pending_deletion(workspace_id: uuid.UUID) -> None:
         """Mark workspace as pending deletion (runner offline)."""
+        requested_at = timezone.now()
         Workspace.objects.filter(id=workspace_id).update(
             status=WorkspaceStatus.PENDING_DELETION,
             active_operation=None,
-            delete_requested_at=timezone.now(),
+            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
+            delete_last_error="",
         )
 
     @staticmethod
     def mark_deleting(workspace_id: uuid.UUID) -> None:
         """Mark workspace as actively being deleted by runner."""
+        now = timezone.now()
         Workspace.objects.filter(id=workspace_id).update(
             status=WorkspaceStatus.DELETING,
+            active_operation=None,
+            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
+            delete_started_at=now,
+            delete_last_error="",
+            delete_attempt_count=F("delete_attempt_count") + 1,
         )
 
     @staticmethod
@@ -1113,9 +1122,11 @@ class ImageInstanceRepository:
 
     @staticmethod
     def get_by_task_id(task_id: str) -> "ImageInstance | None":
-        """Find the image instance being created by a given task."""
+        """Find the image instance associated with a create or delete task."""
         return (
-            ImageInstance.objects.filter(creating_task_id=task_id)
+            ImageInstance.objects.filter(
+                Q(creating_task_id=task_id) | Q(deleting_task_id=task_id)
+            )
             .select_related(
                 "runner",
                 "origin_workspace",
@@ -1222,8 +1233,6 @@ class ImageInstanceRepository:
             origin_workspace_id=workspace_id
         ).exclude(
             status=ImageInstance.Status.DELETED
-        ).exclude(
-            status=ImageInstance.Status.DELETING
         ).select_related(
             "runner",
             "origin_workspace",
@@ -1242,8 +1251,6 @@ class ImageInstanceRepository:
             created_by=user
         ).exclude(
             status=ImageInstance.Status.DELETED
-        ).exclude(
-            status=ImageInstance.Status.DELETING
         ).select_related(
             "runner",
             "origin_workspace",
@@ -1265,19 +1272,24 @@ class ImageInstanceRepository:
     @staticmethod
     def mark_deleting(image_id: uuid.UUID, *, deleting_task_id: str | None) -> None:
         """Mark an image instance as pending deletion."""
+        now = timezone.now()
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.DELETING,
             deleting_task_id=deleting_task_id,
-            delete_started_at=timezone.now(),
+            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
+            delete_started_at=now,
+            delete_last_error="",
             delete_attempt_count=F("delete_attempt_count") + 1,
         )
 
     @staticmethod
     def mark_pending_deletion(image_id: uuid.UUID) -> None:
         """Mark an image instance as pending deletion (runner offline)."""
+        requested_at = timezone.now()
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.PENDING_DELETION,
-            delete_requested_at=timezone.now(),
+            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
+            delete_last_error="",
         )
 
     @staticmethod
@@ -1295,6 +1307,7 @@ class ImageInstanceRepository:
         """Mark an image instance deletion as failed."""
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.DELETE_FAILED,
+            deleting_task_id=None,
             delete_last_error=error,
         )
 
@@ -1360,16 +1373,24 @@ class ImageDefinitionRepository:
     @staticmethod
     def mark_pending_deletion(definition_id: uuid.UUID) -> None:
         """Mark definition pending deletion (waiting for build deletes)."""
+        requested_at = timezone.now()
         ImageDefinition.objects.filter(id=definition_id).update(
             is_active=False,
             status=ImageDefinition.Status.PENDING_DELETION,
+            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
+            delete_last_error="",
         )
 
     @staticmethod
     def mark_deleting(definition_id: uuid.UUID) -> None:
         """Mark definition as actively deleting its builds."""
+        now = timezone.now()
         ImageDefinition.objects.filter(id=definition_id).update(
             status=ImageDefinition.Status.DELETING,
+            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
+            delete_started_at=now,
+            delete_last_error="",
+            delete_attempt_count=F("delete_attempt_count") + 1,
         )
 
     @staticmethod
@@ -1377,7 +1398,17 @@ class ImageDefinitionRepository:
         """Mark definition as fully deleted after all builds are confirmed deleted."""
         ImageDefinition.objects.filter(id=definition_id).update(
             status=ImageDefinition.Status.DELETED,
+            delete_confirmed_at=timezone.now(),
             deleted_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_delete_failed(definition_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark definition deletion as failed."""
+        ImageDefinition.objects.filter(id=definition_id).update(
+            is_active=False,
+            status=ImageDefinition.Status.DELETE_FAILED,
+            delete_last_error=error,
         )
 
 
@@ -1472,18 +1503,23 @@ class ImageBuildJobRepository:
     @staticmethod
     def mark_pending_deletion(build_job_id: uuid.UUID) -> None:
         """Mark build job as pending deletion (runner offline)."""
+        requested_at = timezone.now()
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.PENDING_DELETION,
-            delete_requested_at=timezone.now(),
+            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
+            delete_last_error="",
         )
 
     @staticmethod
     def mark_deleting(build_job_id: uuid.UUID, *, deleting_task_id: str) -> None:
         """Mark build job as actively deleting on runner."""
+        now = timezone.now()
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.DELETING,
             deleting_task_id=deleting_task_id,
-            delete_started_at=timezone.now(),
+            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
+            delete_started_at=now,
+            delete_last_error="",
             delete_attempt_count=F("delete_attempt_count") + 1,
         )
 
@@ -1501,6 +1537,7 @@ class ImageBuildJobRepository:
         """Mark build job deletion as failed."""
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.DELETE_FAILED,
+            deleting_task_id=None,
             delete_last_error=error,
         )
 
