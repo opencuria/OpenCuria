@@ -572,7 +572,17 @@ export interface ImageArtifact {
   runner_artifact_id: string
   name: string
   size_bytes: number | null
-  status: 'creating' | 'ready' | 'failed' | 'retired' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
+  status:
+    | 'creating'
+    | 'capturing'
+    | 'building'
+    | 'ready'
+    | 'failed'
+    | 'retired'
+    | 'pending_deletion'
+    | 'deleting'
+    | 'deleted'
+    | 'delete_failed'
   artifact_kind: 'built' | 'captured'
   build_job_id?: string | null
   source_definition_name?: string | null
