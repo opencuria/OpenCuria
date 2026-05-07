@@ -108,6 +108,19 @@ def _workspace_credential_ids(workspace) -> list[uuid.UUID]:
     return [credential.id for credential in workspace.credentials.all()]
 
 
+def _workspace_base_image_name(workspace) -> str | None:
+    """Return a user-facing base image name for a workspace when available."""
+    image = getattr(workspace, "base_image_instance", None)
+    if image is None:
+        return None
+    origin_definition = getattr(image, "origin_definition", None)
+    if origin_definition and getattr(origin_definition, "name", ""):
+        return origin_definition.name
+    if getattr(image, "name", ""):
+        return image.name
+    return None
+
+
 def _workspace_to_out(workspace) -> WorkspaceOut:
     """Map a Workspace ORM instance to WorkspaceOut."""
     # Determine runner online status — prefer cached attribute injected by the
@@ -162,6 +175,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         has_active_session=bool(getattr(workspace, "has_active_session", False)),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
+        base_image_name=_workspace_base_image_name(workspace),
     )
 
 
@@ -677,6 +691,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             ).exists(),
             runner_online=workspace.runner.status == RS.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
+            base_image_name=_workspace_base_image_name(workspace),
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)

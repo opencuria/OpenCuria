@@ -264,7 +264,13 @@ class WorkspaceRepository:
         """Fetch a workspace by its ID."""
         return (
             Workspace.objects.filter(id=workspace_id)
-            .select_related("runner", "runner__organization", "created_by")
+            .select_related(
+                "runner",
+                "runner__organization",
+                "created_by",
+                "base_image_instance",
+                "base_image_instance__origin_definition",
+            )
             .prefetch_related("credentials__service")
             .annotate(has_active_session=_ACTIVE_SESSION_EXISTS)
             .first()
@@ -274,7 +280,12 @@ class WorkspaceRepository:
     def list_all() -> QuerySet[Workspace]:
         """Return all workspaces."""
         return (
-            Workspace.objects.select_related("runner", "runner__organization")
+            Workspace.objects.select_related(
+                "runner",
+                "runner__organization",
+                "base_image_instance",
+                "base_image_instance__origin_definition",
+            )
             .prefetch_related("credentials__service")
             .annotate(has_active_session=_ACTIVE_SESSION_EXISTS)
         )
@@ -284,7 +295,12 @@ class WorkspaceRepository:
         """Return all workspaces for a specific runner."""
         return (
             Workspace.objects.filter(runner_id=runner_id)
-            .select_related("runner", "runner__organization")
+            .select_related(
+                "runner",
+                "runner__organization",
+                "base_image_instance",
+                "base_image_instance__origin_definition",
+            )
             .prefetch_related("credentials__service")
             .annotate(has_active_session=_ACTIVE_SESSION_EXISTS)
         )
@@ -345,7 +361,12 @@ class WorkspaceRepository:
         """Return all workspaces for runners in a specific organization."""
         return (
             Workspace.objects.filter(runner__organization_id=organization_id)
-            .select_related("runner", "runner__organization")
+            .select_related(
+                "runner",
+                "runner__organization",
+                "base_image_instance",
+                "base_image_instance__origin_definition",
+            )
             .prefetch_related("credentials__service")
             .annotate(has_active_session=_ACTIVE_SESSION_EXISTS)
         )
@@ -355,7 +376,12 @@ class WorkspaceRepository:
         """Return all workspaces created by a specific user."""
         return (
             Workspace.objects.filter(created_by_id=user_id)
-            .select_related("runner", "runner__organization")
+            .select_related(
+                "runner",
+                "runner__organization",
+                "base_image_instance",
+                "base_image_instance__origin_definition",
+            )
             .prefetch_related("credentials__service")
             .annotate(has_active_session=_ACTIVE_SESSION_EXISTS)
         )
