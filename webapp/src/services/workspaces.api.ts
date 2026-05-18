@@ -9,6 +9,9 @@ import type {
   WorkspaceCreateOut,
   WorkspaceUpdateIn,
   WorkspaceUpdateOut,
+  WorkspaceDesktopStartCommand,
+  WorkspaceDesktopStartCommandIn,
+  WorkspaceDesktopStartCommandUpdateIn,
   Session,
   PromptIn,
   PromptOut,
@@ -82,8 +85,39 @@ export function startTerminal(
 
 // --- Desktop API ---
 
-export function startDesktop(id: string): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`)
+export function listDesktopStartCommands(id: string): Promise<WorkspaceDesktopStartCommand[]> {
+  return get<WorkspaceDesktopStartCommand[]>(`/workspaces/${id}/desktop-start-commands/`)
+}
+
+export function createDesktopStartCommand(
+  id: string,
+  data: WorkspaceDesktopStartCommandIn,
+): Promise<WorkspaceDesktopStartCommand> {
+  return post<WorkspaceDesktopStartCommand>(`/workspaces/${id}/desktop-start-commands/`, data)
+}
+
+export function updateDesktopStartCommand(
+  id: string,
+  commandId: string,
+  data: WorkspaceDesktopStartCommandUpdateIn,
+): Promise<WorkspaceDesktopStartCommand> {
+  return patch<WorkspaceDesktopStartCommand>(
+    `/workspaces/${id}/desktop-start-commands/${commandId}/`,
+    data,
+  )
+}
+
+export function deleteDesktopStartCommand(id: string, commandId: string): Promise<void> {
+  return del<void>(`/workspaces/${id}/desktop-start-commands/${commandId}/`)
+}
+
+export function startDesktop(
+  id: string,
+  desktopStartCommandId?: string | null,
+): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, desktopStartCommandId
+    ? { desktop_start_command_id: desktopStartCommandId }
+    : undefined)
 }
 
 export function stopDesktop(id: string): Promise<{ task_id: string }> {

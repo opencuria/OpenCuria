@@ -4,12 +4,18 @@ import { useRouter } from 'vue-router'
 import { Pencil, Check, Key } from 'lucide-vue-next'
 
 import { UiButton, UiDialog, UiInput } from '@/components/ui'
-import type { Workspace, WorkspaceUpdateIn } from '@/types'
+import type {
+  Workspace,
+  WorkspaceDesktopStartCommand,
+  WorkspaceUpdateIn,
+} from '@/types'
 import { RuntimeType } from '@/types'
 import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
+import { useNotificationStore } from '@/stores/notifications'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
+import * as workspacesApi from '@/services/workspaces.api'
 
 const props = defineProps<{
   workspace: Workspace
@@ -17,7 +23,12 @@ const props = defineProps<{
   disabled?: boolean
 }>()
 
+const emit = defineEmits<{
+  desktopStartCommandsUpdated: []
+}>()
+
 const credentialStore = useCredentialStore()
+const notificationStore = useNotificationStore()
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
 const router = useRouter()
@@ -29,6 +40,8 @@ const qemuVcpus = ref(2)
 const qemuMemoryMb = ref(4096)
 const qemuDiskSizeGb = ref(50)
 const submitting = ref(false)
+const desktopStartCommands = ref<Array<WorkspaceDesktopStartCommand & { localId: string }>>([])
+const initialDesktopStartCommands = ref<WorkspaceDesktopStartCommand[]>([])
 
 const btnSize = computed(() => (props.size === 'sm' ? 'icon-sm' as const : 'icon' as const))
 const qemuDefaults = computed(() => {
@@ -79,6 +92,21 @@ function syncFormWithWorkspace(workspace: Workspace): void {
   qemuDiskSizeGb.value = currentQemuResources.diskSizeGb
 }
 
+function cloneDesktopStartCommands(
+  commands: WorkspaceDesktopStartCommand[],
+): Array<WorkspaceDesktopStartCommand & { localId: string }> {
+  return commands.map((command) => ({
+    ...command,
+    localId: command.id,
+  }))
+}
+
+async function loadDesktopStartCommands(): Promise<void> {
+  const commands = await workspacesApi.listDesktopStartCommands(props.workspace.id)
+  initialDesktopStartCommands.value = commands
+  desktopStartCommands.value = cloneDesktopStartCommands(commands)
+}
+
 watch(
   () => props.workspace,
   (workspace) => {
@@ -105,7 +133,86 @@ async function handleOpen(): Promise<void> {
     await runnerStore.fetchRunners()
   }
   await credentialStore.fetchCredentials()
+  await loadDesktopStartCommands()
   syncFormWithWorkspace(props.workspace)
+}
+
+function addDesktopStartCommand(): void {
+  desktopStartCommands.value.push({
+    id: '',
+    workspace_id: props.workspace.id,
+    localId: `new-${Date.now()}-${desktopStartCommands.value.length}`,
+    name: '',
+    command: '',
+    created_at: '',
+    updated_at: '',
+  })
+}
+
+function removeDesktopStartCommand(localId: string): void {
+  desktopStartCommands.value = desktopStartCommands.value.filter(
+    (command) => command.localId !== localId,
+  )
+}
+
+const hasInvalidDesktopStartCommands = computed(() =>
+  desktopStartCommands.value.some(
+    (command) => !command.name.trim() || !command.command.trim(),
+  ),
+)
+
+async function syncDesktopStartCommands(): Promise<boolean> {
+  const initialById = new Map(initialDesktopStartCommands.value.map((command) => [command.id, command]))
+  const currentIds = new Set(
+    desktopStartCommands.value.filter((command) => command.id).map((command) => command.id),
+  )
+
+  for (const command of initialDesktopStartCommands.value) {
+    if (!currentIds.has(command.id)) {
+      await workspacesApi.deleteDesktopStartCommand(props.workspace.id, command.id)
+    }
+  }
+
+  for (const command of desktopStartCommands.value) {
+    const payload = {
+      name: command.name.trim(),
+      command: command.command.trim(),
+    }
+    if (!command.id) {
+      await workspacesApi.createDesktopStartCommand(props.workspace.id, payload)
+      continue
+    }
+
+    const initial = initialById.get(command.id)
+    if (!initial) continue
+
+    const changedFields: { name?: string; command?: string } = {}
+    if (initial.name !== payload.name) changedFields.name = payload.name
+    if (initial.command !== payload.command) changedFields.command = payload.command
+
+    if (Object.keys(changedFields).length > 0) {
+      await workspacesApi.updateDesktopStartCommand(
+        props.workspace.id,
+        command.id,
+        changedFields,
+      )
+    }
+  }
+
+  const desktopStartCommandsChanged =
+    desktopStartCommands.value.length !== initialDesktopStartCommands.value.length
+    || desktopStartCommands.value.some((command, index) => {
+      const initial = initialDesktopStartCommands.value[index]
+      if (!initial) return true
+      return command.id !== initial.id
+        || command.name.trim() !== initial.name
+        || command.command.trim() !== initial.command
+    })
+
+  if (desktopStartCommandsChanged) {
+    emit('desktopStartCommandsUpdated')
+  }
+  return desktopStartCommandsChanged
 }
 
 async function handleSubmit(): Promise<void> {
@@ -128,16 +235,27 @@ async function handleSubmit(): Promise<void> {
   }
 
   const success = await workspaceStore.updateWorkspace(props.workspace.id, payload)
-  submitting.value = false
+  if (!success) {
+    submitting.value = false
+    return
+  }
 
-  if (success) {
+  try {
+    await syncDesktopStartCommands()
     open.value = false
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to update desktop start commands'
+    notificationStore.error('Update failed', message)
+    await loadDesktopStartCommands()
+  } finally {
+    submitting.value = false
   }
 }
 
 function handleClose(): void {
   open.value = false
   syncFormWithWorkspace(props.workspace)
+  desktopStartCommands.value = cloneDesktopStartCommands(initialDesktopStartCommands.value)
 }
 
 async function navigateToCredentials(): Promise<void> {
@@ -247,9 +365,72 @@ async function navigateToCredentials(): Promise<void> {
         </div>
       </div>
 
+      <div class="space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <label class="text-sm font-medium text-fg block">Desktop start commands</label>
+            <p class="text-xs text-muted-fg">
+              Configure the commands available from the desktop launcher.
+            </p>
+          </div>
+          <UiButton
+            variant="outline"
+            size="sm"
+            type="button"
+            :disabled="submitting || props.disabled"
+            @click="addDesktopStartCommand"
+          >
+            Add command
+          </UiButton>
+        </div>
+
+        <div v-if="desktopStartCommands.length" class="space-y-3">
+          <div
+            v-for="desktopStartCommand in desktopStartCommands"
+            :key="desktopStartCommand.localId"
+            class="rounded-[var(--radius-md)] border border-border bg-bg p-3 space-y-3"
+          >
+            <div class="grid gap-3 sm:grid-cols-[minmax(0,160px)_minmax(0,1fr)_auto] sm:items-end">
+              <div>
+                <label class="mb-1 block text-xs font-medium text-muted-fg">Name</label>
+                <UiInput
+                  v-model="desktopStartCommand.name"
+                  :disabled="submitting || props.disabled"
+                  placeholder="Browser"
+                />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium text-muted-fg">Command</label>
+                <UiInput
+                  v-model="desktopStartCommand.command"
+                  :disabled="submitting || props.disabled"
+                  placeholder="/usr/local/bin/opencuria-desktop-browser"
+                />
+              </div>
+              <UiButton
+                variant="ghost"
+                type="button"
+                class="text-error hover:text-error"
+                :disabled="submitting || props.disabled"
+                @click="removeDesktopStartCommand(desktopStartCommand.localId)"
+              >
+                Delete
+              </UiButton>
+            </div>
+          </div>
+        </div>
+
+        <p v-else class="text-xs text-muted-fg">
+          No custom desktop start commands configured. Starting the desktop falls back to the browser default.
+        </p>
+      </div>
+
       <div class="flex justify-end gap-2 pt-2">
         <UiButton variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="submitting || props.disabled || !name.trim()">
+        <UiButton
+          type="submit"
+          :disabled="submitting || props.disabled || !name.trim() || hasInvalidDesktopStartCommands"
+        >
           {{ submitting ? 'Saving…' : 'Save Changes' }}
         </UiButton>
       </div>

@@ -275,7 +275,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         handler = interface._sio.handlers["/"]["task:start_desktop"]
         await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
 
-        service.start_desktop.assert_awaited_once_with(workspace_id)
+        service.start_desktop.assert_awaited_once_with(workspace_id, command=None)
         interface._sio.emit.assert_awaited_with(
             "desktop:started",
             {
@@ -285,6 +285,34 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "container_ip": "10.100.0.2",
                 "network_name": "",
             },
+        )
+
+    async def test_start_desktop_forwards_selected_command(self) -> None:
+        service = DummyService()
+        service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())
+
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+
+        task_id = "desktop-task-2"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:start_desktop"]
+        await handler(
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "desktop_start_command": {
+                    "id": str(uuid.uuid4()),
+                    "name": "Browser",
+                    "command": "/usr/local/bin/opencuria-desktop-browser --incognito",
+                },
+            }
+        )
+
+        service.start_desktop.assert_awaited_once_with(
+            workspace_id,
+            command="/usr/local/bin/opencuria-desktop-browser --incognito",
         )
 
     async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:

@@ -8,10 +8,17 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.runners import api as runners_api
 from apps.organizations.models import Membership, MembershipRole, Organization
+from apps.runners import api as runners_api
 from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
-from apps.runners.models import Chat, ImageInstance, Runner, Session, Workspace
+from apps.runners.models import (
+    Chat,
+    ImageInstance,
+    Runner,
+    Session,
+    Workspace,
+    WorkspaceDesktopStartCommand,
+)
 from common.utils import generate_api_token, hash_token
 
 
@@ -88,6 +95,11 @@ def workspace_access_setup(db):
         prompt="owner prompt",
         status=SessionStatus.RUNNING,
     )
+    owner_desktop_command = WorkspaceDesktopStartCommand.objects.create(
+        workspace=owner_workspace,
+        name="Docs",
+        command="xdg-open https://docs.example.test",
+    )
     Session.objects.create(
         chat=admin_chat,
         prompt="admin prompt",
@@ -111,6 +123,7 @@ def workspace_access_setup(db):
         "admin_workspace": admin_workspace,
         "owner_chat": owner_chat,
         "owner_session": owner_session,
+        "owner_desktop_command": owner_desktop_command,
         "artifact": artifact,
     }
 
@@ -209,6 +222,15 @@ def test_global_image_artifact_create_requires_images_create_permission(
         ("post", "/api/v1/workspaces/{workspace_id}/prompt/", {"prompt": "test"}, [APIKeyPermission.PROMPTS_RUN.value]),
         ("post", "/api/v1/workspaces/{workspace_id}/sessions/{session_id}/cancel/", None, [APIKeyPermission.PROMPTS_CANCEL.value]),
         ("post", "/api/v1/workspaces/{workspace_id}/terminal/", {"cols": 80, "rows": 24}, [APIKeyPermission.TERMINAL_ACCESS.value]),
+        ("get", "/api/v1/workspaces/{workspace_id}/desktop-start-commands/", None, [APIKeyPermission.WORKSPACES_READ.value]),
+        ("post", "/api/v1/workspaces/{workspace_id}/desktop-start-commands/", {"name": "Docs", "command": "xdg-open https://docs.example.test"}, [APIKeyPermission.WORKSPACES_UPDATE.value]),
+        ("patch", "/api/v1/workspaces/{workspace_id}/desktop-start-commands/{command_id}/", {"name": "Docs 2"}, [APIKeyPermission.WORKSPACES_UPDATE.value]),
+        ("delete", "/api/v1/workspaces/{workspace_id}/desktop-start-commands/{command_id}/", None, [APIKeyPermission.WORKSPACES_UPDATE.value]),
+        ("post", "/api/v1/workspaces/{workspace_id}/desktop/", {"desktop_start_command_id": "{command_id}"}, [APIKeyPermission.TERMINAL_ACCESS.value]),
+        ("post", "/api/v1/workspaces/{workspace_id}/desktop/stop/", None, [APIKeyPermission.TERMINAL_ACCESS.value]),
+        ("get", "/api/v1/workspaces/{workspace_id}/desktop/status/", None, [APIKeyPermission.TERMINAL_ACCESS.value]),
+        ("post", "/api/v1/workspaces/{workspace_id}/desktop/clipboard/write/", {"text": "hello"}, [APIKeyPermission.TERMINAL_ACCESS.value]),
+        ("post", "/api/v1/workspaces/{workspace_id}/desktop/clipboard/read/", None, [APIKeyPermission.TERMINAL_ACCESS.value]),
         ("patch", "/api/v1/workspaces/{workspace_id}/", {"name": "renamed"}, [APIKeyPermission.WORKSPACES_UPDATE.value]),
         ("post", "/api/v1/workspaces/{workspace_id}/stop/", None, [APIKeyPermission.WORKSPACES_STOP.value]),
         ("post", "/api/v1/workspaces/{workspace_id}/resume/", None, [APIKeyPermission.WORKSPACES_RESUME.value]),
@@ -242,8 +264,14 @@ def test_foreign_workspace_endpoints_return_not_found(
         workspace_id=workspace_access_setup["owner_workspace"].id,
         session_id=workspace_access_setup["owner_session"].id,
         chat_id=workspace_access_setup["owner_chat"].id,
+        command_id=workspace_access_setup["owner_desktop_command"].id,
         artifact_id=workspace_access_setup["artifact"].id,
     )
+    if payload and "desktop_start_command_id" in payload:
+        payload = {
+            **payload,
+            "desktop_start_command_id": str(workspace_access_setup["owner_desktop_command"].id),
+        }
 
     request = getattr(client, method)
     if payload is None:

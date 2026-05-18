@@ -142,7 +142,11 @@ export DISPLAY=:1
 export HOME=/root
 openbox-session &
 sleep 1
-/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
+if [ -n "${OPENCURIA_DESKTOP_START_COMMAND:-}" ]; then
+    sh -lc "$OPENCURIA_DESKTOP_START_COMMAND" >/root/.vnc/desktop-command.log 2>&1 &
+else
+    /usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
+fi
 wait
 XSTARTUP
 chmod +x /root/.vnc/xstartup

@@ -6,15 +6,16 @@ from .models import (
     AgentCommand,
     AgentDefinition,
     Chat,
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     OrgAgentDefinitionActivation,
     Runner,
-    ImageBuildJob,
     RunnerSystemMetrics,
     Session,
     Task,
     Workspace,
+    WorkspaceDesktopStartCommand,
 )
 
 
@@ -29,6 +30,13 @@ class RunnerAdmin(admin.ModelAdmin):
 class WorkspaceAdmin(admin.ModelAdmin):
     list_display = ["id", "name", "runner", "status", "runtime_type", "created_at"]
     list_filter = ["status", "runtime_type"]
+    readonly_fields = ["id", "created_at", "updated_at"]
+
+
+@admin.register(WorkspaceDesktopStartCommand)
+class WorkspaceDesktopStartCommandAdmin(admin.ModelAdmin):
+    list_display = ["id", "workspace", "name", "command", "created_at"]
+    search_fields = ["workspace__name", "name", "command"]
     readonly_fields = ["id", "created_at", "updated_at"]
 
 

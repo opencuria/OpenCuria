@@ -86,3 +86,57 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.workspace_id, self.workspace_id)
         self.assertEqual(self.runtime.exec_command_wait.await_count, 1)
+
+    async def test_start_desktop_passes_selected_command_to_start_script(self) -> None:
+        self.runtime.exec_command_wait.side_effect = [
+            (1, "dead"),
+            (0, "supported"),
+            (0, "started"),
+        ]
+
+        await self.service.start_desktop(
+            self.workspace_id,
+            command="/usr/local/bin/opencuria-desktop-browser --incognito",
+        )
+
+        _, kwargs = self.runtime.exec_command_wait.await_args_list[2]
+        self.assertEqual(
+            kwargs["env"]["OPENCURIA_DESKTOP_START_COMMAND"],
+            "/usr/local/bin/opencuria-desktop-browser --incognito",
+        )
+
+    async def test_start_desktop_legacy_image_runs_selected_command_after_start(self) -> None:
+        self.runtime.exec_command_wait.side_effect = [
+            (1, "dead"),
+            (1, "unsupported"),
+            (0, "started"),
+            (0, ""),
+        ]
+
+        await self.service.start_desktop(
+            self.workspace_id,
+            command="x-terminal-emulator",
+        )
+
+        self.assertEqual(self.runtime.exec_command_wait.await_count, 4)
+        fallback_args, fallback_kwargs = self.runtime.exec_command_wait.await_args_list[3]
+        self.assertEqual(fallback_args[1][0:2], ["sh", "-lc"])
+        self.assertIn("OPENCURIA_DESKTOP_START_COMMAND", fallback_kwargs["env"])
+        self.assertEqual(
+            fallback_kwargs["env"]["OPENCURIA_DESKTOP_START_COMMAND"],
+            "x-terminal-emulator",
+        )
+
+    async def test_start_desktop_supported_image_skips_legacy_fallback(self) -> None:
+        self.runtime.exec_command_wait.side_effect = [
+            (1, "dead"),
+            (0, "supported"),
+            (0, "started"),
+        ]
+
+        await self.service.start_desktop(
+            self.workspace_id,
+            command="x-terminal-emulator",
+        )
+
+        self.assertEqual(self.runtime.exec_command_wait.await_count, 3)

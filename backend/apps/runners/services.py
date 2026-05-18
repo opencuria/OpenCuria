@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -23,7 +22,7 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.credentials.services import CredentialSvc
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
-from common.utils import generate_uuid, hash_token, verify_token
+from common.utils import generate_uuid, hash_token
 
 from .enums import (
     AgentCommandPhase,
@@ -43,15 +42,17 @@ from .exceptions import (
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
+from .models import Chat, ImageInstance, Runner, Session, Task, Workspace
 from .repositories import (
     AgentRepository,
     ChatRepository,
+    ImageBuildJobRepository,
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
-    ImageBuildJobRepository,
     SessionRepository,
     TaskRepository,
+    WorkspaceDesktopStartCommandRepository,
     WorkspaceRepository,
 )
 
@@ -83,6 +84,7 @@ class RunnerService:
         self.tasks = TaskRepository
         self.agents = AgentRepository
         self.chats = ChatRepository
+        self.desktop_start_commands = WorkspaceDesktopStartCommandRepository
         self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
         self.build_jobs = ImageBuildJobRepository
@@ -95,7 +97,7 @@ class RunnerService:
     # Runner lifecycle
     # ------------------------------------------------------------------
 
-    def authenticate_runner(self, token: str) -> "Runner":
+    def authenticate_runner(self, token: str) -> Runner:
         """
         Authenticate a runner by its API token.
 
@@ -109,11 +111,11 @@ class RunnerService:
 
     def register_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         *,
         sid: str,
         available_runtimes: list[str] | None = None,
-    ) -> "Runner":
+    ) -> Runner:
         """
         Mark a runner as online after it connects and sends runner:register.
 
@@ -133,7 +135,7 @@ class RunnerService:
         )
         return runner
 
-    async def dispatch_pending_image_builds(self, runner: "Runner") -> list:
+    async def dispatch_pending_image_builds(self, runner: Runner) -> list:
         """Dispatch pending image builds that were created while the runner was offline.
 
         This is called after a runner registers online.  It queries for
@@ -176,7 +178,7 @@ class RunnerService:
                 )
         return dispatched
 
-    async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
+    async def dispatch_pending_image_deletions(self, runner: Runner) -> list:
         """Dispatch pending image deletions that accumulated while runner was offline."""
         from .models import ImageInstance
 
@@ -262,7 +264,6 @@ class RunnerService:
 
         # Also fail any pending/in-progress tasks on this runner's workspaces
         # that are for run_prompt (so task state is consistent).
-        from .enums import TaskStatus as TS
         Task.objects.filter(
             runner=runner,
             status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
@@ -302,7 +303,7 @@ class RunnerService:
 
     def _forward_runner_status_to_frontend(
         self,
-        runner: "Runner",
+        runner: Runner,
         status: str,
     ) -> None:
         """Emit runner status change events for all workspaces of this runner.
@@ -590,7 +591,7 @@ class RunnerService:
         return f"workspace-{str(workspace_id)[:8]}"
 
     @staticmethod
-    def _validate_runner_qemu_limits(runner: "Runner") -> None:
+    def _validate_runner_qemu_limits(runner: Runner) -> None:
         """Validate min/max/default and total limits for a runner's QEMU config."""
         if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
             raise ConflictError("Runner vCPU minimum cannot exceed maximum")
@@ -634,7 +635,7 @@ class RunnerService:
             return "busy"
         return operation.replace("_", " ")
 
-    def _ensure_workspace_available(self, workspace: "Workspace") -> None:
+    def _ensure_workspace_available(self, workspace: Workspace) -> None:
         """Reject mutating operations while another blocking lifecycle action runs."""
         if workspace.status in (
             WorkspaceStatus.PENDING_DELETION,
@@ -666,9 +667,9 @@ class RunnerService:
 
     async def _set_workspace_operation(
         self,
-        workspace: "Workspace",
+        workspace: Workspace,
         operation: WorkspaceOperation | None,
-    ) -> "Workspace":
+    ) -> Workspace:
         """Persist and broadcast a workspace operation change."""
         workspace = await sync_to_async(self.workspaces.update_active_operation)(
             workspace,
@@ -680,11 +681,11 @@ class RunnerService:
     async def _dispatch_workspace_task(
         self,
         *,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         payload: dict,
-        task: "Task",
-        workspace: "Workspace" | None = None,
+        task: Task,
+        workspace: Workspace | None = None,
         operation: WorkspaceOperation | None = None,
     ) -> None:
         """Set busy state, emit the task to the runner, and roll back on dispatch failure."""
@@ -702,7 +703,7 @@ class RunnerService:
     @staticmethod
     def _resolve_qemu_resources(
         *,
-        runner: "Runner",
+        runner: Runner,
         qemu_vcpus: int | None,
         qemu_memory_mb: int | None,
         qemu_disk_size_gb: int | None,
@@ -734,7 +735,7 @@ class RunnerService:
     @staticmethod
     def _ensure_runner_supports_runtime(
         *,
-        runner: "Runner",
+        runner: Runner,
         runtime_type: str,
     ) -> None:
         """Raise when a runner does not advertise support for a runtime."""
@@ -744,7 +745,7 @@ class RunnerService:
     async def _ensure_qemu_active_capacity(
         self,
         *,
-        runner: "Runner",
+        runner: Runner,
         requested_vcpus: int,
         requested_memory_mb: int,
         requested_disk_size_gb: int,
@@ -791,6 +792,174 @@ class RunnerService:
                 f"Runner active disk limit exceeded ({next_total_disk_size_gb}/{runner.qemu_max_active_disk_size_gb} GiB)"
             )
 
+    @staticmethod
+    def _normalize_desktop_start_command(
+        *,
+        name: str,
+        command: str,
+    ) -> tuple[str, str]:
+        """Validate and normalize one desktop start command payload."""
+        normalized_name = (name or "").strip()
+        normalized_command = (command or "").strip()
+        if not normalized_name:
+            raise ValueError("Desktop start command name must not be empty")
+        if not normalized_command:
+            raise ValueError("Desktop start command must not be empty")
+        return normalized_name, normalized_command
+
+    def _serialize_workspace_desktop_start_commands(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> list[dict[str, str]]:
+        """Return a snapshot-ready list of workspace desktop start commands."""
+        return [
+            {
+                "name": command.name,
+                "command": command.command,
+            }
+            for command in self.desktop_start_commands.list_by_workspace(workspace_id)
+        ]
+
+    def _resolve_desktop_start_command_snapshots_for_image(
+        self,
+        image,
+    ) -> list[dict[str, str]]:
+        """Resolve the desktop start command set to use for a cloned workspace."""
+        raw_snapshot = getattr(image, "desktop_start_commands_snapshot", None)
+        if isinstance(raw_snapshot, list) and raw_snapshot:
+            resolved_snapshot: list[dict[str, str]] = []
+            for item in raw_snapshot:
+                if not isinstance(item, dict):
+                    continue
+                name = (item.get("name") or "").strip()
+                command = (item.get("command") or "").strip()
+                if name and command:
+                    resolved_snapshot.append({"name": name, "command": command})
+            if resolved_snapshot:
+                return resolved_snapshot
+
+        source_workspace = getattr(image, "origin_workspace", None)
+        if source_workspace is not None:
+            source_commands = self._serialize_workspace_desktop_start_commands(
+                source_workspace.id
+            )
+            if source_commands:
+                return source_commands
+
+        from .models import (
+            DEFAULT_DESKTOP_START_COMMAND_COMMAND,
+            DEFAULT_DESKTOP_START_COMMAND_NAME,
+        )
+
+        return [
+            {
+                "name": DEFAULT_DESKTOP_START_COMMAND_NAME,
+                "command": DEFAULT_DESKTOP_START_COMMAND_COMMAND,
+            }
+        ]
+
+    def _replace_workspace_desktop_start_commands(
+        self,
+        workspace,
+        commands: list[dict[str, str]],
+    ) -> None:
+        """Replace the workspace command set with normalized commands."""
+        normalized_commands = [
+            {
+                "name": normalized_name,
+                "command": normalized_command,
+            }
+            for normalized_name, normalized_command in (
+                self._normalize_desktop_start_command(
+                    name=command["name"],
+                    command=command["command"],
+                )
+                for command in commands
+            )
+        ]
+        self.desktop_start_commands.replace_for_workspace(workspace, normalized_commands)
+
+    def list_workspace_desktop_start_commands(
+        self,
+        workspace_id: uuid.UUID,
+    ):
+        """Return desktop start commands for one workspace."""
+        workspace = self.workspaces.get_by_id(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        return list(self.desktop_start_commands.list_by_workspace(workspace_id))
+
+    def create_workspace_desktop_start_command(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        name: str,
+        command: str,
+    ):
+        """Create a desktop start command for a workspace."""
+        workspace = self.workspaces.get_by_id(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        normalized_name, normalized_command = self._normalize_desktop_start_command(
+            name=name,
+            command=command,
+        )
+        return self.desktop_start_commands.create(
+            workspace=workspace,
+            name=normalized_name,
+            command=normalized_command,
+        )
+
+    def update_workspace_desktop_start_command(
+        self,
+        workspace_id: uuid.UUID,
+        command_id: uuid.UUID,
+        *,
+        name: str | None = None,
+        command: str | None = None,
+    ):
+        """Update one desktop start command scoped to its workspace."""
+        desktop_start_command = self.desktop_start_commands.get_by_workspace_and_id(
+            workspace_id,
+            command_id,
+        )
+        if desktop_start_command is None:
+            raise NotFoundError("WorkspaceDesktopStartCommand", str(command_id))
+
+        update_name = None
+        update_command = None
+        if name is not None:
+            update_name = (name or "").strip()
+            if not update_name:
+                raise ValueError("Desktop start command name must not be empty")
+        if command is not None:
+            update_command = (command or "").strip()
+            if not update_command:
+                raise ValueError("Desktop start command must not be empty")
+
+        if update_name is None and update_command is None:
+            raise ValueError("At least one desktop start command field is required")
+
+        return self.desktop_start_commands.update(
+            desktop_start_command,
+            name=update_name,
+            command=update_command,
+        )
+
+    def delete_workspace_desktop_start_command(
+        self,
+        workspace_id: uuid.UUID,
+        command_id: uuid.UUID,
+    ) -> None:
+        """Delete one desktop start command scoped to its workspace."""
+        desktop_start_command = self.desktop_start_commands.get_by_workspace_and_id(
+            workspace_id,
+            command_id,
+        )
+        if desktop_start_command is None:
+            raise NotFoundError("WorkspaceDesktopStartCommand", str(command_id))
+        self.desktop_start_commands.delete(desktop_start_command)
+
     async def create_workspace(
         self,
         *,
@@ -808,7 +977,7 @@ class RunnerService:
         image_artifact_id: uuid.UUID | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["Workspace", "Task"]:
+    ) -> tuple[Workspace, Task]:
         """
         Create a new workspace on a runner.
 
@@ -851,22 +1020,37 @@ class RunnerService:
             runtime_type = selected_build_job.image_definition.runtime_type
             runner_id = selected_build_job.runner_id
         else:
-            if source_workspace is None:
-                raise ConflictError("Captured image artifact is missing its source workspace")
+            artifact_runner = selected_image.runner
             if (
-                organization_id
+                source_workspace is not None
+                and organization_id
                 and source_workspace.runner.organization_id != organization_id
             ):
                 raise NotFoundError("ImageArtifact", str(image_artifact_id))
             if (
+                source_workspace is None
+                and organization_id
+                and artifact_runner.organization_id != organization_id
+            ):
+                raise NotFoundError("ImageArtifact", str(image_artifact_id))
+            if (
                 requested_runner_id is not None
-                and requested_runner_id != source_workspace.runner_id
+                and requested_runner_id
+                != (source_workspace.runner_id if source_workspace else artifact_runner.id)
             ):
                 raise ConflictError(
                     "Selected runner does not have the selected image artifact"
                 )
-            runtime_type = source_workspace.runtime_type
-            runner_id = source_workspace.runner_id
+            runtime_type = (
+                source_workspace.runtime_type
+                if source_workspace is not None
+                else selected_image.runtime_type
+            )
+            runner_id = (
+                source_workspace.runner_id
+                if source_workspace is not None
+                else artifact_runner.id
+            )
 
         # Find a suitable runner
         if runner_id:
@@ -891,6 +1075,9 @@ class RunnerService:
             runner=runner,
             runtime_type=runtime_type,
         )
+        resolved_desktop_start_commands = await sync_to_async(
+            self._resolve_desktop_start_command_snapshots_for_image
+        )(selected_image)
 
         self._validate_runner_qemu_limits(runner)
         resolved_qemu_vcpus: int | None = None
@@ -927,6 +1114,10 @@ class RunnerService:
             qemu_disk_size_gb=resolved_qemu_disk_size_gb,
             base_image_instance=selected_image,
             created_by=user,
+        )
+        await sync_to_async(self._replace_workspace_desktop_start_commands)(
+            workspace,
+            resolved_desktop_start_commands,
         )
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
@@ -988,7 +1179,7 @@ class RunnerService:
         agent_options: dict[str, str] | None = None,
         chat_id: str | None = None,
         skill_ids: list[uuid.UUID] | None = None,
-    ) -> tuple["Session", "Task", "Chat"]:
+    ) -> tuple[Session, Task, Chat]:
         """
         Run a prompt in an existing workspace.
 
@@ -1285,7 +1476,7 @@ class RunnerService:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
-    ) -> "Workspace":
+    ) -> Workspace:
         """Update mutable workspace metadata and attached credentials."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -1385,11 +1576,11 @@ class RunnerService:
 
         return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
 
-    async def rename_workspace(self, workspace_id: uuid.UUID, name: str) -> "Workspace":
+    async def rename_workspace(self, workspace_id: uuid.UUID, name: str) -> Workspace:
         """Rename an existing workspace."""
         return await self.update_workspace(workspace_id, name=name)
 
-    async def stop_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def stop_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Stop a running workspace."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -1432,7 +1623,7 @@ class RunnerService:
         self,
         workspace_id: uuid.UUID,
         session_id: uuid.UUID,
-    ) -> "Task":
+    ) -> Task:
         """Cancel a running prompt session without stopping the workspace."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -1486,7 +1677,7 @@ class RunnerService:
         await sync_to_async(self.tasks.mark_in_progress)(task)
         return task
 
-    async def resume_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def resume_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Resume a stopped workspace."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -1555,7 +1746,7 @@ class RunnerService:
         )
         return task
 
-    async def remove_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def remove_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Remove a workspace and its container.
 
         If the runner is online, dispatches the delete command immediately and
@@ -2070,7 +2261,7 @@ class RunnerService:
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
-    ) -> "Task":
+    ) -> Task:
         """Dispatch a start_terminal task to the runner.
 
         Returns the Task record.
@@ -2355,7 +2546,8 @@ class RunnerService:
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
-    ) -> "Task":
+        desktop_start_command_id: uuid.UUID | None = None,
+    ) -> Task:
         """Dispatch a start_desktop task to the runner."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -2373,6 +2565,32 @@ class RunnerService:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
+        desktop_start_commands = await sync_to_async(
+            lambda: list(self.desktop_start_commands.list_by_workspace(workspace_id))
+        )()
+        selected_desktop_start_command = None
+        if desktop_start_command_id is not None:
+            selected_desktop_start_command = next(
+                (
+                    command
+                    for command in desktop_start_commands
+                    if command.id == desktop_start_command_id
+                ),
+                None,
+            )
+            if selected_desktop_start_command is None:
+                raise NotFoundError(
+                    "WorkspaceDesktopStartCommand",
+                    str(desktop_start_command_id),
+                )
+        elif len(desktop_start_commands) == 1:
+            selected_desktop_start_command = desktop_start_commands[0]
+        elif len(desktop_start_commands) > 1:
+            raise ValueError(
+                "desktop_start_command_id is required when multiple desktop start "
+                "commands exist"
+            )
+
         from common.utils import generate_uuid
 
         task_id = generate_uuid()
@@ -2383,13 +2601,21 @@ class RunnerService:
             workspace=workspace,
         )
 
+        payload = {
+            "task_id": str(task_id),
+            "workspace_id": str(workspace_id),
+        }
+        if selected_desktop_start_command is not None:
+            payload["desktop_start_command"] = {
+                "id": str(selected_desktop_start_command.id),
+                "name": selected_desktop_start_command.name,
+                "command": selected_desktop_start_command.command,
+            }
+
         await self._emit_to_runner(
             runner,
             "task:start_desktop",
-            {
-                "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-            },
+            payload,
         )
 
         await sync_to_async(self.tasks.mark_in_progress)(task)
@@ -2405,7 +2631,7 @@ class RunnerService:
     async def stop_desktop(
         self,
         workspace_id: uuid.UUID,
-    ) -> "Task":
+    ) -> Task:
         """Dispatch a stop_desktop task to the runner."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -2588,7 +2814,7 @@ class RunnerService:
                 return
             await sync_to_async(self.tasks.complete)(task)
 
-        desktop_info = self._active_desktops.pop(workspace_id, None)
+        self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
 
         logger.info("Desktop stopped: workspace=%s", workspace_id)
@@ -2779,7 +3005,7 @@ class RunnerService:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         now: datetime | None = None,
-    ) -> list["Task"]:
+    ) -> list[Task]:
         """Stop running workspaces whose inactivity deadline has elapsed."""
         evaluation_time = now or timezone.now()
         if runner_id is not None:
@@ -2793,7 +3019,7 @@ class RunnerService:
         else:
             workspaces = await sync_to_async(lambda: list(self.workspaces.list_all()))()
 
-        dispatched: list["Task"] = []
+        dispatched: list[Task] = []
         for workspace in workspaces:
             if not self._should_auto_stop_workspace(workspace, now=evaluation_time):
                 continue
@@ -2816,7 +3042,7 @@ class RunnerService:
 
     def handle_heartbeat(
         self,
-        runner: "Runner",
+        runner: Runner,
         workspaces: list[dict],
     ) -> None:
         """Handle runner:heartbeat event — reconcile workspace state.
@@ -2828,7 +3054,6 @@ class RunnerService:
             runner: The Runner that sent the heartbeat.
             workspaces: List of dicts with workspace_id, status, agent_type.
         """
-        from django.utils import timezone as tz
 
         # Update heartbeat timestamp
         self.runners.update_heartbeat(runner)
@@ -2973,7 +3198,7 @@ class RunnerService:
 
     def handle_unknown_workspace_cleanup_result(
         self,
-        runner: "Runner",
+        runner: Runner,
         workspace_id: str,
         *,
         cleaned: bool,
@@ -3001,7 +3226,7 @@ class RunnerService:
 
     def _request_workspace_cleanup(
         self,
-        runner: "Runner",
+        runner: Runner,
         *,
         workspace_id: str,
         reason: str,
@@ -3048,13 +3273,13 @@ class RunnerService:
     # Query methods (used by REST API)
     # ------------------------------------------------------------------
 
-    def list_runners(self, organization_id: uuid.UUID | None = None) -> list["Runner"]:
+    def list_runners(self, organization_id: uuid.UUID | None = None) -> list[Runner]:
         """Return all registered runners, optionally filtered by organization."""
         if organization_id:
             return list(self.runners.list_by_organization(organization_id))
         return list(self.runners.list_all())
 
-    def get_runner(self, runner_id: uuid.UUID) -> "Runner":
+    def get_runner(self, runner_id: uuid.UUID) -> Runner:
         """Return a runner by ID or raise RunnerNotFoundError."""
         runner = self.runners.get_by_id(runner_id)
         if runner is None:
@@ -3065,7 +3290,7 @@ class RunnerService:
         self,
         runner_id: uuid.UUID,
         **fields,
-    ) -> "Runner":
+    ) -> Runner:
         """Update per-runner QEMU resource limits/defaults."""
         runner = self.get_runner(runner_id)
         updated_fields = dict(fields)
@@ -3085,7 +3310,7 @@ class RunnerService:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         user=None,
-    ) -> list["Workspace"]:
+    ) -> list[Workspace]:
         """Return workspaces filtered by org and owner."""
         if runner_id:
             qs = self.workspaces.list_by_runner(runner_id)
@@ -3099,7 +3324,7 @@ class RunnerService:
 
         return list(qs)
 
-    def get_workspace(self, workspace_id: uuid.UUID) -> "Workspace":
+    def get_workspace(self, workspace_id: uuid.UUID) -> Workspace:
         """Return a workspace by ID or raise WorkspaceNotFoundError."""
         workspace = self.workspaces.get_by_id(workspace_id)
         if workspace is None:
@@ -3112,7 +3337,7 @@ class RunnerService:
         *,
         user,
         organization_id: uuid.UUID,
-    ) -> "Workspace":
+    ) -> Workspace:
         """Return a workspace only when it belongs to the active org and owner."""
         workspace = self.get_workspace(workspace_id)
         if workspace.runner.organization_id != organization_id:
@@ -3121,7 +3346,7 @@ class RunnerService:
             raise WorkspaceNotFoundError(str(workspace_id))
         return workspace
 
-    def list_sessions(self, workspace_id: uuid.UUID) -> list["Session"]:
+    def list_sessions(self, workspace_id: uuid.UUID) -> list[Session]:
         """Return all sessions for a workspace."""
         return list(self.sessions.list_by_workspace(workspace_id))
 
@@ -3129,7 +3354,7 @@ class RunnerService:
         """Return all chats for a workspace."""
         return list(self.chats.list_by_workspace(workspace_id))
 
-    def list_chat_sessions(self, chat_id: uuid.UUID) -> list["Session"]:
+    def list_chat_sessions(self, chat_id: uuid.UUID) -> list[Session]:
         """Return all sessions for a specific chat."""
         return list(self.sessions.list_by_chat(chat_id))
 
@@ -3138,7 +3363,7 @@ class RunnerService:
         workspace_id: uuid.UUID,
         name: str = "",
         agent_definition_id: uuid.UUID | None = None,
-    ) -> "Chat":
+    ) -> Chat:
         """Create a new chat within a workspace."""
         workspace = self.workspaces.get_by_id(workspace_id)
         if workspace is None:
@@ -3173,7 +3398,7 @@ class RunnerService:
             agent_type=agent_type,
         )
 
-    def rename_chat(self, chat_id: uuid.UUID, name: str) -> "Chat":
+    def rename_chat(self, chat_id: uuid.UUID, name: str) -> Chat:
         """Rename an existing chat."""
         chat = self.chats.get_by_id(chat_id)
         if chat is None:
@@ -3294,7 +3519,7 @@ class RunnerService:
 
     async def _emit_to_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         data: dict,
     ) -> None:
@@ -3316,7 +3541,7 @@ class RunnerService:
 
     async def _call_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         data: dict,
         *,
@@ -3429,7 +3654,7 @@ RUN mkdir -p /root/.vnc \\
     && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
-    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
+    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\nif [ -n \"${OPENCURIA_DESKTOP_START_COMMAND:-}\" ]; then\\n  sh -lc \"$OPENCURIA_DESKTOP_START_COMMAND\" >/root/.vnc/desktop-command.log 2>&1 &\\nelse\\n  /usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nfi\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
@@ -3507,7 +3732,11 @@ export DISPLAY=:1
 export HOME=/root
 openbox-session &
 sleep 1
-/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
+if [ -n "${OPENCURIA_DESKTOP_START_COMMAND:-}" ]; then
+    sh -lc "$OPENCURIA_DESKTOP_START_COMMAND" >/root/.vnc/desktop-command.log 2>&1 &
+else
+    /usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
+fi
 wait
 XSTARTUP
 chmod +x /root/.vnc/xstartup
@@ -3684,7 +3913,7 @@ rm -rf /var/lib/apt/lists/*
         created_by=None,
     ):
         """Create/update runner build record and dispatch task:build_image."""
-        from .models import ImageInstance, ImageBuildJob
+        from .models import ImageBuildJob, ImageInstance
 
         self._ensure_runner_supports_runtime(
             runner=runner,
@@ -3825,7 +4054,8 @@ rm -rf /var/lib/apt/lists/*
     ) -> None:
         """Mark a runner image build as active and complete its task."""
         from django.utils import timezone
-        from .models import ImageInstance, ImageBuildJob
+
+        from .models import ImageBuildJob, ImageInstance
 
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
@@ -3909,7 +4139,7 @@ rm -rf /var/lib/apt/lists/*
         workspace_id: uuid.UUID,
         name: str,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["Workspace", "Task"]:
+    ) -> tuple[Workspace, Task]:
         """Dispatch image artifact creation to the runner.
 
         Creates a pending image instance immediately so the UI can show
@@ -3945,6 +4175,9 @@ rm -rf /var/lib/apt/lists/*
         # Create the artifact record upfront so the UI can immediately show the
         # 'creating' state.
         created_by = await sync_to_async(lambda: workspace.created_by)()
+        desktop_start_commands_snapshot = await sync_to_async(
+            self._serialize_workspace_desktop_start_commands
+        )(workspace.id)
         image = await sync_to_async(self.image_instances.create_pending)(
             runner=runner,
             runtime_type=workspace.runtime_type,
@@ -3953,6 +4186,7 @@ rm -rf /var/lib/apt/lists/*
             name=name,
             creating_task_id=str(task_id),
             created_by=created_by,
+            desktop_start_commands_snapshot=desktop_start_commands_snapshot,
         )
 
         await self._dispatch_workspace_task(
@@ -4012,6 +4246,9 @@ rm -rf /var/lib/apt/lists/*
                 name=name,
                 size_bytes=size_bytes,
                 created_by=task.workspace.created_by if task.workspace else None,
+                desktop_start_commands_snapshot=self._serialize_workspace_desktop_start_commands(
+                    workspace.id
+                ),
             )
 
         if task.workspace:
@@ -4306,7 +4543,6 @@ rm -rf /var/lib/apt/lists/*
         Marks both the build job and its image instance as deleted.
         Also checks if the parent definition can be marked deleted.
         """
-        from .models import ImageBuildJob
 
         task = self.tasks.get_by_id(uuid.UUID(task_id)) if task_id else None
         if task is not None and not self._validate_task_runner(task, runner_id):
@@ -4422,7 +4658,7 @@ rm -rf /var/lib/apt/lists/*
         Step 2: Initiate deletion of all runner builds.
         Definition itself is only marked deleted when all build deletes are confirmed.
         """
-        from .models import ImageDefinition, ImageBuildJob
+        from .models import ImageBuildJob, ImageDefinition
 
         definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
         if definition is None:
@@ -4473,7 +4709,7 @@ rm -rf /var/lib/apt/lists/*
         # Check if all are already done
         await sync_to_async(self._check_definition_deletion_complete)(definition_id)
 
-    async def dispatch_pending_workspace_deletions(self, runner: "Runner") -> list:
+    async def dispatch_pending_workspace_deletions(self, runner: Runner) -> list:
         """Dispatch pending workspace deletions that accumulated while runner was offline."""
         from .models import Workspace
 
@@ -4531,7 +4767,7 @@ rm -rf /var/lib/apt/lists/*
                 )
         return dispatched
 
-    async def dispatch_pending_build_job_deletions(self, runner: "Runner") -> list:
+    async def dispatch_pending_build_job_deletions(self, runner: Runner) -> list:
         """Dispatch pending build job deletions that accumulated while runner was offline."""
         from .models import ImageBuildJob, ImageInstance
 
@@ -4610,7 +4846,7 @@ rm -rf /var/lib/apt/lists/*
         credentials: list | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["Workspace", "Task"]:
+    ) -> tuple[Workspace, Task]:
         """Create a workspace from an image artifact.
 
         Credentials are explicitly supplied by the caller and injected for the
@@ -4639,9 +4875,11 @@ rm -rf /var/lib/apt/lists/*
             qemu_memory_mb = None
             qemu_disk_size_gb = None
         else:
-            raise ValueError(
-                f"Image artifact '{image_artifact_id}' is missing its source runtime metadata"
-            )
+            runner = image.runner
+            runtime_type = image.runtime_type
+            qemu_vcpus = None
+            qemu_memory_mb = None
+            qemu_disk_size_gb = None
 
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
@@ -4670,6 +4908,9 @@ rm -rf /var/lib/apt/lists/*
                 requested_memory_mb=qemu_memory_mb,
                 requested_disk_size_gb=qemu_disk_size_gb,
             )
+        resolved_desktop_start_commands = await sync_to_async(
+            self._resolve_desktop_start_command_snapshots_for_image
+        )(image)
 
         resolved_env_vars = env_vars or {}
         resolved_files = files or []
@@ -4693,6 +4934,10 @@ rm -rf /var/lib/apt/lists/*
             qemu_disk_size_gb=qemu_disk_size_gb,
             base_image_instance=image,
             created_by=user,
+        )
+        await sync_to_async(self._replace_workspace_desktop_start_commands)(
+            workspace,
+            resolved_desktop_start_commands,
         )
 
         if credentials is not None:

@@ -20,8 +20,8 @@ from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
-from django.http import HttpRequest
 from django.db.models import Q
+from django.http import HttpRequest
 from django.utils import timezone
 from ninja import Router
 
@@ -32,13 +32,11 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_api_token, hash_token
 
-from .enums import RunnerStatus as RS, SessionStatus, WorkspaceStatus
+from .enums import RunnerStatus, SessionStatus, WorkspaceStatus
 from .exceptions import RunnerOfflineError
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
-    AgentCommandIn,
     AgentCommandOut,
-    AgentCredentialRelationCommandIn,
     AgentCredentialRelationCommandOut,
     AgentCredentialRelationCreateIn,
     AgentCredentialRelationOut,
@@ -48,7 +46,24 @@ from .schemas import (
     ChatOut,
     ChatRenameIn,
     ConversationOut,
+    DesktopClipboardReadOut,
+    DesktopClipboardWriteIn,
+    DesktopStartIn,
+    DesktopStartOut,
+    DesktopStatusOut,
+    DesktopStopOut,
     ErrorOut,
+    ImageArtifactCreateIn,
+    ImageArtifactCreateOut,
+    ImageArtifactOut,
+    ImageArtifactUpdateIn,
+    ImageBuildJobCreateIn,
+    ImageBuildJobOut,
+    ImageBuildJobUpdateIn,
+    ImageDefinitionCreateIn,
+    ImageDefinitionDuplicateIn,
+    ImageDefinitionOut,
+    ImageDefinitionUpdateIn,
     LastSessionOut,
     MarkConversationReadIn,
     MarkConversationUnreadIn,
@@ -57,38 +72,25 @@ from .schemas import (
     OrgAgentDefinitionDuplicateIn,
     OrgAgentDefinitionOut,
     OrgAgentDefinitionUpdateIn,
-    ImageArtifactCreateIn,
-    ImageArtifactCreateOut,
-    ImageArtifactOut,
-    ImageArtifactUpdateIn,
-    ImageDefinitionCreateIn,
-    ImageDefinitionDuplicateIn,
-    ImageDefinitionOut,
-    ImageDefinitionUpdateIn,
     PromptIn,
     PromptOut,
     RunnerCreateIn,
     RunnerCreateOut,
     RunnerOut,
-    RunnerUpdateIn,
     RunnerSystemMetricsOut,
+    RunnerUpdateIn,
     SessionOut,
     SessionSkillOut,
-    ImageBuildJobCreateIn,
-    ImageBuildJobOut,
-    ImageBuildJobUpdateIn,
     TaskOut,
     TerminalStartIn,
-    WorkspaceFromImageArtifactIn,
-    WorkspaceFromImageArtifactOut,
     TerminalStartOut,
-    DesktopStartOut,
-    DesktopStopOut,
-    DesktopStatusOut,
-    DesktopClipboardWriteIn,
-    DesktopClipboardReadOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
+    WorkspaceDesktopStartCommandIn,
+    WorkspaceDesktopStartCommandOut,
+    WorkspaceDesktopStartCommandUpdateIn,
+    WorkspaceFromImageArtifactIn,
+    WorkspaceFromImageArtifactOut,
     WorkspaceOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
@@ -116,8 +118,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
     if hasattr(workspace, "runner_is_online"):
         runner_online = bool(workspace.runner_is_online)
     elif hasattr(workspace, "runner") and workspace.runner is not None:
-        from .enums import RunnerStatus as RS
-        runner_online = workspace.runner.status == RS.ONLINE
+        runner_online = workspace.runner.status == RunnerStatus.ONLINE
 
     auto_stop_timeout_minutes = None
     auto_stop_at = None
@@ -162,6 +163,18 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         has_active_session=bool(getattr(workspace, "has_active_session", False)),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
+    )
+
+
+def _workspace_desktop_start_command_to_out(command) -> WorkspaceDesktopStartCommandOut:
+    """Map a workspace desktop start command ORM instance to its API schema."""
+    return WorkspaceDesktopStartCommandOut(
+        id=command.id,
+        workspace_id=command.workspace_id,
+        name=command.name,
+        command=command.command,
+        created_at=command.created_at,
+        updated_at=command.updated_at,
     )
 
 
@@ -642,7 +655,6 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        from .enums import RunnerStatus as RS
         from .models import Session
         return 200, WorkspaceOut(
             id=workspace.id,
@@ -675,7 +687,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
                 chat__workspace_id=workspace_id,
                 status__in=(SessionStatus.PENDING, SessionStatus.RUNNING),
             ).exists(),
-            runner_online=workspace.runner.status == RS.ONLINE,
+            runner_online=workspace.runner.status == RunnerStatus.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
         )
     except NotFoundError as e:
@@ -748,6 +760,136 @@ async def cancel_session_prompt(
         return 400, ErrorOut(detail=str(e), code="validation_error")
 
 
+@workspace_router.get(
+    "/{workspace_id}/desktop-start-commands/",
+    response={200: list[WorkspaceDesktopStartCommandOut], 403: ErrorOut, 404: ErrorOut},
+    summary="List workspace desktop start commands",
+)
+async def list_workspace_desktop_start_commands(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Return desktop start commands for a workspace."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_READ)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        commands = await sync_to_async(service.list_workspace_desktop_start_commands)(
+            workspace_id
+        )
+        return [
+            _workspace_desktop_start_command_to_out(command) for command in commands
+        ]
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop-start-commands/",
+    response={
+        201: WorkspaceDesktopStartCommandOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+    },
+    summary="Create workspace desktop start command",
+)
+async def create_workspace_desktop_start_command(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    payload: WorkspaceDesktopStartCommandIn,
+):
+    """Create a desktop start command for a workspace."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        command = await sync_to_async(service.create_workspace_desktop_start_command)(
+            workspace_id,
+            name=payload.name,
+            command=payload.command,
+        )
+        return 201, _workspace_desktop_start_command_to_out(command)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.patch(
+    "/{workspace_id}/desktop-start-commands/{command_id}/",
+    response={
+        200: WorkspaceDesktopStartCommandOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+    },
+    summary="Update workspace desktop start command",
+)
+async def update_workspace_desktop_start_command(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    command_id: uuid.UUID,
+    payload: WorkspaceDesktopStartCommandUpdateIn,
+):
+    """Update one workspace desktop start command."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        command = await sync_to_async(service.update_workspace_desktop_start_command)(
+            workspace_id,
+            command_id,
+            name=payload.name,
+            command=payload.command,
+        )
+        return 200, _workspace_desktop_start_command_to_out(command)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.delete(
+    "/{workspace_id}/desktop-start-commands/{command_id}/",
+    response={204: None, 403: ErrorOut, 404: ErrorOut},
+    summary="Delete workspace desktop start command",
+)
+async def delete_workspace_desktop_start_command(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    command_id: uuid.UUID,
+):
+    """Delete one workspace desktop start command."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        await sync_to_async(service.delete_workspace_desktop_start_command)(
+            workspace_id,
+            command_id,
+        )
+        return 204, None
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+
+
 @workspace_router.post(
     "/{workspace_id}/terminal/",
     response={202: TerminalStartOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
@@ -780,33 +922,36 @@ async def start_terminal(
 
 @workspace_router.post(
     "/{workspace_id}/desktop/",
-    response={202: DesktopStartOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={202: DesktopStartOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Start desktop session",
 )
 async def start_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopStartIn = None,
 ):
     """Start a KasmVNC desktop session in a workspace container."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        task = await service.start_desktop(workspace_id)
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        task = await service.start_desktop(
+            workspace_id,
+            desktop_start_command_id=(
+                payload.desktop_start_command_id if payload else None
+            ),
+        )
         return 202, DesktopStartOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
 
 
 @workspace_router.post(
@@ -822,16 +967,11 @@ async def stop_desktop(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
+        await _get_owned_workspace_async(request, org_id, workspace_id)
         task = await service.stop_desktop(workspace_id)
         return 202, DesktopStopOut(task_id=task.id)
     except NotFoundError as e:
@@ -853,16 +993,11 @@ async def desktop_status(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
+        await _get_owned_workspace_async(request, org_id, workspace_id)
         desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
         is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
@@ -885,16 +1020,11 @@ async def desktop_clipboard_write(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
+        await _get_owned_workspace_async(request, org_id, workspace_id)
         await service.write_desktop_clipboard(workspace_id, payload.text)
         text = await service.read_desktop_clipboard(workspace_id)
         return 200, DesktopClipboardReadOut(text=text)
@@ -919,16 +1049,11 @@ async def desktop_clipboard_read(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
+        await _get_owned_workspace_async(request, org_id, workspace_id)
         text = await service.read_desktop_clipboard(workspace_id)
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
@@ -1429,17 +1554,17 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
     image_runner = getattr(artifact, "runner", None)
     if image_runner is not None and source_runner_id is None:
         source_runner_id = image_runner.id
-        source_runner_online = image_runner.status == RS.ONLINE
+        source_runner_online = image_runner.status == RunnerStatus.ONLINE
     workspace_runner = getattr(source_workspace, "runner", None)
     if workspace_runner is not None:
-        source_runner_online = workspace_runner.status == RS.ONLINE
+        source_runner_online = workspace_runner.status == RunnerStatus.ONLINE
     source_definition_name = None
     is_deactivated = False
     if runner_build is not None:
         source_runner_id = getattr(runner_build, "runner_id", source_runner_id)
         runner = getattr(runner_build, "runner", None)
         if runner is not None:
-            source_runner_online = runner.status == RS.ONLINE
+            source_runner_online = runner.status == RunnerStatus.ONLINE
         image_definition = getattr(runner_build, "image_definition", None)
         if image_definition is not None:
             source_definition_name = image_definition.name
@@ -2147,6 +2272,7 @@ async def update_image_definition_runner_build(
     if not await _get_org_admin_flag_async(request, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
     from django.utils import timezone
+
     from .models import ImageBuildJob
 
     build = await sync_to_async(_get_build_job_for_org)(
@@ -2279,11 +2405,12 @@ def list_org_agent_definitions(request: HttpRequest):
         return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_READ)
     org_id = _get_org_id(request)
     org_service = _get_org_service()
-    org = org_service.require_membership(request.user, org_id)
+    org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from django.db.models import Q
+
     from .models import AgentDefinition, OrgAgentDefinitionActivation
 
     # All standard + org-specific definitions
@@ -2325,6 +2452,7 @@ def duplicate_org_agent_definition(
 
     from django.db import connection, transaction
     from django.db.models import Q
+
     from .models import (
         AgentCommand,
         AgentCredentialRelationCommand,
@@ -2420,12 +2548,14 @@ def create_org_agent_definition(request: HttpRequest, payload: OrgAgentDefinitio
         return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
     org_id = _get_org_id(request)
     org_service = _get_org_service()
-    org = org_service.require_membership(request.user, org_id)
+    org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from django.db import IntegrityError
+
     from apps.credentials.models import CredentialService
+
     from .models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
 
     # Validate commands: must have exactly one run command
@@ -2502,6 +2632,7 @@ def update_org_agent_definition(
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from apps.credentials.models import CredentialService
+
     from .models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
 
     agent = AgentDefinition.objects.filter(id=agent_id, organization_id=org_id).first()
@@ -2604,6 +2735,7 @@ def toggle_org_agent_activation(
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from django.db.models import Q
+
     from .models import AgentDefinition, OrgAgentDefinitionActivation
 
     # The definition must be standard OR owned by this org
@@ -2677,6 +2809,7 @@ def list_agent_credential_relations(request: HttpRequest, agent_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
 
     from django.db.models import Q
+
     from .models import AgentDefinition, AgentDefinitionCredentialRelation
 
     agent = AgentDefinition.objects.filter(
@@ -2713,8 +2846,14 @@ def create_agent_credential_relation(
 
     from django.db import IntegrityError
     from django.db.models import Q
+
     from apps.credentials.models import CredentialService
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation, AgentCredentialRelationCommand
+
+    from .models import (
+        AgentCredentialRelationCommand,
+        AgentDefinition,
+        AgentDefinitionCredentialRelation,
+    )
 
     agent = AgentDefinition.objects.filter(
         Q(organization__isnull=True) | Q(organization_id=org_id),
@@ -2777,7 +2916,12 @@ def update_agent_credential_relation(
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from django.db.models import Q
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation, AgentCredentialRelationCommand
+
+    from .models import (
+        AgentCredentialRelationCommand,
+        AgentDefinition,
+        AgentDefinitionCredentialRelation,
+    )
 
     agent = AgentDefinition.objects.filter(
         Q(organization__isnull=True) | Q(organization_id=org_id),
@@ -2835,6 +2979,7 @@ def delete_agent_credential_relation(
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
     from django.db.models import Q
+
     from .models import AgentDefinition, AgentDefinitionCredentialRelation
 
     agent = AgentDefinition.objects.filter(

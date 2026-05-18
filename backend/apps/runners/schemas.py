@@ -165,6 +165,31 @@ class WorkspaceCreateOut(Schema):
     status: str
 
 
+class WorkspaceDesktopStartCommandOut(Schema):
+    """Response schema for a workspace desktop start command."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    name: str
+    command: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceDesktopStartCommandIn(Schema):
+    """Request schema for creating a workspace desktop start command."""
+
+    name: str
+    command: str
+
+
+class WorkspaceDesktopStartCommandUpdateIn(Schema):
+    """Request schema for partially updating a workspace desktop start command."""
+
+    name: str | None = None
+    command: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Session schemas
 # ---------------------------------------------------------------------------
@@ -433,6 +458,12 @@ class TerminalStartOut(Schema):
 # ---------------------------------------------------------------------------
 # Desktop session schemas
 # ---------------------------------------------------------------------------
+
+
+class DesktopStartIn(Schema):
+    """Request schema for starting a desktop session."""
+
+    desktop_start_command_id: uuid.UUID | None = None
 
 
 class DesktopStartOut(Schema):

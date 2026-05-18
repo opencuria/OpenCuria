@@ -26,17 +26,20 @@ from .enums import (
     WorkspaceStatus,
 )
 from .models import (
+    DEFAULT_DESKTOP_START_COMMAND_COMMAND,
+    DEFAULT_DESKTOP_START_COMMAND_NAME,
     AgentCommand,
     AgentDefinition,
     Chat,
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     RunnerSystemMetrics,
     Session,
     Task,
     Workspace,
+    WorkspaceDesktopStartCommand,
 )
 
 # ---------------------------------------------------------------------------
@@ -69,7 +72,7 @@ def _touch_conversation_activity(
     at: datetime | None = None,
 ) -> None:
     """Update workspace/chat ``updated_at`` so "last activity" stays accurate.
-    
+
     Either workspace_id or chat_id must be provided.
     If only chat_id is given, workspace_id is derived from the chat.
     """
@@ -234,8 +237,9 @@ class RunnerSystemMetricsRepository:
     @staticmethod
     def purge_old(runner_id: uuid.UUID, keep_hours: int = 24) -> int:
         """Delete metrics older than *keep_hours* hours. Returns count deleted."""
-        from django.utils import timezone as tz
         from datetime import timedelta
+
+        from django.utils import timezone as tz
 
         cutoff = tz.now() - timedelta(hours=keep_hours)
         deleted, _ = RunnerSystemMetrics.objects.filter(
@@ -318,6 +322,7 @@ class WorkspaceRepository:
         )
         workspace.last_activity_at = workspace.created_at
         workspace.save(update_fields=["last_activity_at"])
+        WorkspaceDesktopStartCommandRepository.ensure_default_for_workspace(workspace)
         return workspace
 
     @staticmethod
@@ -465,6 +470,100 @@ class WorkspaceRepository:
             status=WorkspaceStatus.DELETE_FAILED,
             active_operation=None,
             delete_last_error=error,
+        )
+
+
+class WorkspaceDesktopStartCommandRepository:
+    """Data access for workspace desktop start commands."""
+
+    @staticmethod
+    def list_by_workspace(
+        workspace_id: uuid.UUID,
+    ) -> QuerySet[WorkspaceDesktopStartCommand]:
+        """Return desktop start commands for a workspace in UI order."""
+        return WorkspaceDesktopStartCommand.objects.filter(
+            workspace_id=workspace_id
+        ).order_by("created_at", "id")
+
+    @staticmethod
+    def get_by_workspace_and_id(
+        workspace_id: uuid.UUID,
+        command_id: uuid.UUID,
+    ) -> WorkspaceDesktopStartCommand | None:
+        """Return one desktop start command scoped to its workspace."""
+        return (
+            WorkspaceDesktopStartCommand.objects.filter(
+                workspace_id=workspace_id,
+                id=command_id,
+            )
+            .select_related("workspace", "workspace__runner")
+            .first()
+        )
+
+    @staticmethod
+    def create(
+        *,
+        workspace: Workspace,
+        name: str,
+        command: str,
+    ) -> WorkspaceDesktopStartCommand:
+        """Create a desktop start command for a workspace."""
+        return WorkspaceDesktopStartCommand.objects.create(
+            workspace=workspace,
+            name=name,
+            command=command,
+        )
+
+    @staticmethod
+    def update(
+        desktop_start_command: WorkspaceDesktopStartCommand,
+        *,
+        name: str | None = None,
+        command: str | None = None,
+    ) -> WorkspaceDesktopStartCommand:
+        """Update a desktop start command."""
+        update_fields: list[str] = ["updated_at"]
+        if name is not None:
+            desktop_start_command.name = name
+            update_fields.append("name")
+        if command is not None:
+            desktop_start_command.command = command
+            update_fields.append("command")
+        desktop_start_command.save(update_fields=update_fields)
+        return desktop_start_command
+
+    @staticmethod
+    def delete(desktop_start_command: WorkspaceDesktopStartCommand) -> None:
+        """Delete a desktop start command."""
+        desktop_start_command.delete()
+
+    @staticmethod
+    def ensure_default_for_workspace(workspace: Workspace) -> None:
+        """Ensure a new workspace has a browser launch command by default."""
+        if WorkspaceDesktopStartCommand.objects.filter(workspace=workspace).exists():
+            return
+        WorkspaceDesktopStartCommand.objects.create(
+            workspace=workspace,
+            name=DEFAULT_DESKTOP_START_COMMAND_NAME,
+            command=DEFAULT_DESKTOP_START_COMMAND_COMMAND,
+        )
+
+    @staticmethod
+    def replace_for_workspace(
+        workspace: Workspace,
+        commands: list[dict[str, str]],
+    ) -> None:
+        """Replace all workspace commands with the provided snapshot."""
+        WorkspaceDesktopStartCommand.objects.filter(workspace=workspace).delete()
+        WorkspaceDesktopStartCommand.objects.bulk_create(
+            [
+                WorkspaceDesktopStartCommand(
+                    workspace=workspace,
+                    name=command["name"],
+                    command=command["command"],
+                )
+                for command in commands
+            ]
         )
 
 
@@ -1063,7 +1162,8 @@ class ImageInstanceRepository:
         build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageInstance":
+        desktop_start_commands_snapshot: list[dict[str, str]] | None = None,
+    ) -> ImageInstance:
         """Create a new image instance record (immediately ready)."""
         image = ImageInstance.objects.create(
             runner=runner,
@@ -1077,6 +1177,7 @@ class ImageInstanceRepository:
             status=ImageInstance.Status.READY,
             build_job=build_job,
             created_by=created_by,
+            desktop_start_commands_snapshot=desktop_start_commands_snapshot or [],
         )
         if credentials:
             image.credentials.set(credentials)
@@ -1095,7 +1196,8 @@ class ImageInstanceRepository:
         build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageInstance":
+        desktop_start_commands_snapshot: list[dict[str, str]] | None = None,
+    ) -> ImageInstance:
         """Create an image instance before capture/build finishes."""
         status = (
             ImageInstance.Status.BUILDING
@@ -1115,13 +1217,14 @@ class ImageInstanceRepository:
             created_by=created_by,
             status=status,
             creating_task_id=creating_task_id,
+            desktop_start_commands_snapshot=desktop_start_commands_snapshot or [],
         )
         if credentials:
             image.credentials.set(credentials)
         return image
 
     @staticmethod
-    def get_by_task_id(task_id: str) -> "ImageInstance | None":
+    def get_by_task_id(task_id: str) -> ImageInstance | None:
         """Find the image instance associated with a create or delete task."""
         return (
             ImageInstance.objects.filter(
@@ -1189,7 +1292,7 @@ class ImageInstanceRepository:
         return count > 0
 
     @staticmethod
-    def get_by_id(image_id: uuid.UUID) -> "ImageInstance | None":
+    def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (
             ImageInstance.objects.filter(id=image_id)
@@ -1209,7 +1312,7 @@ class ImageInstanceRepository:
     @staticmethod
     def get_by_build_job_id(
         build_job_id: uuid.UUID,
-    ) -> "ImageInstance | None":
+    ) -> ImageInstance | None:
         """Fetch a built image instance by its runner build relation."""
         return (
             ImageInstance.objects.filter(build_job_id=build_job_id)
@@ -1227,7 +1330,7 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> "QuerySet[ImageInstance]":
+    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[ImageInstance]:
         """Return all image instances captured from a workspace."""
         return ImageInstance.objects.filter(
             origin_workspace_id=workspace_id
@@ -1245,7 +1348,7 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def list_by_user(user) -> "QuerySet[ImageInstance]":
+    def list_by_user(user) -> QuerySet[ImageInstance]:
         """Return all visible image instances created by a specific user."""
         return ImageInstance.objects.filter(
             created_by=user
@@ -1564,10 +1667,9 @@ class ImageBuildJobRepository:
     @staticmethod
     def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
         """Check if any non-deleted workspaces depend on this build's image instance."""
-        from .models import ImageInstance as II
-        instances = II.objects.filter(
+        instances = ImageInstance.objects.filter(
             build_job_id=build_job_id,
-        ).exclude(status__in=[II.Status.DELETED])
+        ).exclude(status__in=[ImageInstance.Status.DELETED])
         count = 0
         for instance in instances:
             ws_count = Workspace.objects.filter(
