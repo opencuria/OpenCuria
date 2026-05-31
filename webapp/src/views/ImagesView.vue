@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useImageStore } from '@/stores/images'
+import { useAuthStore } from '@/stores/auth'
 import { usePolling } from '@/composables/usePolling'
 import { UiSpinner, UiButton, UiCard, UiCardContent, UiBadge } from '@/components/ui'
 import CreateImageArtifactDialog from '@/components/workspaces/CreateImageArtifactDialog.vue'
 import CreateWorkspaceFromImageArtifactDialog from '@/components/workspaces/CreateWorkspaceFromImageArtifactDialog.vue'
-import { Camera, Copy, Trash2, HardDrive, Calendar, Pencil, Check, X, AlertTriangle, Loader2, WifiOff } from 'lucide-vue-next'
+import { Camera, Copy, Trash2, HardDrive, Calendar, Pencil, Check, X, AlertTriangle, Loader2, WifiOff, Users } from 'lucide-vue-next'
 import type { ImageArtifact } from '@/types'
 
 const imageStore = useImageStore()
+const authStore = useAuthStore()
 
 const deletingId = ref<string | null>(null)
 const editingId = ref<string | null>(null)
+const sharingId = ref<string | null>(null)
 const editName = ref('')
 
 const capturedImages = computed(() =>
@@ -75,6 +78,16 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
   await imageStore.renameImageArtifact(imageArtifact.id, trimmed)
   editingId.value = null
 }
+
+async function toggleOrganizationSharing(imageArtifact: ImageArtifact): Promise<void> {
+  if (!authStore.isAdmin) return
+  sharingId.value = imageArtifact.id
+  await imageStore.setImageArtifactOrganizationSharing(
+    imageArtifact.id,
+    !imageArtifact.is_organization_shared,
+  )
+  sharingId.value = null
+}
 </script>
 
 <template>
@@ -83,7 +96,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
       <div>
         <h2 class="text-xl font-semibold text-fg">Captured Images</h2>
         <p class="text-sm text-muted-fg mt-1">
-          Reusable workspace images captured from your workspaces.
+          Reusable workspace images captured from your workspaces. Admins can share images organization-wide.
         </p>
       </div>
       <CreateImageArtifactDialog />
@@ -158,6 +171,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 </div>
                 <div class="flex flex-wrap items-center gap-1.5 mb-1">
                   <UiBadge v-if="imageArtifact.runtime_type" variant="muted">{{ imageArtifact.runtime_type }}</UiBadge>
+                  <UiBadge v-if="imageArtifact.is_organization_shared" variant="success">Organization</UiBadge>
                   <UiBadge v-if="isCaptureInProgress(imageArtifact)" variant="warning">Creating…</UiBadge>
                   <UiBadge v-else-if="imageArtifact.status === 'failed'" variant="error">Failed</UiBadge>
                   <UiBadge v-else-if="imageArtifact.status === 'pending_deletion'" variant="error">Pending deletion</UiBadge>
@@ -198,6 +212,19 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
             </div>
 
             <div class="flex items-center gap-2 w-full sm:w-auto sm:shrink-0">
+              <UiButton
+                v-if="authStore.isAdmin"
+                variant="outline"
+                size="sm"
+                class="gap-1.5 w-full sm:w-auto justify-center"
+                :disabled="sharingId === imageArtifact.id || imageArtifact.status !== 'ready'"
+                @click="toggleOrganizationSharing(imageArtifact)"
+              >
+                <UiSpinner v-if="sharingId === imageArtifact.id" :size="14" />
+                <Users v-else :size="14" />
+                {{ imageArtifact.is_organization_shared ? 'Unshare' : 'Share in Org' }}
+              </UiButton>
+
               <CreateWorkspaceFromImageArtifactDialog
                 v-if="imageArtifact.status === 'ready'"
                 :image-artifact="imageArtifact"

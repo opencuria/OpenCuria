@@ -1263,6 +1263,30 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
+    def list_visible_for_user(
+        *,
+        user,
+        organization_id: uuid.UUID,
+    ) -> "QuerySet[ImageInstance]":
+        """Return image instances visible to a user within an organization."""
+        return ImageInstance.objects.filter(
+            runner__organization_id=organization_id,
+        ).filter(
+            Q(created_by=user) | Q(is_organization_shared=True)
+        ).exclude(
+            status=ImageInstance.Status.DELETED
+        ).select_related(
+            "runner",
+            "origin_workspace",
+            "origin_workspace__runner",
+            "created_by",
+            "origin_definition",
+            "build_job",
+            "build_job__runner",
+            "build_job__image_definition",
+        )
+
+    @staticmethod
     def mark_retired(image_id: uuid.UUID) -> None:
         """Mark an image instance retired so it cannot be used for new workspaces."""
         ImageInstance.objects.filter(id=image_id).exclude(

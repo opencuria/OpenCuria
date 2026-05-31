@@ -1053,7 +1053,10 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     svc.image_instances.timeout_stale(timeout_hours=1)
-    artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
+    artifacts = svc.list_image_artifacts_for_user(
+        user=api_key.user,
+        organization_id=org_id,
+    )
     result = [
         {
             "id": str(s.id),
