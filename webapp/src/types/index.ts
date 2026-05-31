@@ -593,6 +593,7 @@ export interface ImageArtifact {
   delete_requested_at?: string | null
   delete_confirmed_at?: string | null
   delete_last_error?: string
+  is_organization_shared?: boolean
   created_at: string
   created_by_id: number | null
 }

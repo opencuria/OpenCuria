@@ -126,3 +126,49 @@ def test_api_key_without_org_agent_write_cannot_create_credential_relation(clien
 
     assert response.status_code == 403
     assert response.json()["code"] == "permission_denied"
+
+
+@pytest.mark.django_db
+def test_api_key_without_images_create_cannot_toggle_image_sharing(client: Client):
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(email="image-owner@test.local", password="secret")
+    admin = user_model.objects.create_user(email="image-admin@test.local", password="secret")
+    org = Organization.objects.create(name="Image Share Org", slug="image-share-org")
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="image-share-runner",
+        api_token_hash=hash_token("image-share-runner-token"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Owner Workspace",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    from apps.runners.models import ImageInstance
+
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=owner,
+        name="Owner Snapshot",
+        runner_ref="owner-snapshot-sharing",
+        status=ImageInstance.Status.READY,
+    )
+    token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_READ.value])
+
+    response = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/organization-sharing/",
+        data=json.dumps({"active": True}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"

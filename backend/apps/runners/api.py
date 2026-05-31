@@ -59,6 +59,7 @@ from .schemas import (
     OrgAgentDefinitionUpdateIn,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
+    ImageArtifactOrgSharingToggleIn,
     ImageArtifactOut,
     ImageArtifactUpdateIn,
     ImageDefinitionCreateIn,
@@ -313,6 +314,37 @@ async def _get_owned_workspace_artifact_async(
     if artifact.created_by_id != request.user.id:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
     return workspace, artifact
+
+
+def _can_access_image_artifact(
+    *,
+    artifact,
+    user,
+    org_id: uuid.UUID,
+) -> bool:
+    """Return whether user can use the artifact within the active org."""
+    if artifact.runner.organization_id != org_id:
+        return False
+    if artifact.created_by_id == user.id:
+        return True
+    return bool(getattr(artifact, "is_organization_shared", False))
+
+
+def _can_manage_image_artifact(
+    *,
+    artifact,
+    user,
+    org_id: uuid.UUID,
+    is_org_admin: bool,
+) -> bool:
+    """Return whether user can rename/delete/share the artifact."""
+    if artifact.runner.organization_id != org_id:
+        return False
+    if artifact.created_by_id == user.id:
+        return True
+    if not is_org_admin:
+        return False
+    return bool(getattr(artifact, "is_organization_shared", False))
 
 
 def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
@@ -1469,6 +1501,7 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
         delete_requested_at=getattr(artifact, "delete_requested_at", None),
         delete_confirmed_at=getattr(artifact, "delete_confirmed_at", None),
         delete_last_error=getattr(artifact, "delete_last_error", "") or "",
+        is_organization_shared=bool(getattr(artifact, "is_organization_shared", False)),
         created_at=artifact.created_at,
         created_by_id=artifact.created_by_id,
     )
@@ -1489,7 +1522,10 @@ def list_image_artifacts(request: HttpRequest):
 
     service = _get_service()
     service.image_instances.timeout_stale(timeout_hours=1)
-    artifacts = service.list_image_artifacts_for_user(user=request.user)
+    artifacts = service.list_image_artifacts_for_user(
+        user=request.user,
+        organization_id=org_id,
+    )
     return [_image_artifact_to_out(artifact) for artifact in artifacts]
 
 
@@ -1543,7 +1579,13 @@ async def rename_image_artifact(
     artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
     if artifact is None:
         return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-    if artifact.created_by != request.user:
+    is_org_admin = await _get_org_admin_flag_async(request, org_id)
+    if not _can_manage_image_artifact(
+        artifact=artifact,
+        user=request.user,
+        org_id=org_id,
+        is_org_admin=is_org_admin,
+    ):
         return 403, ErrorOut(
             detail="Not authorized to rename this image artifact",
             code="forbidden",
@@ -1569,13 +1611,19 @@ async def delete_image_artifact_global(
         return _perm_denied(APIKeyPermission.IMAGES_DELETE)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
+    is_org_admin = await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
     try:
         artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
+        if not _can_manage_image_artifact(
+            artifact=artifact,
+            user=request.user,
+            org_id=org_id,
+            is_org_admin=is_org_admin,
+        ):
             return 403, ErrorOut(
                 detail="Not authorized to delete this image artifact",
                 code="forbidden",
@@ -1614,7 +1662,11 @@ async def create_workspace_from_image_artifact_global(
         artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
+        if not _can_access_image_artifact(
+            artifact=artifact,
+            user=request.user,
+            org_id=org_id,
+        ):
             return 403, ErrorOut(
                 detail="Not authorized to use this image artifact",
                 code="forbidden",
@@ -1648,6 +1700,56 @@ async def create_workspace_from_image_artifact_global(
         return 409, ErrorOut(detail=e.message, code=e.code)
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+
+
+@image_artifact_router.post(
+    "/{image_artifact_id}/organization-sharing/",
+    response={200: ImageArtifactOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Toggle organization-wide sharing for a captured image",
+)
+async def toggle_image_artifact_organization_sharing(
+    request: HttpRequest,
+    image_artifact_id: uuid.UUID,
+    payload: ImageArtifactOrgSharingToggleIn,
+):
+    """Toggle organization-wide sharing for a captured image artifact."""
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
+        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+    is_org_admin = await _get_org_admin_flag_async(request, org_id)
+    if not is_org_admin:
+        return 403, ErrorOut(detail="Admin role required", code="forbidden")
+
+    from .models import ImageInstance
+
+    service = _get_service()
+    artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+    if artifact is None:
+        return 404, ErrorOut(detail="Image artifact not found", code="not_found")
+    if artifact.runner.organization_id != org_id:
+        return 404, ErrorOut(detail="Image artifact not found", code="not_found")
+    if artifact.origin_type != ImageInstance.OriginType.WORKSPACE_CAPTURE:
+        return 409, ErrorOut(
+            detail="Only captured images can be organization-shared",
+            code="conflict",
+        )
+    if artifact.status in {
+        ImageInstance.Status.DELETED,
+        ImageInstance.Status.DELETING,
+        ImageInstance.Status.PENDING_DELETION,
+    }:
+        return 409, ErrorOut(
+            detail="Image artifact is pending deletion and cannot be shared",
+            code="conflict",
+        )
+
+    artifact.is_organization_shared = payload.active
+    await sync_to_async(artifact.save)(
+        update_fields=["is_organization_shared", "updated_at"]
+    )
+    updated = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+    return 200, _image_artifact_to_out(updated)
 
 
 @workspace_image_artifact_router.get(
