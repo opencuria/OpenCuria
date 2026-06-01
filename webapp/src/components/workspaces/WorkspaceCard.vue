@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import { UiCard, UiCardContent, UiBadge } from '@/components/ui'
-import { AlertTriangle, Container, Clock, Loader2, WifiOff } from 'lucide-vue-next'
+import { AlertTriangle, Container, Loader2, Layers, WifiOff } from 'lucide-vue-next'
 import { formatRelativeTime } from '@/lib/utils'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import WorkspaceActions from './WorkspaceActions.vue'
@@ -121,9 +121,15 @@ function formatStorage(bytes?: number | null): string {
             <h3 class="font-medium text-fg text-sm truncate">
               {{ workspace.name }}
             </h3>
-            <div class="text-xs text-muted-fg font-mono">
-              {{ formatStorage(storageBytes) }}
+            <div
+              v-if="workspace.base_image_name"
+              class="mt-1 inline-flex max-w-full items-center gap-1 rounded-[var(--radius-sm)] bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-fg"
+              :title="`Based on image: ${workspace.base_image_name}`"
+            >
+              <Layers :size="11" class="shrink-0" />
+              <span class="truncate">{{ workspace.base_image_name }}</span>
             </div>
+            <div v-else class="mt-1 text-xs text-muted-fg">—</div>
           </div>
         </div>
 
@@ -152,13 +158,10 @@ function formatStorage(bytes?: number | null): string {
         </div>
       </div>
 
-      <!-- Footer: Time + Actions -->
+      <!-- Footer: Storage + Actions -->
       <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0 text-xs text-muted-fg">
-          <div class="flex items-center gap-1.5">
-            <Clock :size="12" />
-            {{ formatRelativeTime(workspace.created_at) }}
-          </div>
+        <div class="min-w-0 text-xs text-muted-fg font-mono">
+          <div>{{ formatStorage(storageBytes) }}</div>
           <div v-if="imminentAutoStopLabel" class="mt-1 text-warning">
             {{ imminentAutoStopLabel }}
           </div>

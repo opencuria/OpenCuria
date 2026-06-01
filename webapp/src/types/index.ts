@@ -233,6 +233,7 @@ export interface Workspace {
   has_active_session: boolean
   runner_online: boolean
   credential_ids: string[]
+  base_image_name?: string | null
 }
 
 export type WorkspaceDetail = Workspace

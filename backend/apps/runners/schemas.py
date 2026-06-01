@@ -118,6 +118,7 @@ class WorkspaceOut(Schema):
     has_active_session: bool = False
     runner_online: bool = False
     credential_ids: list[uuid.UUID] = []
+    base_image_name: str | None = None
 
 
 class WorkspaceCreateIn(Schema):
