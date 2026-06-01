@@ -15,6 +15,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   captureImage: []
+  desktopStartCommandsUpdated: []
 }>()
 
 const workspaceStore = useWorkspaceStore()
@@ -74,7 +75,12 @@ function handleCaptureImage(e: Event): void {
 
 <template>
   <div class="flex items-center gap-1">
-    <EditWorkspaceDialog :workspace="workspace" :size="size" :disabled="areActionsDisabled" />
+    <EditWorkspaceDialog
+      :workspace="workspace"
+      :size="size"
+      :disabled="areActionsDisabled"
+      @desktop-start-commands-updated="emit('desktopStartCommandsUpdated')"
+    />
     <UiButton
       v-if="isTransitioning"
       variant="ghost"

@@ -1063,11 +1063,22 @@ class WebSocketInterface(Interface):
         async def on_start_desktop(data: dict) -> None:
             task_id = data["task_id"]
             workspace_id = uuid.UUID(data["workspace_id"])
+            raw_desktop_start_command = data.get("desktop_start_command")
+            desktop_start_command = None
+            if isinstance(raw_desktop_start_command, dict):
+                desktop_start_command = (
+                    raw_desktop_start_command.get("command") or None
+                )
+            elif isinstance(raw_desktop_start_command, str):
+                desktop_start_command = raw_desktop_start_command or None
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             log.info("task_received", task="start_desktop")
 
             try:
-                session = await self._service.start_desktop(workspace_id)
+                session = await self._service.start_desktop(
+                    workspace_id,
+                    command=desktop_start_command,
+                )
 
                 # Get container IP for backend proxy
                 container_ip = self._service.get_desktop_container_ip(workspace_id)

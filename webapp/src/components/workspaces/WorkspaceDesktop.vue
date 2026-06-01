@@ -11,6 +11,7 @@ import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from 'lu
 
 const props = defineProps<{
   workspaceId: string
+  selectedDesktopStartCommandId?: string | null
 }>()
 
 const desktopStore = useDesktopStore()
@@ -112,7 +113,10 @@ async function startDesktop(): Promise<void> {
       desktopStore.setConnected(props.workspaceId, status.proxy_url)
       return
     }
-    await workspacesApi.startDesktop(props.workspaceId)
+    await workspacesApi.startDesktop(
+      props.workspaceId,
+      props.selectedDesktopStartCommandId ?? null,
+    )
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {

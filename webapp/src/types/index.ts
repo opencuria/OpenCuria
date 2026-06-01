@@ -275,6 +275,25 @@ export interface WorkspaceCreateOut {
   status: string
 }
 
+export interface WorkspaceDesktopStartCommand {
+  id: string
+  workspace_id: string
+  name: string
+  command: string
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceDesktopStartCommandIn {
+  name: string
+  command: string
+}
+
+export interface WorkspaceDesktopStartCommandUpdateIn {
+  name?: string
+  command?: string
+}
+
 // --- Session ---
 
 export interface SessionSkill {

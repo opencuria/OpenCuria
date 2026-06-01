@@ -10,6 +10,7 @@ import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import * as agentsApi from '@/services/agents.api'
+import * as workspacesApi from '@/services/workspaces.api'
 import { usePolling } from '@/composables/usePolling'
 import { useChatOptionsCache } from '@/composables/useChatOptionsCache'
 import {
@@ -18,7 +19,7 @@ import {
   onEvent,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
-import type { Agent } from '@/types'
+import type { Agent, WorkspaceDesktopStartCommand } from '@/types'
 import { isSessionActive, isSessionDone } from '@/lib/sessionState'
 import { findLatestUnreadDoneSession, isSessionEligibleForAutoRead } from '@/lib/sessionReadState'
 import { formatRelativeTime } from '@/lib/utils'
@@ -26,13 +27,14 @@ import ChatContainer from '@/components/chat/ChatContainer.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
+import WorkspaceDesktopLaunchButton from '@/components/workspaces/WorkspaceDesktopLaunchButton.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, Plus } from 'lucide-vue-next'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, Plus } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -59,6 +61,8 @@ const imageArtifactDialogOpen = ref(false)
 const loadingChats = ref(false)
 const mainChatPanelHost = ref<HTMLElement | null>(null)
 const desktopChatPanelHost = ref<HTMLElement | null>(null)
+const desktopStartCommands = ref<WorkspaceDesktopStartCommand[]>([])
+const selectedDesktopStartCommandId = ref<string | null>(null)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -249,24 +253,18 @@ const terminalButtonTitle = computed(() => {
   return 'Minimize terminal'
 })
 
-function handleDesktopButtonClick(): void {
-  if (!canPrompt.value) return
-  if (!desktopStore.isOpen) {
-    desktopStore.open()
-    return
+async function loadDesktopStartCommands(id: string): Promise<void> {
+  try {
+    desktopStartCommands.value = await workspacesApi.listDesktopStartCommands(id)
+  } catch {
+    desktopStartCommands.value = []
   }
-  if (desktopStore.isMinimized) {
-    desktopStore.restore()
-    return
-  }
-  desktopStore.minimize()
 }
 
-const desktopButtonTitle = computed(() => {
-  if (!desktopStore.isOpen) return 'Open desktop'
-  if (desktopStore.isMinimized) return 'Restore desktop'
-  return 'Minimize desktop'
-})
+function handleDesktopOpen(commandId: string | null): void {
+  selectedDesktopStartCommandId.value = commandId
+  desktopStore.open()
+}
 
 const isDesktopPanelVisible = computed(
   () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
@@ -446,6 +444,7 @@ onMounted(() => {
   setupSocketListeners()
   skillStore.fetchSkills()
   loadAvailableAgents(workspaceId.value)
+  void loadDesktopStartCommands(workspaceId.value)
 
   // Always fetch chats (workspaces now always support multiple chats)
   void loadWorkspaceChats(workspaceId.value, route.query.chatId as string | undefined)
@@ -489,6 +488,8 @@ watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
     desktopStore.reset()
+    selectedDesktopStartCommandId.value = null
+    desktopStartCommands.value = []
     fileExplorerStore.reset()
     workspaceStore.chats = []
     workspaceStore.activeChatId = null
@@ -496,6 +497,7 @@ watch(workspaceId, (newId, oldId) => {
     loadingChats.value = true
     workspaceStore.fetchWorkspaceDetail(newId)
     loadAvailableAgents(newId)
+    void loadDesktopStartCommands(newId)
     void loadWorkspaceChats(newId, route.query.chatId as string | undefined)
     setupSocketListeners()
   }
@@ -875,6 +877,7 @@ function handleToggleSessionReadState(sessionId: string): void {
             v-if="workspace"
             :workspace="workspace"
             @capture-image="imageArtifactDialogOpen = true"
+            @desktop-start-commands-updated="loadDesktopStartCommands(workspaceId)"
             hide-destructive
           />
         </div>
@@ -977,6 +980,7 @@ function handleToggleSessionReadState(sessionId: string): void {
           <WorkspaceDesktop
             v-if="isDesktopPanelVisible"
             :workspace-id="workspaceId"
+            :selected-desktop-start-command-id="selectedDesktopStartCommandId"
           >
             <template #sidebar-content>
               <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
@@ -1117,23 +1121,15 @@ function handleToggleSessionReadState(sessionId: string): void {
                     />
                   </span>
                 </UiButton>
-                <UiButton
-                  variant="ghost"
-                  size="icon-sm"
-                  class="shrink-0 mr-2 mb-2"
-                  :disabled="!canPrompt"
-                  :title="desktopButtonTitle"
-                  @click="handleDesktopButtonClick"
-                >
-                  <span class="relative inline-flex">
-                    <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
-                    <span
-                      v-if="desktopStore.isOpen && desktopStore.isMinimized"
-                      class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-                      title="Desktop minimized"
-                    />
-                  </span>
-                </UiButton>
+                <WorkspaceDesktopLaunchButton
+                  :commands="desktopStartCommands"
+                  :can-prompt="canPrompt"
+                  :desktop-open="desktopStore.isOpen"
+                  :desktop-minimized="desktopStore.isMinimized"
+                  @open="handleDesktopOpen"
+                  @restore="desktopStore.restore()"
+                  @minimize="desktopStore.minimize()"
+                />
               </template>
             </div>
           </div>

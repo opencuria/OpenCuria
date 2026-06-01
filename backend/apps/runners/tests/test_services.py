@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from apps.credentials.models import CredentialService
 from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
+from apps.organizations.models import Organization
 from apps.runners.enums import (
     AgentCommandPhase,
     RunnerStatus,
@@ -23,29 +24,27 @@ from apps.runners.enums import (
     WorkspaceStatus,
 )
 from apps.runners.exceptions import (
-    RunnerNotFoundError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
-from common.exceptions import ConflictError, NotFoundError
-
 from apps.runners.models import (
     AgentCommand,
     AgentCredentialRelationCommand,
     AgentDefinition,
     AgentDefinitionCredentialRelation,
     Chat,
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     Session,
     Task,
     Workspace,
+    WorkspaceDesktopStartCommand,
 )
-from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
+from common.exceptions import ConflictError, NotFoundError
 
 
 @pytest.fixture
@@ -732,7 +731,86 @@ class TestCreateImageArtifactSecurity:
                 workspace_id=foreign_workspace.id,
                 name="forbidden-image-artifact",
                 organization_id=local_org.id,
-            )
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestWorkspaceDesktopStartCommands:
+    def test_command_crud_is_scoped_to_workspace(self, service, workspace):
+        created = service.create_workspace_desktop_start_command(
+            workspace.id,
+            name="Docs",
+            command="xdg-open https://docs.example.test",
+        )
+
+        listed = list(service.list_workspace_desktop_start_commands(workspace.id))
+        assert [command.id for command in listed] == [created.id]
+
+        updated = service.update_workspace_desktop_start_command(
+            workspace.id,
+            created.id,
+            name="Documentation",
+            command="xdg-open https://docs.example.test/v2",
+        )
+        assert updated.name == "Documentation"
+        assert updated.command == "xdg-open https://docs.example.test/v2"
+
+        service.delete_workspace_desktop_start_command(workspace.id, created.id)
+        assert list(service.list_workspace_desktop_start_commands(workspace.id)) == []
+
+    @pytest.mark.asyncio
+    async def test_start_desktop_dispatches_selected_command(
+        self,
+        service,
+        sio_mock,
+        runner,
+        workspace,
+    ):
+        desktop_start_command = WorkspaceDesktopStartCommand.objects.create(
+            workspace=workspace,
+            name="Docs",
+            command="xdg-open https://docs.example.test",
+        )
+
+        task = await service.start_desktop(
+            workspace.id,
+            desktop_start_command_id=desktop_start_command.id,
+        )
+
+        assert task.type == TaskType.START_DESKTOP
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["desktop_start_command"] == {
+            "id": str(desktop_start_command.id),
+            "name": "Docs",
+            "command": "xdg-open https://docs.example.test",
+        }
+
+    @pytest.mark.asyncio
+    async def test_start_desktop_requires_selection_when_multiple_commands_exist(
+        self,
+        service,
+        workspace,
+    ):
+        WorkspaceDesktopStartCommand.objects.bulk_create(
+            [
+                WorkspaceDesktopStartCommand(
+                    workspace=workspace,
+                    name="Browser",
+                    command="/usr/local/bin/opencuria-desktop-browser",
+                ),
+                WorkspaceDesktopStartCommand(
+                    workspace=workspace,
+                    name="Docs",
+                    command="xdg-open https://docs.example.test",
+                ),
+            ]
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="desktop_start_command_id is required when multiple desktop start commands exist",
+        ):
+            await service.start_desktop(workspace.id)
 
 
 @pytest.mark.django_db
@@ -1280,6 +1358,181 @@ class TestRuntimeCompatibilityGuards:
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspaceFromImageArtifact:
+    @pytest.mark.asyncio
+    async def test_create_image_artifact_stores_desktop_start_command_snapshot(
+        self,
+        service,
+        workspace,
+        runner,
+    ):
+        WorkspaceDesktopStartCommand.objects.bulk_create(
+            [
+                WorkspaceDesktopStartCommand(
+                    workspace=workspace,
+                    name="Browser",
+                    command="/usr/local/bin/opencuria-desktop-browser",
+                ),
+                WorkspaceDesktopStartCommand(
+                    workspace=workspace,
+                    name="Docs",
+                    command="xdg-open https://docs.example.test",
+                ),
+            ]
+        )
+
+        _, task = await service.create_image_artifact(
+            workspace_id=workspace.id,
+            name="Snapshot With Desktop Commands",
+            organization_id=runner.organization_id,
+        )
+
+        image = ImageInstance.objects.get(creating_task_id=str(task.id))
+        assert image.desktop_start_commands_snapshot == [
+            {
+                "name": "Browser",
+                "command": "/usr/local/bin/opencuria-desktop-browser",
+            },
+            {
+                "name": "Docs",
+                "command": "xdg-open https://docs.example.test",
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_clone_workspace_from_image_artifact_restores_snapshot_commands(
+        self,
+        service,
+        runner,
+        user,
+    ):
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            created_by=user,
+            name="Captured Source",
+            runner_ref="captured-artifact-with-snapshot",
+            status=ImageInstance.Status.READY,
+            desktop_start_commands_snapshot=[
+                {
+                    "name": "Browser",
+                    "command": "/usr/local/bin/opencuria-desktop-browser",
+                },
+                {
+                    "name": "Docs",
+                    "command": "xdg-open https://docs.example.test",
+                },
+            ],
+        )
+
+        workspace, _ = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Workspace",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert list(
+            WorkspaceDesktopStartCommand.objects.filter(workspace=workspace).values_list(
+                "name",
+                "command",
+            )
+        ) == [
+            ("Browser", "/usr/local/bin/opencuria-desktop-browser"),
+            ("Docs", "xdg-open https://docs.example.test"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_clone_workspace_from_image_artifact_falls_back_to_origin_workspace_commands(
+        self,
+        service,
+        runner,
+        user,
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Source Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            runtime_type="docker",
+        )
+        WorkspaceDesktopStartCommand.objects.create(
+            workspace=source_workspace,
+            name="Docs",
+            command="xdg-open https://docs.example.test",
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
+            created_by=user,
+            name="Captured Source",
+            runner_ref="captured-artifact-origin-fallback",
+            status=ImageInstance.Status.READY,
+            desktop_start_commands_snapshot=[],
+        )
+
+        workspace, _ = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Workspace",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert list(
+            WorkspaceDesktopStartCommand.objects.filter(workspace=workspace).values_list(
+                "name",
+                "command",
+            )
+        ) == [("Docs", "xdg-open https://docs.example.test")]
+
+    @pytest.mark.asyncio
+    async def test_clone_workspace_from_image_artifact_falls_back_to_default_command(
+        self,
+        service,
+        runner,
+        user,
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name=f"Fallback Build {uuid.uuid4().hex[:6]}",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.ACTIVE,
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            created_by=user,
+            name="Built Artifact",
+            runner_ref="built-artifact-default-fallback",
+            status=ImageInstance.Status.READY,
+            desktop_start_commands_snapshot=[],
+        )
+
+        workspace, _ = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Workspace",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert list(
+            WorkspaceDesktopStartCommand.objects.filter(workspace=workspace).values_list(
+                "name",
+                "command",
+            )
+        ) == [("Browser", "/usr/local/bin/opencuria-desktop-browser")]
+
     @pytest.mark.asyncio
     async def test_uses_only_explicitly_supplied_credentials(
         self, service, sio_mock, runner, user

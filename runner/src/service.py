@@ -36,6 +36,14 @@ logger = structlog.get_logger(__name__)
 FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+DEFAULT_DESKTOP_START_COMMAND = "/usr/local/bin/opencuria-desktop-browser"
+LEGACY_DESKTOP_BROWSER_PROCESS_NAMES = (
+    "chrome",
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+)
 _SHELL_OPERATOR_TOKENS = {
     "|",
     "||",
@@ -1503,9 +1511,77 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
     # -- desktop session (KasmVNC) -----------------------------------------
 
+    @staticmethod
+    def _needs_legacy_desktop_command_fallback(command: str | None) -> bool:
+        """Return True when a non-default desktop command needs legacy handling."""
+        if not command:
+            return False
+        return command.strip() != DEFAULT_DESKTOP_START_COMMAND
+
+    async def _supports_native_desktop_start_command(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+    ) -> bool:
+        """Detect whether the workspace image already honours desktop commands."""
+        exit_code, _ = await runtime.exec_command_wait(
+            instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "grep -q 'OPENCURIA_DESKTOP_START_COMMAND' /root/.vnc/xstartup "
+                    "|| grep -q 'OPENCURIA_DESKTOP_START_COMMAND' "
+                    "/usr/local/bin/opencuria-desktop-start"
+                ),
+            ],
+            env={"HOME": "/root"},
+        )
+        return exit_code == 0
+
+    async def _launch_legacy_desktop_start_command(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        command: str,
+    ) -> None:
+        """Start the selected command in older images that ignore desktop env."""
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "for _ in $(seq 1 20); do "
+                    "pids=$(ps -eo pid=,comm= | awk "
+                    f"'$2 == \"{LEGACY_DESKTOP_BROWSER_PROCESS_NAMES[0]}\""
+                    f" || $2 == \"{LEGACY_DESKTOP_BROWSER_PROCESS_NAMES[1]}\""
+                    f" || $2 == \"{LEGACY_DESKTOP_BROWSER_PROCESS_NAMES[2]}\""
+                    f" || $2 == \"{LEGACY_DESKTOP_BROWSER_PROCESS_NAMES[3]}\""
+                    f" || $2 == \"{LEGACY_DESKTOP_BROWSER_PROCESS_NAMES[4]}\" "
+                    "{ print $1 }'); "
+                    "if [ -n \"$pids\" ]; then kill $pids 2>/dev/null || true; break; fi; "
+                    "sleep 0.25; "
+                    "done; "
+                    "nohup sh -lc \"$OPENCURIA_DESKTOP_START_COMMAND\" "
+                    ">/root/.vnc/desktop-command.log 2>&1 </dev/null &"
+                ),
+            ],
+            env={
+                "HOME": "/root",
+                "DISPLAY": ":1",
+                "OPENCURIA_DESKTOP_START_COMMAND": command,
+            },
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Failed to launch desktop start command in legacy image: {output}"
+            )
+
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
+        command: str | None = None,
     ) -> DesktopSession:
         """Start a KasmVNC desktop session inside the workspace container.
 
@@ -1536,18 +1612,47 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
+        normalized_command = command.strip() if command else None
 
         log = logger.bind(workspace_id=str(workspace_id))
+        requires_legacy_fallback = False
+        if self._needs_legacy_desktop_command_fallback(normalized_command):
+            try:
+                requires_legacy_fallback = (
+                    not await self._supports_native_desktop_start_command(
+                        runtime,
+                        info.instance_id,
+                    )
+                )
+            except Exception:
+                requires_legacy_fallback = True
+                log.exception("desktop_command_support_probe_failed")
 
         # Execute the start script inside the container
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
             ["/usr/local/bin/opencuria-desktop-start"],
-            env={"HOME": "/root", "DISPLAY": ":1"},
+            env={
+                "HOME": "/root",
+                "DISPLAY": ":1",
+                **(
+                    {"OPENCURIA_DESKTOP_START_COMMAND": normalized_command}
+                    if normalized_command
+                    else {}
+                ),
+            },
         )
         if exit_code != 0:
             log.error("desktop_start_failed", exit_code=exit_code, output=output)
             raise RuntimeError(f"Failed to start desktop session: {output}")
+
+        if requires_legacy_fallback and normalized_command is not None:
+            await self._launch_legacy_desktop_start_command(
+                runtime,
+                info.instance_id,
+                normalized_command,
+            )
+            log.info("desktop_command_started_via_runner_fallback")
 
         session = DesktopSession(
             workspace_id=workspace_id,

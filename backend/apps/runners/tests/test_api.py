@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
+from apps.runners import api as runners_api
 from apps.runners.enums import SessionStatus, WorkspaceStatus
 from apps.runners.models import (
     AgentDefinition,
@@ -21,6 +22,7 @@ from apps.runners.models import (
     Runner,
     Session,
     Workspace,
+    WorkspaceDesktopStartCommand,
 )
 from common.utils import generate_api_token, hash_token
 
@@ -48,6 +50,8 @@ def auth_context(db):
             APIKeyPermission.RUNNERS_READ.value,
             APIKeyPermission.RUNNERS_CREATE.value,
             APIKeyPermission.WORKSPACES_READ.value,
+            APIKeyPermission.WORKSPACES_UPDATE.value,
+            APIKeyPermission.TERMINAL_ACCESS.value,
             APIKeyPermission.AGENTS_READ.value,
         ],
     )
@@ -169,6 +173,121 @@ class TestListWorkspaces:
         assert response.json()["auto_stop_timeout_minutes"] == 15
         assert response.json()["last_activity_at"]
         assert "sessions" not in response.json()
+
+
+@pytest.mark.django_db
+class TestWorkspaceDesktopStartCommandApi:
+    def test_lists_workspace_desktop_start_commands(self, client, auth_context):
+        runner = Runner.objects.create(
+            name="desktop-command-runner",
+            api_token_hash=hash_token("runner-token-desktop-list"),
+            organization=auth_context["organization"],
+        )
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Workspace With Desktop Commands",
+            status=WorkspaceStatus.RUNNING,
+            created_by=auth_context["user"],
+        )
+        command = WorkspaceDesktopStartCommand.objects.create(
+            workspace=workspace,
+            name="Docs",
+            command="xdg-open https://docs.example.test",
+        )
+
+        response = client.get(
+            f"/api/v1/workspaces/{workspace.id}/desktop-start-commands/"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == str(command.id)
+        assert data[0]["workspace_id"] == str(workspace.id)
+        assert data[0]["name"] == "Docs"
+        assert data[0]["command"] == "xdg-open https://docs.example.test"
+
+    def test_creates_updates_and_deletes_workspace_desktop_start_commands(
+        self,
+        client,
+        auth_context,
+    ):
+        runner = Runner.objects.create(
+            name="desktop-command-runner",
+            api_token_hash=hash_token("runner-token-desktop-write"),
+            organization=auth_context["organization"],
+        )
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Workspace With Desktop Commands",
+            status=WorkspaceStatus.RUNNING,
+            created_by=auth_context["user"],
+        )
+
+        create_response = client.post(
+            f"/api/v1/workspaces/{workspace.id}/desktop-start-commands/",
+            data={"name": "Docs", "command": "xdg-open https://docs.example.test"},
+            content_type="application/json",
+        )
+        assert create_response.status_code == 201
+        created_id = create_response.json()["id"]
+
+        update_response = client.patch(
+            f"/api/v1/workspaces/{workspace.id}/desktop-start-commands/{created_id}/",
+            data={"name": "Documentation"},
+            content_type="application/json",
+        )
+        assert update_response.status_code == 200
+        assert update_response.json()["name"] == "Documentation"
+
+        delete_response = client.delete(
+            f"/api/v1/workspaces/{workspace.id}/desktop-start-commands/{created_id}/"
+        )
+        assert delete_response.status_code == 204
+        assert (
+            WorkspaceDesktopStartCommand.objects.filter(id=created_id).exists() is False
+        )
+
+    def test_start_desktop_forwards_selected_command_id(self, client, auth_context, monkeypatch):
+        runner = Runner.objects.create(
+            name="desktop-command-runner",
+            api_token_hash=hash_token("runner-token-desktop-start"),
+            organization=auth_context["organization"],
+        )
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Workspace With Desktop Commands",
+            status=WorkspaceStatus.RUNNING,
+            created_by=auth_context["user"],
+        )
+        command = WorkspaceDesktopStartCommand.objects.create(
+            workspace=workspace,
+            name="Docs",
+            command="xdg-open https://docs.example.test",
+        )
+
+        class DummyService:
+            def get_workspace_for_user(self, workspace_id, *, user, organization_id):
+                assert workspace_id == workspace.id
+                assert user == auth_context["user"]
+                assert organization_id == auth_context["organization"].id
+                return workspace
+
+            async def start_desktop(self, workspace_id, desktop_start_command_id=None):
+                assert workspace_id == workspace.id
+                assert desktop_start_command_id == command.id
+                return type("Task", (), {"id": uuid.uuid4()})()
+
+        monkeypatch.setattr(runners_api, "_get_service", lambda: DummyService())
+
+        response = client.post(
+            f"/api/v1/workspaces/{workspace.id}/desktop/",
+            data={"desktop_start_command_id": str(command.id)},
+            content_type="application/json",
+        )
+
+        assert response.status_code == 202
+        assert "task_id" in response.json()
 
 
 @pytest.mark.django_db

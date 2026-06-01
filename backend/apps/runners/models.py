@@ -24,6 +24,9 @@ from .enums import (
     WorkspaceStatus,
 )
 
+DEFAULT_DESKTOP_START_COMMAND_NAME = "Browser"
+DEFAULT_DESKTOP_START_COMMAND_COMMAND = "/usr/local/bin/opencuria-desktop-browser"
+
 
 class Runner(models.Model):
     """
@@ -186,6 +189,31 @@ class Workspace(models.Model):
 
     def __str__(self) -> str:
         return f"Workspace({self.name}, {self.status})"
+
+
+class WorkspaceDesktopStartCommand(models.Model):
+    """User-managed desktop launch commands for a workspace."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="desktop_start_commands",
+    )
+    name = models.CharField(max_length=255)
+    command = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runners_workspace_desktop_start_command"
+        ordering = ["created_at", "id"]
+
+    def __str__(self) -> str:
+        return (
+            "WorkspaceDesktopStartCommand("
+            f"workspace={self.workspace_id}, name={self.name})"
+        )
 
 
 class Chat(models.Model):
@@ -988,6 +1016,14 @@ class ImageInstance(models.Model):
         help_text=(
             "Credentials associated with this image instance. "
             "Workspace cloning must still supply credentials explicitly."
+        ),
+    )
+    desktop_start_commands_snapshot = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Snapshot of workspace desktop start commands captured with this image. "
+            "Each entry stores 'name' and 'command'."
         ),
     )
     deleted_at = models.DateTimeField(null=True, blank=True)

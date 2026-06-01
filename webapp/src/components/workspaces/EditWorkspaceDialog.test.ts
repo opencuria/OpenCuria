@@ -5,10 +5,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
 
+const workspacesApiMocks = vi.hoisted(() => ({
+  listDesktopStartCommands: vi.fn(),
+  createDesktopStartCommand: vi.fn(),
+  updateDesktopStartCommand: vi.fn(),
+  deleteDesktopStartCommand: vi.fn(),
+}))
+
 const routerPush = vi.fn()
 const fetchCredentials = vi.fn()
 const fetchRunners = vi.fn()
 const updateWorkspace = vi.fn()
+const notificationError = vi.fn()
 
 const credentialStore = {
   credentials: [
@@ -94,9 +102,26 @@ vi.mock('@/stores/workspaces', () => ({
   useWorkspaceStore: () => workspaceStore,
 }))
 
+vi.mock('@/stores/notifications', () => ({
+  useNotificationStore: () => ({
+    error: notificationError,
+  }),
+}))
+
 vi.mock('@/stores/runners', () => ({
   useRunnerStore: () => runnerStore,
 }))
+
+vi.mock('@/services/workspaces.api', async () => {
+  const actual = await vi.importActual<typeof import('@/services/workspaces.api')>('@/services/workspaces.api')
+  return {
+    ...actual,
+    listDesktopStartCommands: workspacesApiMocks.listDesktopStartCommands,
+    createDesktopStartCommand: workspacesApiMocks.createDesktopStartCommand,
+    updateDesktopStartCommand: workspacesApiMocks.updateDesktopStartCommand,
+    deleteDesktopStartCommand: workspacesApiMocks.deleteDesktopStartCommand,
+  }
+})
 
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
@@ -132,7 +157,13 @@ describe('EditWorkspaceDialog', () => {
     fetchCredentials.mockReset()
     fetchRunners.mockReset()
     updateWorkspace.mockReset()
+    notificationError.mockReset()
+    workspacesApiMocks.listDesktopStartCommands.mockReset()
+    workspacesApiMocks.createDesktopStartCommand.mockReset()
+    workspacesApiMocks.updateDesktopStartCommand.mockReset()
+    workspacesApiMocks.deleteDesktopStartCommand.mockReset()
     updateWorkspace.mockResolvedValue(true)
+    workspacesApiMocks.listDesktopStartCommands.mockResolvedValue([])
   })
 
   it('omits unchanged QEMU resources when saving non-resource edits', async () => {
@@ -187,5 +218,59 @@ describe('EditWorkspaceDialog', () => {
     expect(
       (wrapper.vm as typeof wrapper.vm & { selectedCredentialIds: string[] }).selectedCredentialIds,
     ).toEqual(['cred-2'])
+  })
+
+  it('creates, updates, and deletes desktop start commands on save', async () => {
+    workspacesApiMocks.listDesktopStartCommands.mockResolvedValue([
+      {
+        id: 'cmd-existing',
+        workspace_id: 'workspace-1',
+        name: 'Browser',
+        command: '/usr/local/bin/opencuria-desktop-browser',
+        created_at: '2026-04-01T10:00:00.000Z',
+        updated_at: '2026-04-01T10:00:00.000Z',
+      },
+      {
+        id: 'cmd-delete',
+        workspace_id: 'workspace-1',
+        name: 'Delete me',
+        command: 'echo delete',
+        created_at: '2026-04-01T10:00:00.000Z',
+        updated_at: '2026-04-01T10:00:00.000Z',
+      },
+    ])
+
+    const wrapper = shallowMount(EditWorkspaceDialog, {
+      props: {
+        workspace: makeWorkspace(),
+      },
+    })
+
+    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
+
+    const desktopCommands = (
+      wrapper.vm as typeof wrapper.vm & {
+        desktopStartCommands: Array<{ id: string; localId: string; name: string; command: string }>
+      }
+    ).desktopStartCommands
+    expect(desktopCommands[0]).toBeDefined()
+    desktopCommands[0]!.name = 'Browser Updated'
+    desktopCommands.splice(1, 1)
+    ;(wrapper.vm as typeof wrapper.vm & { addDesktopStartCommand: () => void }).addDesktopStartCommand()
+    expect(desktopCommands[1]).toBeDefined()
+    desktopCommands[1]!.name = 'Docs'
+    desktopCommands[1]!.command = 'xdg-open https://docs.example.test'
+
+    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
+
+    expect(updateWorkspace).toHaveBeenCalled()
+    expect(workspacesApiMocks.updateDesktopStartCommand).toHaveBeenCalledWith('workspace-1', 'cmd-existing', {
+      name: 'Browser Updated',
+    })
+    expect(workspacesApiMocks.deleteDesktopStartCommand).toHaveBeenCalledWith('workspace-1', 'cmd-delete')
+    expect(workspacesApiMocks.createDesktopStartCommand).toHaveBeenCalledWith('workspace-1', {
+      name: 'Docs',
+      command: 'xdg-open https://docs.example.test',
+    })
   })
 })
