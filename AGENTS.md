@@ -114,7 +114,7 @@ opencuria/
 │   └── src/                       ← Python application
 │       ├── __init__.py
 │       ├── __main__.py            ← `python -m src` entry point
-│       ├── main.py                ← Typer app, logging setup, serve command
+│       ├── main.py                ← Typer app, logging setup, daemon entry
 │       ├── config.py              ← pydantic-settings
 │       ├── models.py              ← Dataclasses (WorkspaceInfo)
 │       ├── service.py             ← Command execution (WorkspaceService)
@@ -549,7 +549,7 @@ pip install -r requirements.txt
 # Daemon mode (connects to backend) — the only way to run the runner
 export RUNNER_API_TOKEN=<token>
 export RUNNER_BACKEND_URL=ws://localhost:8000/ws/runner/
-python -m src serve
+python -m src
 ```
 
 ---

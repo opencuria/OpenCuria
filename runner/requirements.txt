@@ -1,9 +1,7 @@
 # Docker SDK
 docker>=7.0,<8.0
 
-# QEMU/KVM runtime (optional — only needed when RUNNER_ENABLED_RUNTIMES includes "qemu")
-libvirt-python>=10.0.0
-asyncssh>=2.14,<3.0
+# QEMU/KVM runtime deps live in requirements-qemu.txt (optional for docker-only dev).
 
 # WebSocket Client (async)
 python-socketio[asyncio_client]>=5.0,<6.0

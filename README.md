@@ -246,7 +246,7 @@ After that you can run `backend`, `webapp`, and `runner` individually.
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
-with `python -m src serve` while iterating.
+with `python -m src` while iterating.
 
 ## License
 

@@ -86,7 +86,7 @@ jobs:
           cache: pip
           cache-dependency-path: runner/requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-qemu.txt
       - name: Run tests
         run: pytest -q
 

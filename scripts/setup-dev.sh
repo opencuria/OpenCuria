@@ -37,6 +37,46 @@ setup_python_component() {
   )
 }
 
+warn_runner_qemu_deps_skipped() {
+  printf '\nWARNING: Optional runner QEMU dependencies were not installed.\n' >&2
+  printf 'Docker-only development works with RUNNER_ENABLED_RUNTIMES=docker.\n' >&2
+  printf 'To enable QEMU later, install libvirt system libraries and rerun:\n' >&2
+  printf '  cd runner && source .venv/bin/activate && pip install -r requirements-qemu.txt\n' >&2
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    printf 'On macOS: brew install libvirt pkg-config\n' >&2
+  else
+    printf 'On Debian/Ubuntu: sudo apt-get install -y libvirt-dev pkg-config\n' >&2
+  fi
+}
+
+setup_runner_python_environment() {
+  local component_dir="$REPO_ROOT/runner"
+
+  print_section "Setting up runner Python environment"
+
+  if [[ ! -d "$component_dir/.venv" ]]; then
+    python3 -m venv "$component_dir/.venv"
+  fi
+
+  (
+    cd "$component_dir"
+    source .venv/bin/activate
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+  )
+
+  print_section "Installing runner QEMU optional dependencies"
+  if (
+    cd "$component_dir"
+    source .venv/bin/activate
+    pip install -r requirements-qemu.txt
+  ); then
+    printf 'Runner QEMU dependencies installed.\n'
+  else
+    warn_runner_qemu_deps_skipped
+  fi
+}
+
 setup_node_component() {
   local component="$1"
   local component_dir="$REPO_ROOT/$component"
@@ -124,7 +164,7 @@ install_system_deps() {
 install_system_deps
 setup_git_hooks
 setup_python_component backend
-setup_python_component runner
+setup_runner_python_environment
 setup_node_component webapp
 run_backend_migrations
 
