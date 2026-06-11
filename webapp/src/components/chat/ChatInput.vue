@@ -1,6 +1,22 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { UiSelect, UiTextarea, UiButton, UiBadge, UiDialog } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Send,
   Square,
@@ -13,7 +29,7 @@ import {
   AlertCircle,
   File as FileIcon,
   FileText,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import type { AgentOption, Skill } from '@/types'
 import WorkspaceFilePicker from './WorkspaceFilePicker.vue'
@@ -323,8 +339,9 @@ function removeSkill(id: string): void {
   selectedSkillIds.value = selectedSkillIds.value.filter((sid) => sid !== id)
 }
 
-function updateOption(key: string, value: string): void {
-  emit('update:selectedOptions', { ...props.selectedOptions, [key]: value })
+function updateOption(key: string, value: unknown): void {
+  if (value == null || typeof value === 'object') return
+  emit('update:selectedOptions', { ...props.selectedOptions, [key]: String(value) })
 }
 
 function handleSend(): void {
@@ -418,7 +435,7 @@ watch(canManageFiles, (allowed) => {
 <template>
   <div class="pt-3 px-3 sm:pt-4 sm:px-4 pb-2 bg-transparent min-w-0 w-full">
     <div
-      class="group relative flex flex-col rounded-xl border bg-surface shadow-sm focus-within:border-primary transition-all duration-200"
+      class="group relative flex flex-col rounded-xl border bg-card shadow-sm focus-within:border-primary transition-all duration-200"
       :class="isDragging ? 'border-primary ring-1 ring-primary' : 'border-border'"
       @dragover="handleDragOver"
       @dragleave="handleDragLeave"
@@ -478,22 +495,22 @@ watch(canManageFiles, (allowed) => {
           />
           <div
             v-else-if="entry.kind === 'text'"
-            class="h-16 w-[180px] rounded-md border border-border bg-surface px-2 py-1.5 flex flex-col gap-1"
+            class="h-16 w-[180px] rounded-md border border-border bg-card px-2 py-1.5 flex flex-col gap-1"
           >
             <div class="flex items-center gap-1.5 min-w-0">
               <FileText :size="13" class="text-primary shrink-0" />
-              <span class="truncate text-[10px] font-medium text-fg">{{ entry.label }}</span>
+              <span class="truncate text-[10px] font-medium text-foreground">{{ entry.label }}</span>
             </div>
-            <pre class="text-[10px] leading-4 text-muted-fg whitespace-pre-wrap break-words overflow-hidden">{{ entry.textPreview || 'Text file in workspace' }}</pre>
+            <pre class="text-[10px] leading-4 text-muted-foreground whitespace-pre-wrap break-words overflow-hidden">{{ entry.textPreview || 'Text file in workspace' }}</pre>
           </div>
           <div
             v-else-if="entry.kind === 'binary'"
-            class="h-16 w-[180px] rounded-md border border-border bg-surface px-2 py-1.5 flex items-center gap-2"
+            class="h-16 w-[180px] rounded-md border border-border bg-card px-2 py-1.5 flex items-center gap-2"
           >
-            <FileIcon :size="14" class="text-muted-fg shrink-0" />
+            <FileIcon :size="14" class="text-muted-foreground shrink-0" />
             <div class="min-w-0">
-              <div class="truncate text-[10px] font-medium text-fg">{{ entry.label }}</div>
-              <div class="text-[10px] text-muted-fg">Binary file</div>
+              <div class="truncate text-[10px] font-medium text-foreground">{{ entry.label }}</div>
+              <div class="text-[10px] text-muted-foreground">Binary file</div>
             </div>
           </div>
           <!-- Loading placeholder (no media URL yet) -->
@@ -501,8 +518,8 @@ watch(canManageFiles, (allowed) => {
             v-else
             class="h-16 w-20 rounded-md border border-border bg-muted flex items-center justify-center"
           >
-            <Video v-if="entry.kind === 'video'" :size="18" class="text-muted-fg" />
-            <Image v-else :size="18" class="text-muted-fg" />
+            <Video v-if="entry.kind === 'video'" :size="18" class="text-muted-foreground" />
+            <Image v-else :size="18" class="text-muted-foreground" />
           </div>
 
           <!-- Upload status overlay -->
@@ -523,19 +540,19 @@ watch(canManageFiles, (allowed) => {
             <CheckCircle
               v-else-if="imageStore.getUploadStatus(entry.path) === 'done'"
               :size="18"
-              class="text-success"
+              class="text-emerald-600 dark:text-emerald-400"
             />
             <AlertCircle
               v-else-if="imageStore.getUploadStatus(entry.path) === 'error'"
               :size="18"
-              class="text-error"
+              class="text-destructive"
             />
           </div>
 
           <!-- Upload error tooltip -->
           <div
             v-if="imageStore.getUploadStatus(entry.path) === 'error'"
-            class="absolute -bottom-5 left-0 right-0 text-center text-[9px] text-error whitespace-nowrap"
+            class="absolute -bottom-5 left-0 right-0 text-center text-[9px] text-destructive whitespace-nowrap"
           >
             Upload failed
           </div>
@@ -543,7 +560,7 @@ watch(canManageFiles, (allowed) => {
           <!-- Remove button -->
           <button
             type="button"
-            class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-surface border border-border flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity hover:bg-error hover:border-error hover:text-white"
+            class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-card border border-border flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity hover:bg-error hover:border-error hover:text-white"
             :title="`Remove reference to ${entry.path.split('/').pop()}`"
             @click="removeFileRef(entry.path)"
           >
@@ -552,14 +569,12 @@ watch(canManageFiles, (allowed) => {
         </div>
       </div>
 
-      <UiTextarea
+      <Textarea
         v-model="prompt"
         :disabled="disabled"
         :rows="1"
         placeholder="Send a prompt to the agent…"
         class="min-h-[50px] max-h-[200px] w-full resize-none !border-0 !shadow-none focus:!shadow-none focus:!border-transparent !ring-0 !outline-none focus-visible:ring-0 focus-visible:outline-none !rounded-none !bg-transparent px-4 py-3 text-base"
-        style="backdrop-filter: none; -webkit-backdrop-filter: none;"
-        autosize
         @keydown="handleKeydown"
       />
 
@@ -576,12 +591,23 @@ watch(canManageFiles, (allowed) => {
               :key="option.key"
               class="w-auto min-w-[90px] sm:min-w-[130px]"
             >
-              <UiSelect
+              <Select
                 :model-value="selectedOptions?.[option.key] ?? option.default"
-                :options="option.choices.map((c) => ({ value: c, label: c }))"
-                class="h-8 text-xs border-transparent bg-muted/50 hover:bg-muted focus:ring-0 px-2 py-1 rounded-lg w-full"
                 @update:model-value="updateOption(option.key, $event)"
-              />
+              >
+                <SelectTrigger class="h-8 text-xs border-transparent bg-muted/50 hover:bg-muted focus:ring-0 px-2 py-1 rounded-lg w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="choice in option.choices"
+                    :key="choice"
+                    :value="choice"
+                  >
+                    {{ choice }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <!-- Skill picker -->
@@ -589,9 +615,8 @@ watch(canManageFiles, (allowed) => {
               <button
                 ref="skillButtonRef"
                 type="button"
-                class="flex items-center gap-1.5 h-8 px-2 py-1 rounded-lg text-xs transition-colors cursor-pointer"
-                :class="selectedSkillIds.length ? 'text-primary' : 'text-muted-fg'"
-                style="background: var(--glass-bg-subtle); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);"
+                class="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-muted/50 px-2 py-1 text-xs transition-colors hover:bg-muted"
+                :class="selectedSkillIds.length ? 'text-primary' : 'text-muted-foreground'"
                 @click="skillDropdownOpen = !skillDropdownOpen"
               >
                 <BookText :size="13" />
@@ -604,12 +629,11 @@ watch(canManageFiles, (allowed) => {
               <button
                 ref="imageButtonRef"
                 type="button"
-                class="flex items-center gap-1.5 h-8 px-2 py-1 rounded-lg text-xs transition-colors cursor-pointer"
+                class="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-muted/50 px-2 py-1 text-xs transition-colors hover:bg-muted"
                 :class="[
-                  imagePickerOpen ? 'text-primary' : 'text-muted-fg',
-                  !canManageFiles ? 'opacity-50 cursor-not-allowed' : '',
+                  imagePickerOpen ? 'text-primary' : 'text-muted-foreground',
+                  !canManageFiles ? 'cursor-not-allowed opacity-50' : '',
                 ]"
-                style="background: var(--glass-bg-subtle); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);"
                 :title="canManageFiles ? 'Insert workspace file or upload' : 'Workspace must be running to insert or upload files'"
                 :disabled="!canManageFiles"
                 @click="canManageFiles && (imagePickerOpen = !imagePickerOpen)"
@@ -622,27 +646,27 @@ watch(canManageFiles, (allowed) => {
         </div>
 
         <!-- Send button always visible on the right -->
-        <UiButton
+        <Button
           v-if="stoppable"
           :disabled="!canStop"
           size="icon"
           class="h-9 w-9 rounded-full transition-all shrink-0"
-          :class="canStop ? 'bg-error text-white hover:bg-error/90' : 'bg-muted text-muted-fg'"
+          :class="canStop ? 'bg-error text-white hover:bg-error/90' : 'bg-muted text-muted-foreground'"
           title="Stop current completion"
           @click="requestStop"
         >
           <Square :size="16" />
-        </UiButton>
-        <UiButton
+        </Button>
+        <Button
           v-else
           :disabled="!canSend"
           size="icon"
           class="h-9 w-9 rounded-full transition-all shrink-0"
-          :class="canSend ? 'bg-primary text-primary-fg hover:bg-primary-hover' : 'bg-muted text-muted-fg'"
+          :class="canSend ? 'bg-primary text-primary-fg hover:bg-primary-hover' : 'bg-muted text-muted-foreground'"
           @click="handleSend"
         >
           <Send :size="18" />
-        </UiButton>
+        </Button>
 
         <Teleport to="body">
           <template v-if="skillDropdownOpen">
@@ -651,14 +675,14 @@ watch(canManageFiles, (allowed) => {
               @click="skillDropdownOpen = false"
             />
             <div
-              class="fixed z-[121] -translate-y-full rounded-[var(--radius-md)] glass-strong py-1 max-h-56 overflow-y-auto"
+              class="fixed z-[121] -translate-y-full rounded-[var(--radius-md)] border border-border bg-popover shadow-md py-1 max-h-56 overflow-y-auto"
               :style="skillDropdownStyle"
             >
               <button
                 v-for="skill in skillOptions"
                 :key="skill.id"
                 type="button"
-                class="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-fg hover:bg-surface-hover transition-colors"
+                class="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors"
                 @click="toggleSkill(skill.id)"
               >
                 <span
@@ -685,9 +709,9 @@ watch(canManageFiles, (allowed) => {
                   </svg>
                 </span>
                 <span class="truncate flex-1 text-left">{{ skill.name }}</span>
-                <UiBadge class="shrink-0 text-[10px] py-0" variant="muted">
+                <Badge class="shrink-0 text-[10px] py-0" variant="secondary">
                   {{ skill.scope === 'organization' ? 'Org' : 'Mine' }}
-                </UiBadge>
+                </Badge>
               </button>
             </div>
           </template>
@@ -712,28 +736,31 @@ watch(canManageFiles, (allowed) => {
         </Teleport>
       </div>
     </div>
-    <UiDialog
-      :open="stopConfirmOpen"
-      title="Stop current completion?"
-      description="This will terminate the running agent process for this message."
-      @update:open="(value) => (stopConfirmOpen = value)"
-    >
-      <div class="flex flex-col gap-4">
-        <p class="text-sm text-muted-fg">
-          The current response will be aborted immediately. The workspace remains running.
-        </p>
-        <div class="flex justify-end gap-2">
-          <UiButton variant="outline" @click="stopConfirmOpen = false">Cancel</UiButton>
-          <UiButton variant="destructive" @click="confirmStop">Stop completion</UiButton>
+    <Dialog :open="stopConfirmOpen" @update:open="(value) => (stopConfirmOpen = value)">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Stop current completion?</DialogTitle>
+          <DialogDescription>
+            This will terminate the running agent process for this message.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4">
+          <p class="text-sm text-muted-foreground">
+            The current response will be aborted immediately. The workspace remains running.
+          </p>
+          <div class="flex justify-end gap-2">
+            <Button variant="outline" @click="stopConfirmOpen = false">Cancel</Button>
+            <Button variant="destructive" @click="confirmStop">Stop completion</Button>
+          </div>
         </div>
-      </div>
-    </UiDialog>
-    <p v-if="busyMessage" class="text-xs text-center text-warning mt-2">
+      </DialogContent>
+    </Dialog>
+    <p v-if="busyMessage" class="text-xs text-center text-amber-600 dark:text-amber-400 mt-2">
       {{ busyMessage }}
     </p>
-    <p v-else class="hidden sm:block text-xs text-center text-muted-fg mt-2">
-      Press <kbd class="font-mono font-medium text-fg">Enter</kbd> to send,
-      <kbd class="font-mono font-medium text-fg">Shift+Enter</kbd> for newline
+    <p v-else class="hidden sm:block text-xs text-center text-muted-foreground mt-2">
+      Press <kbd class="font-mono font-medium text-foreground">Enter</kbd> to send,
+      <kbd class="font-mono font-medium text-foreground">Shift+Enter</kbd> for newline
     </p>
   </div>
 </template>

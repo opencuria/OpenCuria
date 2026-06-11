@@ -60,11 +60,11 @@ describe('ImagesView', () => {
     const wrapper = mount(ImagesView, {
       global: {
         stubs: {
-          UiSpinner: { template: '<div />' },
-          UiButton: { template: '<button><slot /></button>' },
-          UiCard: { template: '<div><slot /></div>' },
-          UiCardContent: { template: '<div><slot /></div>' },
-          UiBadge: { template: '<span><slot /></span>' },
+          LoadingSpinner: { template: '<div />' },
+          Button: { template: '<button><slot /></button>' },
+          Card: { template: '<div><slot /></div>' },
+          CardContent: { template: '<div><slot /></div>' },
+          Badge: { template: '<span><slot /></span>' },
           CreateImageArtifactDialog: { template: '<button>Capture Image</button>' },
           CreateWorkspaceFromImageArtifactDialog: { template: '<div><slot /></div>' },
         },

@@ -14,13 +14,16 @@
  */
 import { ref, computed, watch } from 'vue'
 import { get, post, patch, del } from '@/services/api'
+import { Button } from '@/components/ui/button'
 import {
-  UiButton,
-  UiDialog,
-  UiInput,
-  UiSpinner,
-  UiTextarea,
-} from '@/components/ui'
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import {
   Plus,
   Trash2,
@@ -34,7 +37,7 @@ import {
   Bot,
   Settings2,
   Zap,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -674,28 +677,26 @@ function close() {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    :title="agent ? `Edit Agent: ${agent.name}` : 'New Agent Definition'"
-    description=""
-    class="sm:max-w-2xl lg:max-w-5xl"
     @update:open="(v) => !v && close()"
   >
-    <template #trigger>
-      <span class="hidden" />
-    </template>
+    <DialogContent class="sm:max-w-2xl lg:max-w-5xl">
+      <DialogHeader>
+        <DialogTitle>{{ agent ? `Edit Agent: ${agent.name}` : 'New Agent Definition' }}</DialogTitle>
+      </DialogHeader>
 
-    <div class="flex flex-col gap-4">
+      <div class="flex flex-col gap-4">
       <!-- Error banner -->
       <div
         v-if="error"
-        class="flex items-center gap-2 rounded-[var(--radius-sm)] border border-error/30 bg-error-muted px-3 py-2 text-sm text-error"
+        class="flex items-center gap-2 rounded-sm border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
       >
         <AlertTriangle :size="14" class="shrink-0" />
         <span class="flex-1">{{ error }}</span>
-        <UiButton variant="ghost" size="icon-sm" @click="error = null">
+        <Button variant="ghost" size="icon-sm" @click="error = null">
           <X :size="12" />
-        </UiButton>
+        </Button>
       </div>
 
       <!-- Tabs -->
@@ -711,7 +712,7 @@ function close() {
           :class="
             activeTab === tab.key
               ? 'border-accent text-accent'
-              : 'border-transparent text-muted-fg hover:text-fg'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
           "
           @click="activeTab = tab.key as 'definition' | 'credentials'"
         >
@@ -733,8 +734,8 @@ function close() {
 
           <!-- Name -->
           <div>
-            <label class="block text-xs font-medium text-muted-fg mb-1">Name *</label>
-            <UiInput
+            <label class="block text-xs font-medium text-muted-foreground mb-1">Name *</label>
+            <Input
               v-model="name"
               placeholder="e.g. my-custom-agent"
               :disabled="agent?.is_standard"
@@ -743,8 +744,8 @@ function close() {
 
           <!-- Description -->
           <div>
-            <label class="block text-xs font-medium text-muted-fg mb-1">Description</label>
-            <UiTextarea
+            <label class="block text-xs font-medium text-muted-foreground mb-1">Description</label>
+            <Textarea
               v-model="description"
               :rows="2"
               placeholder="What does this agent do?"
@@ -754,7 +755,7 @@ function close() {
 
           <!-- Multi-chat toggle -->
           <div>
-            <label class="text-xs font-medium text-muted-fg block mb-2">Options</label>
+            <label class="text-xs font-medium text-muted-foreground block mb-2">Options</label>
             <label class="flex items-center gap-3 cursor-pointer">
               <div
                 class="relative w-10 h-6 rounded-full transition-colors cursor-pointer shrink-0 border"
@@ -770,20 +771,20 @@ function close() {
                   :class="supportsMultiChat ? 'translate-x-4' : 'translate-x-0'"
                 />
               </div>
-              <span class="text-sm text-fg">Multi-chat support</span>
+              <span class="text-sm text-foreground">Multi-chat support</span>
             </label>
           </div>
 
           <!-- Default Environment Variables -->
           <div>
             <div class="flex items-center justify-between mb-2">
-              <label class="text-xs font-medium text-muted-fg">Default Environment Variables</label>
-              <UiButton size="icon-sm" variant="ghost" title="Add variable" @click="addEnvPair">
+              <label class="text-xs font-medium text-muted-foreground">Default Environment Variables</label>
+              <Button size="icon-sm" variant="ghost" title="Add variable" @click="addEnvPair">
                 <Plus :size="14" />
-              </UiButton>
+              </Button>
             </div>
 
-            <div v-if="defaultEnv.length === 0" class="text-xs text-muted-fg py-1.5 text-center">
+            <div v-if="defaultEnv.length === 0" class="text-xs text-muted-foreground py-1.5 text-center">
               No environment variables.
             </div>
 
@@ -793,20 +794,20 @@ function close() {
                 :key="i"
                 class="flex gap-2 items-center"
               >
-                <UiInput
+                <Input
                   v-model="pair.key"
                   placeholder="KEY"
                   class="font-mono text-xs flex-1"
                 />
-                <span class="text-muted-fg text-xs shrink-0">=</span>
-                <UiInput
+                <span class="text-muted-foreground text-xs shrink-0">=</span>
+                <Input
                   v-model="pair.value"
                   placeholder="value"
                   class="font-mono text-xs flex-1"
                 />
-                <UiButton variant="ghost" size="icon-sm" @click="removeEnvPair(i)">
+                <Button variant="ghost" size="icon-sm" @click="removeEnvPair(i)">
                   <X :size="12" />
-                </UiButton>
+                </Button>
               </div>
             </div>
           </div>
@@ -815,17 +816,17 @@ function close() {
           <div>
             <div class="flex items-center justify-between mb-2">
               <div>
-                <label class="text-xs font-medium text-muted-fg">Available Options</label>
-                <p class="text-xs text-muted-fg/70 mt-0.5">
+                <label class="text-xs font-medium text-muted-foreground">Available Options</label>
+                <p class="text-xs text-muted-foreground/70 mt-0.5">
                   Selectable per-session options. Keys become <code class="font-mono bg-muted/40 px-0.5 rounded text-accent">{key}</code> placeholders in commands.
                 </p>
               </div>
-              <UiButton size="icon-sm" variant="ghost" title="Add option" @click="addOption">
+              <Button size="icon-sm" variant="ghost" title="Add option" @click="addOption">
                 <Plus :size="14" />
-              </UiButton>
+              </Button>
             </div>
 
-            <div v-if="availableOptions.length === 0" class="text-xs text-muted-fg py-1.5 text-center">
+            <div v-if="availableOptions.length === 0" class="text-xs text-muted-foreground py-1.5 text-center">
               No options configured.
             </div>
 
@@ -833,49 +834,48 @@ function close() {
               <div
                 v-for="(opt, i) in availableOptions"
                 :key="opt._id"
-                class="rounded-[var(--radius-sm)] border border-border p-2.5 space-y-2"
-                style="background: var(--glass-bg-subtle)"
+                class="rounded-sm border border-border p-2.5 space-y-2 bg-muted/30"
               >
                 <div class="flex items-center gap-2">
                   <div class="flex-1 grid grid-cols-2 gap-1.5">
                     <div>
-                      <label class="text-xs text-muted-fg">Key</label>
-                      <UiInput
+                      <label class="text-xs text-muted-foreground">Key</label>
+                      <Input
                         v-model="opt.key"
                         placeholder="model"
                         class="font-mono text-xs mt-0.5"
                       />
                     </div>
                     <div>
-                      <label class="text-xs text-muted-fg">Label</label>
-                      <UiInput
+                      <label class="text-xs text-muted-foreground">Label</label>
+                      <Input
                         v-model="opt.label"
                         placeholder="Model"
                         class="text-xs mt-0.5"
                       />
                     </div>
                   </div>
-                  <UiButton
+                  <Button
                     variant="ghost"
                     size="icon-sm"
                     class="shrink-0 self-end mb-0.5"
                     @click="removeOption(i)"
                   >
                     <X :size="12" />
-                  </UiButton>
+                  </Button>
                 </div>
                 <div class="grid grid-cols-2 gap-1.5">
                   <div>
-                    <label class="text-xs text-muted-fg">Choices <span class="text-muted-fg/60">(comma-separated)</span></label>
-                    <UiInput
+                    <label class="text-xs text-muted-foreground">Choices <span class="text-muted-foreground/60">(comma-separated)</span></label>
+                    <Input
                       v-model="opt.choicesText"
                       placeholder="gpt-4, claude-3"
                       class="font-mono text-xs mt-0.5"
                     />
                   </div>
                   <div>
-                    <label class="text-xs text-muted-fg">Default</label>
-                    <UiInput
+                    <label class="text-xs text-muted-foreground">Default</label>
+                    <Input
                       v-model="opt.default"
                       :placeholder="opt.choicesText.split(',')[0]?.trim() || 'default'"
                       class="font-mono text-xs mt-0.5"
@@ -890,26 +890,26 @@ function close() {
 
         <!-- ── RIGHT COLUMN: Commands ── -->
         <div class="space-y-4">
-          <p class="text-xs font-medium text-muted-fg">Commands</p>
+          <p class="text-xs font-medium text-muted-foreground">Commands</p>
 
           <!-- ── Configure Phase ── -->
-          <div class="rounded-[var(--radius-md)] border border-border overflow-hidden" style="background: var(--glass-bg-subtle)">
+          <div class="rounded-md border border-border overflow-hidden bg-muted/30">
             <div class="flex items-center justify-between px-3 py-2.5 border-b border-border">
               <div class="flex items-center gap-2">
-                <Settings2 :size="14" class="text-muted-fg" />
-                <span class="text-xs font-medium text-fg">Configure Phase</span>
-                <span class="text-xs text-muted-fg">(runs once after workspace setup)</span>
+                <Settings2 :size="14" class="text-muted-foreground" />
+                <span class="text-xs font-medium text-foreground">Configure Phase</span>
+                <span class="text-xs text-muted-foreground">(runs once after workspace setup)</span>
               </div>
-              <UiButton size="sm" variant="ghost" @click="addConfigureCommand">
+              <Button size="sm" variant="ghost" @click="addConfigureCommand">
                 <Plus :size="12" />
                 Add
-              </UiButton>
+              </Button>
             </div>
 
             <div class="p-3">
               <div
                 v-if="configureCommands.length === 0"
-                class="text-xs text-muted-fg py-3 text-center border border-dashed border-border rounded-[var(--radius-sm)]"
+                class="text-xs text-muted-foreground py-3 text-center border border-dashed border-border rounded-sm"
               >
                 No configure commands. Optional.
               </div>
@@ -918,16 +918,16 @@ function close() {
                 <div
                   v-for="row in configureCommands"
                   :key="row._dragId"
-                  class="rounded-[var(--radius-sm)] border border-border p-2.5 space-y-2 bg-[var(--glass-bg)]"
+                  class="rounded-sm border border-border p-2.5 space-y-2 bg-muted/50"
                   draggable="true"
                   @dragstart="onDragStart($event, row)"
                   @dragover="onDragOver($event, row)"
                   @drop="onDrop($event, row)"
                 >
                   <div class="flex items-start gap-2">
-                    <GripVertical :size="14" class="text-muted-fg mt-2 shrink-0 cursor-grab" />
+                    <GripVertical :size="14" class="text-muted-foreground mt-2 shrink-0 cursor-grab" />
                     <div class="flex-1 space-y-1.5">
-                      <UiInput
+                      <Input
                         v-model="row.commandText"
                         placeholder="bash -c 'echo hello'"
                         class="font-mono text-xs"
@@ -941,10 +941,10 @@ function close() {
                         <span
                           v-for="p in validatePlaceholders(row.commandText).invalid"
                           :key="p"
-                          class="text-xs px-1.5 py-0.5 rounded bg-error/15 text-error font-mono"
+                          class="text-xs px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-mono"
                         >{{ p }} ✗</span>
                       </div>
-                      <UiInput
+                      <Input
                         v-model="row.description"
                         placeholder="Description (optional)"
                         class="text-xs"
@@ -952,10 +952,10 @@ function close() {
                       <!-- Per-command env -->
                       <div v-if="row.env.length > 0 || true">
                         <div class="flex items-center justify-between mb-1">
-                          <label class="text-xs text-muted-fg">Extra Env</label>
-                          <UiButton variant="ghost" size="icon-sm" @click="addCommandEnvPair(row)">
+                          <label class="text-xs text-muted-foreground">Extra Env</label>
+                          <Button variant="ghost" size="icon-sm" @click="addCommandEnvPair(row)">
                             <Plus :size="10" />
-                          </UiButton>
+                          </Button>
                         </div>
                         <div class="space-y-1">
                           <div
@@ -963,30 +963,30 @@ function close() {
                             :key="ei"
                             class="flex gap-1.5 items-center"
                           >
-                            <UiInput v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
-                            <span class="text-muted-fg text-xs shrink-0">=</span>
-                            <UiInput v-model="pair.value" placeholder="val" class="font-mono text-xs" />
-                            <UiButton variant="ghost" size="icon-sm" @click="removeCommandEnvPair(row, ei)">
+                            <Input v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
+                            <span class="text-muted-foreground text-xs shrink-0">=</span>
+                            <Input v-model="pair.value" placeholder="val" class="font-mono text-xs" />
+                            <Button variant="ghost" size="icon-sm" @click="removeCommandEnvPair(row, ei)">
                               <X :size="10" />
-                            </UiButton>
+                            </Button>
                           </div>
                         </div>
                         <div v-if="row.env.length === 0">
-                          <UiButton
+                          <Button
                             variant="ghost"
                             size="sm"
-                            class="text-xs text-muted-fg w-full justify-start"
+                            class="text-xs text-muted-foreground w-full justify-start"
                             @click="addCommandEnvPair(row)"
                           >
                             <Plus :size="10" />
                             Add env var
-                          </UiButton>
+                          </Button>
                         </div>
                       </div>
                     </div>
-                    <UiButton variant="ghost" size="icon-sm" class="shrink-0 mt-0.5" @click="removeCommand(row)">
+                    <Button variant="ghost" size="icon-sm" class="shrink-0 mt-0.5" @click="removeCommand(row)">
                       <Trash2 :size="13" />
-                    </UiButton>
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -995,20 +995,19 @@ function close() {
 
           <!-- ── Run (First Message) Phase ── -->
           <div
-            class="rounded-[var(--radius-md)] border overflow-hidden"
+            class="rounded-md border overflow-hidden bg-muted/30"
             :class="runFirstCommand ? 'border-amber-400/30' : 'border-border border-dashed'"
-            style="background: var(--glass-bg-subtle)"
           >
             <div
               class="flex items-center justify-between px-3 py-2.5"
               :class="runFirstCommand ? 'border-b border-amber-400/20' : ''"
             >
               <div class="flex items-center gap-2">
-                <Zap :size="14" :class="runFirstCommand ? 'text-amber-400' : 'text-muted-fg'" />
-                <span class="text-xs font-medium text-fg">Run Phase (First Message)</span>
-                <span class="text-xs text-muted-fg">(optional — runs on first chat message)</span>
+                <Zap :size="14" :class="runFirstCommand ? 'text-amber-400' : 'text-muted-foreground'" />
+                <span class="text-xs font-medium text-foreground">Run Phase (First Message)</span>
+                <span class="text-xs text-muted-foreground">(optional — runs on first chat message)</span>
               </div>
-              <UiButton
+              <Button
                 v-if="!runFirstCommand"
                 size="sm"
                 variant="ghost"
@@ -1017,27 +1016,27 @@ function close() {
               >
                 <Plus :size="12" />
                 Enable
-              </UiButton>
-              <UiButton
+              </Button>
+              <Button
                 v-else
                 size="sm"
                 variant="ghost"
-                class="text-xs text-muted-fg"
+                class="text-xs text-muted-foreground"
                 @click="disableRunFirst"
               >
                 <X :size="12" />
                 Disable
-              </UiButton>
+              </Button>
             </div>
 
             <div v-if="runFirstCommand" class="p-3">
               <div
-                class="rounded-[var(--radius-sm)] border border-amber-400/20 p-2.5 space-y-1.5 bg-[var(--glass-bg)]"
+                class="rounded-sm border border-amber-400/20 p-2.5 space-y-1.5 bg-muted/50"
               >
                 <div class="flex items-start gap-2">
                   <Zap :size="14" class="text-amber-400 mt-2 shrink-0" />
                   <div class="flex-1 space-y-1.5">
-                    <UiInput
+                    <Input
                       v-model="runFirstCommand.commandText"
                       placeholder="my-agent --init {prompt}"
                       class="font-mono text-xs"
@@ -1051,10 +1050,10 @@ function close() {
                       <span
                         v-for="p in validatePlaceholders(runFirstCommand.commandText).invalid"
                         :key="p"
-                        class="text-xs px-1.5 py-0.5 rounded bg-error/15 text-error font-mono"
+                        class="text-xs px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-mono"
                       >{{ p }} ✗</span>
                     </div>
-                    <UiInput
+                    <Input
                       v-model="runFirstCommand.description"
                       placeholder="Description (optional)"
                       class="text-xs"
@@ -1062,10 +1061,10 @@ function close() {
                     <!-- Per-command env -->
                     <div>
                       <div class="flex items-center justify-between mb-1">
-                        <label class="text-xs text-muted-fg">Extra Env</label>
-                        <UiButton variant="ghost" size="icon-sm" @click="addCommandEnvPair(runFirstCommand)">
+                        <label class="text-xs text-muted-foreground">Extra Env</label>
+                        <Button variant="ghost" size="icon-sm" @click="addCommandEnvPair(runFirstCommand)">
                           <Plus :size="10" />
-                        </UiButton>
+                        </Button>
                       </div>
                       <div class="space-y-1">
                         <div
@@ -1073,12 +1072,12 @@ function close() {
                           :key="ei"
                           class="flex gap-1.5 items-center"
                         >
-                          <UiInput v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
-                          <span class="text-muted-fg text-xs shrink-0">=</span>
-                          <UiInput v-model="pair.value" placeholder="val" class="font-mono text-xs" />
-                          <UiButton variant="ghost" size="icon-sm" @click="removeCommandEnvPair(runFirstCommand, ei)">
+                          <Input v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
+                          <span class="text-muted-foreground text-xs shrink-0">=</span>
+                          <Input v-model="pair.value" placeholder="val" class="font-mono text-xs" />
+                          <Button variant="ghost" size="icon-sm" @click="removeCommandEnvPair(runFirstCommand, ei)">
                             <X :size="10" />
-                          </UiButton>
+                          </Button>
                         </div>
                       </div>
                     </div>
@@ -1090,20 +1089,19 @@ function close() {
 
           <!-- ── Run Phase ── -->
           <div
-            class="rounded-[var(--radius-md)] border overflow-hidden"
-            :class="runCommands.length === 0 ? 'border-error/30' : 'border-accent/20'"
-            style="background: var(--glass-bg-subtle)"
+            class="rounded-md border overflow-hidden bg-muted/30"
+            :class="runCommands.length === 0 ? 'border-destructive/30' : 'border-accent/20'"
           >
             <div
               class="flex items-center justify-between px-3 py-2.5 border-b"
-              :class="runCommands.length === 0 ? 'border-error/20' : 'border-accent/10'"
+              :class="runCommands.length === 0 ? 'border-destructive/20' : 'border-accent/10'"
             >
               <div class="flex items-center gap-2">
                 <Bot :size="14" class="text-accent" />
-                <span class="text-xs font-medium text-fg">Run Phase</span>
-                <span class="text-xs text-muted-fg">(executed for each prompt — exactly 1)</span>
+                <span class="text-xs font-medium text-foreground">Run Phase</span>
+                <span class="text-xs text-muted-foreground">(executed for each prompt — exactly 1)</span>
               </div>
-              <UiButton
+              <Button
                 size="sm"
                 variant="ghost"
                 :disabled="runCommands.length >= 1"
@@ -1111,13 +1109,13 @@ function close() {
               >
                 <Plus :size="12" />
                 Add
-              </UiButton>
+              </Button>
             </div>
 
             <div class="p-3">
               <div
                 v-if="runCommands.length === 0"
-                class="text-xs text-error py-3 text-center border border-dashed border-error/30 rounded-[var(--radius-sm)]"
+                class="text-xs text-destructive py-3 text-center border border-dashed border-destructive/30 rounded-sm"
               >
                 Required: add exactly one run command.
               </div>
@@ -1126,12 +1124,12 @@ function close() {
                 <div
                   v-for="row in runCommands"
                   :key="row._dragId"
-                  class="rounded-[var(--radius-sm)] border border-accent/20 p-2.5 space-y-1.5 bg-[var(--glass-bg)]"
+                  class="rounded-sm border border-accent/20 p-2.5 space-y-1.5 bg-muted/50"
                 >
                   <div class="flex items-start gap-2">
                     <Bot :size="14" class="text-accent mt-2 shrink-0" />
                     <div class="flex-1 space-y-1.5">
-                      <UiInput
+                      <Input
                         v-model="row.commandText"
                         placeholder="my-agent --prompt {prompt}"
                         class="font-mono text-xs"
@@ -1145,10 +1143,10 @@ function close() {
                         <span
                           v-for="p in validatePlaceholders(row.commandText).invalid"
                           :key="p"
-                          class="text-xs px-1.5 py-0.5 rounded bg-error/15 text-error font-mono"
+                          class="text-xs px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-mono"
                         >{{ p }} ✗</span>
                       </div>
-                      <UiInput
+                      <Input
                         v-model="row.description"
                         placeholder="Description (optional)"
                         class="text-xs"
@@ -1156,10 +1154,10 @@ function close() {
                       <!-- Per-command env -->
                       <div>
                         <div class="flex items-center justify-between mb-1">
-                          <label class="text-xs text-muted-fg">Extra Env</label>
-                          <UiButton variant="ghost" size="icon-sm" @click="addCommandEnvPair(row)">
+                          <label class="text-xs text-muted-foreground">Extra Env</label>
+                          <Button variant="ghost" size="icon-sm" @click="addCommandEnvPair(row)">
                             <Plus :size="10" />
-                          </UiButton>
+                          </Button>
                         </div>
                         <div class="space-y-1">
                           <div
@@ -1167,19 +1165,19 @@ function close() {
                             :key="ei"
                             class="flex gap-1.5 items-center"
                           >
-                            <UiInput v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
-                            <span class="text-muted-fg text-xs shrink-0">=</span>
-                            <UiInput v-model="pair.value" placeholder="val" class="font-mono text-xs" />
-                            <UiButton variant="ghost" size="icon-sm" @click="removeCommandEnvPair(row, ei)">
+                            <Input v-model="pair.key" placeholder="KEY" class="font-mono text-xs" />
+                            <span class="text-muted-foreground text-xs shrink-0">=</span>
+                            <Input v-model="pair.value" placeholder="val" class="font-mono text-xs" />
+                            <Button variant="ghost" size="icon-sm" @click="removeCommandEnvPair(row, ei)">
                               <X :size="10" />
-                            </UiButton>
+                            </Button>
                           </div>
                         </div>
                       </div>
                     </div>
-                    <UiButton variant="ghost" size="icon-sm" class="shrink-0 mt-0.5" @click="removeCommand(row)">
+                    <Button variant="ghost" size="icon-sm" class="shrink-0 mt-0.5" @click="removeCommand(row)">
                       <Trash2 :size="13" />
-                    </UiButton>
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -1193,14 +1191,14 @@ function close() {
       <!-- TAB: Credentials -->
       <!-- ================================================================ -->
       <div v-else-if="activeTab === 'credentials'" class="space-y-4">
-        <p class="text-xs text-muted-fg">
+        <p class="text-xs text-muted-foreground">
           Select which credential services this agent requires. You can optionally configure
           per-service default environment variables and commands.
         </p>
 
         <!-- Available services to add -->
         <div>
-          <p class="text-xs font-medium text-muted-fg mb-2">Available Credential Services</p>
+          <p class="text-xs font-medium text-muted-foreground mb-2">Available Credential Services</p>
           <div class="flex flex-wrap gap-2">
             <button
               v-for="svc in credentialServices"
@@ -1210,7 +1208,7 @@ function close() {
               :class="
                 linkedCredentialServiceIds.includes(svc.id)
                   ? 'border-accent/40 bg-accent/10 text-accent cursor-default'
-                  : 'border-border text-muted-fg hover:border-accent/40 hover:text-fg cursor-pointer'
+                  : 'border-border text-muted-foreground hover:border-accent/40 hover:text-foreground cursor-pointer'
               "
               :disabled="linkedCredentialServiceIds.includes(svc.id)"
               @click="addCredentialRelation(svc)"
@@ -1219,7 +1217,7 @@ function close() {
               <Plus v-else :size="11" />
               {{ svc.name }}
             </button>
-            <span v-if="credentialServices.length === 0" class="text-xs text-muted-fg">
+            <span v-if="credentialServices.length === 0" class="text-xs text-muted-foreground">
               No credential services available.
             </span>
           </div>
@@ -1230,41 +1228,40 @@ function close() {
           <div
             v-for="rel in credentialRelations"
             :key="rel.credential_service_id"
-            class="rounded-[var(--radius-md)] border border-border overflow-hidden"
-            style="background: var(--glass-bg)"
+            class="rounded-md border border-border overflow-hidden bg-muted/50"
           >
             <!-- Header -->
             <div class="flex items-center gap-2 px-3 py-2.5">
               <button
                 type="button"
-                class="flex items-center gap-1 text-muted-fg hover:text-fg"
+                class="flex items-center gap-1 text-muted-foreground hover:text-foreground"
                 @click="toggleRelationExpand(rel.credential_service_id)"
               >
                 <ChevronDown v-if="expandedRelation !== rel.credential_service_id" :size="14" />
                 <ChevronUp v-else :size="14" />
               </button>
-              <Key :size="14" class="text-muted-fg shrink-0" />
-              <span class="text-sm font-medium text-fg flex-1">
+              <Key :size="14" class="text-muted-foreground shrink-0" />
+              <span class="text-sm font-medium text-foreground flex-1">
                 {{ rel.credential_service_name || rel.credential_service_id }}
               </span>
               <div class="flex items-center gap-1.5">
                 <span
                   v-if="rel.default_env.length > 0 || rel.commands.length > 0"
-                  class="text-xs text-muted-fg"
+                  class="text-xs text-muted-foreground"
                 >
                   <span v-if="rel.default_env.length > 0">{{ rel.default_env.length }} env</span>
                   <span v-if="rel.default_env.length > 0 && rel.commands.length > 0"> · </span>
                   <span v-if="rel.commands.length > 0">{{ rel.commands.length }} cmd</span>
                 </span>
-                <span v-else class="text-xs text-muted-fg italic">required only</span>
-                <UiButton
+                <span v-else class="text-xs text-muted-foreground italic">required only</span>
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   title="Remove"
                   @click="removeCredentialRelation(rel.credential_service_id)"
                 >
                   <X :size="12" />
-                </UiButton>
+                </Button>
               </div>
             </div>
 
@@ -1276,12 +1273,12 @@ function close() {
               <!-- Default env for this relation -->
               <div>
                 <div class="flex items-center justify-between mb-1.5">
-                  <label class="text-xs font-medium text-muted-fg">Default Env (for this service)</label>
-                  <UiButton variant="ghost" size="icon-sm" @click="addRelationEnvPair(rel)">
+                  <label class="text-xs font-medium text-muted-foreground">Default Env (for this service)</label>
+                  <Button variant="ghost" size="icon-sm" @click="addRelationEnvPair(rel)">
                     <Plus :size="12" />
-                  </UiButton>
+                  </Button>
                 </div>
-                <div v-if="rel.default_env.length === 0" class="text-xs text-muted-fg italic">
+                <div v-if="rel.default_env.length === 0" class="text-xs text-muted-foreground italic">
                   No extra env variables. Click + to add one.
                 </div>
                 <div class="space-y-1.5">
@@ -1290,12 +1287,12 @@ function close() {
                     :key="i"
                     class="flex gap-2 items-center"
                   >
-                    <UiInput v-model="pair.key" placeholder="KEY" class="font-mono text-xs flex-1" />
-                    <span class="text-muted-fg text-xs shrink-0">=</span>
-                    <UiInput v-model="pair.value" placeholder="value" class="font-mono text-xs flex-1" />
-                    <UiButton variant="ghost" size="icon-sm" @click="removeRelationEnvPair(rel, i)">
+                    <Input v-model="pair.key" placeholder="KEY" class="font-mono text-xs flex-1" />
+                    <span class="text-muted-foreground text-xs shrink-0">=</span>
+                    <Input v-model="pair.value" placeholder="value" class="font-mono text-xs flex-1" />
+                    <Button variant="ghost" size="icon-sm" @click="removeRelationEnvPair(rel, i)">
                       <X :size="12" />
-                    </UiButton>
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -1303,39 +1300,38 @@ function close() {
               <!-- Commands for this relation -->
               <div>
                 <div class="flex items-center justify-between mb-1.5">
-                  <label class="text-xs font-medium text-muted-fg">Commands (run before agent commands)</label>
-                  <UiButton size="sm" variant="ghost" @click="addRelationCommand(rel)">
+                  <label class="text-xs font-medium text-muted-foreground">Commands (run before agent commands)</label>
+                  <Button size="sm" variant="ghost" @click="addRelationCommand(rel)">
                     <Plus :size="12" />
                     Add
-                  </UiButton>
+                  </Button>
                 </div>
-                <div v-if="rel.commands.length === 0" class="text-xs text-muted-fg italic">
+                <div v-if="rel.commands.length === 0" class="text-xs text-muted-foreground italic">
                   No commands. Typically you only need to add the credential service above.
                 </div>
                 <div class="space-y-2">
                   <div
                     v-for="row in rel.commands"
                     :key="row._dragId"
-                    class="rounded-[var(--radius-sm)] border border-border p-2.5 space-y-2"
-                    style="background: var(--glass-bg-subtle)"
+                    class="space-y-2 rounded-sm border border-border bg-muted/30 p-2.5"
                     draggable="true"
                     @dragstart="onRelationDragStart($event, row)"
                     @dragover="onRelationDragOver"
                     @drop="onRelationDrop($event, rel, row)"
                   >
                     <div class="flex items-start gap-2">
-                      <GripVertical :size="13" class="text-muted-fg mt-2 cursor-grab shrink-0" />
+                      <GripVertical :size="13" class="text-muted-foreground mt-2 cursor-grab shrink-0" />
                       <div class="flex-1 space-y-2">
                         <!-- Phase selector -->
                         <div class="flex gap-2 items-center">
                           <select
                             v-model="row.phase"
-                            class="h-7 px-2 rounded-[var(--radius-sm)] border border-[var(--input-border)] bg-[var(--input-bg)] text-xs text-fg"
+                            class="h-7 px-2 rounded-sm border border-input bg-background text-xs text-foreground"
                           >
                             <option value="configure">configure</option>
                             <option value="run">run</option>
                           </select>
-                          <UiInput
+                          <Input
                             v-model="row.commandText"
                             placeholder="bash -c '...'"
                             class="font-mono text-xs flex-1"
@@ -1350,18 +1346,18 @@ function close() {
                           <span
                             v-for="p in validatePlaceholders(row.commandText).invalid"
                             :key="p"
-                            class="text-xs px-1.5 py-0.5 rounded bg-error/15 text-error font-mono"
+                            class="text-xs px-1.5 py-0.5 rounded bg-destructive/15 text-destructive font-mono"
                           >{{ p }} ✗</span>
                         </div>
-                        <UiInput
+                        <Input
                           v-model="row.description"
                           placeholder="Description (optional)"
                           class="text-xs"
                         />
                       </div>
-                      <UiButton variant="ghost" size="icon-sm" @click="removeRelationCommand(rel, row)">
+                      <Button variant="ghost" size="icon-sm" @click="removeRelationCommand(rel, row)">
                         <Trash2 :size="12" />
-                      </UiButton>
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -1369,7 +1365,7 @@ function close() {
             </div>
           </div>
 
-          <div v-if="credentialRelations.length === 0" class="text-center py-8 text-muted-fg text-sm">
+          <div v-if="credentialRelations.length === 0" class="text-center py-8 text-muted-foreground text-sm">
             No credential services linked. Select one above to get started.
           </div>
         </div>
@@ -1377,15 +1373,16 @@ function close() {
 
       <!-- ── Action buttons ── -->
       <div class="flex justify-end gap-2 pt-2 border-t border-border">
-        <UiButton variant="outline" type="button" :disabled="loading" @click="close">
+        <Button variant="outline" type="button" :disabled="loading" @click="close">
           Cancel
-        </UiButton>
-        <UiButton type="button" :disabled="loading || !name.trim()" @click="submit">
-          <UiSpinner v-if="loading" :size="12" />
+        </Button>
+        <Button type="button" :disabled="loading || !name.trim()" @click="submit">
+          <LoadingSpinner v-if="loading" :size="12" />
           <Check v-else :size="12" />
           {{ agent ? 'Save Changes' : 'Create Agent' }}
-        </UiButton>
+        </Button>
       </div>
     </div>
-  </UiDialog>
+    </DialogContent>
+  </Dialog>
 </template>

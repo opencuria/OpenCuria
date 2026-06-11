@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { UiSpinner } from '@/components/ui'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { useAuthStore } from '@/stores/auth'
 import * as authApi from '@/services/auth.api'
 import { connect as connectSocket } from '@/services/socket'
@@ -50,11 +50,11 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center px-[var(--sp-3)]">
+  <div class="min-h-screen flex items-center justify-center px-4">
     <div class="flex flex-col items-center gap-3 text-center">
-      <UiSpinner class="h-8 w-8" />
-      <p v-if="!error" class="text-sm text-muted-fg">Signing in with SSO…</p>
-      <p v-else class="text-sm" style="color: var(--color-error)">{{ error }}</p>
+      <LoadingSpinner :size="32" />
+      <p v-if="!error" class="text-sm text-muted-foreground">Signing in with SSO…</p>
+      <p v-else class="text-sm text-destructive">{{ error }}</p>
     </div>
   </div>
 </template>

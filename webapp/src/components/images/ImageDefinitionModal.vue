@@ -1,6 +1,22 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { UiButton, UiDialog, UiInput, UiSelect, UiTextarea } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import type { ImageDefinition } from '@/types'
 
 const props = withDefaults(
@@ -112,89 +128,118 @@ function handleSave(): void {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    :title="title"
-    description="Define base distro, packages and advanced build customization."
     @update:open="(v) => emit('update:open', v)"
   >
-    <template #trigger>
-      <span class="hidden" />
-    </template>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>{{ title }}</DialogTitle>
+        <DialogDescription>
+          Define base distro, packages and advanced build customization.
+        </DialogDescription>
+      </DialogHeader>
 
-    <form class="space-y-4" @submit.prevent="handleSave">
-      <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-1">
-        <div class="grid grid-cols-2 gap-1">
-          <UiButton type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
-            Definition
-          </UiButton>
-          <UiButton type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
-            Advanced / Custom Build
-          </UiButton>
-        </div>
-      </div>
-
-      <template v-if="activeTab === 'definition'">
-        <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Name</label>
-          <UiInput v-model="name" placeholder="Python Dev Environment" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Description</label>
-          <UiTextarea v-model="description" :rows="2" />
-        </div>
-
-        <div class="grid gap-3 sm:grid-cols-2">
-          <div>
-            <label class="text-sm font-medium text-fg mb-1.5 block">Runtime Type</label>
-            <UiSelect v-model="runtimeType" :options="runtimeOptions" />
-          </div>
-          <div>
-            <label class="text-sm font-medium text-fg mb-1.5 block">Base Distro</label>
-            <UiSelect v-model="baseDistroPreset" :options="distroOptions" />
+      <form class="space-y-4" @submit.prevent="handleSave">
+        <div class="rounded-md border border-border bg-muted/50 p-1">
+          <div class="grid grid-cols-2 gap-1">
+            <Button type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
+              Definition
+            </Button>
+            <Button type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
+              Advanced / Custom Build
+            </Button>
           </div>
         </div>
 
-        <p v-if="runtimeType === 'qemu'" class="text-xs text-muted-fg -mt-1">
-          QEMU image builds currently support Ubuntu cloud images only.
-        </p>
+        <template v-if="activeTab === 'definition'">
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+            <Input v-model="name" placeholder="Python Dev Environment" />
+          </div>
 
-        <div v-if="baseDistroPreset === '__custom__'">
-          <label class="text-sm font-medium text-fg mb-1.5 block">Custom Base Distro</label>
-          <UiInput v-model="customBaseDistro" placeholder="e.g. ubuntu:22.04" />
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
+            <Textarea v-model="description" :rows="2" />
+          </div>
+
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label class="text-sm font-medium text-foreground mb-1.5 block">Runtime Type</label>
+              <Select v-model="runtimeType">
+                <SelectTrigger>
+                  <SelectValue placeholder="Select runtime" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="opt in runtimeOptions"
+                    :key="opt.value"
+                    :value="opt.value"
+                  >
+                    {{ opt.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label class="text-sm font-medium text-foreground mb-1.5 block">Base Distro</label>
+              <Select v-model="baseDistroPreset">
+                <SelectTrigger>
+                  <SelectValue placeholder="Select distro" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="opt in distroOptions"
+                    :key="opt.value"
+                    :value="opt.value"
+                  >
+                    {{ opt.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <p v-if="runtimeType === 'qemu'" class="text-xs text-muted-foreground -mt-1">
+            QEMU image builds currently support Ubuntu cloud images only.
+          </p>
+
+          <div v-if="baseDistroPreset === '__custom__'">
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Base Distro</label>
+            <Input v-model="customBaseDistro" placeholder="e.g. ubuntu:22.04" />
+          </div>
+
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Pre-installed Packages</label>
+            <Input v-model="packages" placeholder="python3, nodejs, ffmpeg" />
+          </div>
+
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Baked Environment Variables</label>
+            <Textarea v-model="envVars" :rows="4" placeholder="NODE_ENV=production" />
+          </div>
+        </template>
+
+        <template v-else>
+          <p class="text-xs text-muted-foreground">
+            The base distro and packages above are applied first. Use this section for advanced customization.
+          </p>
+          <div v-if="runtimeType === 'docker'">
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Dockerfile</label>
+            <Textarea v-model="customDockerfile" :rows="8" placeholder="RUN pip install numpy torch" />
+          </div>
+
+          <div v-else>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Init Script</label>
+            <Textarea v-model="customInitScript" :rows="8" placeholder="#!/bin/bash\napt-get install -y ffmpeg" />
+          </div>
+        </template>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <Button variant="outline" type="button" @click="emit('update:open', false)">Cancel</Button>
+          <Button type="submit" :disabled="!isValid">Save</Button>
         </div>
-
-        <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Pre-installed Packages</label>
-          <UiInput v-model="packages" placeholder="python3, nodejs, ffmpeg" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Baked Environment Variables</label>
-          <UiTextarea v-model="envVars" :rows="4" placeholder="NODE_ENV=production" />
-        </div>
-      </template>
-
-      <template v-else>
-        <p class="text-xs text-muted-fg">
-          The base distro and packages above are applied first. Use this section for advanced customization.
-        </p>
-        <div v-if="runtimeType === 'docker'">
-          <label class="text-sm font-medium text-fg mb-1.5 block">Custom Dockerfile</label>
-          <UiTextarea v-model="customDockerfile" :rows="8" placeholder="RUN pip install numpy torch" />
-        </div>
-
-        <div v-else>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Custom Init Script</label>
-          <UiTextarea v-model="customInitScript" :rows="8" placeholder="#!/bin/bash\napt-get install -y ffmpeg" />
-        </div>
-      </template>
-
-      <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="emit('update:open', false)">Cancel</UiButton>
-        <UiButton type="submit" :disabled="!isValid">Save</UiButton>
-      </div>
-    </form>
-  </UiDialog>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>

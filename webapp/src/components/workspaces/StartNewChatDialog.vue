@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { UiDialog, UiButton, UiSpinner, UiScrollArea } from '@/components/ui'
-import { useWorkspaceStore } from '@/stores/workspaces'
-import * as agentsApi from '@/services/agents.api'
 import {
   Bot,
   Plus,
@@ -13,7 +10,20 @@ import {
   ChevronUp,
   AlertCircle,
   CheckCircle,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { useWorkspaceStore } from '@/stores/workspaces'
+import * as agentsApi from '@/services/agents.api'
 import type { Workspace, Agent } from '@/types'
 
 const router = useRouter()
@@ -24,7 +34,6 @@ const loading = ref(false)
 const loadingAgents = ref(false)
 const agents = ref<Agent[]>([])
 
-// Step: 'workspace' | 'agent'
 const step = ref<'workspace' | 'agent'>('workspace')
 const selectedWorkspace = ref<Workspace | null>(null)
 const selectedAgent = ref<Agent | null>(null)
@@ -125,25 +134,28 @@ const dialogDescription = computed(() =>
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    :title="dialogTitle"
-    :description="dialogDescription"
     @update:open="handleOpenChange"
   >
-    <template #trigger>
+    <DialogTrigger as-child>
       <slot name="trigger">
-        <UiButton variant="default" size="sm">
+        <Button variant="default" size="sm">
           <Plus :size="16" class="mr-1.5" />
           New Chat
-        </UiButton>
+        </Button>
       </slot>
-    </template>
+    </DialogTrigger>
 
-    <template #default>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>{{ dialogTitle }}</DialogTitle>
+        <DialogDescription>{{ dialogDescription }}</DialogDescription>
+      </DialogHeader>
+
       <div v-if="step === 'agent'" class="flex items-center gap-2 -mt-2 mb-3">
         <button
-          class="flex items-center gap-1 text-xs text-muted-fg hover:text-fg transition-colors"
+          class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
           @click="step = 'workspace'"
         >
           <ArrowLeft :size="14" />
@@ -153,19 +165,19 @@ const dialogDescription = computed(() =>
 
       <template v-if="step === 'workspace'">
         <div v-if="isInitialWorkspaceLoading" class="flex items-center justify-center py-12">
-          <UiSpinner :size="24" />
+          <LoadingSpinner :size="24" />
         </div>
 
         <div
           v-else-if="runningWorkspaces.length === 0"
           class="flex flex-col items-center justify-center py-12 text-center"
         >
-          <Bot :size="40" class="text-muted-fg mb-3" />
-          <p class="text-sm text-muted-fg">No running workspaces available.</p>
-          <p class="text-xs text-muted-fg mt-1">Create a workspace first or start an existing one.</p>
+          <Bot :size="40" class="text-muted-foreground mb-3" />
+          <p class="text-sm text-muted-foreground">No running workspaces available.</p>
+          <p class="text-xs text-muted-foreground mt-1">Create a workspace first or start an existing one.</p>
         </div>
 
-        <UiScrollArea v-else class="max-h-[400px]">
+        <ScrollArea v-else class="max-h-[400px]">
           <div class="space-y-2">
             <button
               v-for="workspace in runningWorkspaces"
@@ -178,37 +190,37 @@ const dialogDescription = computed(() =>
               @click="selectWorkspace(workspace)"
             >
               <div class="w-9 h-9 rounded-full bg-muted flex items-center justify-center shrink-0">
-                <Bot :size="16" class="text-muted-fg" />
+                <Bot :size="16" class="text-muted-foreground" />
               </div>
               <div class="flex-1 min-w-0">
-                <div class="text-sm font-medium text-fg truncate mb-0.5">
+                <div class="text-sm font-medium text-foreground truncate mb-0.5">
                   {{ workspace.name || workspace.id.slice(0, 12) + '…' }}
                 </div>
-                <div class="text-xs text-muted-fg">
+                <div class="text-xs text-muted-foreground">
                   {{ workspace.runtime_type }} · {{ workspace.status }}
                 </div>
-                <div v-if="workspace.has_active_session" class="flex items-center gap-1 mt-1 text-xs text-warning">
+                <div v-if="workspace.has_active_session" class="flex items-center gap-1 mt-1 text-xs text-amber-500">
                   <Loader2 :size="10" class="animate-spin" />
                   Session in progress
                 </div>
               </div>
             </button>
           </div>
-        </UiScrollArea>
+        </ScrollArea>
       </template>
 
       <template v-else-if="step === 'agent'">
         <div v-if="loadingAgents" class="flex items-center justify-center py-12">
-          <UiSpinner :size="24" />
+          <LoadingSpinner :size="24" />
         </div>
 
         <div v-else-if="availableAgents.length === 0" class="flex flex-col items-center justify-center py-12 text-center">
-          <Bot :size="40" class="text-muted-fg mb-3" />
-          <p class="text-sm text-muted-fg">No agents available in this workspace.</p>
-          <p class="text-xs text-muted-fg mt-1">The workspace must already include the required credentials and have an online runner.</p>
+          <Bot :size="40" class="text-muted-foreground mb-3" />
+          <p class="text-sm text-muted-foreground">No agents available in this workspace.</p>
+          <p class="text-xs text-muted-foreground mt-1">The workspace must already include the required credentials and have an online runner.</p>
         </div>
 
-        <UiScrollArea v-else class="max-h-[420px]">
+        <ScrollArea v-else class="max-h-[420px]">
           <div class="space-y-3">
             <div class="space-y-2">
               <button
@@ -226,23 +238,23 @@ const dialogDescription = computed(() =>
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2 mb-0.5">
-                    <span class="text-sm font-medium text-fg">{{ agent.description || agent.name }}</span>
-                    <CheckCircle :size="14" class="text-success shrink-0" />
+                    <span class="text-sm font-medium text-foreground">{{ agent.description || agent.name }}</span>
+                    <CheckCircle :size="14" class="text-green-600 shrink-0" />
                   </div>
-                    <div class="text-xs text-muted-fg">
-                      {{ agent.supports_multi_chat ? 'Multi-chat' : 'Single-chat' }}
-                      <template v-if="getModelChoices(agent).length > 0">
-                        · {{ getModelChoices(agent).length }} model{{ getModelChoices(agent).length !== 1 ? 's' : '' }}
-                      </template>
-                    </div>
+                  <div class="text-xs text-muted-foreground">
+                    {{ agent.supports_multi_chat ? 'Multi-chat' : 'Single-chat' }}
+                    <template v-if="getModelChoices(agent).length > 0">
+                      · {{ getModelChoices(agent).length }} model{{ getModelChoices(agent).length !== 1 ? 's' : '' }}
+                    </template>
                   </div>
-                <UiSpinner v-if="loading && selectedAgent?.id === agent.id" :size="16" class="ml-auto shrink-0" />
+                </div>
+                <LoadingSpinner v-if="loading && selectedAgent?.id === agent.id" :size="16" class="ml-auto shrink-0" />
               </button>
             </div>
 
             <div v-if="secondaryAgents.length > 0">
               <button
-                class="flex items-center gap-2 text-xs text-muted-fg hover:text-fg transition-colors w-full py-1"
+                class="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors w-full py-1"
                 @click="showAllAgents = !showAllAgents"
               >
                 <component :is="showAllAgents ? ChevronUp : ChevronDown" :size="14" />
@@ -256,29 +268,29 @@ const dialogDescription = computed(() =>
                   class="w-full flex items-start gap-3 p-3 rounded-lg border transition-all text-left opacity-70"
                   :class="selectedAgent?.id === agent.id
                     ? 'border-primary bg-primary/5'
-                    : 'border-border hover:border-muted-fg hover:bg-surface-hover'"
+                    : 'border-border hover:border-muted-foreground hover:bg-muted'"
                   :disabled="loading"
                   @click="selectAgent(agent)"
                 >
                   <div class="w-9 h-9 rounded-full bg-muted flex items-center justify-center shrink-0">
-                    <Bot :size="16" class="text-muted-fg" />
+                    <Bot :size="16" class="text-muted-foreground" />
                   </div>
                   <div class="flex-1 min-w-0">
                     <div class="flex items-center gap-2 mb-0.5">
-                      <span class="text-sm font-medium text-fg">{{ agent.description || agent.name }}</span>
-                      <AlertCircle :size="14" class="text-warning shrink-0" />
+                      <span class="text-sm font-medium text-foreground">{{ agent.description || agent.name }}</span>
+                      <AlertCircle :size="14" class="text-amber-500 shrink-0" />
                     </div>
-                    <div class="text-xs text-muted-fg">
+                    <div class="text-xs text-muted-foreground">
                       {{ !agent.has_online_runner ? 'No runner available' : 'Missing workspace credentials' }}
                     </div>
                   </div>
-                  <UiSpinner v-if="loading && selectedAgent?.id === agent.id" :size="16" class="ml-auto shrink-0" />
+                  <LoadingSpinner v-if="loading && selectedAgent?.id === agent.id" :size="16" class="ml-auto shrink-0" />
                 </button>
               </div>
             </div>
           </div>
-        </UiScrollArea>
+        </ScrollArea>
       </template>
-    </template>
-  </UiDialog>
+    </DialogContent>
+  </Dialog>
 </template>

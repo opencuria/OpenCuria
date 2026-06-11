@@ -31,8 +31,18 @@ import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
-import { UiBadge, UiDialog, UiSpinner, UiButton, UiInput } from '@/components/ui'
-import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, Plus } from 'lucide-vue-next'
+import { Badge } from '@/components/ui/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { ArrowLeft, Bot, TerminalSquare, FolderTree, Monitor, MessageSquare, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Loader2, Plus } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -95,22 +105,22 @@ const hasActiveSession = computed(() => {
   return sessions.some((s) => isSessionActive(s.status))
 })
 
-const statusVariant = computed(() => {
+const statusVariant = computed((): 'secondary' | 'outline' | 'destructive' | 'default' => {
   if (isRunnerOfflineState.value) {
-    return 'muted'
+    return 'secondary'
   }
   switch (workspace.value?.status) {
     case WorkspaceStatus.RUNNING:
-      return 'success'
+      return 'secondary'
     case WorkspaceStatus.CREATING:
-      return 'warning'
+      return 'outline'
     case WorkspaceStatus.STOPPED:
-      return 'muted'
+      return 'secondary'
     case WorkspaceStatus.FAILED:
     case WorkspaceStatus.DELETE_FAILED:
-      return 'error'
+      return 'destructive'
     default:
-      return 'muted'
+      return 'secondary'
   }
 })
 const statusLabel = computed(() => {
@@ -790,57 +800,57 @@ function handleToggleSessionReadState(sessionId: string): void {
 <template>
   <div class="flex flex-col -m-6 lg:-m-8 h-[calc(100%+3rem)] lg:h-[calc(100%+4rem)]">
     <!-- Workspace header -->
-    <div class="border-b border-border bg-surface px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
+    <div class="border-b border-border bg-card px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
       <div class="flex items-center justify-between gap-2 min-w-0">
         <!-- Left: back + workspace info -->
         <div class="flex items-center gap-2 min-w-0 flex-1">
-          <UiButton variant="ghost" size="icon-sm" class="shrink-0" @click="goBack">
+          <Button variant="ghost" size="icon-sm" class="shrink-0" @click="goBack">
             <ArrowLeft :size="16" />
-          </UiButton>
+          </Button>
 
           <div v-if="workspace" class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5 min-w-0">
               <template v-if="editingName">
                 <div class="flex items-center gap-2 flex-1 min-w-0">
-                  <UiInput
+                  <Input
                     v-model="workspaceNameInput"
                     class="h-8 min-w-0"
                     maxlength="255"
                     @keydown.enter.prevent="saveWorkspaceName"
                     @keydown.esc.prevent="cancelEditingName"
                   />
-                  <UiButton size="sm" :disabled="renaming" @click="saveWorkspaceName">
+                  <Button size="sm" :disabled="renaming" @click="saveWorkspaceName">
                     Save
-                  </UiButton>
-                  <UiButton size="sm" variant="outline" :disabled="renaming" @click="cancelEditingName">
+                  </Button>
+                  <Button size="sm" variant="outline" :disabled="renaming" @click="cancelEditingName">
                     Cancel
-                  </UiButton>
+                  </Button>
                 </div>
               </template>
               <template v-else>
-                <h2 class="font-semibold text-fg text-sm truncate">
+                <h2 class="font-semibold text-foreground text-sm truncate">
                   {{ workspace.name }}
                 </h2>
-                <UiBadge :variant="statusVariant" class="shrink-0">
+                <Badge :variant="statusVariant" class="shrink-0">
                   {{ statusLabel }}
-                </UiBadge>
-                <UiBadge
+                </Badge>
+                <Badge
                   v-if="showImminentAutoStop && autoStopCountdownLabel"
-                  variant="warning"
+                  variant="outline"
                   class="shrink-0"
                 >
                   {{ autoStopCountdownLabel }}
-                </UiBadge>
-                <UiBadge
+                </Badge>
+                <Badge
                   v-if="showWorkspaceTransitionLabel"
-                  variant="info"
+                  variant="default"
                   class="shrink-0 flex items-center gap-1"
                 >
                   <Loader2 :size="12" class="animate-spin" />
                   {{ workspaceTransitionLabel }}
-                </UiBadge>
+                </Badge>
                 <button
-                  class="hidden sm:flex items-center text-xs text-muted-fg hover:text-fg transition-colors shrink-0 px-1"
+                  class="hidden sm:flex items-center text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 px-1"
                   :disabled="showWorkspaceTransitionLabel"
                   @click="startEditingName"
                 >
@@ -849,8 +859,8 @@ function handleToggleSessionReadState(sessionId: string): void {
               </template>
             </div>
             <div class="hidden sm:flex items-center gap-3 mt-0.5">
-              <span class="text-xs text-muted-fg font-mono">{{ workspace.id.slice(0, 12) }}…</span>
-              <span v-if="currentAgent" class="flex items-center gap-1 text-xs text-muted-fg">
+              <span class="text-xs text-muted-foreground font-mono">{{ workspace.id.slice(0, 12) }}…</span>
+              <span v-if="currentAgent" class="flex items-center gap-1 text-xs text-muted-foreground">
                 <Bot :size="12" />
                 {{ currentAgent.description || currentAgent.name }}
               </span>
@@ -861,7 +871,7 @@ function handleToggleSessionReadState(sessionId: string): void {
         <!-- Right: mobile chats button + workspace actions -->
         <div class="flex items-center gap-1 shrink-0">
           <!-- Mobile chat list toggle (only for multi-chat agents) -->
-          <UiButton
+          <Button
             v-if="isMultiChat && hasChats"
             variant="ghost"
             size="icon-sm"
@@ -870,7 +880,7 @@ function handleToggleSessionReadState(sessionId: string): void {
             @click="mobileChatListOpen = true"
           >
             <MessageSquare :size="16" />
-          </UiButton>
+          </Button>
           <WorkspaceActions
             v-if="workspace"
             :workspace="workspace"
@@ -881,15 +891,20 @@ function handleToggleSessionReadState(sessionId: string): void {
       </div>
     </div>
 
-    <UiDialog
+    <Dialog
       :open="showAgentPicker"
-      title="Choose Agent"
-      description="Select the AI agent for the new chat in this workspace."
       @update:open="handleAgentPickerOpenChange"
     >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Choose Agent</DialogTitle>
+          <DialogDescription>
+            Select the AI agent for the new chat in this workspace.
+          </DialogDescription>
+        </DialogHeader>
       <div class="space-y-3">
         <div v-if="availableAgents.length > 0" class="space-y-2">
-          <UiButton
+          <Button
             v-for="agent in availableAgents"
             :key="agent.id"
             variant="ghost"
@@ -902,12 +917,12 @@ function handleToggleSessionReadState(sessionId: string): void {
               </div>
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  <span class="truncate text-sm font-medium text-fg">
+                  <span class="truncate text-sm font-medium text-foreground">
                     {{ agent.description || agent.name }}
                   </span>
                   <CheckCircle :size="14" class="shrink-0 text-success" />
                 </div>
-                <span class="text-xs text-muted-fg">
+                <span class="text-xs text-muted-foreground">
                   {{ agent.supports_multi_chat ? 'Multi-chat' : 'Single-chat' }}
                   <template v-if="getModelChoices(agent).length > 0">
                     · {{ getModelChoices(agent).length }} model{{ getModelChoices(agent).length !== 1 ? 's' : '' }}
@@ -915,58 +930,59 @@ function handleToggleSessionReadState(sessionId: string): void {
                 </span>
               </div>
             </div>
-          </UiButton>
+          </Button>
         </div>
         <div
           v-else
-          class="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-fg"
+          class="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground"
         >
           No agents are currently available in this workspace. The runner must be online and the required credentials must already be attached.
         </div>
 
         <div v-if="secondaryAgents.length > 0">
-          <UiButton
+          <Button
             variant="ghost"
             size="sm"
-            class="w-full justify-start px-0 text-xs text-muted-fg hover:text-fg"
+            class="w-full justify-start px-0 text-xs text-muted-foreground hover:text-foreground"
             @click="showOtherAgents = !showOtherAgents"
           >
             <component :is="showOtherAgents ? ChevronUp : ChevronDown" :size="14" />
             {{ showOtherAgents ? 'Hide' : 'Show' }} other agents ({{ secondaryAgents.length }})
-          </UiButton>
+          </Button>
           <div v-if="showOtherAgents" class="mt-2 space-y-2">
-            <UiButton
+            <Button
               v-for="agent in secondaryAgents"
               :key="agent.id"
               variant="ghost"
-              class="h-auto w-full justify-start rounded-xl border border-border bg-transparent px-4 py-3 text-left opacity-75 hover:bg-surface-hover"
+              class="h-auto w-full justify-start rounded-xl border border-border bg-transparent px-4 py-3 text-left opacity-75 hover:bg-muted"
               @click="handleCreateChatWithAgent(agent.id, agent.name)"
             >
               <div class="flex w-full items-start gap-3">
                 <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted">
-                  <Bot :size="16" class="text-muted-fg" />
+                  <Bot :size="16" class="text-muted-foreground" />
                 </div>
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2">
-                    <span class="truncate text-sm font-medium text-fg">
+                    <span class="truncate text-sm font-medium text-foreground">
                       {{ agent.description || agent.name }}
                     </span>
                     <AlertCircle :size="14" class="shrink-0 text-warning" />
                   </div>
-                  <span class="text-xs text-muted-fg">
+                  <span class="text-xs text-muted-foreground">
                     {{ !agent.has_online_runner ? 'No runner available' : 'Missing workspace credentials' }}
                   </span>
                 </div>
               </div>
-            </UiButton>
+            </Button>
           </div>
         </div>
       </div>
-    </UiDialog>
+      </DialogContent>
+    </Dialog>
 
     <!-- Loading state -->
     <div v-if="workspaceStore.loading && !workspace" class="flex-1 flex items-center justify-center">
-      <UiSpinner :size="24" />
+      <LoadingSpinner :size="24" />
     </div>
 
     <!-- Chat area + terminal -->
@@ -1055,7 +1071,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                 class="group flex-1 flex items-center justify-center gap-3 m-3 sm:m-4 p-4 sm:p-5
                        rounded-xl border border-dashed border-border
                        hover:border-primary/60
-                       bg-surface hover:bg-primary/5
+                       bg-card hover:bg-primary/5
                        shadow-sm hover:shadow-md
                        transition-all duration-300 cursor-pointer
                        focus:outline-none focus:ring-2 focus:ring-primary/30"
@@ -1064,7 +1080,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                 <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 group-hover:bg-primary/20 text-primary transition-colors duration-300">
                   <Bot :size="17" />
                 </div>
-                <span class="text-sm font-medium text-muted-fg group-hover:text-primary transition-colors duration-300">
+                <span class="text-sm font-medium text-muted-foreground group-hover:text-primary transition-colors duration-300">
                   Start a chat — choose an agent
                 </span>
                 <div class="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-primary/25 group-hover:border-primary/50 bg-primary/5 group-hover:bg-primary/15 text-xs font-medium text-primary transition-all duration-300">
@@ -1090,7 +1106,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                 @stop="handleStopPrompt"
               />
               <template v-if="isDesktop && !isDesktopPanelVisible">
-                <UiButton
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   class="shrink-0 mb-2"
@@ -1099,8 +1115,8 @@ function handleToggleSessionReadState(sessionId: string): void {
                   @click="fileExplorerStore.toggle()"
                 >
                   <FolderTree :size="16" :class="fileExplorerStore.isOpen ? 'text-primary' : ''" />
-                </UiButton>
-                <UiButton
+                </Button>
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
@@ -1116,8 +1132,8 @@ function handleToggleSessionReadState(sessionId: string): void {
                       title="Terminal minimized"
                     />
                   </span>
-                </UiButton>
-                <UiButton
+                </Button>
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   class="shrink-0 mr-2 mb-2"
@@ -1133,7 +1149,7 @@ function handleToggleSessionReadState(sessionId: string): void {
                       title="Desktop minimized"
                     />
                   </span>
-                </UiButton>
+                </Button>
               </template>
             </div>
           </div>
@@ -1148,9 +1164,9 @@ function handleToggleSessionReadState(sessionId: string): void {
     >
       <div class="text-center">
         <p class="text-error mb-2">{{ workspaceStore.error }}</p>
-        <UiButton variant="outline" @click="goBack">
+        <Button variant="outline" @click="goBack">
           Back
-        </UiButton>
+        </Button>
       </div>
     </div>
   </div>

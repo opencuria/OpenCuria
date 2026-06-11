@@ -6,8 +6,16 @@ import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
-import { UiButton, UiSelect, UiSpinner } from '@/components/ui'
-import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -423,37 +431,37 @@ watch(
 </script>
 
 <template>
-  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] bg-surface">
-    <div class="flex h-full flex-col bg-surface sm:flex-row">
+  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] bg-card">
+    <div class="flex h-full flex-col bg-card sm:flex-row">
       <div ref="viewportHostRef" class="order-2 min-h-0 flex-1 sm:order-1 relative">
         <div
           v-if="desktopStore.isConnecting"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
         >
-          <UiSpinner :size="24" />
-          <span class="text-sm text-muted-fg">Starting desktop session…</span>
+          <LoadingSpinner :size="24" />
+          <span class="text-sm text-muted-foreground">Starting desktop session…</span>
         </div>
 
         <div
           v-else-if="error"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface px-4"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card px-4"
         >
-          <p class="text-sm text-error text-center">{{ error }}</p>
-          <UiButton size="sm" @click="startDesktop">
+          <p class="text-sm text-destructive text-center">{{ error }}</p>
+          <Button size="sm" @click="startDesktop">
             Retry
-          </UiButton>
+          </Button>
         </div>
 
         <div
           v-else-if="!desktopStore.isConnected && !desktopStore.isConnecting"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
         >
-          <Monitor :size="32" class="text-muted-fg" />
-          <p class="text-sm text-muted-fg">Desktop session not active</p>
-          <UiButton size="sm" @click="startDesktop">
+          <Monitor :size="32" class="text-muted-foreground" />
+          <p class="text-sm text-muted-foreground">Desktop session not active</p>
+          <Button size="sm" @click="startDesktop">
             <Monitor :size="14" class="mr-1" />
             Start Desktop
-          </UiButton>
+          </Button>
         </div>
 
         <div
@@ -474,7 +482,7 @@ watch(
             class="flex h-full w-full items-center justify-center overflow-hidden p-2 sm:p-3"
           >
             <div
-              class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-[var(--glass-shadow-sm)]"
+              class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
               :style="scaledFrameStyle"
             >
               <iframe
@@ -492,12 +500,12 @@ watch(
       </div>
 
       <div
-        class="order-1 flex shrink-0 flex-col gap-2 border-b border-border bg-surface px-3 py-1.5 sm:order-2 sm:w-80 sm:border-b-0 sm:border-l sm:py-2 min-h-0"
+        class="order-1 flex shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-1.5 sm:order-2 sm:w-80 sm:border-b-0 sm:border-l sm:py-2 min-h-0"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">
-            <Monitor :size="14" class="shrink-0 text-muted-fg" />
-            <span class="text-xs font-medium text-fg">Desktop</span>
+            <Monitor :size="14" class="shrink-0 text-muted-foreground" />
+            <span class="text-xs font-medium text-foreground">Desktop</span>
             <span
               v-if="desktopStore.isConnected"
               class="inline-block h-1.5 w-1.5 rounded-full bg-success"
@@ -510,7 +518,7 @@ watch(
             />
           </div>
           <div class="flex items-center gap-1">
-            <UiButton
+            <Button
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
@@ -519,8 +527,8 @@ watch(
               @click="copyFromVmClipboard"
             >
               <Copy :size="11" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
@@ -529,8 +537,8 @@ watch(
               @click="pasteToVmClipboard"
             >
               <ClipboardPaste :size="11" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               v-if="desktopStore.isConnected"
               variant="ghost"
               size="icon-sm"
@@ -538,33 +546,42 @@ watch(
               @click="handleReconnect"
             >
               <RefreshCw :size="12" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               title="Minimize desktop panel"
               @click="handleMinimize"
             >
               <Minus :size="12" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               title="Close desktop panel"
               @click="handleClose"
             >
               <X :size="12" />
-            </UiButton>
+            </Button>
           </div>
         </div>
 
-        <div class="text-[11px] text-muted-fg">Screen size</div>
-        <UiSelect
-          v-model="viewportPreset"
-          :options="viewportPresetOptions"
-          class="h-8 py-1 text-xs sm:h-9"
-        />
-        <UiButton
+        <div class="text-[11px] text-muted-foreground">Screen size</div>
+        <Select v-model="viewportPreset">
+          <SelectTrigger class="h-8 py-1 text-xs sm:h-9">
+            <SelectValue placeholder="Screen size" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem
+              v-for="opt in viewportPresetOptions"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Button
           variant="outline"
           size="sm"
           :disabled="!isCustomPreset"
@@ -573,7 +590,7 @@ watch(
         >
           <RotateCw :size="12" class="mr-1" />
           Rotate
-        </UiButton>
+        </Button>
 
         <div class="hidden min-h-0 flex-1 overflow-hidden pt-2 lg:flex">
           <slot name="sidebar-content" />

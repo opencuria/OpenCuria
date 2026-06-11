@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { UiDialog, UiButton } from '@/components/ui'
 import { useApiKeyStore } from '@/stores/apiKeys'
 import type { APIKey } from '@/types'
-import { TriangleAlert } from 'lucide-vue-next'
+import { TriangleAlert } from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const props = defineProps<{
   apiKey: APIKey | null
@@ -34,37 +40,39 @@ async function handleRevoke(): Promise<void> {
 </script>
 
 <template>
-  <UiDialog
-    :open="open"
-    title="Revoke API Key"
-    @update:open="(v) => !v && emit('close')"
-  >
-    <div class="flex flex-col gap-4">
-      <div class="flex items-start gap-3 rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-3.5 py-3">
-        <TriangleAlert :size="16" class="mt-0.5 shrink-0 text-error" />
-        <div class="text-sm text-error">
-          <p class="font-medium">This action is irreversible.</p>
-          <p class="text-error/80 mt-0.5">
-            Any integration using <span class="font-mono font-medium">{{ apiKey?.key_prefix }}…</span>
-            will immediately lose access.
-          </p>
+  <Dialog :open="open" @update:open="(v) => !v && emit('close')">
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Revoke API Key</DialogTitle>
+      </DialogHeader>
+
+      <div class="flex flex-col gap-4">
+        <div class="flex items-start gap-3 rounded-[var(--radius-md)] border border-destructive/30 bg-destructive/10 px-3.5 py-3">
+          <TriangleAlert :size="16" class="mt-0.5 shrink-0 text-destructive" />
+          <div class="text-sm text-destructive">
+            <p class="font-medium">This action is irreversible.</p>
+            <p class="text-destructive/80 mt-0.5">
+              Any integration using <span class="font-mono font-medium">{{ apiKey?.key_prefix }}…</span>
+              will immediately lose access.
+            </p>
+          </div>
+        </div>
+
+        <p class="text-sm text-muted-foreground">
+          Are you sure you want to revoke <span class="font-medium text-foreground">{{ apiKey?.name }}</span>?
+        </p>
+
+        <div class="flex justify-end gap-2">
+          <Button variant="outline" :disabled="submitting" @click="emit('close')">Cancel</Button>
+          <Button
+            variant="destructive"
+            :disabled="submitting"
+            @click="handleRevoke"
+          >
+            {{ submitting ? 'Revoking…' : 'Revoke Key' }}
+          </Button>
         </div>
       </div>
-
-      <p class="text-sm text-muted-fg">
-        Are you sure you want to revoke <span class="font-medium text-fg">{{ apiKey?.name }}</span>?
-      </p>
-
-      <div class="flex justify-end gap-2">
-        <UiButton variant="outline" :disabled="submitting" @click="emit('close')">Cancel</UiButton>
-        <UiButton
-          variant="destructive"
-          :disabled="submitting"
-          @click="handleRevoke"
-        >
-          {{ submitting ? 'Revoking…' : 'Revoke Key' }}
-        </UiButton>
-      </div>
-    </div>
-  </UiDialog>
+    </DialogContent>
+  </Dialog>
 </template>

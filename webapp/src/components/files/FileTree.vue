@@ -28,7 +28,7 @@ const emit = defineEmits<{
     <!-- Empty state -->
     <div
       v-if="!nodes.length"
-      class="flex flex-col items-center gap-2 py-8 text-muted-fg"
+      class="flex flex-col items-center gap-2 py-8 text-muted-foreground"
     >
       <span class="text-xs">No files found</span>
     </div>

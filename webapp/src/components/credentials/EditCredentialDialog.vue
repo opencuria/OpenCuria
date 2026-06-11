@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { UiDialog, UiInput, UiButton, UiTextarea } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { useCredentialStore } from '@/stores/credentials'
 import type { Credential } from '@/types'
 
@@ -48,7 +57,6 @@ async function handleSubmit(): Promise<void> {
     data.value = value.value
   }
 
-  // Only update if something changed
   if (data.name || data.value) {
     await credentialStore.updateCredential(props.credential.id, data)
   }
@@ -67,49 +75,54 @@ function handleClose(): void {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="Edit Credential"
-    description="Update the credential name or replace its value."
     @update:open="(v) => (v ? null : handleClose())"
   >
-    <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <div v-if="credential">
-        <p class="text-sm text-muted-fg mb-3">
-          {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
-        </p>
-      </div>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Edit Credential</DialogTitle>
+        <DialogDescription>Update the credential name or replace its value.</DialogDescription>
+      </DialogHeader>
 
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Name</label>
-        <UiInput v-model="name" placeholder="Credential name" />
-      </div>
+      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <div v-if="credential">
+          <p class="text-sm text-muted-foreground mb-3">
+            {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
+          </p>
+        </div>
 
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">New Value</label>
-        <UiTextarea
-          v-if="credential?.credential_type === 'file'"
-          v-model="value"
-          :rows="10"
-          placeholder="Leave empty to keep current file contents"
-        />
-        <UiInput
-          v-else
-          v-model="value"
-          type="password"
-          placeholder="Leave empty to keep current value"
-        />
-        <p class="text-xs text-muted-fg mt-1">
-          Only fill this in if you want to replace the stored value.
-        </p>
-      </div>
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+          <Input v-model="name" placeholder="Credential name" />
+        </div>
 
-      <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="submitting">
-          {{ submitting ? 'Saving…' : 'Save Changes' }}
-        </UiButton>
-      </div>
-    </form>
-  </UiDialog>
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">New Value</label>
+          <Textarea
+            v-if="credential?.credential_type === 'file'"
+            v-model="value"
+            :rows="10"
+            placeholder="Leave empty to keep current file contents"
+          />
+          <Input
+            v-else
+            v-model="value"
+            type="password"
+            placeholder="Leave empty to keep current value"
+          />
+          <p class="text-xs text-muted-foreground mt-1">
+            Only fill this in if you want to replace the stored value.
+          </p>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+          <Button type="submit" :disabled="submitting">
+            {{ submitting ? 'Saving…' : 'Save Changes' }}
+          </Button>
+        </div>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>

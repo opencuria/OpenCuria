@@ -2,8 +2,9 @@
 import { ref, watch, onMounted } from 'vue'
 import type { FileNode } from '@/types'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { UiButton, UiScrollArea } from '@/components/ui'
-import { RefreshCw, ChevronRight } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { RefreshCw, ChevronRight } from '@lucide/vue'
 import FileTree from './FileTree.vue'
 import FileContextMenu from './FileContextMenu.vue'
 import FileUploadZone from './FileUploadZone.vue'
@@ -88,7 +89,7 @@ function onDragStart(e: MouseEvent): void {
 
 <template>
   <div
-    class="flex h-full border-l border-border bg-surface shrink-0 relative transition-all duration-200"
+    class="flex h-full border-l border-border bg-card shrink-0 relative transition-all duration-200"
     :style="{ width: `${panelWidth}px` }"
   >
     <!-- Drag handle (left edge) -->
@@ -98,23 +99,23 @@ function onDragStart(e: MouseEvent): void {
     />
 
     <!-- Close toggle -->
-    <UiButton
+    <Button
       variant="secondary"
       size="icon-sm"
-      class="absolute -left-3 top-3 z-10 w-6 h-6 rounded-full bg-surface border border-border hover:bg-surface-hover transition-colors flex items-center justify-center"
+      class="absolute -left-3 top-3 z-10 w-6 h-6 rounded-full bg-card border border-border hover:bg-muted transition-colors flex items-center justify-center"
       title="Close files"
       @click="store.close()"
     >
       <ChevronRight :size="14" />
-    </UiButton>
+    </Button>
 
     <div class="flex flex-col flex-1 min-w-0">
       <!-- Header -->
       <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-        <span class="text-sm font-medium text-fg">Files</span>
-        <UiButton variant="ghost" size="icon-sm" title="Refresh" @click="handleRefresh">
+        <span class="text-sm font-medium text-foreground">Files</span>
+        <Button variant="ghost" size="icon-sm" title="Refresh" @click="handleRefresh">
           <RefreshCw :size="14" />
-        </UiButton>
+        </Button>
       </div>
 
       <!-- File tree with drag & drop upload -->
@@ -124,14 +125,14 @@ function onDragStart(e: MouseEvent): void {
         class="flex-1 min-h-0"
         @uploaded="handleRefresh"
       >
-        <UiScrollArea class="h-full">
+        <ScrollArea class="h-full">
           <FileTree
             :nodes="store.tree"
             :workspace-id="workspaceId"
             @select="handleSelect"
             @contextmenu="handleContextMenu"
           />
-        </UiScrollArea>
+        </ScrollArea>
       </FileUploadZone>
     </div>
 

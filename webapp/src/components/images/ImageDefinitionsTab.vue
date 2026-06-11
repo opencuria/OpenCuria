@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { UiBadge, UiButton, UiCard, UiCardContent, UiSpinner } from '@/components/ui'
-import { Plus, Pencil, Trash2, ChevronsDownUp, ChevronsUpDown, RefreshCcw, Loader2, Copy } from 'lucide-vue-next'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { Plus, Pencil, Trash2, ChevronsDownUp, ChevronsUpDown, RefreshCcw, Loader2, Copy } from '@lucide/vue'
 import type { ImageDefinition, Runner, RunnerImageBuild } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { get } from '@/services/api'
@@ -226,70 +229,70 @@ onUnmounted(() => {
 <template>
   <div class="space-y-4">
     <div class="flex justify-between items-center">
-      <p class="text-sm text-muted-fg">Define reusable images and activate them per runner.</p>
-      <UiButton size="sm" @click="openCreate">
+      <p class="text-sm text-muted-foreground">Define reusable images and activate them per runner.</p>
+      <Button size="sm" @click="openCreate">
         <Plus :size="14" />
         New Image Definition
-      </UiButton>
+      </Button>
     </div>
 
-    <div v-if="loading" class="flex justify-center py-10"><UiSpinner :size="24" /></div>
+    <div v-if="loading" class="flex justify-center py-10"><LoadingSpinner :size="24" /></div>
 
-    <div v-else-if="error" class="rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-4 py-3 text-sm text-error">
+    <div v-else-if="error" class="rounded-[var(--radius-md)] border border-error/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
       {{ error }}
     </div>
 
     <div v-else class="space-y-2">
-      <UiCard v-for="definition in imageDefinitions" :key="definition.id">
-        <UiCardContent>
+      <Card v-for="definition in imageDefinitions" :key="definition.id">
+        <CardContent>
           <div class="flex items-center gap-3">
-            <button type="button" class="text-muted-fg hover:text-fg" @click="toggleExpand(definition.id)">
+            <button type="button" class="text-muted-foreground hover:text-foreground" @click="toggleExpand(definition.id)">
               <ChevronsUpDown v-if="expanded !== definition.id" :size="14" />
               <ChevronsDownUp v-else :size="14" />
             </button>
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
-                <span class="font-medium text-fg">{{ definition.name }}</span>
-                <UiBadge variant="info">{{ definition.runtime_type }}</UiBadge>
-                <UiBadge :variant="definition.is_standard ? 'muted' : 'success'">
+                <span class="font-medium text-foreground">{{ definition.name }}</span>
+                <Badge variant="default">{{ definition.runtime_type }}</Badge>
+                <Badge :variant="definition.is_standard ? 'secondary' : 'secondary'">
                   {{ definition.is_standard ? 'standard' : 'custom' }}
-                </UiBadge>
-                <UiBadge v-if="definition.status === 'deactivated'" variant="warning">deactivated</UiBadge>
-                <UiBadge v-else-if="definition.status === 'pending_deletion'" variant="error">
+                </Badge>
+                <Badge v-if="definition.status === 'deactivated'" variant="outline">deactivated</Badge>
+                <Badge v-else-if="definition.status === 'pending_deletion'" variant="destructive">
                   <Loader2 :size="10" class="inline animate-spin mr-1" />pending deletion
-                </UiBadge>
-                <UiBadge v-else-if="definition.status === 'deleting'" variant="error">
+                </Badge>
+                <Badge v-else-if="definition.status === 'deleting'" variant="destructive">
                   <Loader2 :size="10" class="inline animate-spin mr-1" />deleting
-                </UiBadge>
-                <UiBadge v-else-if="definition.status === 'delete_failed'" variant="error">delete failed</UiBadge>
-                <UiBadge v-else-if="definition.status === 'deleted'" variant="muted">deleted</UiBadge>
+                </Badge>
+                <Badge v-else-if="definition.status === 'delete_failed'" variant="destructive">delete failed</Badge>
+                <Badge v-else-if="definition.status === 'deleted'" variant="secondary">deleted</Badge>
               </div>
-              <p class="text-xs text-muted-fg truncate">{{ definition.description || 'No description' }}</p>
-              <p class="text-xs text-muted-fg">Base: {{ definition.base_distro }} · {{ summary(definition.id) }}</p>
+              <p class="text-xs text-muted-foreground truncate">{{ definition.description || 'No description' }}</p>
+              <p class="text-xs text-muted-foreground">Base: {{ definition.base_distro }} · {{ summary(definition.id) }}</p>
             </div>
-            <UiButton variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="duplicateDefinition(definition)">
+            <Button variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="duplicateDefinition(definition)">
               <Copy :size="14" />
-            </UiButton>
-            <UiButton v-if="!definition.is_standard" variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="openEdit(definition)">
+            </Button>
+            <Button v-if="!definition.is_standard" variant="ghost" size="icon-sm" :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')" @click="openEdit(definition)">
               <Pencil :size="14" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               v-if="!definition.is_standard"
               variant="ghost"
               size="icon-sm"
-              class="text-error"
+              class="text-destructive"
               :disabled="['pending_deletion', 'deleting', 'deleted'].includes(definition.status || 'active')"
               @click="removeDefinition(definition.id)"
             >
               <Trash2 :size="14" />
-            </UiButton>
+            </Button>
           </div>
 
           <div v-if="expanded === definition.id" class="mt-4 border-t border-border pt-3">
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="text-left text-muted-fg">
+                  <tr class="text-left text-muted-foreground">
                     <th class="py-1 pr-3">Runner</th>
                     <th class="py-1 pr-3">Status</th>
                     <th class="py-1">Action</th>
@@ -299,26 +302,26 @@ onUnmounted(() => {
                   <tr v-for="runner in compatibleRunners(definition)" :key="runner.id" class="border-t border-border/40">
                     <td class="py-2 pr-3">{{ runner.name || runner.id.slice(0, 8) }}</td>
                     <td class="py-2 pr-3">
-                      <UiBadge v-if="getBuild(definition.id, runner.id)" :variant="['pending_deletion', 'deleting', 'delete_failed'].includes(getBuild(definition.id, runner.id)?.status || '') ? 'error' : 'muted'">
+                      <Badge v-if="getBuild(definition.id, runner.id)" :variant="['pending_deletion', 'deleting', 'delete_failed'].includes(getBuild(definition.id, runner.id)?.status || '') ? 'destructive' : 'secondary'">
                         <Loader2
                           v-if="['pending', 'building', 'pending_deletion', 'deleting'].includes(getBuild(definition.id, runner.id)?.status || '')"
                           :size="10"
                           class="inline animate-spin mr-1"
                         />
                         {{ getBuild(definition.id, runner.id)?.status }}
-                      </UiBadge>
-                      <span v-else class="text-xs text-muted-fg">not assigned</span>
+                      </Badge>
+                      <span v-else class="text-xs text-muted-foreground">not assigned</span>
                     </td>
                     <td class="py-2">
                       <div class="flex items-center gap-2">
-                        <UiButton
+                        <Button
                           v-if="!getBuild(definition.id, runner.id)"
                           size="sm"
                           variant="outline"
                           :disabled="actionLoading === `${definition.id}:${runner.id}:assign`"
                           @click="assignOrActivate(definition.id, runner.id)"
-                        >Assign & Activate</UiButton>
-                        <UiButton
+                        >Assign & Activate</Button>
+                        <Button
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'pending_deletion' || getBuild(definition.id, runner.id)?.status === 'deleting'"
                           size="sm"
                           variant="outline"
@@ -326,22 +329,22 @@ onUnmounted(() => {
                         >
                           <Loader2 :size="12" class="animate-spin" />
                           Deleting…
-                        </UiButton>
-                        <UiButton
+                        </Button>
+                        <Button
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'active'"
                           size="sm"
                           variant="outline"
                           :disabled="actionLoading === `${definition.id}:${runner.id}:deactivate`"
                           @click="deactivate(definition.id, runner.id)"
-                        >Deactivate</UiButton>
-                        <UiButton
+                        >Deactivate</Button>
+                        <Button
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'deactivated'"
                           size="sm"
                           variant="outline"
                           :disabled="actionLoading === `${definition.id}:${runner.id}:activate`"
                           @click="activate(definition.id, runner.id)"
-                        >Activate</UiButton>
-                        <UiButton
+                        >Activate</Button>
+                        <Button
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'failed'"
                           size="sm"
                           variant="outline"
@@ -350,23 +353,23 @@ onUnmounted(() => {
                         >
                           <RefreshCcw :size="12" />
                           Rebuild
-                        </UiButton>
-                        <UiButton
+                        </Button>
+                        <Button
                           v-if="getBuild(definition.id, runner.id)?.status === 'failed'"
                           size="sm"
                           variant="ghost"
                           :disabled="actionLoading === `${definition.id}:${runner.id}:log`"
                           @click="viewLog(definition.id, runner.id)"
-                        >View Log</UiButton>
-                        <UiButton
+                        >View Log</Button>
+                        <Button
                           v-if="['active', 'deactivated', 'failed', 'delete_failed'].includes(getBuild(definition.id, runner.id)?.status || '')"
                           size="sm"
                           variant="ghost"
-                          class="text-error"
+                          class="text-destructive"
                           :disabled="actionLoading === `${definition.id}:${runner.id}:delete`"
                           @click="deleteRunnerBuild(definition.id, runner.id)"
-                        >Delete runner build</UiButton>
-                        <UiButton
+                        >Delete runner build</Button>
+                        <Button
                           v-else-if="getBuild(definition.id, runner.id)?.status === 'pending' || getBuild(definition.id, runner.id)?.status === 'building'"
                           size="sm"
                           variant="outline"
@@ -374,8 +377,8 @@ onUnmounted(() => {
                         >
                           <Loader2 :size="12" class="animate-spin" />
                           Building…
-                        </UiButton>
-                        <UiButton
+                        </Button>
+                        <Button
                           v-else
                           size="sm"
                           variant="outline"
@@ -384,21 +387,21 @@ onUnmounted(() => {
                         >
                           <RefreshCcw :size="12" />
                           Rebuild / Activate
-                        </UiButton>
+                        </Button>
                       </div>
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <p v-if="compatibleRunners(definition).length === 0" class="mt-3 text-xs text-muted-fg">
+            <p v-if="compatibleRunners(definition).length === 0" class="mt-3 text-xs text-muted-foreground">
               No runners in this organization currently support the {{ definition.runtime_type }} runtime.
             </p>
           </div>
-        </UiCardContent>
-      </UiCard>
+        </CardContent>
+      </Card>
 
-      <div v-if="imageDefinitions.length === 0" class="py-10 text-center text-sm text-muted-fg">
+      <div v-if="imageDefinitions.length === 0" class="py-10 text-center text-sm text-muted-foreground">
         No image definitions found.
       </div>
     </div>

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import type { APIKey } from '@/types'
-import { UiCard, UiCardContent, UiBadge, UiButton } from '@/components/ui'
-import { KeyRound, Clock, Zap, Trash2, CheckCircle2, XCircle, Shield, ShieldOff, ChevronDown, ChevronUp, Check } from 'lucide-vue-next'
+import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { KeyRound, Clock, Zap, Trash2, CheckCircle2, XCircle, Shield, ShieldOff, ChevronDown, ChevronUp, Check } from '@lucide/vue'
 import { formatDate, formatRelativeTime } from '@/lib/utils'
 import { useApiKeyStore } from '@/stores/apiKeys'
 
@@ -49,7 +51,6 @@ function toggleFullAccess() {
   if (localPermissions.value.length > 0) {
     localPermissions.value = []
   } else {
-    // Select all permissions
     localPermissions.value = apiKeyStore.availablePermissions.map((p) => p.value)
   }
 }
@@ -70,25 +71,25 @@ async function savePermissions() {
 </script>
 
 <template>
-  <UiCard class="hover:border-border-hover transition-colors duration-150">
-    <UiCardContent>
+  <Card class="hover:border-border transition-colors duration-150">
+    <CardContent>
       <div class="flex items-start justify-between mb-3">
         <div class="flex items-center gap-3">
           <div
             class="flex items-center justify-center w-10 h-10 rounded-[var(--radius-md)] shrink-0"
-            :class="apiKey.is_active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-fg'"
+            :class="apiKey.is_active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'"
           >
             <KeyRound :size="18" />
           </div>
           <div class="min-w-0">
-            <h3 class="font-medium text-fg text-sm truncate">{{ apiKey.name }}</h3>
-            <p class="text-xs text-muted-fg font-mono mt-0.5">{{ apiKey.key_prefix }}…</p>
+            <h3 class="font-medium text-foreground text-sm truncate">{{ apiKey.name }}</h3>
+            <p class="text-xs text-muted-foreground font-mono mt-0.5">{{ apiKey.key_prefix }}…</p>
           </div>
         </div>
 
         <button
           v-if="apiKey.is_active"
-          class="p-1.5 rounded-[var(--radius-sm)] text-muted-fg hover:text-error hover:bg-error-muted transition-colors cursor-pointer shrink-0 ml-2"
+          class="p-1.5 rounded-[var(--radius-sm)] text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer shrink-0 ml-2"
           title="Revoke key"
           @click="emit('revoke', apiKey)"
         >
@@ -96,28 +97,26 @@ async function savePermissions() {
         </button>
       </div>
 
-      <!-- Status badges -->
       <div class="flex flex-wrap gap-1.5 mb-3">
-        <UiBadge :variant="apiKey.is_active ? 'success' : 'muted'">
+        <Badge :variant="apiKey.is_active ? 'secondary' : 'secondary'">
           <component :is="apiKey.is_active ? CheckCircle2 : XCircle" :size="11" class="mr-1" />
           {{ apiKey.is_active ? 'Active' : 'Revoked' }}
-        </UiBadge>
-        <UiBadge variant="outline">
+        </Badge>
+        <Badge variant="outline">
           {{ apiKey.expires_at ? `Expires ${formatDate(apiKey.expires_at)}` : 'Never expires' }}
-        </UiBadge>
-        <UiBadge :variant="apiKey.permissions.length === 0 ? 'default' : 'outline'">
+        </Badge>
+        <Badge :variant="apiKey.permissions.length === 0 ? 'default' : 'outline'">
           <Shield :size="10" class="mr-1" />
           {{ apiKey.permissions.length === 0 ? 'Full access' : `${apiKey.permissions.length} permission${apiKey.permissions.length !== 1 ? 's' : ''}` }}
-        </UiBadge>
+        </Badge>
       </div>
 
-      <!-- Timestamps -->
       <div class="flex flex-col gap-1 mb-3">
-        <div class="flex items-center gap-1.5 text-xs text-muted-fg">
+        <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Clock :size="12" />
           <span>Created {{ formatRelativeTime(apiKey.created_at) }}</span>
         </div>
-        <div class="flex items-center gap-1.5 text-xs text-muted-fg">
+        <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Zap :size="12" />
           <span>
             {{ apiKey.last_used_at ? `Last used ${formatRelativeTime(apiKey.last_used_at)}` : 'Never used' }}
@@ -125,11 +124,9 @@ async function savePermissions() {
         </div>
       </div>
 
-      <!-- Permissions section -->
       <div v-if="apiKey.is_active">
-        <!-- Toggle permissions editor -->
         <button
-          class="w-full flex items-center justify-between text-xs text-muted-fg hover:text-fg transition-colors py-1.5 border-t border-border cursor-pointer"
+          class="w-full flex items-center justify-between text-xs text-muted-foreground hover:text-foreground transition-colors py-1.5 border-t border-border cursor-pointer"
           @click="editingPermissions = !editingPermissions"
         >
           <span class="flex items-center gap-1.5">
@@ -140,15 +137,14 @@ async function savePermissions() {
         </button>
 
         <div v-if="editingPermissions" class="mt-2 space-y-3">
-          <!-- Full access toggle -->
           <div class="flex items-center justify-between">
-            <span class="text-xs text-muted-fg">Access level</span>
+            <span class="text-xs text-muted-foreground">Access level</span>
             <button
               type="button"
               class="flex items-center gap-1.5 text-xs px-2 py-1 rounded-[var(--radius-sm)] border transition-colors cursor-pointer"
               :class="fullAccess
                 ? 'border-primary/40 bg-primary/10 text-primary'
-                : 'border-border bg-bg text-muted-fg hover:text-fg'"
+                : 'border-border bg-background text-muted-foreground hover:text-foreground'"
               @click="toggleFullAccess"
             >
               <component :is="fullAccess ? Shield : ShieldOff" :size="12" />
@@ -156,14 +152,14 @@ async function savePermissions() {
             </button>
           </div>
 
-          <div v-if="fullAccess" class="rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-xs text-muted-fg">
+          <div v-if="fullAccess" class="rounded-[var(--radius-md)] border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
             No restrictions — key can access all operations.
           </div>
 
           <div v-else class="space-y-2 max-h-56 overflow-y-auto pr-1">
             <template v-for="(perms, group) in permissionGroups" :key="group">
               <div>
-                <p class="text-xs font-medium text-muted-fg uppercase tracking-wide mb-1">{{ group }}</p>
+                <p class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">{{ group }}</p>
                 <div class="space-y-0.5">
                   <label
                     v-for="perm in perms"
@@ -171,7 +167,7 @@ async function savePermissions() {
                     class="flex items-center gap-2 p-1.5 rounded-[var(--radius-sm)] border cursor-pointer transition-colors"
                     :class="localPermissions.includes(perm.value)
                       ? 'border-primary/40 bg-primary/5'
-                      : 'border-border bg-bg hover:border-border-hover'"
+                      : 'border-border bg-background hover:border-border'"
                   >
                     <input
                       type="checkbox"
@@ -179,33 +175,31 @@ async function savePermissions() {
                       class="shrink-0 accent-primary cursor-pointer"
                       @change="togglePermission(perm.value)"
                     />
-                    <span class="text-xs font-mono text-fg truncate">{{ perm.value }}</span>
+                    <span class="text-xs font-mono text-foreground truncate">{{ perm.value }}</span>
                   </label>
                 </div>
               </div>
             </template>
           </div>
 
-          <!-- Save/Cancel buttons -->
           <div class="flex gap-2 justify-end pt-1">
-            <UiButton size="sm" variant="outline" @click="cancelEdit">Cancel</UiButton>
-            <UiButton size="sm" :disabled="savingPermissions" @click="savePermissions">
+            <Button size="sm" variant="outline" @click="cancelEdit">Cancel</Button>
+            <Button size="sm" :disabled="savingPermissions" @click="savePermissions">
               <Check :size="12" class="mr-1" />
               {{ savingPermissions ? 'Saving…' : 'Save' }}
-            </UiButton>
+            </Button>
           </div>
         </div>
 
-        <!-- Current permissions pills (compact, when not editing) -->
         <div v-else-if="apiKey.permissions.length > 0" class="mt-1.5 flex flex-wrap gap-1">
           <span
             v-for="p in apiKey.permissions.slice(0, 4)"
             :key="p"
-            class="font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-fg"
+            class="font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground"
           >{{ p }}</span>
-          <span v-if="apiKey.permissions.length > 4" class="text-[10px] text-muted-fg">+{{ apiKey.permissions.length - 4 }} more</span>
+          <span v-if="apiKey.permissions.length > 4" class="text-[10px] text-muted-foreground">+{{ apiKey.permissions.length - 4 }} more</span>
         </div>
       </div>
-    </UiCardContent>
-  </UiCard>
+    </CardContent>
+  </Card>
 </template>

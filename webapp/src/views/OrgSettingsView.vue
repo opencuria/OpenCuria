@@ -3,7 +3,24 @@ import { ref, onMounted, computed, watch } from 'vue'
 import { get, post, del } from '@/services/api'
 import { getOrganization, updateOrganizationWorkspacePolicy } from '@/services/organizations.api'
 import { useAuthStore } from '@/stores/auth'
-import { UiButton, UiDialog, UiSpinner, UiBadge, UiInput, UiSelect } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import AgentDefinitionModal from '@/components/agents/AgentDefinitionModal.vue'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import type { AgentOption, Organization } from '@/types'
@@ -23,7 +40,7 @@ import {
   Copy,
   HardDrive,
   Clock3,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -414,8 +431,8 @@ function runCommand(agent: OrgAgentDefinition) {
     <!-- Page header -->
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold text-fg">Organization Settings</h2>
-        <p class="text-sm text-muted-fg mt-1">
+        <h2 class="text-xl font-semibold text-foreground">Organization Settings</h2>
+        <p class="text-sm text-muted-foreground mt-1">
           Manage workspace policy, agent definitions, and credential services for your organization.
         </p>
       </div>
@@ -424,25 +441,25 @@ function runCommand(agent: OrgAgentDefinition) {
     <!-- Not admin warning -->
     <div
       v-if="!isAdmin"
-      class="rounded-[var(--radius-md)] border border-warning/30 bg-warning-muted px-4 py-3 text-sm text-warning"
+      class="rounded-md border border-warning/30 bg-warning-muted px-4 py-3 text-sm text-warning"
     >
       Only organization admins can manage these settings.
     </div>
 
     <!-- Loading -->
     <div v-else-if="loading" class="flex justify-center py-12">
-      <UiSpinner :size="24" />
+      <LoadingSpinner :size="24" />
     </div>
 
     <!-- Error -->
     <div
       v-else-if="error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-4 py-3 text-sm text-error flex items-center justify-between"
+      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error flex items-center justify-between"
     >
       <span>{{ error }}</span>
-      <UiButton size="icon-sm" variant="ghost" @click="error = null">
+      <Button size="icon-sm" variant="ghost" @click="error = null">
         <X :size="14" />
-      </UiButton>
+      </Button>
     </div>
 
     <!-- Main content -->
@@ -462,7 +479,7 @@ function runCommand(agent: OrgAgentDefinition) {
           :class="
             activeTab === tab.key
               ? 'border-accent text-accent'
-              : 'border-transparent text-muted-fg hover:text-fg'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
           "
           @click="activeTab = tab.key as 'workspace-policies' | 'agents' | 'image-definitions' | 'credential-services'"
         >
@@ -472,28 +489,25 @@ function runCommand(agent: OrgAgentDefinition) {
       </div>
 
       <div v-if="activeTab === 'workspace-policies'" class="space-y-4">
-        <div
-          class="rounded-[var(--radius-lg)] border border-border p-5"
-          style="background: var(--glass-bg)"
-        >
+        <div class="rounded-lg border border-border bg-card p-5">
           <div class="flex items-start justify-between gap-4">
             <div>
-              <h3 class="text-base font-semibold text-fg">Automatic Workspace Stop</h3>
-              <p class="mt-1 text-sm text-muted-fg">
+              <h3 class="text-base font-semibold text-foreground">Automatic Workspace Stop</h3>
+              <p class="mt-1 text-sm text-muted-foreground">
                 Running workspaces stop automatically after the configured period without prompts,
                 terminal input, or file interactions.
               </p>
             </div>
-            <UiBadge :variant="autoStopEnabled ? 'success' : 'muted'">
+            <Badge :variant="autoStopEnabled ? 'secondary' : 'secondary'">
               {{ autoStopEnabled ? 'Enabled' : 'Disabled' }}
-            </UiBadge>
+            </Badge>
           </div>
 
           <div class="mt-5 space-y-4">
-            <label class="flex items-center justify-between gap-4 rounded-[var(--radius-md)] border border-border px-4 py-3">
+            <label class="flex items-center justify-between gap-4 rounded-md border border-border px-4 py-3">
               <div>
-                <div class="text-sm font-medium text-fg">Automatically stop inactive workspaces</div>
-                <div class="text-xs text-muted-fg mt-0.5">
+                <div class="text-sm font-medium text-foreground">Automatically stop inactive workspaces</div>
+                <div class="text-xs text-muted-foreground mt-0.5">
                   This policy applies to every workspace in the active organization.
                 </div>
               </div>
@@ -507,8 +521,8 @@ function runCommand(agent: OrgAgentDefinition) {
             <div v-if="autoStopEnabled" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
               <div class="space-y-3">
                 <label class="block">
-                  <span class="text-sm font-medium text-fg">Inactivity Timeout (minutes)</span>
-                  <UiInput
+                  <span class="text-sm font-medium text-foreground">Inactivity Timeout (minutes)</span>
+                  <Input
                     :model-value="String(autoStopTimeoutMinutes)"
                     type="number"
                     min="1"
@@ -518,7 +532,7 @@ function runCommand(agent: OrgAgentDefinition) {
                   />
                 </label>
                 <div class="flex flex-wrap gap-2">
-                  <UiButton
+                  <Button
                     v-for="preset in workspacePolicyPresetOptions"
                     :key="preset.value"
                     size="sm"
@@ -526,25 +540,25 @@ function runCommand(agent: OrgAgentDefinition) {
                     @click="autoStopTimeoutMinutes = preset.value"
                   >
                     {{ preset.label }}
-                  </UiButton>
+                  </Button>
                 </div>
               </div>
 
-              <div class="rounded-[var(--radius-md)] border border-border bg-muted/10 px-4 py-3">
-                <div class="text-xs uppercase tracking-[0.16em] text-muted-fg">Policy Summary</div>
-                <div class="mt-2 text-sm text-fg">{{ workspacePolicySummary }}</div>
-                <div class="mt-2 text-xs text-muted-fg">
+              <div class="rounded-md border border-border bg-muted/10 px-4 py-3">
+                <div class="text-xs uppercase tracking-[0.16em] text-muted-foreground">Policy Summary</div>
+                <div class="mt-2 text-sm text-foreground">{{ workspacePolicySummary }}</div>
+                <div class="mt-2 text-xs text-muted-foreground">
                   Active prompt sessions prevent auto-stop until they finish.
                 </div>
               </div>
             </div>
 
-            <div v-else class="rounded-[var(--radius-md)] border border-border bg-muted/10 px-4 py-3 text-sm text-muted-fg">
+            <div v-else class="rounded-md border border-border bg-muted/10 px-4 py-3 text-sm text-muted-foreground">
               Auto-stop is disabled. Workspaces remain running until users stop them manually.
             </div>
 
             <div class="flex items-center justify-between gap-3">
-              <p class="text-xs text-muted-fg">
+              <p class="text-xs text-muted-foreground">
                 Last saved:
                 {{
                   organizationSettings?.workspace_auto_stop_timeout_minutes != null
@@ -552,10 +566,10 @@ function runCommand(agent: OrgAgentDefinition) {
                     : 'Disabled'
                 }}
               </p>
-              <UiButton size="sm" :disabled="policySaving" @click="saveWorkspacePolicy">
-                <UiSpinner v-if="policySaving" :size="12" />
+              <Button size="sm" :disabled="policySaving" @click="saveWorkspacePolicy">
+                <LoadingSpinner v-if="policySaving" :size="12" />
                 <span v-else>Save Policy</span>
-              </UiButton>
+              </Button>
             </div>
           </div>
         </div>
@@ -566,13 +580,13 @@ function runCommand(agent: OrgAgentDefinition) {
       <!-- ================================================================ -->
       <div v-else-if="activeTab === 'agents'" class="space-y-4">
         <div class="flex justify-between items-center">
-          <p class="text-sm text-muted-fg">
+          <p class="text-sm text-muted-foreground">
             Activate or deactivate agent definitions. Admins can also create custom agents.
           </p>
-          <UiButton size="sm" @click="openCreateAgent">
+          <Button size="sm" @click="openCreateAgent">
             <Plus :size="14" />
             New Agent
-          </UiButton>
+          </Button>
         </div>
 
         <!-- Agent list -->
@@ -580,15 +594,14 @@ function runCommand(agent: OrgAgentDefinition) {
           <div
             v-for="agent in agentDefs"
             :key="agent.id"
-            class="rounded-[var(--radius-md)] border border-border overflow-hidden transition-colors"
-            style="background: var(--glass-bg)"
+            class="rounded-md border border-border bg-card overflow-hidden transition-colors"
           >
             <!-- Header row -->
             <div class="flex items-center gap-3 px-4 py-3">
               <!-- Expand toggle -->
               <button
                 type="button"
-                class="text-muted-fg hover:text-fg transition-colors"
+                class="text-muted-foreground hover:text-foreground transition-colors"
                 @click="toggleExpandAgent(agent.id)"
               >
                 <ChevronDown v-if="expandedAgent !== agent.id" :size="15" />
@@ -596,13 +609,13 @@ function runCommand(agent: OrgAgentDefinition) {
               </button>
 
               <!-- Icon + name -->
-              <Bot :size="16" class="text-muted-fg shrink-0" />
+              <Bot :size="16" class="text-muted-foreground shrink-0" />
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <span class="font-medium text-sm text-fg truncate">{{ agent.name }}</span>
+                  <span class="font-medium text-sm text-foreground truncate">{{ agent.name }}</span>
                   <span
                     class="text-xs px-1.5 py-0.5 rounded font-medium"
-                    :class="agent.is_standard ? 'bg-muted/20 text-muted-fg' : 'bg-accent/10 text-accent'"
+                    :class="agent.is_standard ? 'bg-muted/20 text-muted-foreground' : 'bg-accent/10 text-accent'"
                   >
                     {{ agent.is_standard ? 'standard' : 'custom' }}
                   </span>
@@ -611,7 +624,7 @@ function runCommand(agent: OrgAgentDefinition) {
                     class="text-xs px-1.5 py-0.5 rounded bg-success/10 text-success"
                   >multi-chat</span>
                 </div>
-                <p v-if="agent.description" class="text-xs text-muted-fg truncate mt-0.5">
+                <p v-if="agent.description" class="text-xs text-muted-foreground truncate mt-0.5">
                   {{ agent.description }}
                 </p>
               </div>
@@ -619,18 +632,18 @@ function runCommand(agent: OrgAgentDefinition) {
               <!-- Actions -->
               <div class="flex items-center gap-1.5 shrink-0">
                 <!-- Edit (org-owned only) -->
-                <UiButton
+                <Button
                   variant="ghost"
                   size="icon-sm"
                   title="Duplicate"
                   :disabled="toggleLoading === `dup:${agent.id}`"
                   @click.stop="duplicateAgent(agent)"
                 >
-                  <UiSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
+                  <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
                   <Copy v-else :size="14" />
-                </UiButton>
+                </Button>
 
-                <UiButton
+                <Button
                   v-if="!agent.is_standard"
                   variant="ghost"
                   size="icon-sm"
@@ -638,10 +651,10 @@ function runCommand(agent: OrgAgentDefinition) {
                   @click.stop="openEditAgent(agent)"
                 >
                   <Pencil :size="14" />
-                </UiButton>
+                </Button>
 
                 <!-- Delete (org-owned only) -->
-                <UiButton
+                <Button
                   v-if="!agent.is_standard"
                   variant="ghost"
                   size="icon-sm"
@@ -649,7 +662,7 @@ function runCommand(agent: OrgAgentDefinition) {
                   @click.stop="openDeleteAgentDialog(agent)"
                 >
                   <Trash2 :size="14" />
-                </UiButton>
+                </Button>
 
                 <!-- Activation toggle -->
                 <button
@@ -658,12 +671,12 @@ function runCommand(agent: OrgAgentDefinition) {
                   :class="
                     agent.is_active
                       ? 'border-success/30 bg-success/10 text-success hover:bg-success/20'
-                      : 'border-border bg-muted/10 text-muted-fg hover:bg-muted/20'
+                      : 'border-border bg-muted/10 text-muted-foreground hover:bg-muted/20'
                   "
                   :disabled="toggleLoading === agent.id"
                   @click="toggleAgentActivation(agent)"
                 >
-                  <UiSpinner v-if="toggleLoading === agent.id" :size="10" />
+                  <LoadingSpinner v-if="toggleLoading === agent.id" :size="10" />
                   <Check v-else-if="agent.is_active" :size="11" />
                   <X v-else :size="11" />
                   {{ agent.is_active ? 'Active' : 'Inactive' }}
@@ -678,12 +691,12 @@ function runCommand(agent: OrgAgentDefinition) {
             >
               <!-- Required credentials -->
               <div v-if="agent.required_credential_service_ids.length > 0">
-                <p class="text-xs font-medium text-muted-fg mb-1.5">Required Credentials</p>
+                <p class="text-xs font-medium text-muted-foreground mb-1.5">Required Credentials</p>
                 <div class="flex flex-wrap gap-1.5">
                   <span
                     v-for="id in agent.required_credential_service_ids"
                     :key="id"
-                    class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-muted/10 text-muted-fg border border-border"
+                    class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-muted/10 text-muted-foreground border border-border"
                   >
                     <Key :size="10" />
                     {{ getCredentialServiceName(id) }}
@@ -693,7 +706,7 @@ function runCommand(agent: OrgAgentDefinition) {
 
               <!-- Commands overview -->
               <div>
-                <p class="text-xs font-medium text-muted-fg mb-1.5">
+                <p class="text-xs font-medium text-muted-foreground mb-1.5">
                   Commands ({{ agent.commands.length }})
                 </p>
                 <div class="space-y-1">
@@ -703,11 +716,11 @@ function runCommand(agent: OrgAgentDefinition) {
                     :key="'cfg-' + idx"
                     class="flex items-center gap-2 text-xs"
                   >
-                    <span class="px-1.5 py-0.5 rounded-sm bg-muted/10 text-muted-fg font-mono w-20 text-center shrink-0">
+                    <span class="px-1.5 py-0.5 rounded-sm bg-muted/10 text-muted-foreground font-mono w-20 text-center shrink-0">
                       configure
                     </span>
-                    <code class="text-muted-fg font-mono truncate">{{ cmd.args.join(' ') }}</code>
-                    <span v-if="cmd.description" class="text-muted-fg/60 truncate hidden sm:inline">
+                    <code class="text-muted-foreground font-mono truncate">{{ cmd.args.join(' ') }}</code>
+                    <span v-if="cmd.description" class="text-muted-foreground/60 truncate hidden sm:inline">
                       — {{ cmd.description }}
                     </span>
                   </div>
@@ -716,10 +729,10 @@ function runCommand(agent: OrgAgentDefinition) {
                     <span class="px-1.5 py-0.5 rounded-sm bg-accent/10 text-accent font-mono w-20 text-center shrink-0">
                       run
                     </span>
-                    <code class="text-muted-fg font-mono truncate">
+                    <code class="text-muted-foreground font-mono truncate">
                       {{ runCommand(agent)?.args.join(' ') }}
                     </code>
-                    <span v-if="runCommand(agent)?.description" class="text-muted-fg/60 truncate hidden sm:inline">
+                    <span v-if="runCommand(agent)?.description" class="text-muted-foreground/60 truncate hidden sm:inline">
                       — {{ runCommand(agent)?.description }}
                     </span>
                   </div>
@@ -728,12 +741,12 @@ function runCommand(agent: OrgAgentDefinition) {
 
               <!-- Default env -->
               <div v-if="Object.keys(agent.default_env || {}).length > 0">
-                <p class="text-xs font-medium text-muted-fg mb-1.5">Default Environment</p>
+                <p class="text-xs font-medium text-muted-foreground mb-1.5">Default Environment</p>
                 <div class="flex flex-wrap gap-1.5">
                   <span
                     v-for="[k, v] in Object.entries(agent.default_env)"
                     :key="k"
-                    class="text-xs px-2 py-0.5 rounded font-mono bg-muted/10 text-muted-fg"
+                    class="text-xs px-2 py-0.5 rounded font-mono bg-muted/10 text-muted-foreground"
                   >
                     {{ k }}=<span class="opacity-60">{{ String(v).length > 20 ? '***' : v }}</span>
                   </span>
@@ -743,40 +756,40 @@ function runCommand(agent: OrgAgentDefinition) {
               <!-- Edit button for custom agents -->
               <div v-if="!agent.is_standard" class="pt-1">
                 <div class="flex gap-2">
-                  <UiButton
+                  <Button
                     size="sm"
                     variant="outline"
                     :disabled="toggleLoading === `dup:${agent.id}`"
                     @click="duplicateAgent(agent)"
                   >
-                    <UiSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
+                    <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
                     <Copy v-else :size="12" />
                     Duplicate
-                  </UiButton>
-                  <UiButton size="sm" variant="outline" @click="openEditAgent(agent)">
+                  </Button>
+                  <Button size="sm" variant="outline" @click="openEditAgent(agent)">
                     <Settings2 :size="12" />
                     Edit Definition
-                  </UiButton>
+                  </Button>
                 </div>
               </div>
               <div v-else class="pt-1">
-                <UiButton
+                <Button
                   size="sm"
                   variant="outline"
                   :disabled="toggleLoading === `dup:${agent.id}`"
                   @click="duplicateAgent(agent)"
                 >
-                  <UiSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
+                  <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
                   <Copy v-else :size="12" />
                   Duplicate
-                </UiButton>
+                </Button>
               </div>
             </div>
           </div>
         </div>
 
         <!-- Empty state -->
-        <div v-if="agentDefs.length === 0" class="text-center py-12 text-muted-fg text-sm">
+        <div v-if="agentDefs.length === 0" class="text-center py-12 text-muted-foreground text-sm">
           No agent definitions found.
         </div>
       </div>
@@ -790,44 +803,43 @@ function runCommand(agent: OrgAgentDefinition) {
 
       <div v-else-if="activeTab === 'credential-services'" class="space-y-4">
         <div class="flex items-start justify-between gap-3">
-          <p class="text-sm text-muted-fg">
+          <p class="text-sm text-muted-foreground">
             Control which credential services are available to your organization members.
           </p>
-          <UiButton size="sm" @click="openCreateCredentialService">
+          <Button size="sm" @click="openCreateCredentialService">
             <Plus :size="14" />
             New Service
-          </UiButton>
+          </Button>
         </div>
 
         <div class="space-y-2">
           <div
             v-for="svc in credentialServices"
             :key="svc.id"
-            class="flex items-center gap-3 px-4 py-3 rounded-[var(--radius-md)] border border-border"
-            style="background: var(--glass-bg)"
+            class="flex items-center gap-3 px-4 py-3 rounded-md border border-border bg-card"
           >
             <!-- Icon -->
             <div
               class="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
               :class="svc.is_active ? 'bg-success/10' : 'bg-muted/10'"
             >
-              <Key :size="14" :class="svc.is_active ? 'text-success' : 'text-muted-fg'" />
+              <Key :size="14" :class="svc.is_active ? 'text-success' : 'text-muted-foreground'" />
             </div>
 
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-medium text-sm text-fg">{{ svc.name }}</span>
-                <span class="text-xs text-muted-fg font-mono px-1.5 py-0.5 rounded bg-muted/10">
+                <span class="font-medium text-sm text-foreground">{{ svc.name }}</span>
+                <span class="text-xs text-muted-foreground font-mono px-1.5 py-0.5 rounded bg-muted/10">
                   {{ svc.credential_type }}
                 </span>
               </div>
-              <p v-if="svc.description" class="text-xs text-muted-fg truncate mt-0.5">
+              <p v-if="svc.description" class="text-xs text-muted-foreground truncate mt-0.5">
                 {{ svc.description }}
               </p>
-              <p v-if="svc.env_var_name" class="text-xs text-muted-fg font-mono mt-0.5">
+              <p v-if="svc.env_var_name" class="text-xs text-muted-foreground font-mono mt-0.5">
                 {{ svc.env_var_name }}
               </p>
-              <p v-if="svc.target_path" class="text-xs text-muted-fg font-mono mt-0.5">
+              <p v-if="svc.target_path" class="text-xs text-muted-foreground font-mono mt-0.5">
                 {{ svc.target_path }}
               </p>
             </div>
@@ -839,12 +851,12 @@ function runCommand(agent: OrgAgentDefinition) {
               :class="
                 svc.is_active
                   ? 'border-success/30 bg-success/10 text-success hover:bg-success/20'
-                  : 'border-border bg-muted/10 text-muted-fg hover:bg-muted/20'
+                  : 'border-border bg-muted/10 text-muted-foreground hover:bg-muted/20'
               "
               :disabled="toggleLoading === svc.id"
               @click="toggleCredentialServiceActivation(svc)"
             >
-              <UiSpinner v-if="toggleLoading === svc.id" :size="10" />
+              <LoadingSpinner v-if="toggleLoading === svc.id" :size="10" />
               <Check v-else-if="svc.is_active" :size="11" />
               <X v-else :size="11" />
               {{ svc.is_active ? 'Active' : 'Inactive' }}
@@ -852,26 +864,28 @@ function runCommand(agent: OrgAgentDefinition) {
           </div>
         </div>
 
-        <div v-if="credentialServices.length === 0" class="text-center py-12 text-muted-fg text-sm">
+        <div v-if="credentialServices.length === 0" class="text-center py-12 text-muted-foreground text-sm">
           No credential services found.
         </div>
       </div>
     </template>
 
-    <UiDialog
+    <Dialog
       :open="showCreateServiceModal"
-      title="Create Credential Service"
-      description="Define a new credential service your organization can use in credentials and agents."
       @update:open="(v) => (v ? (showCreateServiceModal = true) : closeCreateCredentialService())"
     >
-      <template #trigger>
-        <span class="hidden" />
-      </template>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Create Credential Service</DialogTitle>
+          <DialogDescription>
+            Define a new credential service your organization can use in credentials and agents.
+          </DialogDescription>
+        </DialogHeader>
 
       <form class="space-y-4" @submit.prevent="createCredentialService">
         <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Name</label>
-          <UiInput
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+          <Input
             v-model="serviceName"
             placeholder="GitHub Enterprise"
           />
@@ -879,71 +893,85 @@ function runCommand(agent: OrgAgentDefinition) {
 
         <div class="grid gap-3 sm:grid-cols-2">
           <div>
-            <label class="text-sm font-medium text-fg mb-1.5 block">Slug</label>
-            <UiInput
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Slug</label>
+            <Input
               v-model="serviceSlug"
               placeholder="github-enterprise"
               @update:modelValue="serviceSlugTouched = true"
             />
-            <p class="text-xs text-muted-fg mt-1">Used as stable identifier. Auto-generated from name.</p>
+            <p class="text-xs text-muted-foreground mt-1">Used as stable identifier. Auto-generated from name.</p>
           </div>
           <div>
-            <label class="text-sm font-medium text-fg mb-1.5 block">Credential Type</label>
-            <UiSelect v-model="serviceCredentialType" :options="credentialTypeOptions" />
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Credential Type</label>
+            <Select v-model="serviceCredentialType">
+              <SelectTrigger>
+                <SelectValue placeholder="Select credential type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="option in credentialTypeOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
         <div v-if="serviceCredentialType === 'env'">
-          <label class="text-sm font-medium text-fg mb-1.5 block">Environment Variable Name</label>
-          <UiInput
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Environment Variable Name</label>
+          <Input
             v-model="serviceEnvVarName"
             placeholder="GITHUB_TOKEN"
           />
-          <p class="text-xs text-muted-fg mt-1">
+          <p class="text-xs text-muted-foreground mt-1">
             Must be uppercase snake case, e.g. <code>OPENAI_API_KEY</code>.
           </p>
         </div>
 
         <div v-else-if="serviceCredentialType === 'file'">
-          <label class="text-sm font-medium text-fg mb-1.5 block">Target Path</label>
-          <UiInput
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Target Path</label>
+          <Input
             v-model="serviceTargetPath"
             placeholder="~/.codex/auth.json"
           />
-          <p class="text-xs text-muted-fg mt-1">
+          <p class="text-xs text-muted-foreground mt-1">
             Supports absolute paths, <code>~/...</code>, <code>${HOME}/...</code>, and relative paths resolved against HOME.
           </p>
         </div>
 
         <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Label</label>
-          <UiInput
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Label</label>
+          <Input
             v-model="serviceLabel"
             placeholder="Personal Access Token"
           />
-          <p class="text-xs text-muted-fg mt-1">Optional helper label shown in credential forms.</p>
+          <p class="text-xs text-muted-foreground mt-1">Optional helper label shown in credential forms.</p>
         </div>
 
         <div>
-          <label class="text-sm font-medium text-fg mb-1.5 block">Description</label>
-          <UiInput
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
+          <Input
             v-model="serviceDescription"
             placeholder="Used for repository access and API integrations."
           />
         </div>
 
         <div class="flex justify-end gap-2 pt-2">
-          <UiButton variant="outline" type="button" :disabled="createServiceLoading" @click="closeCreateCredentialService">
+          <Button variant="outline" type="button" :disabled="createServiceLoading" @click="closeCreateCredentialService">
             Cancel
-          </UiButton>
-          <UiButton type="submit" :disabled="!isCreateServiceValid || createServiceLoading">
-            <UiSpinner v-if="createServiceLoading" :size="12" />
+          </Button>
+          <Button type="submit" :disabled="!isCreateServiceValid || createServiceLoading">
+            <LoadingSpinner v-if="createServiceLoading" :size="12" />
             <Plus v-else :size="12" />
             Create Service
-          </UiButton>
+          </Button>
         </div>
       </form>
-    </UiDialog>
+      </DialogContent>
+    </Dialog>
 
     <!-- ================================================================== -->
     <!-- Agent Definition Modal -->
@@ -959,26 +987,27 @@ function runCommand(agent: OrgAgentDefinition) {
     <!-- ================================================================== -->
     <!-- Delete Confirmation Dialog -->
     <!-- ================================================================== -->
-    <UiDialog
+    <Dialog
       :open="!!deleteTargetAgent"
-      title="Delete Agent Definition"
-      :description="deleteAgentDescription"
       @update:open="(v) => !v && closeDeleteAgentDialog()"
     >
-      <template #trigger>
-        <span class="hidden" />
-      </template>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete Agent Definition</DialogTitle>
+          <DialogDescription>{{ deleteAgentDescription }}</DialogDescription>
+        </DialogHeader>
 
-      <div class="flex justify-end gap-2">
-        <UiButton variant="outline" :disabled="deleteLoading" @click="closeDeleteAgentDialog">
-          Cancel
-        </UiButton>
-        <UiButton variant="destructive" :disabled="deleteLoading" @click="confirmDeleteAgent">
-          <UiSpinner v-if="deleteLoading" :size="12" />
-          <Trash2 v-else :size="12" />
-          Delete
-        </UiButton>
-      </div>
-    </UiDialog>
+        <div class="flex justify-end gap-2">
+          <Button variant="outline" :disabled="deleteLoading" @click="closeDeleteAgentDialog">
+            Cancel
+          </Button>
+          <Button variant="destructive" :disabled="deleteLoading" @click="confirmDeleteAgent">
+            <LoadingSpinner v-if="deleteLoading" :size="12" />
+            <Trash2 v-else :size="12" />
+            Delete
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

@@ -2,8 +2,9 @@
 import { computed, ref } from 'vue'
 import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
-import { UiCard, UiCardContent, UiBadge } from '@/components/ui'
-import { AlertTriangle, Container, Loader2, Layers, WifiOff } from 'lucide-vue-next'
+import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { AlertTriangle, Container, Loader2, Layers, WifiOff } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import WorkspaceActions from './WorkspaceActions.vue'
@@ -39,26 +40,26 @@ const isRunnerOfflineState = computed(
 
 const statusVariant = computed(() => {
   if (transitionLabel.value) {
-    return 'info'
+    return 'default'
   }
   if (isRunnerOfflineState.value) {
-    return 'muted'
+    return 'secondary'
   }
   switch (props.workspace.status) {
     case WorkspaceStatus.RUNNING:
-      return 'success'
+      return 'secondary'
     case WorkspaceStatus.CREATING:
-      return 'warning'
+      return 'outline'
     case WorkspaceStatus.STOPPED:
-      return 'muted'
+      return 'secondary'
     case WorkspaceStatus.FAILED:
     case WorkspaceStatus.DELETE_FAILED:
-      return 'error'
+      return 'destructive'
     case WorkspaceStatus.REMOVED:
     case WorkspaceStatus.DELETED:
-      return 'muted'
+      return 'secondary'
     default:
-      return 'muted'
+      return 'secondary'
   }
 })
 
@@ -92,84 +93,84 @@ function formatStorage(bytes?: number | null): string {
 </script>
 
 <template>
-  <UiCard
-    :class="'transition-colors duration-150' + (clickable ? ' cursor-pointer hover:border-border-hover' : '')"
+  <Card
+    :class="'transition-colors duration-150' + (clickable ? ' cursor-pointer hover:border-border' : '')"
     @click="clickable ? $emit('click') : undefined"
   >
-    <UiCardContent>
+    <CardContent>
       <div class="flex items-start justify-between gap-3 mb-3">
         <div class="flex items-center gap-3 min-w-0 flex-1">
           <div
             :class="[
               'flex items-center justify-center w-10 h-10 rounded-[var(--radius-md)]',
                isRunnerOfflineState
-                 ? 'bg-muted text-muted-fg'
+                 ? 'bg-muted text-muted-foreground'
                  : workspace.status === WorkspaceStatus.RUNNING
-                  ? 'bg-success-muted text-success'
+                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
                       : workspace.status === WorkspaceStatus.CREATING
-                    ? 'bg-warning-muted text-warning'
+                    ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
                     : workspace.status === WorkspaceStatus.FAILED || workspace.status === WorkspaceStatus.DELETE_FAILED
-                      ? 'bg-error-muted text-error'
+                      ? 'bg-destructive/10 text-destructive'
                       : workspace.status === WorkspaceStatus.REMOVED || workspace.status === WorkspaceStatus.DELETED
-                         ? 'bg-muted/50 text-muted-fg/50'
-                         : 'bg-muted text-muted-fg',
+                         ? 'bg-muted/50 text-muted-foreground/50'
+                         : 'bg-muted text-muted-foreground',
             ]"
           >
             <Container :size="18" />
           </div>
           <div class="min-w-0">
-            <h3 class="font-medium text-fg text-sm truncate">
+            <h3 class="font-medium text-foreground text-sm truncate">
               {{ workspace.name }}
             </h3>
             <div
               v-if="workspace.base_image_name"
-              class="mt-1 inline-flex max-w-full items-center gap-1 rounded-[var(--radius-sm)] bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-fg"
+              class="mt-1 inline-flex max-w-full items-center gap-1 rounded-[var(--radius-sm)] bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground"
               :title="`Based on image: ${workspace.base_image_name}`"
             >
               <Layers :size="11" class="shrink-0" />
               <span class="truncate">{{ workspace.base_image_name }}</span>
             </div>
-            <div v-else class="mt-1 text-xs text-muted-fg">—</div>
+            <div v-else class="mt-1 text-xs text-muted-foreground">—</div>
           </div>
         </div>
 
         <div class="flex items-center gap-1.5 shrink-0">
-          <UiBadge
+          <Badge
             v-if="!isRunnerOfflineState && workspace.status === WorkspaceStatus.RUNNING && workspace.has_active_session"
-            variant="warning"
+            variant="outline"
             class="flex items-center gap-1"
           >
             <Loader2 :size="10" class="animate-spin" />
             Busy
-          </UiBadge>
-          <UiBadge
+          </Badge>
+          <Badge
             v-if="showResourceWarning"
-            variant="warning"
+            variant="outline"
             class="flex items-center gap-1"
           >
             <AlertTriangle :size="10" />
             High usage
-          </UiBadge>
-          <UiBadge :variant="statusVariant" class="flex items-center gap-1">
+          </Badge>
+          <Badge :variant="statusVariant" class="flex items-center gap-1">
             <WifiOff v-if="isRunnerOfflineState" :size="10" />
             <Loader2 v-else-if="showStatusSpinner" :size="10" class="animate-spin" />
             {{ statusLabel }}
-          </UiBadge>
+          </Badge>
         </div>
       </div>
 
       <!-- Footer: Storage + Actions -->
       <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0 text-xs text-muted-fg font-mono">
+        <div class="min-w-0 text-xs text-muted-foreground font-mono">
           <div>{{ formatStorage(storageBytes) }}</div>
-          <div v-if="imminentAutoStopLabel" class="mt-1 text-warning">
+          <div v-if="imminentAutoStopLabel" class="mt-1 text-amber-600 dark:text-amber-400">
             {{ imminentAutoStopLabel }}
           </div>
         </div>
         <WorkspaceActions :workspace="workspace" size="sm" @capture-image="handleCaptureImage" />
       </div>
-    </UiCardContent>
-  </UiCard>
+    </CardContent>
+  </Card>
 
   <WorkspaceImageArtifactDialog
     v-if="imageArtifactDialogOpen"

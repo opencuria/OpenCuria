@@ -1,39 +1,37 @@
 /**
  * Notification / toast store.
  *
- * Provides a queue-based notification system for displaying
- * success, error, warning, and info toasts.
+ * Facade over vue-sonner so consuming stores keep a stable API.
  */
 
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { toast } from 'vue-sonner'
 
 export type NotificationType = 'success' | 'error' | 'warning' | 'info'
 
-export interface Notification {
-  id: number
-  type: NotificationType
-  title: string
-  message?: string
-  duration: number
-}
-
-let nextId = 0
-
 export const useNotificationStore = defineStore('notifications', () => {
-  const notifications = ref<Notification[]>([])
+  function add(
+    type: NotificationType,
+    title: string,
+    message?: string,
+    duration = 5000,
+  ): void {
+    const options = message ? { description: message, duration } : { duration }
 
-  function add(type: NotificationType, title: string, message?: string, duration = 5000): void {
-    const id = nextId++
-    notifications.value.push({ id, type, title, message, duration })
-
-    if (duration > 0) {
-      setTimeout(() => remove(id), duration)
+    switch (type) {
+      case 'success':
+        toast.success(title, options)
+        break
+      case 'error':
+        toast.error(title, options)
+        break
+      case 'warning':
+        toast.warning(title, options)
+        break
+      case 'info':
+        toast.info(title, options)
+        break
     }
-  }
-
-  function remove(id: number): void {
-    notifications.value = notifications.value.filter((n) => n.id !== id)
   }
 
   function success(title: string, message?: string): void {
@@ -52,5 +50,5 @@ export const useNotificationStore = defineStore('notifications', () => {
     add('info', title, message)
   }
 
-  return { notifications, add, remove, success, error, warning, info }
+  return { add, success, error, warning, info }
 })

@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import type { FileNode } from '@/types'
-import { Folder, Image, Video, File as FileIcon, ChevronLeft, Upload } from 'lucide-vue-next'
+import { Folder, Image, Video, File as FileIcon, ChevronLeft, Upload } from '@lucide/vue'
 import { classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
@@ -82,25 +82,25 @@ function selectFile(node: FileNode): void {
 
 <template>
   <div
-    class="w-72 max-w-[min(18rem,calc(100vw-1.5rem))] max-h-64 glass-strong rounded-[var(--radius-md)] flex flex-col overflow-hidden"
+    class="w-72 max-w-[min(18rem,calc(100vw-1.5rem))] max-h-64 rounded-[var(--radius-md)] border border-border bg-popover shadow-md flex flex-col overflow-hidden"
   >
     <!-- Header -->
     <div class="flex items-center gap-1.5 px-2.5 py-2 border-b border-border shrink-0">
       <button
         v-if="currentPath !== '/workspace'"
-        class="flex items-center gap-1 text-xs text-muted-fg hover:text-fg transition-colors"
+        class="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
         @click="goUp"
       >
         <ChevronLeft :size="13" />
       </button>
-      <span class="text-xs text-muted-fg truncate flex-1">{{ currentPath }}</span>
+      <span class="text-xs text-muted-foreground truncate flex-1">{{ currentPath }}</span>
     </div>
 
     <!-- File list -->
     <div class="overflow-y-auto flex-1 py-1">
       <div
         v-if="fileExplorer.loadingPaths.has(currentPath)"
-        class="px-3 py-3 text-xs text-muted-fg text-center"
+        class="px-3 py-3 text-xs text-muted-foreground text-center"
       >
         Loading…
       </div>
@@ -112,11 +112,11 @@ function selectFile(node: FileNode): void {
             :class="[
                node.type === 'directory'
                  ? props.disabled
-                   ? 'text-fg/60 cursor-default'
-                   : 'text-fg hover:bg-surface-hover cursor-pointer'
+                   ? 'text-foreground/60 cursor-default'
+                   : 'text-foreground hover:bg-muted cursor-pointer'
                  : props.disabled
                    ? 'text-primary/60 cursor-default'
-                   : 'text-primary hover:bg-surface-hover cursor-pointer',
+                   : 'text-primary hover:bg-muted cursor-pointer',
              ]"
             :disabled="props.disabled"
             @click="node.type === 'directory' ? navigate(node) : selectFile(node)"
@@ -128,7 +128,7 @@ function selectFile(node: FileNode): void {
             <span class="truncate flex-1">{{ node.name }}</span>
           </button>
 
-        <div v-if="!currentNodes.length" class="px-3 py-3 text-xs text-muted-fg text-center">
+        <div v-if="!currentNodes.length" class="px-3 py-3 text-xs text-muted-foreground text-center">
           No files found
         </div>
       </template>
@@ -136,7 +136,7 @@ function selectFile(node: FileNode): void {
 
     <!-- Footer: hint + upload button -->
     <div class="px-3 py-1.5 border-t border-border flex items-center justify-between gap-2 shrink-0">
-      <span class="text-[10px] text-muted-fg">
+      <span class="text-[10px] text-muted-foreground">
         {{ props.disabled ? 'Start workspace to insert or upload files' : 'Click file to insert its path' }}
       </span>
       <button

@@ -2,8 +2,10 @@
 import { ref } from 'vue'
 import type { Chat } from '@/types'
 import { PENDING_CHAT_ID } from '@/stores/workspaces'
-import { UiButton, UiInput, UiScrollArea } from '@/components/ui'
-import { Plus, MessageSquare, Pencil, Trash2, Check, X, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Plus, MessageSquare, Pencil, Trash2, Check, X, ChevronLeft, ChevronRight } from '@lucide/vue'
 
 const props = defineProps<{
   chats: Chat[]
@@ -69,7 +71,7 @@ function formatDate(dateStr: string): string {
 
   <!-- Sidebar: fixed overlay on mobile, inline on desktop -->
   <div
-    class="flex flex-col h-full border-r border-border bg-surface shrink-0 relative transition-all duration-200"
+    class="flex flex-col h-full border-r border-border bg-card shrink-0 relative transition-all duration-200"
     :class="[
       isCollapsed ? 'md:w-12' : 'md:w-64',
       mobileOpen
@@ -79,7 +81,7 @@ function formatDate(dateStr: string): string {
   >
     <!-- Collapse toggle button (desktop only) -->
     <button
-      class="hidden md:flex absolute -right-3 top-3 z-10 w-6 h-6 rounded-full bg-surface border border-border hover:bg-surface-hover transition-colors items-center justify-center"
+      class="hidden md:flex absolute -right-3 top-3 z-10 w-6 h-6 rounded-full bg-card border border-border hover:bg-muted transition-colors items-center justify-center"
       @click="isCollapsed = !isCollapsed"
       :title="isCollapsed ? 'Expand chats' : 'Collapse chats'"
     >
@@ -88,11 +90,11 @@ function formatDate(dateStr: string): string {
 
     <!-- Header -->
     <div class="flex items-center justify-between px-3 py-3 border-b border-border" :class="isCollapsed && !mobileOpen ? 'md:hidden' : ''">
-      <span class="text-sm font-medium text-fg">Chats</span>
+      <span class="text-sm font-medium text-foreground">Chats</span>
       <div class="flex items-center gap-1">
-        <UiButton variant="ghost" size="icon-sm" title="New chat" @click="emit('create')">
+        <Button variant="ghost" size="icon-sm" title="New chat" @click="emit('create')">
           <Plus :size="16" />
-        </UiButton>
+        </Button>
         <button
           class="md:hidden w-7 h-7 rounded-full hover:bg-muted transition-colors flex items-center justify-center"
           @click="emit('close')"
@@ -104,14 +106,14 @@ function formatDate(dateStr: string): string {
 
     <!-- Collapsed state (desktop only): just icon + create -->
     <div v-if="isCollapsed && !mobileOpen" class="hidden md:flex flex-col items-center py-3 border-b border-border gap-2">
-      <MessageSquare :size="18" class="text-muted-fg" />
-      <UiButton variant="ghost" size="icon-sm" @click="emit('create')" title="New chat">
+      <MessageSquare :size="18" class="text-muted-foreground" />
+      <Button variant="ghost" size="icon-sm" @click="emit('create')" title="New chat">
         <Plus :size="16" />
-      </UiButton>
+      </Button>
     </div>
 
     <!-- Chat list (expanded on desktop, always shown on mobile overlay) -->
-    <UiScrollArea v-if="!isCollapsed || mobileOpen" class="flex-1">
+    <ScrollArea v-if="!isCollapsed || mobileOpen" class="flex-1">
       <div class="flex flex-col gap-0.5 p-1.5">
         <div
           v-for="chat in chats"
@@ -120,13 +122,13 @@ function formatDate(dateStr: string): string {
           :class="
             chat.id === activeChatId
               ? 'bg-primary/10 text-primary'
-              : 'text-fg hover:bg-muted'
+              : 'text-foreground hover:bg-muted'
           "
           @click="handleSelect(chat.id)"
         >
           <!-- Editing state -->
           <template v-if="editingChatId === chat.id">
-            <UiInput
+            <Input
               v-model="editName"
               class="h-7 text-xs flex-1"
               maxlength="255"
@@ -134,22 +136,22 @@ function formatDate(dateStr: string): string {
               @keydown.esc.prevent="cancelRename"
               @click.stop
             />
-            <UiButton variant="ghost" size="icon-sm" class="shrink-0 h-6 w-6" @click.stop="confirmRename">
+            <Button variant="ghost" size="icon-sm" class="shrink-0 h-6 w-6" @click.stop="confirmRename">
               <Check :size="12" />
-            </UiButton>
-            <UiButton variant="ghost" size="icon-sm" class="shrink-0 h-6 w-6" @click.stop="cancelRename">
+            </Button>
+            <Button variant="ghost" size="icon-sm" class="shrink-0 h-6 w-6" @click.stop="cancelRename">
               <X :size="12" />
-            </UiButton>
+            </Button>
           </template>
 
           <!-- Normal state -->
           <template v-else>
             <MessageSquare :size="14" class="shrink-0" :class="chat.id === PENDING_CHAT_ID ? 'opacity-40' : 'opacity-60'" />
             <div class="flex-1 min-w-0">
-              <div class="truncate text-xs font-medium" :class="chat.id === PENDING_CHAT_ID ? 'italic text-muted-fg' : ''">
+              <div class="truncate text-xs font-medium" :class="chat.id === PENDING_CHAT_ID ? 'italic text-muted-foreground' : ''">
                 {{ chat.name || 'New Chat' }}
               </div>
-              <div class="text-[10px] text-muted-fg truncate">
+              <div class="text-[10px] text-muted-foreground truncate">
                 <template v-if="chat.id === PENDING_CHAT_ID">
                   <span>Send a message to create</span>
                 </template>
@@ -166,22 +168,22 @@ function formatDate(dateStr: string): string {
 
             <!-- Action buttons (visible on hover, hidden for pending chats) -->
             <div v-if="chat.id !== PENDING_CHAT_ID" class="flex opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-              <UiButton
+              <Button
                 variant="ghost"
                 size="icon-sm"
                 class="h-6 w-6"
                 @click.stop="startRename(chat)"
               >
                 <Pencil :size="11" />
-              </UiButton>
-              <UiButton
+              </Button>
+              <Button
                 variant="ghost"
                 size="icon-sm"
-                class="h-6 w-6 text-error hover:text-error"
+                class="h-6 w-6 text-destructive hover:text-destructive"
                 @click.stop="emit('delete', chat.id)"
               >
                 <Trash2 :size="11" />
-              </UiButton>
+              </Button>
             </div>
           </template>
         </div>
@@ -189,16 +191,16 @@ function formatDate(dateStr: string): string {
         <!-- Empty state -->
         <div
           v-if="!chats.length"
-          class="flex flex-col items-center gap-2 py-8 text-muted-fg"
+          class="flex flex-col items-center gap-2 py-8 text-muted-foreground"
         >
           <MessageSquare :size="24" class="opacity-40" />
           <span class="text-xs">No chats yet</span>
         </div>
       </div>
-    </UiScrollArea>
+    </ScrollArea>
 
     <!-- Collapsed chat list (desktop only): just dots -->
-    <UiScrollArea v-else class="flex-1">
+    <ScrollArea v-else class="flex-1">
       <div class="flex flex-col gap-1 p-2 items-center">
         <div
           v-for="chat in chats"
@@ -207,7 +209,7 @@ function formatDate(dateStr: string): string {
           :class="
             chat.id === activeChatId
               ? 'bg-primary/10 text-primary'
-              : 'text-muted-fg hover:bg-muted'
+              : 'text-muted-foreground hover:bg-muted'
           "
           @click="handleSelect(chat.id)"
           :title="chat.name || 'Untitled chat'"
@@ -215,6 +217,6 @@ function formatDate(dateStr: string): string {
           <MessageSquare :size="14" />
         </div>
       </div>
-    </UiScrollArea>
+    </ScrollArea>
   </div>
 </template>

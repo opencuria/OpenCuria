@@ -8,7 +8,7 @@ import {
   FolderOpen,
   FileText,
   File as FileIcon,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 const props = defineProps<{
   node: FileNode
@@ -94,7 +94,7 @@ function handleDrop(e: DragEvent): void {
         :is="isDirectory ? (isExpanded ? FolderOpen : Folder) : (node.name.match(/\.(ts|js|vue|py|md|json|yaml|yml|toml|css|html|sh|sql)$/) ? FileText : FileIcon)"
         :size="14"
         class="shrink-0"
-        :class="isDirectory ? 'text-amber-500' : 'text-muted-fg'"
+        :class="isDirectory ? 'text-amber-500' : 'text-muted-foreground'"
       />
 
       <!-- Name -->
@@ -103,7 +103,7 @@ function handleDrop(e: DragEvent): void {
       <!-- Size (files only) -->
       <span
         v-if="!isDirectory && node.size > 0"
-        class="text-[10px] text-muted-fg shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+        class="text-[10px] text-muted-foreground shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
       >
         {{ humanSize(node.size) }}
       </span>
@@ -125,7 +125,7 @@ function handleDrop(e: DragEvent): void {
     <!-- Loading indicator for directory -->
     <div
       v-if="isDirectory && isExpanded && isLoading && !node.children?.length"
-      class="text-xs text-muted-fg py-1"
+      class="text-xs text-muted-foreground py-1"
       :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
     >
       Loading...

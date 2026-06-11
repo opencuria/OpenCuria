@@ -2,8 +2,8 @@
 import { ref, watch, nextTick, computed, onMounted } from 'vue'
 import type { Session } from '@/types'
 import ChatMessage from './ChatMessage.vue'
-import { UiEmptyState, UiScrollArea } from '@/components/ui'
-import { MessageSquare } from 'lucide-vue-next'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { MessageSquare } from '@lucide/vue'
 import { isSessionActive } from '@/lib/sessionState'
 
 const props = defineProps<{
@@ -16,16 +16,14 @@ const emit = defineEmits<{
   toggleReadState: [sessionId: string]
 }>()
 
-const scrollContainer = ref<InstanceType<typeof UiScrollArea> | null>(null)
+const scrollContainer = ref<InstanceType<typeof ScrollArea> | null>(null)
 
-// Sort sessions chronologically (oldest first)
 const sortedSessions = computed(() =>
   [...props.sessions].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
   ),
 )
 
-// Auto-scroll to bottom when new output arrives
 const lastOutput = computed(() => {
   const last = sortedSessions.value[sortedSessions.value.length - 1]
   return last?.output?.length ?? 0
@@ -33,7 +31,7 @@ const lastOutput = computed(() => {
 
 async function scrollToBottom(): Promise<void> {
   await nextTick()
-  const el = scrollContainer.value?.$el
+  const el = scrollContainer.value?.$el?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement | null
   if (el) {
     el.scrollTop = el.scrollHeight
   }
@@ -51,7 +49,7 @@ defineExpose({ hasActiveSession })
 </script>
 
 <template>
-  <UiScrollArea ref="scrollContainer" class="min-h-0 h-full flex-1 px-3 sm:px-6 py-4">
+  <ScrollArea ref="scrollContainer" class="min-h-0 h-full flex-1 px-3 sm:px-6 py-4">
     <div v-if="sortedSessions.length" class="flex flex-col gap-6 w-full max-w-3xl mx-auto">
       <ChatMessage
         v-for="session in sortedSessions"
@@ -62,15 +60,19 @@ defineExpose({ hasActiveSession })
       />
     </div>
 
-    <UiEmptyState
+    <div
       v-else
-      :title="isMultiChat ? 'No messages in this chat' : 'No conversations yet'"
-      :description="isMultiChat ? 'Send a prompt to start this conversation.' : 'Send a prompt to start interacting with the agent.'"
-      class="h-full"
+      class="flex flex-col items-center justify-center py-12 px-6 text-center h-full"
     >
-      <template #icon>
+      <div class="mb-4 text-muted-foreground">
         <MessageSquare :size="40" />
-      </template>
-    </UiEmptyState>
-  </UiScrollArea>
+      </div>
+      <h3 class="text-lg font-medium text-foreground mb-1">
+        {{ isMultiChat ? 'No messages in this chat' : 'No conversations yet' }}
+      </h3>
+      <p class="text-sm text-muted-foreground max-w-sm">
+        {{ isMultiChat ? 'Send a prompt to start this conversation.' : 'Send a prompt to start interacting with the agent.' }}
+      </p>
+    </div>
+  </ScrollArea>
 </template>

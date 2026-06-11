@@ -464,13 +464,14 @@ When a workspace is created, `CredentialSvc.resolve_credentials()` decrypts all 
 
 ### 6.9 Frontend UI Component Consistency
 
-- In the `webapp`, always use the shared standard UI components from
-  `webapp/src/components/ui` for interactive UI elements.
-- This is mandatory for buttons, dialogs/modals, inputs, textareas, selects and
-  similar controls. Do not introduce ad-hoc native elements when a standard
-  component exists (`UiButton`, `UiDialog`, `UiInput`, `UiTextarea`, etc.).
-- Organization Settings and all future views must follow this rule so the
-  Liquid Glass design is applied consistently across the app.
+- In the `webapp`, always use **shadcn-vue** standard components from
+  `webapp/src/components/ui/<name>/` for interactive UI elements.
+- Import per component (e.g. `Button` from `@/components/ui/button`, `Dialog`
+  from `@/components/ui/dialog`). Do not use a barrel `index.ts` or ad-hoc
+  native elements when a shadcn component exists.
+- New UI primitives are added via `npx shadcn-vue@latest add <component>`.
+- Organization Settings and all future views must follow this rule for a
+  consistent design system (reka-maia preset, Noto Sans, Lucide icons).
 
 ### 6.10 Mandatory Test Strategy (strict)
 

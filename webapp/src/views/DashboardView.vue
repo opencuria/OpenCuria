@@ -16,14 +16,14 @@ import {
   isConversationRunning,
   isSessionActive,
 } from '@/lib/sessionState'
-import { UiInput } from '@/components/ui'
+import { Input } from '@/components/ui/input'
 import {
   Search,
   Wifi,
   Container,
   LayoutList,
   LayoutGrid,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import ConversationListView from '@/components/conversations/ConversationListView.vue'
 import ConversationKanbanView from '@/components/conversations/ConversationKanbanView.vue'
@@ -228,20 +228,20 @@ function navigateToConversation(conv: {
 <template>
   <div class="flex flex-col h-full -m-6 lg:-m-8">
     <!-- Compact stats bar -->
-    <div class="border-b border-border bg-surface px-4 py-3 lg:px-6 shrink-0">
+    <div class="border-b border-border bg-card px-4 py-3 lg:px-6 shrink-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">
           <!-- Runners online -->
           <div class="flex items-center gap-1.5 text-sm">
-            <Wifi :size="14" :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-fg'" />
-            <span class="text-fg font-medium">{{ onlineRunnersCount }}</span>
-            <span class="text-muted-fg">/ {{ totalRunnersCount }} runners online</span>
+            <Wifi :size="14" :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-foreground'" />
+            <span class="text-foreground font-medium">{{ onlineRunnersCount }}</span>
+            <span class="text-muted-foreground">/ {{ totalRunnersCount }} runners online</span>
           </div>
           <!-- Active workspaces -->
           <div class="flex items-center gap-1.5 text-sm">
             <Container :size="14" class="text-success" />
-            <span class="text-fg font-medium">{{ activeWorkspacesCount }}</span>
-            <span class="text-muted-fg">active</span>
+            <span class="text-foreground font-medium">{{ activeWorkspacesCount }}</span>
+            <span class="text-muted-foreground">active</span>
           </div>
         </div>
         <div class="hidden sm:block">
@@ -251,11 +251,11 @@ function navigateToConversation(conv: {
     </div>
 
     <!-- Search bar + view toggle -->
-    <div class="border-b border-border bg-surface px-4 py-2 lg:px-6 shrink-0">
+    <div class="border-b border-border bg-card px-4 py-2 lg:px-6 shrink-0">
       <div class="flex items-center gap-2">
         <div class="relative flex-1">
-          <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-fg" />
-          <UiInput
+          <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
             v-model="conversationStore.searchQuery"
             placeholder="Search conversations..."
             class="pl-8 h-8 text-sm"
@@ -266,7 +266,7 @@ function navigateToConversation(conv: {
           <button
             :class="[
               'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'list' ? 'bg-surface-hover text-fg' : 'text-muted-fg hover:text-fg',
+              viewMode === 'list' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
             ]"
             title="List view"
             @click="viewMode = 'list'"
@@ -276,7 +276,7 @@ function navigateToConversation(conv: {
           <button
             :class="[
               'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'kanban' ? 'bg-surface-hover text-fg' : 'text-muted-fg hover:text-fg',
+              viewMode === 'kanban' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
             ]"
             title="Kanban view"
             @click="viewMode = 'kanban'"

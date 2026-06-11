@@ -158,16 +158,16 @@ const toc = computed<TocEntry[]>(() => {
        p-6 = 1.5rem each side → total 3rem; lg:p-8 = 2rem each side → total 4rem -->
   <div class="flex -m-6 lg:-m-8 h-[calc(100%+3rem)] lg:h-[calc(100%+4rem)]">
     <!-- Left: file navigation -->
-    <aside class="w-52 shrink-0 border-r border-border bg-surface flex flex-col overflow-y-auto">
+    <aside class="w-52 shrink-0 border-r border-border bg-card flex flex-col overflow-y-auto">
       <div class="px-4 py-4 border-b border-border">
-        <h2 class="text-xs font-semibold text-muted-fg uppercase tracking-wider">Docs</h2>
+        <h2 class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Docs</h2>
       </div>
       <nav class="flex flex-col gap-0.5 p-2">
         <template v-for="group in docGroups" :key="group.name ?? '__root__'">
           <!-- Folder label (only for non-root groups) -->
           <div
             v-if="group.name !== null"
-            class="mt-3 mb-0.5 px-3 flex items-center gap-1.5 text-xs font-semibold text-muted-fg uppercase tracking-wider"
+            class="mt-3 mb-0.5 px-3 flex items-center gap-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -188,12 +188,12 @@ const toc = computed<TocEntry[]>(() => {
             v-for="doc in group.docs"
             :key="doc.slug"
             :to="{ name: 'docs-detail', params: { slug: doc.slug.split('/') } }"
-            class="px-3 py-2 rounded-[var(--radius-md)] text-sm font-medium transition-colors duration-150"
+            class="px-3 py-2 rounded-md text-sm font-medium transition-colors duration-150"
             :class="[
               group.name !== null ? 'pl-6' : '',
               currentSlug === doc.slug
                 ? 'bg-primary/10 text-primary'
-                : 'text-muted-fg hover:text-fg hover:bg-surface-hover',
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted',
             ]"
           >
             {{ doc.title }}
@@ -209,23 +209,23 @@ const toc = computed<TocEntry[]>(() => {
         class="prose prose-sm dark:prose-invert max-w-3xl"
         v-html="renderedHtml"
       />
-      <p v-else class="text-muted-fg text-sm">No document selected.</p>
+      <p v-else class="text-muted-foreground text-sm">No document selected.</p>
     </main>
 
     <!-- Right: TOC (hidden on small screens) -->
     <aside
       v-if="toc.length > 0"
-      class="hidden xl:flex w-56 shrink-0 border-l border-border bg-surface flex-col overflow-y-auto"
+      class="hidden xl:flex w-56 shrink-0 border-l border-border bg-card flex-col overflow-y-auto"
     >
       <div class="px-4 py-4 border-b border-border">
-        <h2 class="text-xs font-semibold text-muted-fg uppercase tracking-wider">On this page</h2>
+        <h2 class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">On this page</h2>
       </div>
       <nav class="flex flex-col gap-0.5 p-2">
         <a
           v-for="entry in toc"
           :key="entry.id"
           :href="`#${entry.id}`"
-          class="text-sm text-muted-fg hover:text-fg transition-colors duration-150 py-0.5 rounded px-2 hover:bg-surface-hover"
+          class="text-sm text-muted-foreground hover:text-foreground transition-colors duration-150 py-0.5 rounded px-2 hover:bg-muted"
           :class="entry.depth === 3 ? 'pl-5' : 'pl-2'"
         >
           {{ entry.text }}

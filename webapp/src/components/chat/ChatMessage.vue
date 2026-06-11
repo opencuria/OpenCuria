@@ -2,8 +2,10 @@
 import { computed, watch, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import type { Session } from '@/types'
 import { SessionStatus } from '@/types'
-import { User, BookText, Copy, Volume2, Square, MailOpen, Mail } from 'lucide-vue-next'
-import { UiSpinner, ImageLightbox, UiButton } from '@/components/ui'
+import { User, BookText, Copy, Volume2, Square, MailOpen, Mail } from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import ImageLightbox from '@/components/chat/ImageLightbox.vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
@@ -449,16 +451,16 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
         </div>
 
         <div v-if="session.prompt?.trim()" class="flex items-center justify-end gap-0.5 w-full max-w-[80%] sm:max-w-[70%]">
-          <UiButton
+          <Button
             variant="ghost"
             size="icon-sm"
             class="chat-action-btn text-primary-fg/75 hover:text-primary-fg"
             :title="copiedPrompt ? 'Copied!' : 'Copy message'"
             @click="copyMessage(session.prompt, 'prompt')"
           >
-            <Copy :size="13" :class="copiedPrompt ? 'text-success' : ''" />
-          </UiButton>
-          <UiButton
+            <Copy :size="13" :class="copiedPrompt ? 'text-emerald-600 dark:text-emerald-400' : ''" />
+          </Button>
+          <Button
             variant="ghost"
             size="icon-sm"
             class="chat-action-btn text-primary-fg/75 hover:text-primary-fg"
@@ -466,7 +468,7 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
             @click="toggleSpeak(session.prompt, 'prompt')"
           >
             <component :is="speakingSource === 'prompt' ? Square : Volume2" :size="13" />
-          </UiButton>
+          </Button>
         </div>
 
         <!-- Skill badges: shown under the user prompt bubble -->
@@ -496,21 +498,21 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
         :class="[
           'flex-1 min-w-0 py-2 text-sm',
           isFailed
-            ? 'bg-error-muted border border-error/20 text-error rounded-[var(--radius-md)] rounded-bl-sm px-4 py-3'
-            : 'text-fg',
+            ? 'bg-destructive/10 border border-error/20 text-destructive rounded-[var(--radius-md)] rounded-bl-sm px-4 py-3'
+            : 'text-foreground',
         ]"
       >
         <!-- Output content -->
         <div
           v-if="session.output"
-          class="prose-output prose prose-sm max-w-none break-words prose-p:leading-relaxed prose-pre:p-2 prose-pre:bg-muted prose-pre:text-muted-fg prose-pre:rounded-md dark:prose-invert prose-headings:text-fg prose-p:text-fg prose-strong:text-fg prose-ul:text-fg prose-ol:text-fg prose-li:text-fg prose-a:text-primary prose-code:text-fg prose-blockquote:text-muted-fg prose-blockquote:border-l-primary prose-img:rounded-md prose-img:max-w-full prose-img:cursor-pointer prose-img:hover:opacity-90 prose-img:transition-opacity"
+          class="prose-output prose prose-sm max-w-none break-words prose-p:leading-relaxed prose-pre:p-2 prose-pre:bg-muted prose-pre:text-muted-foreground prose-pre:rounded-md dark:prose-invert prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-ul:text-foreground prose-ol:text-foreground prose-li:text-foreground prose-a:text-primary prose-code:text-foreground prose-blockquote:text-muted-foreground prose-blockquote:border-l-primary prose-img:rounded-md prose-img:max-w-full prose-img:cursor-pointer prose-img:hover:opacity-90 prose-img:transition-opacity"
           v-html="renderedOutput"
           @click="onOutputClick"
         ></div>
 
         <!-- Streaming indicator -->
-        <div v-if="isStreaming && !session.output" class="flex items-center gap-2 text-muted-fg">
-          <UiSpinner :size="14" />
+        <div v-if="isStreaming && !session.output" class="flex items-center gap-2 text-muted-foreground">
+          <LoadingSpinner :size="14" />
           <span class="text-xs">{{ session.status_detail || 'Agent is thinking…' }}</span>
         </div>
 
@@ -523,22 +525,22 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
         <!-- Empty completed state -->
         <span
           v-if="!session.output && session.status === SessionStatus.COMPLETED"
-          class="text-muted-fg italic text-xs"
+          class="text-muted-foreground italic text-xs"
         >
           No output returned.
         </span>
 
         <div v-if="session.output?.trim()" class="flex items-center gap-0.5 mt-1.5 -ml-1">
-          <UiButton
+          <Button
             variant="ghost"
             size="icon-sm"
             class="chat-action-btn"
             :title="copiedOutput ? 'Copied!' : 'Copy message'"
             @click="copyMessage(session.output, 'output')"
           >
-            <Copy :size="13" :class="copiedOutput ? 'text-success' : ''" />
-          </UiButton>
-          <UiButton
+            <Copy :size="13" :class="copiedOutput ? 'text-emerald-600 dark:text-emerald-400' : ''" />
+          </Button>
+          <Button
             variant="ghost"
             size="icon-sm"
             class="chat-action-btn"
@@ -546,8 +548,8 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
             @click="toggleSpeak(session.output, 'output')"
           >
             <component :is="speakingSource === 'output' ? Square : Volume2" :size="13" />
-          </UiButton>
-          <UiButton
+          </Button>
+          <Button
             v-if="isSessionDone(session.status)"
             variant="ghost"
             size="icon-sm"
@@ -557,10 +559,10 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
             @click="toggleReadState"
           >
             <component :is="isUnread ? Mail : MailOpen" :size="13" />
-          </UiButton>
+          </Button>
           <span
             v-if="session.agent_model"
-            class="text-[11px] text-muted-fg/90 ml-1.5 pl-1.5 border-l border-border/60 truncate max-w-[14rem]"
+            class="text-[11px] text-muted-foreground/90 ml-1.5 pl-1.5 border-l border-border/60 truncate max-w-[14rem]"
             :title="session.agent_model"
           >
             {{ session.agent_model }}

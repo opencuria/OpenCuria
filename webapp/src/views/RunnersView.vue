@@ -4,7 +4,7 @@ import { useRunnerStore } from '@/stores/runners'
 import { usePolling } from '@/composables/usePolling'
 import RunnerList from '@/components/runners/RunnerList.vue'
 import CreateRunnerDialog from '@/components/runners/CreateRunnerDialog.vue'
-import { UiSpinner } from '@/components/ui'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 
 const runnerStore = useRunnerStore()
 
@@ -20,8 +20,8 @@ onMounted(() => {
     <!-- Page header -->
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold text-fg">Runners</h2>
-        <p class="text-sm text-muted-fg mt-1">
+        <h2 class="text-xl font-semibold text-foreground">Runners</h2>
+        <p class="text-sm text-muted-foreground mt-1">
           Manage runner instances that execute AI coding agents.
         </p>
       </div>
@@ -30,13 +30,13 @@ onMounted(() => {
 
     <!-- Loading state -->
     <div v-if="runnerStore.loading && !runnerStore.runners.length" class="flex justify-center py-12">
-      <UiSpinner :size="24" />
+      <LoadingSpinner :size="24" />
     </div>
 
     <!-- Error state -->
     <div
       v-else-if="runnerStore.error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
     >
       {{ runnerStore.error }}
     </div>
