@@ -4072,9 +4072,19 @@ rm -rf /var/lib/apt/lists/*
         """Return all artifacts captured from a workspace."""
         return list(self.image_instances.list_by_workspace(workspace_id))
 
-    def list_image_artifacts_for_user(self, user) -> list:
-        """Return all artifacts created by a specific user."""
-        return list(self.image_instances.list_by_user(user))
+    def list_image_artifacts_for_user(
+        self,
+        *,
+        user,
+        organization_id: uuid.UUID,
+    ) -> list:
+        """Return all artifacts visible to the user in the active organization."""
+        return list(
+            self.image_instances.list_visible_for_user(
+                user=user,
+                organization_id=organization_id,
+            )
+        )
 
     async def delete_image_artifact(
         self,

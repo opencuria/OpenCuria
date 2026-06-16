@@ -920,6 +920,13 @@ class ImageInstance(models.Model):
         blank=True,
         help_text="The user who created this image instance.",
     )
+    is_organization_shared = models.BooleanField(
+        default=False,
+        help_text=(
+            "Whether this captured image is shared organization-wide. "
+            "Only org admins can toggle this."
+        ),
+    )
     runner_ref = models.CharField(
         max_length=512,
         blank=True,

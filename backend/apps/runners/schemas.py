@@ -576,6 +576,7 @@ class ImageArtifactOut(Schema):
     delete_requested_at: datetime | None = None
     delete_confirmed_at: datetime | None = None
     delete_last_error: str = ""
+    is_organization_shared: bool = False
     created_at: datetime
     created_by_id: int | None = None
 
@@ -598,6 +599,12 @@ class ImageArtifactCreateOut(Schema):
 
     task_id: uuid.UUID
     workspace_id: uuid.UUID
+
+
+class ImageArtifactOrgSharingToggleIn(Schema):
+    """Request schema for toggling organization-wide image sharing."""
+
+    active: bool
 
 
 class WorkspaceFromImageArtifactIn(Schema):

@@ -838,3 +838,208 @@ def test_clone_workspace_from_image_sends_explicit_credential_ids(client: Client
             raise AssertionError(
                 f"Response is not valid JSON: {resp.content[:200]!r}"
             ) from exc
+
+
+@pytest.mark.django_db
+def test_org_admin_can_toggle_captured_image_sharing_and_members_can_see_it(client: Client):
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(email="share-owner@test.com", password="secret")
+    admin = user_model.objects.create_user(email="share-admin@test.com", password="secret")
+    member = user_model.objects.create_user(email="share-member@test.com", password="secret")
+    org = Organization.objects.create(name="Share Org", slug="share-org")
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    Membership.objects.create(user=member, organization=org, role=MembershipRole.MEMBER)
+
+    runner = Runner.objects.create(
+        name="share-runner",
+        api_token_hash=hash_token("share-runner-token"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Owner Workspace",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=owner,
+        name="Owner Captured",
+        runner_ref="share-artifact-1",
+        status=ImageInstance.Status.READY,
+        is_organization_shared=False,
+    )
+
+    admin_token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_CREATE.value])
+    member_token = _create_api_key(user=member, permissions=[APIKeyPermission.IMAGES_READ.value])
+
+    before = client.get("/api/v1/image-artifacts/", **_auth_headers(member_token, str(org.id)))
+    assert before.status_code == 200
+    assert str(artifact.id) not in {entry["id"] for entry in before.json()}
+
+    toggle_on = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/organization-sharing/",
+        data=json.dumps({"active": True}),
+        content_type="application/json",
+        **_auth_headers(admin_token, str(org.id)),
+    )
+    assert toggle_on.status_code == 200
+    assert toggle_on.json()["is_organization_shared"] is True
+
+    after = client.get("/api/v1/image-artifacts/", **_auth_headers(member_token, str(org.id)))
+    assert after.status_code == 200
+    assert str(artifact.id) in {entry["id"] for entry in after.json()}
+
+    toggle_off = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/organization-sharing/",
+        data=json.dumps({"active": False}),
+        content_type="application/json",
+        **_auth_headers(admin_token, str(org.id)),
+    )
+    assert toggle_off.status_code == 200
+    assert toggle_off.json()["is_organization_shared"] is False
+
+
+@pytest.mark.django_db
+def test_non_admin_cannot_toggle_captured_image_sharing(client: Client):
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(email="share-owner-2@test.com", password="secret")
+    member = user_model.objects.create_user(email="share-member-2@test.com", password="secret")
+    org = Organization.objects.create(name="Share Org 2", slug="share-org-2")
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
+    Membership.objects.create(user=member, organization=org, role=MembershipRole.MEMBER)
+
+    runner = Runner.objects.create(
+        name="share-runner-2",
+        api_token_hash=hash_token("share-runner-token-2"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Owner Workspace 2",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=owner,
+        name="Owner Captured 2",
+        runner_ref="share-artifact-2",
+        status=ImageInstance.Status.READY,
+        is_organization_shared=False,
+    )
+
+    token = _create_api_key(user=member, permissions=[APIKeyPermission.IMAGES_CREATE.value])
+    response = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/organization-sharing/",
+        data=json.dumps({"active": True}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "forbidden"
+
+
+@pytest.mark.django_db
+def test_member_can_clone_org_shared_captured_image(client: Client):
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(email="share-owner-3@test.com", password="secret")
+    member = user_model.objects.create_user(email="share-member-3@test.com", password="secret")
+    org = Organization.objects.create(name="Share Org 3", slug="share-org-3")
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.ADMIN)
+    Membership.objects.create(user=member, organization=org, role=MembershipRole.MEMBER)
+
+    runner = Runner.objects.create(
+        name="share-runner-3",
+        api_token_hash=hash_token("share-runner-token-3"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Owner Workspace 3",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=owner,
+        name="Owner Captured 3",
+        runner_ref="share-artifact-3",
+        status=ImageInstance.Status.READY,
+        is_organization_shared=True,
+    )
+
+    token = _create_api_key(user=member, permissions=[APIKeyPermission.IMAGES_CLONE.value])
+    response = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
+        data=json.dumps({"name": "clone-shared"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "runner_offline"
+
+
+@pytest.mark.django_db
+def test_org_admin_can_manage_shared_captured_image(client: Client):
+    user_model = get_user_model()
+    owner = user_model.objects.create_user(email="share-owner-4@test.com", password="secret")
+    admin = user_model.objects.create_user(email="share-admin-4@test.com", password="secret")
+    org = Organization.objects.create(name="Share Org 4", slug="share-org-4")
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+
+    runner = Runner.objects.create(
+        name="share-runner-4",
+        api_token_hash=hash_token("share-runner-token-4"),
+        status=RunnerStatus.OFFLINE,
+        organization=org,
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Owner Workspace 4",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=owner,
+        name="Owner Captured 4",
+        runner_ref="share-artifact-4",
+        status=ImageInstance.Status.READY,
+        is_organization_shared=True,
+    )
+
+    create_token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_CREATE.value])
+    delete_token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_DELETE.value])
+
+    rename = client.patch(
+        f"/api/v1/image-artifacts/{artifact.id}/",
+        data=json.dumps({"name": "Renamed Shared Image"}),
+        content_type="application/json",
+        **_auth_headers(create_token, str(org.id)),
+    )
+    assert rename.status_code == 200
+    assert rename.json()["name"] == "Renamed Shared Image"
+
+    delete = client.delete(
+        f"/api/v1/image-artifacts/{artifact.id}/",
+        **_auth_headers(delete_token, str(org.id)),
+    )
+    assert delete.status_code == 204

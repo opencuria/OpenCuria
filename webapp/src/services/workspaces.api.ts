@@ -185,6 +185,13 @@ export function renameImageArtifact(imageArtifactId: string, name: string): Prom
   return patch<ImageArtifact>(`/image-artifacts/${imageArtifactId}/`, { name })
 }
 
+export function toggleImageArtifactOrganizationSharing(
+  imageArtifactId: string,
+  active: boolean,
+): Promise<ImageArtifact> {
+  return post<ImageArtifact>(`/image-artifacts/${imageArtifactId}/organization-sharing/`, { active })
+}
+
 export function createWorkspaceFromUserImageArtifact(
   imageArtifactId: string,
   data: ImageArtifactCloneIn,

@@ -14,5 +14,6 @@ export const useImageArtifactStore = defineStore('image-artifacts', () => {
     renameImageArtifact: images.renameImageArtifact,
     deleteImageArtifact: images.deleteImageArtifact,
     createWorkspaceFromImageArtifact: images.createWorkspaceFromImageArtifact,
+    setImageArtifactOrganizationSharing: images.setImageArtifactOrganizationSharing,
   }
 })

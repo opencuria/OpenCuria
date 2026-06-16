@@ -125,6 +125,31 @@ export const useImageStore = defineStore('images', () => {
     }
   }
 
+  async function setImageArtifactOrganizationSharing(
+    imageArtifactId: string,
+    active: boolean,
+  ): Promise<boolean> {
+    try {
+      const updated = await workspacesApi.toggleImageArtifactOrganizationSharing(
+        imageArtifactId,
+        active,
+      )
+      const idx = images.value.findIndex((artifact) => artifact.id === imageArtifactId)
+      if (idx !== -1) images.value[idx] = updated
+      notifications.success(
+        active ? 'Organization sharing enabled' : 'Organization sharing disabled',
+        active
+          ? 'Organization members can now use this image.'
+          : 'This image is now private again.',
+      )
+      return true
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to update sharing'
+      notifications.error('Sharing update failed', msg)
+      return false
+    }
+  }
+
   return {
     images,
     imageDefinitions,
@@ -137,5 +162,6 @@ export const useImageStore = defineStore('images', () => {
     renameImageArtifact,
     deleteImageArtifact,
     createWorkspaceFromImageArtifact,
+    setImageArtifactOrganizationSharing,
   }
 })

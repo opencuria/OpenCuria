@@ -520,6 +520,68 @@ Create a workspace from an image artifact.
 
 ---
 
+#### `GET /image-artifacts/` [org]
+
+List image artifacts visible in the active organization.
+
+- Personal captured images are visible to their owner.
+- Organization-shared captured images are visible to all organization members.
+
+**Response 200:** Array of image artifact objects including `is_organization_shared`.
+
+---
+
+#### `PATCH /image-artifacts/{image_artifact_id}/` [org]
+
+Rename an image artifact.
+
+- Owners can rename their own images.
+- Org admins can also rename organization-shared captured images.
+
+**Response 200:** Updated image artifact object.
+
+---
+
+#### `DELETE /image-artifacts/{image_artifact_id}/` [org]
+
+Delete an image artifact.
+
+- Owners can delete their own images.
+- Org admins can also delete organization-shared captured images.
+
+**Response 204:** No content.
+
+---
+
+#### `POST /image-artifacts/{image_artifact_id}/workspaces/` [org]
+
+Create a workspace from an image artifact.
+
+- Owners can clone their own images.
+- All org members can clone organization-shared captured images.
+
+**Response 202:** Task object with new workspace info.
+
+---
+
+#### `POST /image-artifacts/{image_artifact_id}/organization-sharing/` [org]
+
+Toggle organization-wide sharing for a captured image.
+Admin role required.
+
+Only captured images can be shared organization-wide.
+
+**Request:**
+```json
+{
+  "active": true
+}
+```
+
+**Response 200:** Updated image artifact object with `is_organization_shared`.
+
+---
+
 ### Conversations
 
 #### `GET /conversations/` [org]
