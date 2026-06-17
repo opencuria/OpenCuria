@@ -28,6 +28,13 @@ cp .env.example .env
 docker compose up -d
 ```
 
+> [!IMPORTANT]
+> The defaults in `.env.example` are for **localhost evaluation only**.
+> Before any persistent or shared use, change `LOCAL_ADMIN_PASSWORD`,
+> `DJANGO_SECRET_KEY`, `LOCAL_RUNNER_API_TOKEN`, and set a real
+> `CREDENTIAL_ENCRYPTION_KEY` (see the comment in the file for the
+> generation command).
+
 Then open:
 
 - 🌐 Web app: `http://127.0.0.1:8080`
