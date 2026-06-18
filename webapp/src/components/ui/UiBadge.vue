@@ -20,12 +20,12 @@ const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default:     'bg-[oklch(0.55_0.20_258/0.12)] text-primary border-[oklch(0.55_0.20_258/0.20)]',
+        default:     'bg-primary-light text-primary border-primary/20',
         success:     'bg-[oklch(0.52_0.16_150/0.12)] text-success border-[oklch(0.52_0.16_150/0.20)]',
         warning:     'bg-[oklch(0.65_0.18_80/0.12)]  text-warning border-[oklch(0.65_0.18_80/0.20)]',
         error:       'bg-[oklch(0.55_0.22_27/0.12)]  text-error   border-[oklch(0.55_0.22_27/0.20)]',
         info:        'bg-[oklch(0.58_0.18_248/0.12)] text-info    border-[oklch(0.58_0.18_248/0.20)]',
-        muted:       'bg-[var(--glass-bg-subtle)] text-muted-fg border-[var(--glass-border)]',
+        muted:       'bg-surface-hover text-muted-fg border-border',
         outline:     'bg-transparent text-fg border-[var(--color-border)]',
       },
     },

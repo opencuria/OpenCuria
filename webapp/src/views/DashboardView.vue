@@ -19,8 +19,6 @@ import {
 import { UiInput } from '@/components/ui'
 import {
   Search,
-  Wifi,
-  Container,
   LayoutList,
   LayoutGrid,
 } from 'lucide-vue-next'
@@ -157,6 +155,15 @@ const activeWorkspacesCount = computed(
     ).length,
 )
 
+/** Conversations that had a session start today */
+const todayChatsCount = computed(() => {
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  return conversationStore.conversations.filter(
+    (c) => c.last_session && new Date(c.last_session.created_at) >= todayStart,
+  ).length
+})
+
 // ---------------------------------------------------------------------------
 // Kanban columns
 // ---------------------------------------------------------------------------
@@ -227,24 +234,61 @@ function navigateToConversation(conv: {
 
 <template>
   <div class="flex flex-col h-full -m-6 lg:-m-8">
-    <!-- Compact stats bar -->
-    <div class="border-b border-border bg-surface px-4 py-3 lg:px-6 shrink-0">
-      <div class="flex items-center justify-between gap-4">
-        <div class="flex items-center gap-4">
-          <!-- Runners online -->
-          <div class="flex items-center gap-1.5 text-sm">
-            <Wifi :size="14" :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-fg'" />
-            <span class="text-fg font-medium">{{ onlineRunnersCount }}</span>
-            <span class="text-muted-fg">/ {{ totalRunnersCount }} runners online</span>
+    <!-- Stat-chips bar (AP5) -->
+    <div class="border-b border-border px-4 py-2.5 lg:px-6 shrink-0" style="background: var(--color-surface)">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-2 flex-wrap">
+          <!-- Runners live chip -->
+          <div
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium"
+            :class="onlineRunnersCount > 0
+              ? 'bg-success/10 text-success border-success/20'
+              : 'bg-surface-hover text-muted-fg border-border'"
+          >
+            <span
+              class="stat-pulse-dot"
+              :class="onlineRunnersCount === 0 ? 'no-pulse' : ''"
+              :style="{ color: onlineRunnersCount > 0 ? 'var(--color-success)' : 'var(--color-muted-foreground)' }"
+            >
+              <span class="relative z-10 block w-1.5 h-1.5 rounded-full bg-current" />
+            </span>
+            {{ onlineRunnersCount }} / {{ totalRunnersCount }} Runner{{ totalRunnersCount !== 1 ? 's' : '' }} live
           </div>
-          <!-- Active workspaces -->
-          <div class="flex items-center gap-1.5 text-sm">
-            <Container :size="14" class="text-success" />
-            <span class="text-fg font-medium">{{ activeWorkspacesCount }}</span>
-            <span class="text-muted-fg">active</span>
+
+          <!-- Active workspaces chip -->
+          <div
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium"
+            :class="activeWorkspacesCount > 0
+              ? 'bg-primary-light text-primary border-primary/20'
+              : 'bg-surface-hover text-muted-fg border-border'"
+          >
+            <span
+              class="stat-pulse-dot"
+              :class="activeWorkspacesCount === 0 ? 'no-pulse' : ''"
+              :style="{ color: activeWorkspacesCount > 0 ? 'var(--color-primary)' : 'var(--color-muted-foreground)' }"
+            >
+              <span class="relative z-10 block w-1.5 h-1.5 rotate-45 bg-current" style="border-radius: 1px" />
+            </span>
+            {{ activeWorkspacesCount }} Active
+          </div>
+
+          <!-- Chats today chip -->
+          <div
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium"
+            :class="todayChatsCount > 0
+              ? 'bg-warning-muted text-warning border-warning/20'
+              : 'bg-surface-hover text-muted-fg border-border'"
+          >
+            <span
+              class="relative z-10 text-[10px] leading-none"
+              :style="{ color: todayChatsCount > 0 ? 'var(--color-warning)' : 'var(--color-muted-foreground)' }"
+            >✦</span>
+            {{ todayChatsCount }} Chat{{ todayChatsCount !== 1 ? 's' : '' }} today
           </div>
         </div>
-        <div class="hidden sm:block">
+
+        <!-- New Workspace button integrated into the bar -->
+        <div class="hidden sm:block shrink-0">
           <CreateWorkspaceDialog />
         </div>
       </div>

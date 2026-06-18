@@ -53,7 +53,7 @@ describe('AppSidebar organization switcher', () => {
     authStore.logout.mockClear()
   })
 
-  it('uses the dedicated border token for the light-theme organization switcher', async () => {
+  it('uses the shared border token for the organization switcher', async () => {
     const wrapper = shallowMount(AppSidebar, {
       props: {
         mobileOpen: false,
@@ -66,25 +66,18 @@ describe('AppSidebar organization switcher', () => {
     })
 
     const toggleButton = wrapper.findAll('button').find((node) =>
-      node.attributes('style')?.includes('--sidebar-org-switcher-border'),
+      node.classes().includes('border-border'),
     )
 
     expect(toggleButton).toBeDefined()
-    expect(toggleButton?.attributes('style')).toContain(
-      'border: 1px solid var(--sidebar-org-switcher-border)',
-    )
+    expect(toggleButton?.classes()).toContain('border-border')
 
     await toggleButton?.trigger('click')
 
-    expect(wrapper.html()).toContain(
-      'border: 1px solid var(--sidebar-org-switcher-border)',
-    )
-    expect(wrapper.html()).toContain(
-      'border-top: 1px solid var(--sidebar-org-switcher-border)',
-    )
+    expect(wrapper.html()).toContain('border-top: 1px solid var(--color-border)')
   })
 
-  it('uses the dedicated divider token for the sidebar edge', () => {
+  it('uses the shared border token for the sidebar edge', () => {
     const wrapper = shallowMount(AppSidebar, {
       props: {
         mobileOpen: false,
@@ -99,10 +92,8 @@ describe('AppSidebar organization switcher', () => {
     const sidebar = wrapper.find('aside')
 
     expect(sidebar.attributes('style')).toContain(
-      'border-right: 1px solid var(--sidebar-divider-color)',
+      'border-right: 1px solid var(--color-border)',
     )
-    expect(sidebar.attributes('style')).toContain(
-      'box-shadow: var(--glass-shadow-sm)',
-    )
+    expect(sidebar.attributes('style')).not.toContain('box-shadow')
   })
 })

@@ -170,8 +170,8 @@ onMounted(async () => {
                 backdrop-filter: blur(4px);
                 [transition-timing-function:var(--spring-snappy)];
               "
-              @focus="($el as HTMLInputElement).style.boxShadow = '0 0 0 3px oklch(0.55 0.20 258 / 0.22), inset 0 1px 0 oklch(1 0 0 / 0.12)'; ($el as HTMLInputElement).style.borderColor = 'var(--color-primary)'"
-              @blur="($el as HTMLInputElement).style.boxShadow = ''; ($el as HTMLInputElement).style.borderColor = ''"
+              @focus="($event.currentTarget as HTMLInputElement).style.boxShadow = '0 0 0 3px oklch(from var(--color-primary) l c h / 0.22), inset 0 1px 0 oklch(1 0 0 / 0.12)'; ($event.currentTarget as HTMLInputElement).style.borderColor = 'var(--color-primary)'"
+              @blur="($event.currentTarget as HTMLInputElement).style.boxShadow = ''; ($event.currentTarget as HTMLInputElement).style.borderColor = ''"
             />
           </div>
 
@@ -198,8 +198,8 @@ onMounted(async () => {
                 backdrop-filter: blur(4px);
                 [transition-timing-function:var(--spring-snappy)];
               "
-              @focus="($el as HTMLInputElement).style.boxShadow = '0 0 0 3px oklch(0.55 0.20 258 / 0.22), inset 0 1px 0 oklch(1 0 0 / 0.12)'; ($el as HTMLInputElement).style.borderColor = 'var(--color-primary)'"
-              @blur="($el as HTMLInputElement).style.boxShadow = ''; ($el as HTMLInputElement).style.borderColor = ''"
+              @focus="($event.currentTarget as HTMLInputElement).style.boxShadow = '0 0 0 3px oklch(from var(--color-primary) l c h / 0.22), inset 0 1px 0 oklch(1 0 0 / 0.12)'; ($event.currentTarget as HTMLInputElement).style.borderColor = 'var(--color-primary)'"
+              @blur="($event.currentTarget as HTMLInputElement).style.boxShadow = ''; ($event.currentTarget as HTMLInputElement).style.borderColor = ''"
             />
           </div>
 
@@ -218,17 +218,17 @@ onMounted(async () => {
             style="
               border-radius: var(--radius-sm);
               background: var(--color-primary);
-              border: 1px solid oklch(0.55 0.20 258 / 0.30);
+              border: 1px solid oklch(from var(--color-primary) l c h / 0.30);
               box-shadow:
-                0 2px 10px oklch(0.55 0.20 258 / 0.40),
+                0 2px 10px oklch(from var(--color-primary) l c h / 0.40),
                 inset 0 1px 0 oklch(1 0 0 / 0.22),
                 inset 0 -1px 0 oklch(0 0 0 / 0.12);
               letter-spacing: var(--tracking-body);
               transition: transform 200ms var(--spring-snappy), box-shadow 200ms var(--spring-snappy), opacity 150ms;
             "
-            @mousedown="($el as HTMLButtonElement).style.transform = 'scale(0.97)'"
-            @mouseup="($el as HTMLButtonElement).style.transform = ''"
-            @mouseleave="($el as HTMLButtonElement).style.transform = ''"
+            @mousedown="($event.currentTarget as HTMLButtonElement).style.transform = 'scale(0.97)'"
+            @mouseup="($event.currentTarget as HTMLButtonElement).style.transform = ''"
+            @mouseleave="($event.currentTarget as HTMLButtonElement).style.transform = ''"
           >
             {{ authStore.loading ? 'Signing in…' : 'Sign in' }}
           </button>

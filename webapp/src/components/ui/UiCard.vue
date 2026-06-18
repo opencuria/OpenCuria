@@ -1,24 +1,19 @@
 <script setup lang="ts">
 /**
- * UiCard — Liquid Glass card with squircle geometry.
- *
- * Uses the three-layer optical stack:
- * 1. Illumination via ::after (ambient colour bleed)
- * 2. Glass body     (frosted glass, backdrop-filter)
- * 3. Highlight via ::before (specular rim)
+ * UiCard — solid surface card (AP3: glass reserved for overlays only).
  */
 import { cn } from '@/lib/utils'
 
 const props = defineProps<{
   class?: string
-  /** Glass intensity */
+  /** Surface elevation */
   variant?: 'default' | 'strong' | 'subtle'
 }>()
 
 const variantClass =
-  props.variant === 'strong' ? 'glass glass-strong' :
-  props.variant === 'subtle' ? 'glass glass-subtle' :
-  'glass'
+  props.variant === 'strong' ? 'bg-surface-elevated border border-border' :
+  props.variant === 'subtle' ? 'bg-surface/60 border border-border' :
+  'bg-surface border border-border'
 </script>
 
 <template>

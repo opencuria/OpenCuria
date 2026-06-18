@@ -16,7 +16,7 @@ const accentMap = {
   success: 'oklch(0.52 0.16 150',
   error:   'oklch(0.55 0.22 27',
   warning: 'oklch(0.65 0.18 80',
-  info:    'oklch(0.55 0.20 258',
+  info:    'oklch(0.58 0.18 248',
 }
 
 const iconColorMap = {

@@ -33,23 +33,12 @@ const showMobileTopBar = computed(() => !route.meta.hideTopBar)
       <!-- Mobile-only top bar -->
       <div
         v-if="showMobileTopBar"
-        class="flex lg:hidden items-center gap-3 px-4 py-3 shrink-0"
-        style="
-          background: var(--glass-bg);
-          backdrop-filter: var(--glass-filter);
-          -webkit-backdrop-filter: var(--glass-filter);
-          border-bottom: 1px solid var(--glass-border);
-          box-shadow: var(--glass-shadow-sm);
-        "
+        class="flex lg:hidden items-center gap-3 px-4 py-3 shrink-0 border-b border-border"
+        style="background: var(--color-surface);"
       >
         <button
-          class="flex items-center justify-center w-8 h-8 text-muted-fg hover:text-fg transition-[color,background] duration-[200ms] cursor-pointer"
-          style="
-            border-radius: var(--radius-sm);
-            background: var(--glass-bg-subtle);
-            backdrop-filter: var(--glass-filter-subtle);
-            border: 1px solid var(--glass-border);
-          "
+          class="flex items-center justify-center w-8 h-8 text-muted-fg hover:text-fg transition-[color,background] duration-[200ms] cursor-pointer border border-border bg-surface-hover hover:bg-surface-elevated"
+          style="border-radius: var(--radius-sm);"
           title="Open menu"
           @click="mobileSidebarOpen = true"
         >

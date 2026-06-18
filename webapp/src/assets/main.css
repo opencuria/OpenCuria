@@ -1,18 +1,30 @@
 @import 'tailwindcss';
 @plugin "@tailwindcss/typography";
 
+/* ─── Geist Font ─────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 /*
- * OpenCuria — Apple Liquid Glass Design System (2026)
+ * OpenCuria — Visual Identity (2026)
  *
- * Implements the full Apple Liquid Glass specification:
- * - OKLCH colour space for perceptually uniform colours
- * - Squircle geometry (superellipse n=4-5, doubled border-radius)
- * - SF Pro typography with exact tracking values
+ * - Geist (Vercel) typography — geometric-warm, interface-optimised
+ * - Amber/Saffron brand colour: oklch(0.72 0.16 62)
+ * - Solid surfaces for cards & sidebar; glass reserved for overlays only
+ * - OKLCH colour space throughout
  * - 8pt spatial grid
  * - Spring-physics CSS animations via linear()
- * - Three-layer glass stack: Highlight · Shadow · Illumination
- * - backdrop-filter: blur(25px) saturate(120%) Vibrancy effect
- * - prefers-reduced-transparency accessibility fallback
  */
 
 /* ─── SVG Filter: Liquid Glass Refraction ───────────────────────────────── */
@@ -29,40 +41,42 @@
   --sp-7: 64px;
 }
 
-/* ─── Typography: SF Pro System ──────────────────────────────────────────── */
+/* ─── Typography: Geist ──────────────────────────────────────────────────── */
 :root {
   --font-text:
-    'SF Pro Text',
+    'Geist',
     ui-sans-serif,
+    system-ui,
     -apple-system,
     BlinkMacSystemFont,
     'Helvetica Neue',
     Arial,
     sans-serif;
   --font-display:
-    'SF Pro Display',
+    'Geist',
     ui-sans-serif,
+    system-ui,
     -apple-system,
     BlinkMacSystemFont,
     'Helvetica Neue',
     Arial,
     sans-serif;
   --font-mono:
-    'SF Mono',
+    'Geist Mono',
     ui-monospace,
     'Cascadia Code',
     'Fira Code',
     monospace;
 
-  /* Tracking (letter-spacing) — Apple Human Interface Guidelines */
-  --tracking-body:   -0.43px;  /* 17pt body text */
-  --tracking-title:  -0.72px;  /* 28pt title */
-  --tracking-large:  -1.08px;  /* 34pt large */
-  --tracking-caption: 0px;     /* 12pt caption */
+  /* Tracking — Geist reads slightly wider, tighten for titles */
+  --tracking-body:    -0.30px;
+  --tracking-title:   -0.60px;
+  --tracking-large:   -0.90px;
+  --tracking-caption:  0.02em;
 
   /* Line heights */
-  --lh-body:     1.25;   /* 120-130 % for body text */
-  --lh-heading:  1.15;   /* 110-120 % for headlines */
+  --lh-body:     1.25;
+  --lh-heading:  1.15;
   --lh-caption:  1.30;
 }
 
@@ -175,10 +189,10 @@
     0 32px 64px oklch(0.00 0.000 0 / 0.16),
     inset 0 1px 0 oklch(1.00 0.000 0 / 0.22);
 
-  /* Illumination layer — ambient colour bleed */
+  /* Illumination layer — ambient amber bleed */
   --glass-illumination: radial-gradient(
     ellipse 80% 60% at 50% 0%,
-    oklch(0.80 0.06 260 / 0.08) 0%,
+    oklch(0.72 0.12 62 / 0.06) 0%,
     transparent 100%
   );
 
@@ -200,24 +214,24 @@
   --color-background: oklch(0.965 0.012 248);
   --color-foreground: oklch(0.18 0.02 248);
 
-  /* Primary — Apple Blue */
-  --color-primary:            oklch(0.55 0.20 258);
-  --color-primary-hover:      oklch(0.50 0.22 258);
-  --color-primary-light:      oklch(0.92 0.05 258);
-  --color-primary-foreground: oklch(1.00 0.000 0);
+  /* Primary — Amber/Saffron (Curia: authority, judgement, gold) */
+  --color-primary:            oklch(0.62 0.16 62);
+  --color-primary-hover:      oklch(0.56 0.18 62);
+  --color-primary-light:      oklch(0.95 0.06 62);
+  --color-primary-foreground: oklch(0.12 0.02 62);
 
-  /* Surface — glass layers */
-  --color-surface:          oklch(0.99 0.006 248 / 0.80);
-  --color-surface-hover:    oklch(0.97 0.008 248 / 0.90);
-  --color-surface-elevated: oklch(1.00 0.004 248 / 0.92);
+  /* Surface — solid layers (AP3: no glass on cards/sidebar) */
+  --color-surface:          oklch(0.99 0.004 248);
+  --color-surface-hover:    oklch(0.97 0.006 248);
+  --color-surface-elevated: oklch(1.00 0.002 248);
 
   /* Muted */
   --color-muted:            oklch(0.93 0.012 248);
   --color-muted-foreground: oklch(0.52 0.03 248);
 
   /* Border */
-  --color-border:       oklch(0.85 0.012 248 / 0.60);
-  --color-border-hover: oklch(0.75 0.015 248 / 0.80);
+  --color-border:       oklch(0.85 0.012 248 / 0.70);
+  --color-border-hover: oklch(0.75 0.015 248 / 0.90);
 
   /* Status */
   --color-success:       oklch(0.52 0.16 150);
@@ -244,14 +258,15 @@
   --color-background: oklch(0.12 0.016 258);
   --color-foreground: oklch(0.94 0.010 248);
 
-  --color-primary:            oklch(0.65 0.18 258);
-  --color-primary-hover:      oklch(0.70 0.16 258);
-  --color-primary-light:      oklch(0.20 0.06 258);
-  --color-primary-foreground: oklch(1.00 0.000 0);
+  /* Primary — Amber, brighter on dark background */
+  --color-primary:            oklch(0.72 0.16 62);
+  --color-primary-hover:      oklch(0.76 0.18 62);
+  --color-primary-light:      oklch(0.22 0.06 62);
+  --color-primary-foreground: oklch(0.12 0.02 62);
 
-  --color-surface:          oklch(0.18 0.016 258 / 0.72);
-  --color-surface-hover:    oklch(0.22 0.018 258 / 0.80);
-  --color-surface-elevated: oklch(0.22 0.016 258 / 0.88);
+  --color-surface:          oklch(0.17 0.014 258);
+  --color-surface-hover:    oklch(0.21 0.016 258);
+  --color-surface-elevated: oklch(0.23 0.014 258);
 
   --color-muted:            oklch(0.22 0.016 258);
   --color-muted-foreground: oklch(0.60 0.025 248);
@@ -303,7 +318,7 @@
 
   --glass-illumination: radial-gradient(
     ellipse 80% 60% at 50% 0%,
-    oklch(0.60 0.08 260 / 0.06) 0%,
+    oklch(0.72 0.10 62 / 0.05) 0%,
     transparent 100%
   );
 
@@ -540,6 +555,35 @@ body {
   transition: transform var(--dur-instant) var(--spring-snappy);
 }
 
+/* ─── Stat-Chip Pulse Dots (AP5: Dashboard stats bar) ───────────────────── */
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.8; }
+  70%  { transform: scale(2.2); opacity: 0; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.stat-pulse-dot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat-pulse-dot::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  background: currentColor;
+}
+
+/* Suppress pulse when count is zero */
+.stat-pulse-dot.no-pulse::before {
+  animation: none;
+  opacity: 0;
+}
+
 /* ─── Reduced Transparency Fallback ─────────────────────────────────────── */
 @media (prefers-reduced-transparency: reduce) {
   .glass,
@@ -626,6 +670,6 @@ html.dark .prose :not(pre) > code {
 
 /* ─── Selection ──────────────────────────────────────────────────────────── */
 ::selection {
-  background: oklch(0.55 0.20 258 / 0.20);
+  background: oklch(from var(--color-primary) l c h / 0.25);
   color: var(--color-foreground);
 }

@@ -34,11 +34,11 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: [
-          // Primary — Apple Blue glass
+          // Primary — Amber solid
           'bg-primary text-primary-fg',
-          'shadow-[0_2px_8px_oklch(0.55_0.20_258/0.35),inset_0_1px_0_oklch(1_0_0/0.20)]',
-          'hover:bg-primary-hover hover:shadow-[0_4px_16px_oklch(0.55_0.20_258/0.45),inset_0_1px_0_oklch(1_0_0/0.22)]',
-          'border border-[oklch(0.55_0.20_258/0.30)]',
+          'shadow-[0_2px_8px_oklch(from_var(--color-primary)_l_c_h_/_0.35),inset_0_1px_0_oklch(1_0_0/0.20)]',
+          'hover:bg-primary-hover hover:shadow-[0_4px_16px_oklch(from_var(--color-primary)_l_c_h_/_0.45),inset_0_1px_0_oklch(1_0_0/0.22)]',
+          'border border-primary/30',
         ].join(' '),
 
         secondary: [

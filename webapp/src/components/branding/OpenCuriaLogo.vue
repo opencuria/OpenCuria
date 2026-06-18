@@ -62,7 +62,7 @@ withDefaults(
     <line x1="32" y1="32" x2="46" y2="41" stroke="currentColor" stroke-opacity="0.22" stroke-width="1" />
     <line x1="32" y1="32" x2="32" y2="49" stroke="currentColor" stroke-opacity="0.22" stroke-width="1" />
     <line x1="32" y1="32" x2="18" y2="41" stroke="currentColor" stroke-opacity="0.22" stroke-width="1" />
-    <text x="78" y="42" font-family="SF Pro Display, Inter, Segoe UI, sans-serif" font-size="30" font-weight="600" fill="var(--color-foreground)" letter-spacing="-0.6">
+    <text x="78" y="42" font-family="Geist, ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="30" font-weight="600" fill="var(--color-foreground)" letter-spacing="-0.6">
       Open<tspan font-weight="400" fill="var(--color-primary)">Curia</tspan>
     </text>
   </svg>

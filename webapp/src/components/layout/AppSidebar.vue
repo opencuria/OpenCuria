@@ -169,13 +169,8 @@ const userInitials = computed(() => {
       mobileOpen ? 'fixed inset-y-0 left-0 z-40 lg:relative lg:z-auto' : 'hidden lg:flex',
     ]"
     style="
-      background: var(--glass-bg-strong);
-      backdrop-filter: var(--glass-filter);
-      -webkit-backdrop-filter: var(--glass-filter);
-      border-right: 1px solid var(--sidebar-divider-color);
-      box-shadow: var(--glass-shadow-sm);
-      will-change: backdrop-filter;
-      [transition-timing-function:var(--spring-gentle)];
+      background: var(--color-surface);
+      border-right: 1px solid var(--color-border);
     "
   >
     <!-- Brand -->
@@ -185,11 +180,7 @@ const userInitials = computed(() => {
       <!-- Mobile close -->
       <button
         v-if="mobileOpen"
-        class="lg:hidden absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center text-muted-fg hover:text-fg cursor-pointer transition-[background,color] duration-[200ms]"
-        style="
-          background: var(--glass-bg-subtle);
-          border: 1px solid var(--glass-border);
-        "
+        class="lg:hidden absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center text-muted-fg hover:text-fg cursor-pointer transition-[background,color] duration-[200ms] border border-border bg-surface-hover"
         title="Close menu"
         @click="emit('close')"
       >
@@ -199,14 +190,7 @@ const userInitials = computed(() => {
       <!-- Desktop collapse toggle -->
       <button
         v-else
-        class="hidden lg:flex absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full items-center justify-center text-muted-fg hover:text-fg z-10 cursor-pointer transition-[background,color,transform] duration-[200ms]"
-        style="
-          background: var(--glass-bg);
-          backdrop-filter: var(--glass-filter-subtle);
-          border: 1px solid var(--glass-border);
-          box-shadow: var(--glass-shadow-sm);
-          [transition-timing-function:var(--spring-snappy)];
-        "
+        class="hidden lg:flex absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full items-center justify-center text-muted-fg hover:text-fg z-10 cursor-pointer transition-[background,color,transform] duration-[200ms] bg-surface border border-border shadow-sm"
         @click="isCollapsed = !isCollapsed"
         :title="isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
       >
@@ -217,13 +201,8 @@ const userInitials = computed(() => {
     <!-- Organization Switcher -->
     <div class="px-3 mb-2 relative shrink-0" v-if="authStore.organizations.length > 0">
       <button
-        class="flex items-center justify-between w-full px-2.5 py-2 text-xs text-fg cursor-pointer transition-[background,border-color] duration-[200ms]"
-        style="
-          border-radius: var(--radius-sm);
-          background: var(--glass-bg-subtle);
-          backdrop-filter: var(--glass-filter-subtle);
-          border: 1px solid var(--sidebar-org-switcher-border);
-        "
+        class="flex items-center justify-between w-full px-2.5 py-2 text-xs text-fg cursor-pointer transition-[background,border-color] duration-[200ms] border border-border hover:bg-surface-hover"
+        style="border-radius: var(--radius-sm); background: var(--color-surface-hover);"
         @click="orgDropdownOpen = !orgDropdownOpen"
         :title="isCollapsed ? authStore.activeOrganization?.name : ''"
       >
@@ -231,7 +210,7 @@ const userInitials = computed(() => {
           <!-- Org avatar -->
           <div
             class="w-4 h-4 rounded flex items-center justify-center text-primary text-[9px] font-bold shrink-0"
-            style="background: oklch(0.55 0.20 258 / 0.15)"
+            style="background: var(--color-primary-light)"
           >
             {{ authStore.activeOrganization?.name?.charAt(0)?.toUpperCase() ?? '?' }}
           </div>
@@ -257,7 +236,7 @@ const userInitials = computed(() => {
           background: var(--glass-bg-strong);
           backdrop-filter: var(--glass-filter-strong);
           -webkit-backdrop-filter: var(--glass-filter-strong);
-          border: 1px solid var(--sidebar-org-switcher-border);
+          border: 1px solid var(--color-border);
           box-shadow: var(--glass-shadow-lg);
         "
       >
@@ -270,7 +249,7 @@ const userInitials = computed(() => {
           <span class="truncate">{{ org.name }}</span>
           <Check v-if="org.id === authStore.activeOrganizationId" :size="13" class="text-primary shrink-0 ml-2" />
         </button>
-        <div style="border-top: 1px solid var(--sidebar-org-switcher-border); margin-top: 4px; padding-top: 4px;">
+        <div style="border-top: 1px solid var(--color-border); margin-top: 4px; padding-top: 4px;">
           <RouterLink
             to="/create-organization"
             class="flex items-center gap-2 w-full px-3 py-2 text-sm text-muted-fg hover:text-fg transition-[background,color] duration-[150ms] hover:bg-[var(--glass-bg-subtle)]"
@@ -290,7 +269,7 @@ const userInitials = computed(() => {
         <div
           v-if="section.id !== 'main'"
           class="mx-1 my-1"
-          style="height: 1px; background: var(--sidebar-divider-color)"
+          style="height: 1px; background: var(--color-border)"
         />
 
         <!-- Section header -->
@@ -320,7 +299,7 @@ const userInitials = computed(() => {
             :style="[
               'border-radius: var(--radius-sm)',
               isActive(item.to)
-                ? 'background: oklch(0.55 0.20 258 / 0.14); color: var(--color-primary); box-shadow: inset 0 1px 0 oklch(0.55 0.20 258 / 0.15)'
+                ? 'background: var(--color-primary-light); color: var(--color-primary); box-shadow: inset 0 1px 0 oklch(from var(--color-primary) l c h / 0.15)'
                 : 'color: var(--color-muted-foreground)',
               '[transition-timing-function:var(--spring-snappy)]',
             ]"
@@ -337,7 +316,7 @@ const userInitials = computed(() => {
     <!-- Bottom section -->
     <div
       class="shrink-0 px-2 pt-2 pb-3 space-y-0.5"
-      style="border-top: 1px solid var(--sidebar-divider-color)"
+      style="border-top: 1px solid var(--color-border)"
     >
       <!-- Status row -->
       <div v-if="!isCollapsed" class="flex items-center gap-1.5 px-2 py-1.5">
@@ -345,8 +324,8 @@ const userInitials = computed(() => {
           v-if="authStore.activeOrganization"
           class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border"
           :class="authStore.isAdmin
-            ? 'bg-[oklch(0.55_0.20_258/0.10)] text-primary border-[oklch(0.55_0.20_258/0.20)]'
-            : 'bg-[var(--glass-bg-subtle)] text-muted-fg border-[var(--glass-border)]'"
+            ? 'bg-primary-light text-primary border-primary/20'
+            : 'bg-surface-hover text-muted-fg border-border'"
         >
           <Shield :size="9" />
           {{ authStore.isAdmin ? 'Admin' : 'Member' }}
@@ -366,8 +345,7 @@ const userInitials = computed(() => {
       <div v-else class="flex flex-col items-center gap-1 py-1">
         <div
           v-if="authStore.activeOrganization && authStore.isAdmin"
-          class="w-7 h-7 rounded-md flex items-center justify-center"
-          style="background: oklch(0.55 0.20 258 / 0.10); border: 1px solid oklch(0.55 0.20 258 / 0.20)"
+          class="w-7 h-7 rounded-md flex items-center justify-center bg-primary-light border border-primary/20"
           title="Admin"
         >
           <Shield :size="12" class="text-primary" />
@@ -404,8 +382,7 @@ const userInitials = computed(() => {
       >
         <!-- Avatar -->
         <div
-          class="w-6 h-6 rounded-full text-primary text-[10px] font-bold flex items-center justify-center shrink-0"
-          style="background: oklch(0.55 0.20 258 / 0.15); color: var(--color-primary)"
+          class="w-6 h-6 rounded-full text-primary text-[10px] font-bold flex items-center justify-center shrink-0 bg-primary-light"
         >
           {{ userInitials }}
         </div>
@@ -431,9 +408,9 @@ const userInitials = computed(() => {
 </template>
 
 <style scoped>
-/* Nav link hover — subtle glass highlight */
+/* Nav link hover */
 a:not(.router-link-active):hover {
-  background: var(--glass-bg-subtle) !important;
+  background: var(--color-surface-hover) !important;
   color: var(--color-foreground) !important;
 }
 </style>
