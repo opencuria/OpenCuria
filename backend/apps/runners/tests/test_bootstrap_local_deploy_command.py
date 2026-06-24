@@ -14,7 +14,7 @@ from apps.runners.management.commands.bootstrap_local_deploy import (
     DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
     DEFAULT_WORKSPACE_PACKAGES,
 )
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
+from apps.runners.models import ImageBuildJob, ImageDefinition, ImageInstance, Runner
 from common.utils import hash_token
 
 
@@ -176,7 +176,76 @@ def test_bootstrap_preserves_active_build(db) -> None:
 
     build.refresh_from_db()
     assert build.status == ImageBuildJob.Status.ACTIVE
-    assert build.image_instance.runner_ref == "opencuria/custom/local-docker-workspace:test"
+    assert (
+        build.image_instance.runner_ref
+        == "opencuria/custom/local-docker-workspace:test"
+    )
+
+
+def test_bootstrap_requeues_active_build_when_recipe_changes(db) -> None:
+    """An active local image should rebuild when bootstrap updates its recipe."""
+    from django.utils import timezone
+
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "recipe@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Recipe Org",
+        "--runner-name",
+        "recipe-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    org = Organization.objects.get(slug="recipe-org")
+    runner = Runner.objects.get(name="recipe-runner", organization=org)
+    definition = ImageDefinition.objects.get(organization=org)
+    build = ImageBuildJob.objects.get(
+        image_definition=definition, runner=runner
+    )
+
+    build.status = ImageBuildJob.Status.ACTIVE
+    build.build_log = "old build output"
+    build.built_at = timezone.now()
+    build.save(update_fields=["status", "build_log", "built_at"])
+    ImageInstance.objects.create(
+        runner=runner,
+        runtime_type=RuntimeType.DOCKER,
+        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+        origin_definition=definition,
+        build_job=build,
+        runner_ref="opencuria/custom/local-docker-workspace:old",
+        name="Local Docker Workspace (recipe-runner)",
+        status=ImageInstance.Status.READY,
+    )
+
+    definition.custom_dockerfile = "# stale local workspace image recipe\n"
+    definition.save(update_fields=["custom_dockerfile"])
+
+    call_command(
+        "bootstrap_local_deploy",
+        "--admin-email",
+        "recipe@example.com",
+        "--admin-password",
+        "admin",
+        "--organization-name",
+        "Recipe Org",
+        "--runner-name",
+        "recipe-runner",
+        "--runner-token",
+        "secret",
+    )
+
+    definition.refresh_from_db()
+    build.refresh_from_db()
+    assert definition.custom_dockerfile == DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
+    assert build.status == ImageBuildJob.Status.PENDING
+    assert build.build_task is None
+    assert build.built_at is None
+    assert build.build_log == ""
 
 
 def test_bootstrap_resets_failed_build_to_pending(db) -> None:
