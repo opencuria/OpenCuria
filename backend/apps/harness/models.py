@@ -12,6 +12,10 @@ import uuid
 
 from django.db import models
 
+from .permissions.models import PermissionAllowlist, PermissionRequest
+
+__all__ = ["PermissionAllowlist", "PermissionRequest", "ProviderConfig"]
+
 
 class ProviderConfig(models.Model):
     """
@@ -56,4 +60,5 @@ class ProviderConfig(models.Model):
         ordering = ["-updated_at"]
 
     def __str__(self) -> str:
+        """Return a short representation of the config."""
         return f"ProviderConfig(org={self.organization_id})"

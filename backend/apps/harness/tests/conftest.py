@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 
+from apps.harness.access.base import (
+    DirEntry,
+    ExecChunk,
+    ExecResult,
+    FileContent,
+    FileStat,
+    WorkspaceAccessor,
+)
+from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.organizations.models import Organization
 
 # Allow sync ORM calls from async test functions (Django safety check).
@@ -20,3 +30,103 @@ def organization(db) -> Organization:
         name=f"Harness Org {uuid.uuid4().hex[:6]}",
         slug=f"harness-org-{uuid.uuid4().hex[:10]}",
     )
+
+
+class FakeAccessor(WorkspaceAccessor):
+    """In-memory WorkspaceAccessor for tool tests (no network)."""
+
+    def __init__(
+        self,
+        workspace_id: str = "ws-1",
+        *,
+        files: dict[str, bytes] | None = None,
+        error: Exception | None = None,
+        exec_result: ExecResult | None = None,
+    ) -> None:
+        super().__init__(workspace_id)
+        self.files: dict[str, bytes] = dict(files or {})
+        self.error = error
+        self.exec_result = exec_result
+        self.written: dict[str, bytes] = {}
+        self.exec_calls: list[tuple] = []
+
+    def _maybe_fail(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    async def exec_stream(
+        self,
+        command,
+        workdir="/workspace",
+        env=None,
+        timeout=None,
+    ) -> AsyncIterator[ExecChunk]:
+        """Yield a single done chunk (unused by current tools)."""
+        self._maybe_fail()
+        yield ExecChunk(stream="", exit_code=0, done=True)
+
+    async def exec_wait(
+        self,
+        command,
+        workdir="/workspace",
+        env=None,
+        timeout=None,
+    ) -> ExecResult:
+        """Return the canned result or run a tiny fake shell."""
+        self._maybe_fail()
+        self.exec_calls.append((command, workdir))
+        if self.exec_result is not None:
+            return self.exec_result
+        text = command if isinstance(command, str) else " ".join(command)
+        if text.startswith("find "):
+            paths = sorted(self.files)
+            return ExecResult(exit_code=0, stdout="\n".join(paths))
+        if "rg " in text or "grep " in text:
+            return ExecResult(exit_code=0, stdout="")
+        return ExecResult(exit_code=0, stdout="ok")
+
+    async def read_file(self, path: str, max_size=None) -> FileContent:
+        """Read from the in-memory file map."""
+        self._maybe_fail()
+        if path not in self.files:
+            raise RunnerAccessorError(f"read_file failed: not found {path}")
+        content = self.files[path]
+        return FileContent(content=content, size=len(content))
+
+    async def write_file(self, path: str, content: bytes, mode=0o644) -> None:
+        """Write into the in-memory file map."""
+        self._maybe_fail()
+        self.files[path] = bytes(content)
+        self.written[path] = bytes(content)
+
+    async def list_dir(self, path: str) -> list[DirEntry]:
+        """List files with the given prefix."""
+        self._maybe_fail()
+        prefix = path.rstrip("/") + "/"
+        entries = []
+        for full, content in sorted(self.files.items()):
+            if full.startswith(prefix):
+                rest = full[len(prefix) :]
+                if "/" not in rest:
+                    entries.append(
+                        DirEntry(
+                            name=rest,
+                            path=full,
+                            is_dir=False,
+                            size=len(content),
+                        )
+                    )
+        return entries
+
+    async def stat(self, path: str) -> FileStat:
+        """Stat the in-memory file map."""
+        self._maybe_fail()
+        if path in self.files:
+            return FileStat(path=path, size=len(self.files[path]))
+        raise RunnerAccessorError(f"stat failed: not found {path}")
+
+
+@pytest.fixture
+def fake_accessor() -> FakeAccessor:
+    """Default fake accessor with one text file."""
+    return FakeAccessor(files={"/workspace/a.txt": b"hello\nworld\n"})
