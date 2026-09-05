@@ -28,6 +28,22 @@ Tools and their required permissions
 - delete_build_job → image_definitions:manage_runners
 - get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
+- get_provider_config → harness:read
+- save_provider_config → harness:run
+- delete_provider_config → harness:run
+- list_harness_sessions → harness:read
+- create_harness_session → harness:run
+- send_harness_message → harness:run
+- abort_harness_session → harness:run
+- list_harness_parts → harness:read
+- list_harness_todos → harness:read
+- resolve_harness_permission → harness:permissions
+- resolve_harness_question → harness:permissions
+- mark_harness_session_read → harness:read
+- patch_harness_session → harness:run
+- set_harness_session_mode → harness:run
+- delete_harness_session → harness:run
+- list_harness_conversations → harness:read
 - list_org_credential_services       → org_credential_services:read
 - toggle_org_credential_service_activation → org_credential_services:write
 """
@@ -307,6 +323,178 @@ _TOOLS: list[Tool] = [
         description="List credentials (metadata only, no secrets) for the current user.",
         inputSchema={"type": "object", "properties": {}},
     ),
+    Tool(
+        name="get_provider_config",
+        description="Get the org-wide harness provider config (no API key secret).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="save_provider_config",
+        description="Save (upsert) the org-wide harness provider config.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string"},
+                "base_url": {"type": "string"},
+                "default_model": {"type": "string"},
+                "small_model": {"type": "string"},
+            },
+        },
+    ),
+    Tool(
+        name="delete_provider_config",
+        description="Delete the org-wide harness provider config.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="list_harness_sessions",
+        description="List harness sessions for a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."}
+            },
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="create_harness_session",
+        description="Create a harness session and start the first run.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "agent_name": {"type": "string"},
+                "mode": {"type": "string"},
+                "model": {"type": "string"},
+                "skill_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["workspace_id", "prompt"],
+        },
+    ),
+    Tool(
+        name="send_harness_message",
+        description="Send a follow-up prompt to a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "mode": {"type": "string"},
+                "model": {"type": "string"},
+                "skill_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["session_id", "prompt"],
+        },
+    ),
+    Tool(
+        name="abort_harness_session",
+        description="Abort the active run of a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="list_harness_parts",
+        description="List messages and parts of a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="list_harness_todos",
+        description="List todos of a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="resolve_harness_permission",
+        description="Resolve a pending harness permission request.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "request_id": {"type": "string"},
+                "response": {"type": "string"},
+            },
+            "required": ["session_id", "request_id", "response"],
+        },
+    ),
+    Tool(
+        name="patch_harness_session",
+        description="Rename a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["session_id", "title"],
+        },
+    ),
+    Tool(
+        name="set_harness_session_mode",
+        description="Switch a harness session plan|build mode (idle sessions only).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["plan", "build"]},
+            },
+            "required": ["session_id", "mode"],
+        },
+    ),
+    Tool(
+        name="delete_harness_session",
+        description="Delete a harness session (aborts active runs first).",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="list_harness_conversations",
+        description="List harness conversations across owned workspaces in the org.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="mark_harness_session_read",
+        description="Mark a harness session as read (dashboard unread state).",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="resolve_harness_question",
+        description="Answer a pending harness question request.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "question_id": {"type": "string"},
+                "answers": {"type": "array", "items": {}},
+                "reject": {"type": "boolean"},
+            },
+            "required": ["session_id", "question_id"],
+        },
+    ),
 
 
 
@@ -354,6 +542,22 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
+    "get_provider_config": APIKeyPermission.HARNESS_READ,
+    "save_provider_config": APIKeyPermission.HARNESS_RUN,
+    "delete_provider_config": APIKeyPermission.HARNESS_RUN,
+    "list_harness_sessions": APIKeyPermission.HARNESS_READ,
+    "create_harness_session": APIKeyPermission.HARNESS_RUN,
+    "send_harness_message": APIKeyPermission.HARNESS_RUN,
+    "abort_harness_session": APIKeyPermission.HARNESS_RUN,
+    "list_harness_parts": APIKeyPermission.HARNESS_READ,
+    "list_harness_todos": APIKeyPermission.HARNESS_READ,
+    "resolve_harness_permission": APIKeyPermission.HARNESS_PERMISSIONS,
+    "patch_harness_session": APIKeyPermission.HARNESS_RUN,
+    "set_harness_session_mode": APIKeyPermission.HARNESS_RUN,
+    "delete_harness_session": APIKeyPermission.HARNESS_RUN,
+    "list_harness_conversations": APIKeyPermission.HARNESS_READ,
+    "mark_harness_session_read": APIKeyPermission.HARNESS_READ,
+    "resolve_harness_question": APIKeyPermission.HARNESS_PERMISSIONS,
     "list_org_credential_services": APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ,
     "toggle_org_credential_service_activation": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
 }
@@ -1155,6 +1359,523 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
     return _text(result)
 
 
+def _get_harness_service():
+    """Return the process-wide HarnessService singleton."""
+    from apps.harness.harness_service import HarnessService
+
+    global _harness_service_singleton
+    try:
+        return _harness_service_singleton
+    except NameError:
+        _harness_service_singleton = HarnessService()
+        return _harness_service_singleton
+
+
+_harness_service_singleton = None  # type: ignore[assignment]
+try:
+    _harness_service_singleton
+except NameError:
+    _harness_service_singleton = None
+
+
+def _session_dict(session) -> dict:
+    """Serialize a HarnessSession ORM row for MCP responses."""
+    return {
+        "id": str(session.id),
+        "workspace_id": str(session.workspace_id),
+        "title": session.title or "",
+        "mode": session.mode,
+        "agent_name": session.agent_name,
+        "model": session.model or "",
+        "status": session.status,
+        "cost": float(session.cost or 0.0),
+        "tokens": dict(session.tokens or {}),
+        "created_at": session.created_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+    }
+
+
+def _owned_harness_session_or_error(api_key, org_id, session_id):
+    """Return a harness session scoped to an owned workspace."""
+    import uuid as _uuid
+
+    from common.exceptions import NotFoundError
+
+    try:
+        session_uuid = _uuid.UUID(str(session_id))
+    except ValueError:
+        return None, _error("Invalid session_id UUID")
+
+    service = _get_harness_service()
+    try:
+        session = service.get_session(session_uuid)
+    except NotFoundError:
+        return None, _error("Harness session not found")
+
+    _workspace, error = _get_owned_workspace_or_error(
+        api_key, org_id, session.workspace_id
+    )
+    if error is not None:
+        return None, error
+    return session, None
+
+
+def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _fetch_org_provider_config
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    return _text(_fetch_org_provider_config(org_id).model_dump(mode="json"))
+
+
+def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import ProviderConfigIn, _save_org_provider_config
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    payload = ProviderConfigIn(**args)
+    return _text(_save_org_provider_config(org_id, payload).model_dump(mode="json"))
+
+
+def _call_delete_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _delete_org_provider_config
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    _delete_org_provider_config(org_id)
+    return _text({"deleted": True})
+
+
+def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    sessions = service.list_sessions(workspace_id)
+    return _text([_session_dict(session) for session in sessions])
+
+
+def _call_create_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    workspace_id_str = args.get("workspace_id")
+    prompt = (args.get("prompt") or "").strip()
+    if not workspace_id_str or not prompt:
+        return _error("workspace_id and prompt are required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _create():
+        session = service.create_session(
+            workspace_id=workspace.id,
+            organization_id=org_id,
+            prompt=prompt,
+            agent_name=args.get("agent_name") or "build",
+            mode=args.get("mode") or "build",
+            model=args.get("model") or "",
+            skill_ids=list(args.get("skill_ids") or []),
+            user_id=api_key.user.id,
+        )
+        await service.start_run(
+            session,
+            prompt,
+            organization_id=org_id,
+            workspace_id=str(workspace.id),
+            user_id=api_key.user.id,
+            skill_ids=list(args.get("skill_ids") or []),
+        )
+        return service.get_session(session.id)
+
+    try:
+        loop = asyncio.new_event_loop()
+        session = loop.run_until_complete(_create())
+        loop.close()
+        return _text(_session_dict(session))
+    except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    session_id_str = args.get("session_id")
+    prompt = (args.get("prompt") or "").strip()
+    if not session_id_str or not prompt:
+        return _error("session_id and prompt are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _send():
+        current = service.get_session(session.id)
+        if not service.is_running(current.id):
+            if args.get("mode"):
+                current = service.set_mode(current.id, args["mode"])
+            if args.get("model"):
+                current = service.set_model(current.id, args["model"])
+        await service.start_run(
+            current,
+            prompt,
+            organization_id=org_id,
+            workspace_id=str(current.workspace_id),
+            user_id=api_key.user.id,
+            skill_ids=list(args.get("skill_ids") or []) or None,
+        )
+        return service.get_session(current.id)
+
+    try:
+        loop = asyncio.new_event_loop()
+        updated = loop.run_until_complete(_send())
+        loop.close()
+        return _text(_session_dict(updated))
+    except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+def _call_abort_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _abort():
+        return await service.abort_run(session.id)
+
+    loop = asyncio.new_event_loop()
+    updated = loop.run_until_complete(_abort())
+    loop.close()
+    return _text(_session_dict(updated))
+
+
+def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    messages = service.list_messages(session.id)
+    parts = service.list_parts(session.id)
+    parts_by_message: dict[str, list] = {}
+    for part in parts:
+        parts_by_message.setdefault(str(part.message_id), []).append(
+            {
+                "id": str(part.id),
+                "message_id": str(part.message_id),
+                "type": part.type,
+                "state": part.state,
+                "call_id": part.call_id or "",
+                "title": part.title or "",
+                "output": part.output or "",
+                "meta": dict(part.meta or {}),
+            }
+        )
+    return _text(
+        {
+            "session": _session_dict(session),
+            "messages": [
+                {
+                    "id": str(message.id),
+                    "role": message.role,
+                    "content": message.content or "",
+                    "model": message.model or "",
+                    "cost": float(message.cost or 0.0),
+                    "tokens": dict(message.tokens or {}),
+                    "finish": message.finish or "",
+                    "error": message.error or "",
+                    "created_at": message.created_at.isoformat(),
+                    "completed_at": (
+                        message.completed_at.isoformat()
+                        if message.completed_at
+                        else None
+                    ),
+                    "parts": parts_by_message.get(str(message.id), []),
+                }
+                for message in messages
+            ],
+        }
+    )
+
+
+def _call_list_harness_todos(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    return _text(service.list_todos(session.id))
+
+
+def _call_resolve_harness_permission(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    from common.exceptions import NotFoundError
+
+    session_id_str = args.get("session_id")
+    request_id_str = args.get("request_id")
+    response = (args.get("response") or "").strip()
+    if not session_id_str or not request_id_str or not response:
+        return _error("session_id, request_id and response are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+        request_id = _uuid.UUID(request_id_str)
+    except ValueError:
+        return _error("Invalid session_id or request_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _resolve():
+        return await service.resolve_permission(
+            session=session,
+            request_id=request_id,
+            response=response,
+        )
+
+    try:
+        loop = asyncio.new_event_loop()
+        outcome = loop.run_until_complete(_resolve())
+        loop.close()
+        return _text(
+            {
+                "request_id": str(request_id),
+                "decision": outcome["decision"],
+                "remember": outcome["remember"],
+            }
+        )
+    except (NotFoundError, ValueError, LookupError) as exc:
+        return _error(str(exc))
+
+
+def _call_patch_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    title = (args.get("title") or "").strip()
+    if not session_id_str or not title:
+        return _error("session_id and title are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    try:
+        updated = service.update_title(session.id, title)
+    except ValueError as exc:
+        return _error(str(exc))
+    return _text(_session_dict(updated))
+
+
+def _call_set_harness_session_mode(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    mode = (args.get("mode") or "").strip()
+    if not session_id_str or not mode:
+        return _error("session_id and mode are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    if service.is_running(session.id):
+        return _error(f"Harness session '{session.id}' already has an active run")
+
+    try:
+        updated = service.set_mode(session.id, mode)
+    except ValueError as exc:
+        return _error(str(exc))
+    return _text(_session_dict(updated))
+
+
+def _call_delete_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _delete():
+        await service.delete_session(session.id)
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(_delete())
+    loop.close()
+    return _text({"deleted": True, "session_id": str(session.id)})
+
+
+def _call_list_harness_conversations(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from apps.runners.sio_server import get_runner_service
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    runner_service = get_runner_service()
+    workspaces = runner_service.list_workspaces(
+        organization_id=org_id,
+        user=api_key.user,
+    )
+    service = _get_harness_service()
+    return _text(
+        service.list_conversations(
+            organization_id=org_id,
+            workspace_ids=[workspace.id for workspace in workspaces],
+        )
+    )
+
+
+def _call_mark_harness_session_read(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    service.mark_session_read(session.id)
+    return _text({"session_id": str(session.id), "read": True})
+
+
+def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    from common.exceptions import NotFoundError
+
+    session_id_str = args.get("session_id")
+    question_id_str = args.get("question_id")
+    if not session_id_str or not question_id_str:
+        return _error("session_id and question_id are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+        question_id = _uuid.UUID(question_id_str)
+    except ValueError:
+        return _error("Invalid session_id or question_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    answers = args.get("answers") or []
+    reject = bool(args.get("reject", False))
+    service = _get_harness_service()
+
+    async def _resolve():
+        return await service.resolve_question(
+            session=session,
+            question_id=question_id,
+            answers=list(answers),
+            reject=reject,
+        )
+
+    try:
+        loop = asyncio.new_event_loop()
+        outcome = loop.run_until_complete(_resolve())
+        loop.close()
+        return _text(outcome)
+    except (NotFoundError, ValueError, LookupError) as exc:
+        return _error(str(exc))
+
+
 def _call_list_org_credential_services(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 
@@ -1255,6 +1976,22 @@ _TOOL_HANDLERS = {
     "delete_build_job": _call_delete_build_job,
     "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
+    "get_provider_config": _call_get_provider_config,
+    "save_provider_config": _call_save_provider_config,
+    "delete_provider_config": _call_delete_provider_config,
+    "list_harness_sessions": _call_list_harness_sessions,
+    "create_harness_session": _call_create_harness_session,
+    "send_harness_message": _call_send_harness_message,
+    "abort_harness_session": _call_abort_harness_session,
+    "list_harness_parts": _call_list_harness_parts,
+    "list_harness_todos": _call_list_harness_todos,
+    "resolve_harness_permission": _call_resolve_harness_permission,
+    "patch_harness_session": _call_patch_harness_session,
+    "set_harness_session_mode": _call_set_harness_session_mode,
+    "delete_harness_session": _call_delete_harness_session,
+    "list_harness_conversations": _call_list_harness_conversations,
+    "mark_harness_session_read": _call_mark_harness_session_read,
+    "resolve_harness_question": _call_resolve_harness_question,
     "list_org_credential_services": _call_list_org_credential_services,
     "toggle_org_credential_service_activation": _call_toggle_org_credential_service_activation,
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+
 from pydantic import BaseModel, Field
 
 from ..access.base import sanitize_harness_path
@@ -18,6 +20,33 @@ _BINARY_PROBE_BYTES = 4096
 def _is_binary(content: bytes) -> bool:
     """Return True when *content* looks like a binary file."""
     return b"\x00" in content[:_BINARY_PROBE_BYTES]
+
+
+def _patch_metadata(
+    path: str,
+    *,
+    old_text: str,
+    new_text: str,
+) -> dict[str, str]:
+    """Build unified-diff patch metadata for write/edit tools."""
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    diff_lines = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"a/{path.lstrip('/')}",
+        tofile=f"b/{path.lstrip('/')}",
+        lineterm="",
+    )
+    unified = "\n".join(diff_lines)
+    if not unified and old_text != new_text:
+        unified = f"--- a/{path}\n+++ b/{path}\n(content changed)"
+    return {
+        "path": path,
+        "old_content": old_text,
+        "new_content": new_text,
+        "unified_diff": unified,
+    }
 
 
 class ReadArgs(BaseModel):
@@ -133,13 +162,21 @@ class WriteTool(Tool):
         assert isinstance(validated, WriteArgs)
         args = validated
         safe_path = sanitize_harness_path(args.path)
+        old_text = ""
+        try:
+            stored = await ctx.accessor.read_file(safe_path)
+            if not _is_binary(stored.content):
+                old_text = stored.content.decode("utf-8", errors="replace")
+        except RunnerAccessorError:
+            old_text = ""
         try:
             await ctx.accessor.write_file(safe_path, args.content.encode("utf-8"))
         except RunnerAccessorError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
+        patch = _patch_metadata(safe_path, old_text=old_text, new_text=args.content)
         return ToolResult(
             output=f"Wrote {len(args.content.encode('utf-8'))} bytes to {safe_path}",
-            metadata={"path": safe_path},
+            metadata=patch,
         )
 
 
@@ -205,8 +242,10 @@ class EditTool(Tool):
             await ctx.accessor.write_file(safe_path, updated.encode("utf-8"))
         except RunnerAccessorError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
+        patch = _patch_metadata(safe_path, old_text=text, new_text=updated)
+        patch["replacements"] = occurrences if args.replace_all else 1
         return ToolResult(
             output=f"Replaced {occurrences if args.replace_all else 1} "
             f"occurrence(s) in {safe_path}",
-            metadata={"path": safe_path, "replacements": occurrences},
+            metadata=patch,
         )

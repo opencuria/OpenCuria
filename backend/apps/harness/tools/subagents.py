@@ -98,6 +98,8 @@ class TaskTool(Tool):
         from ..runner import HarnessRunner, RunOptions
 
         subtask_id = uuid.uuid4().hex[:12]
+        if ctx.run_subagent is not None:
+            return await ctx.run_subagent(validated, ctx, subtask_id)
         model = (args.model_override or ctx.model or "").strip()
         if not model:
             raise ToolError(

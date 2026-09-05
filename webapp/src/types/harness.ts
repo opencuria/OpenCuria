@@ -72,6 +72,7 @@ export interface HarnessSession {
   agent_name: string
   model: string
   status: HarnessSessionStatus
+  skill_ids?: string[]
   cost: number
   tokens: Record<string, number>
   created_at?: string
@@ -103,6 +104,28 @@ export interface HarnessPermissionRequest {
 /** Permission resolution choice (M6 `HarnessPermissionResolveIn`). */
 export type HarnessPermissionResponse = 'once' | 'always' | 'reject'
 
+export interface HarnessQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface HarnessQuestionItem {
+  header?: string
+  question: string
+  options?: HarnessQuestionOption[]
+  multiple?: boolean
+}
+
+/** A pending question gate surfaced to the user mid-run. */
+export interface HarnessQuestionRequest {
+  request_id: string
+  session_id: string
+  workspace_id: string
+  questions: HarnessQuestionItem[]
+  call_id?: string
+  status?: 'pending' | 'answered' | 'rejected' | 'timed_out'
+}
+
 // --- REST payloads (M6 `backend/apps/harness/api.py`) ----------------------
 
 export interface HarnessSessionCreateIn {
@@ -110,11 +133,36 @@ export interface HarnessSessionCreateIn {
   agent_name?: string
   mode?: HarnessSessionMode
   model?: string
+  skill_ids?: string[]
+}
+
+export interface HarnessSessionPatchIn {
+  title: string
+}
+
+export interface HarnessMessageIn {
+  prompt: string
+  mode?: HarnessSessionMode | ''
+  model?: string
+  skill_ids?: string[]
 }
 
 export interface HarnessPartsOut {
   session: HarnessSession
   messages: HarnessMessage[]
+}
+
+/** Org-wide harness conversation row for the dashboard feed. */
+export interface HarnessConversation {
+  session_id: string
+  workspace_id: string
+  workspace_name: string
+  title: string
+  status: HarnessSessionStatus
+  mode: HarnessSessionMode
+  agent_name: string
+  unread: boolean
+  updated_at: string
 }
 
 // --- Socket event payloads (M6 `HarnessService` emit shapes) ----------------
@@ -131,6 +179,8 @@ export interface HarnessPartDelta {
   title?: string
   call_id?: string
   output?: string
+  patch?: string
+  compaction?: boolean
 }
 
 export interface HarnessPartUpdatedEvent {
@@ -159,6 +209,22 @@ export interface HarnessPermissionResolvedEvent {
   remember: string
 }
 
+export interface HarnessQuestionRequiredEvent {
+  workspace_id: string
+  session_id: string
+  request_id: string
+  questions: HarnessQuestionItem[]
+  call_id?: string
+  status?: string
+}
+
+export interface HarnessQuestionResolvedEvent {
+  workspace_id: string
+  session_id: string
+  request_id: string
+  status: string
+}
+
 export interface HarnessSessionStatusEvent {
   workspace_id: string
   session_id: string
@@ -179,6 +245,7 @@ export interface HarnessSubtaskStartedEvent {
   agent: string
   description: string
   part_id?: string
+  child_session_id?: string
 }
 
 export interface HarnessSubtaskFinishedEvent {

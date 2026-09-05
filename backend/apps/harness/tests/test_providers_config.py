@@ -59,6 +59,14 @@ def test_save_config_upserts(organization) -> None:
 
 
 @pytest.mark.django_db
+def test_save_config_empty_key_on_create_raises(organization) -> None:
+    """Creating a config without an api_key is rejected."""
+    service = ProviderConfigService()
+    with pytest.raises(ValueError, match="api_key must not be empty"):
+        service.save_config(organization_id=organization.id, api_key="")
+
+
+@pytest.mark.django_db
 def test_get_missing_config_raises(organization) -> None:
     """Missing config raises NotFoundError."""
     service = ProviderConfigService()
@@ -79,6 +87,10 @@ def test_build_adapter_uses_stored_config(organization) -> None:
     adapter = service.build_adapter(organization.id)
     assert isinstance(adapter, OpenRouterAdapter)
     assert adapter._base_url == "https://example.com/v1"
+
+    from_config = service.adapter_from_config(service.get_config(organization.id))
+    assert isinstance(from_config, OpenRouterAdapter)
+    assert from_config._base_url == "https://example.com/v1"
 
     with pytest.raises(KeyError):
         service.build_adapter(organization.id, provider_name="nope")

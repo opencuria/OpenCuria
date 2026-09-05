@@ -7,6 +7,7 @@ Encapsulates all database queries. Services never use the ORM directly.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from django.utils import timezone
 
@@ -15,6 +16,7 @@ from .models import (
     HarnessPart,
     HarnessSession,
     ProviderConfig,
+    QuestionRequest,
     Todo,
 )
 
@@ -98,6 +100,7 @@ class HarnessSessionRepository:
         agent_name: str = "build",
         model: str = "",
         parent_id: uuid.UUID | None = None,
+        skill_ids: list[str] | None = None,
     ) -> HarnessSession:
         """Create a harness session bound to a workspace."""
         return HarnessSession.objects.create(
@@ -108,6 +111,7 @@ class HarnessSessionRepository:
             agent_name=agent_name,
             model=model or "",
             parent_id=parent_id,
+            skill_ids=list(skill_ids or []),
         )
 
     @staticmethod
@@ -135,6 +139,46 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def list_for_workspaces(workspace_ids: list[uuid.UUID]) -> list[HarnessSession]:
+        """Return root sessions across *workspace_ids* (newest first)."""
+        if not workspace_ids:
+            return []
+        return list(
+            HarnessSession.objects.filter(
+                workspace_id__in=workspace_ids,
+                parent__isnull=True,
+            ).order_by("-updated_at")
+        )
+
+    @staticmethod
+    def mark_read(session: HarnessSession) -> HarnessSession:
+        """Record that the user opened this session."""
+        session.last_read_at = timezone.now()
+        session.save(update_fields=["last_read_at", "updated_at"])
+        return session
+
+    @staticmethod
+    def set_title(session: HarnessSession, title: str) -> HarnessSession:
+        """Persist a session title."""
+        session.title = (title or "").strip()[:255]
+        session.save(update_fields=["title", "updated_at"])
+        return session
+
+    @staticmethod
+    def set_skill_ids(
+        session: HarnessSession, skill_ids: list[str]
+    ) -> HarnessSession:
+        """Persist selected skill IDs for subsequent runs."""
+        session.skill_ids = list(skill_ids or [])
+        session.save(update_fields=["skill_ids", "updated_at"])
+        return session
+
+    @staticmethod
+    def delete(session: HarnessSession) -> None:
+        """Delete a harness session and its related rows."""
+        session.delete()
+
+    @staticmethod
     def mark_status(session: HarnessSession, status: str) -> HarnessSession:
         """Persist a session status change (busy|idle)."""
         session.status = status
@@ -143,9 +187,20 @@ class HarnessSessionRepository:
 
     @staticmethod
     def set_mode(session: HarnessSession, mode: str) -> HarnessSession:
-        """Persist a session mode change (plan|build, idle only enforced by caller)."""
+        """Persist mode (plan|build) and align primary agent_name when applicable."""
         session.mode = mode
-        session.save(update_fields=["mode", "updated_at"])
+        update_fields = ["mode", "updated_at"]
+        if mode in ("plan", "build"):
+            session.agent_name = mode
+            update_fields.append("agent_name")
+        session.save(update_fields=update_fields)
+        return session
+
+    @staticmethod
+    def set_model(session: HarnessSession, model: str) -> HarnessSession:
+        """Persist the session model override for subsequent runs."""
+        session.model = (model or "").strip()
+        session.save(update_fields=["model", "updated_at"])
         return session
 
     @staticmethod
@@ -197,6 +252,28 @@ class HarnessMessageRepository:
         return list(
             HarnessMessage.objects.filter(session_id=session_id).order_by("created_at")
         )
+
+    @staticmethod
+    def latest_assistant_completed_at_by_session(
+        session_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, datetime]:
+        """Return the latest completed assistant message timestamp per session."""
+        if not session_ids:
+            return {}
+        from django.db.models import Max
+
+        from .models import HarnessMessageRole
+
+        rows = (
+            HarnessMessage.objects.filter(
+                session_id__in=session_ids,
+                role=HarnessMessageRole.ASSISTANT,
+                completed_at__isnull=False,
+            )
+            .values("session_id")
+            .annotate(latest=Max("completed_at"))
+        )
+        return {row["session_id"]: row["latest"] for row in rows}
 
     @staticmethod
     def append_content(message: HarnessMessage, delta: str) -> HarnessMessage:
@@ -385,3 +462,50 @@ class TodoRepository:
         return list(
             Todo.objects.filter(session_id=session_id).order_by("order", "created_at")
         )
+
+
+class QuestionRequestRepository:
+    """Data access for ``QuestionRequest`` records."""
+
+    model = QuestionRequest
+
+    @staticmethod
+    def create(
+        *,
+        organization_id: uuid.UUID,
+        session_id: uuid.UUID,
+        questions: list[dict[str, object]],
+        workspace_id: uuid.UUID | None = None,
+        message_id: uuid.UUID | None = None,
+        call_id: str = "",
+    ) -> QuestionRequest:
+        """Persist a pending question request."""
+        return QuestionRequest.objects.create(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            message_id=message_id,
+            call_id=call_id or "",
+            questions=list(questions or []),
+        )
+
+    @staticmethod
+    def get_by_id(request_id: uuid.UUID) -> QuestionRequest | None:
+        """Fetch a question request by primary key."""
+        return QuestionRequest.objects.filter(id=request_id).first()
+
+    @staticmethod
+    def resolve(
+        request: QuestionRequest,
+        *,
+        answers: list[object],
+        status: str,
+    ) -> QuestionRequest:
+        """Mark *request* answered/rejected and store answers."""
+        request.answers = list(answers or [])
+        request.status = status
+        request.resolved_at = timezone.now()
+        request.save(
+            update_fields=["answers", "status", "resolved_at"],
+        )
+        return request

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from typing import Any
 
 import pytest
@@ -131,18 +133,6 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
             "summary": "found it",
         },
     )
-    await service._on_runner_event(
-        session,
-        assistant,
-        {
-            "type": "permission_required",
-            "tool": "bash",
-            "action": "rm -rf /tmp/x",
-            "title": "$ rm -rf /tmp/x",
-            "call_id": "call-9",
-            "key": "permission",
-        },
-    )
 
     by_event: dict[str, list[dict[str, Any]]] = {}
     for item in emitted:
@@ -154,12 +144,53 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
     started = by_event[FRONTEND_EVENT_SUBTASK_STARTED][0]
     assert started["subtask_id"] == "sub-1"
     assert started["part_id"]
+    assert started.get("child_session_id", "") == ""
     finished = by_event[FRONTEND_EVENT_SUBTASK_FINISHED][0]
     assert finished["status"] == "completed"
-    permission = by_event[FRONTEND_EVENT_PERMISSION][0]
-    assert permission["tool"] == "bash"
-    assert permission["pattern"] == "rm -rf /tmp/x"
-    assert permission["call_id"] == "call-9"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_permission_event_emitted_once_with_request_id(
+    harness_workspace,
+) -> None:
+    """_on_permission emits a single harness.permission_required with request_id."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="perm",
+    )
+    assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    permission_task = asyncio.create_task(
+        service._on_permission(
+            session,
+            assistant,
+            tool="bash",
+            action="rm -rf /tmp/x",
+            title="$ rm -rf /tmp/x",
+            call_id="call-9",
+        )
+    )
+    await asyncio.sleep(0.05)
+    permission_events = [
+        item for item in emitted if item["event"] == FRONTEND_EVENT_PERMISSION
+    ]
+    assert len(permission_events) == 1
+    assert permission_events[0]["request_id"]
+    assert permission_events[0]["tool"] == "bash"
+    assert permission_events[0]["call_id"] == "call-9"
+    await service.resolve_permission(
+        session=session,
+        request_id=uuid.UUID(permission_events[0]["request_id"]),
+        response="once",
+    )
+    decision = await permission_task
+    assert decision == "once"
 
 
 @pytest.mark.django_db(transaction=True)

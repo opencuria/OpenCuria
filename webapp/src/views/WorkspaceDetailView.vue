@@ -16,6 +16,7 @@ import {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
+import HarnessChatSidebar from '@/components/chat/HarnessChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
@@ -26,7 +27,7 @@ import { Badge } from '@/components/ui/badge'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { ArrowLeft, TerminalSquare, FolderTree, Monitor, Loader2 } from '@lucide/vue'
+import { ArrowLeft, Loader2, MessageSquare } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -43,6 +44,7 @@ const editingName = ref(false)
 const workspaceNameInput = ref('')
 const terminalHeight = ref(300)
 const imageArtifactDialogOpen = ref(false)
+const mobileChatListOpen = ref(false)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -106,43 +108,23 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-function handleTerminalButtonClick(): void {
-  if (!canPrompt.value) return
-  if (!terminalStore.isOpen) {
-    terminalStore.open()
-    return
-  }
-  if (terminalStore.isMinimized) {
-    terminalStore.restore()
-    return
-  }
-  terminalStore.minimize()
+const hasHarnessChats = computed(() => harnessStore.rootSessions.length > 0)
+
+function handleSelectHarnessSession(sessionId: string): void {
+  harnessStore.setActiveSession(sessionId)
 }
 
-const terminalButtonTitle = computed(() => {
-  if (!terminalStore.isOpen) return 'Open terminal'
-  if (terminalStore.isMinimized) return 'Restore terminal'
-  return 'Minimize terminal'
-})
-
-function handleDesktopButtonClick(): void {
-  if (!canPrompt.value) return
-  if (!desktopStore.isOpen) {
-    desktopStore.open()
-    return
-  }
-  if (desktopStore.isMinimized) {
-    desktopStore.restore()
-    return
-  }
-  desktopStore.minimize()
+function handleCreateHarnessChat(): void {
+  harnessStore.setActiveSession(null)
 }
 
-const desktopButtonTitle = computed(() => {
-  if (!desktopStore.isOpen) return 'Open desktop'
-  if (desktopStore.isMinimized) return 'Restore desktop'
-  return 'Minimize desktop'
-})
+async function handleRenameHarnessSession(sessionId: string, title: string): Promise<void> {
+  await harnessStore.renameSession(sessionId, title)
+}
+
+async function handleDeleteHarnessSession(sessionId: string): Promise<void> {
+  await harnessStore.removeSession(sessionId)
+}
 
 const isDesktopPanelVisible = computed(
   () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
@@ -463,8 +445,18 @@ function onDragStart(e: MouseEvent): void {
           </div>
         </div>
 
-        <!-- Right: workspace actions -->
+        <!-- Right: mobile chats button + workspace actions -->
         <div class="flex items-center gap-1 shrink-0">
+          <Button
+            v-if="hasHarnessChats"
+            variant="ghost"
+            size="icon-sm"
+            class="md:hidden"
+            title="Switch chat"
+            @click="mobileChatListOpen = true"
+          >
+            <MessageSquare :size="16" />
+          </Button>
           <WorkspaceActions
             v-if="workspace"
             :workspace="workspace"
@@ -495,6 +487,18 @@ function onDragStart(e: MouseEvent): void {
           </WorkspaceDesktop>
 
           <template v-else>
+            <HarnessChatSidebar
+              :sessions="harnessStore.rootSessions"
+              :child-sessions-by-parent="harnessStore.childSessionsByParent"
+              :active-session-id="harnessStore.activeSessionId"
+              :mobile-open="mobileChatListOpen"
+              @select="handleSelectHarnessSession"
+              @create="handleCreateHarnessChat"
+              @rename="handleRenameHarnessSession"
+              @delete="handleDeleteHarnessSession"
+              @close="mobileChatListOpen = false"
+            />
+
             <!-- Harness chat area -->
             <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <FileViewer
@@ -535,56 +539,13 @@ function onDragStart(e: MouseEvent): void {
 
 
         <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
-          <HarnessChatPanel :workspace-id="workspaceId" class="min-h-0 flex-1" />
+          <HarnessChatPanel
+            :workspace-id="workspaceId"
+            :can-prompt="canPrompt"
+            :show-workspace-toolbar="isDesktop && !isDesktopPanelVisible"
+            class="min-h-0 flex-1"
+          />
         </Teleport>
-        <div class="flex items-center gap-0 min-w-0 overflow-x-hidden" :class="isDesktopPanelVisible ? 'pt-2' : ''">
-          <template v-if="isDesktop && !isDesktopPanelVisible">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="shrink-0 mb-2"
-              :disabled="!canPrompt"
-              :title="fileExplorerStore.isOpen ? 'Hide files' : 'Open file explorer'"
-              @click="fileExplorerStore.toggle()"
-            >
-              <FolderTree :size="16" :class="fileExplorerStore.isOpen ? 'text-primary' : ''" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="shrink-0 mr-2 mb-2"
-              :disabled="!canPrompt"
-              :title="terminalButtonTitle"
-              @click="handleTerminalButtonClick"
-            >
-              <span class="relative inline-flex">
-                <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
-                <span
-                  v-if="terminalStore.isOpen && terminalStore.isMinimized"
-                  class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-                  title="Terminal minimized"
-                />
-              </span>
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="shrink-0 mr-2 mb-2"
-              :disabled="!canPrompt"
-              :title="desktopButtonTitle"
-              @click="handleDesktopButtonClick"
-            >
-              <span class="relative inline-flex">
-                <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
-                <span
-                  v-if="desktopStore.isOpen && desktopStore.isMinimized"
-                  class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-                  title="Desktop minimized"
-                />
-              </span>
-            </Button>
-          </template>
-        </div>
       </div>
     </template>
 

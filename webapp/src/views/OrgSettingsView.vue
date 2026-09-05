@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { get, post, del } from '@/services/api'
 import { getOrganization, updateOrganizationWorkspacePolicy } from '@/services/organizations.api'
 import { useAuthStore } from '@/stores/auth'
@@ -22,6 +23,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
+import ProviderConfigTab from '@/components/settings/ProviderConfigTab.vue'
 import type { Organization } from '@/types'
 import { formatMinutesAsDuration } from '@/lib/utils'
 import {
@@ -33,6 +35,7 @@ import {
   X,
   HardDrive,
   Clock3,
+  Bot,
 } from '@lucide/vue'
 
 // ---------------------------------------------------------------------------
@@ -66,16 +69,21 @@ interface CredentialServiceCreateIn {
 // ---------------------------------------------------------------------------
 
 const authStore = useAuthStore()
+const route = useRoute()
 const isAdmin = computed(() => authStore.isAdmin)
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
+
+type OrgSettingsTab =
+  | 'workspace-policies'
+  | 'image-definitions'
+  | 'credential-services'
+  | 'provider'
 
 const credentialServices = ref<CredentialServiceWithActivation[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const organizationSettings = ref<Organization | null>(null)
-const activeTab = ref<'workspace-policies' | 'image-definitions' | 'credential-services'>(
-  'workspace-policies',
-)
+const activeTab = ref<OrgSettingsTab>('workspace-policies')
 
 
 const toggleLoading = ref<string | null>(null)
@@ -165,6 +173,15 @@ async function loadData() {
 }
 
 onMounted(() => {
+  const tab = route.query.tab
+  if (
+    tab === 'workspace-policies' ||
+    tab === 'image-definitions' ||
+    tab === 'credential-services' ||
+    tab === 'provider'
+  ) {
+    activeTab.value = tab
+  }
   loadData()
 })
 
@@ -327,6 +344,7 @@ function getCredentialServiceName(id: string): string {
         <button
           v-for="tab in [
             { key: 'workspace-policies', label: 'Workspace Policies', icon: Clock3 },
+            { key: 'provider', label: 'Provider (OpenRouter)', icon: Bot },
             { key: 'image-definitions', label: 'Image Definitions', icon: HardDrive },
             { key: 'credential-services', label: 'Credential Services', icon: Key },
           ]"
@@ -338,7 +356,7 @@ function getCredentialServiceName(id: string): string {
               ? 'border-primary text-primary'
               : 'border-transparent text-muted-foreground hover:text-foreground'
           "
-          @click="activeTab = tab.key as 'workspace-policies' | 'image-definitions' | 'credential-services'"
+          @click="activeTab = tab.key as OrgSettingsTab"
         >
           <component :is="tab.icon" :size="14" />
           {{ tab.label }}
@@ -430,6 +448,10 @@ function getCredentialServiceName(id: string): string {
             </div>
           </div>
         </div>
+      </div>
+
+      <div v-else-if="activeTab === 'provider'" class="space-y-4">
+        <ProviderConfigTab />
       </div>
 
       <!-- ================================================================ -->

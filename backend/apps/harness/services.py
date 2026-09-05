@@ -45,19 +45,20 @@ class ProviderConfigService:
         self,
         *,
         organization_id: uuid.UUID,
-        api_key: str,
+        api_key: str = "",
         base_url: str = DEFAULT_BASE_URL,
         default_model: str = "",
         small_model: str = "",
     ) -> ProviderConfig:
         """Create or update the provider config for an organization."""
-        if not api_key or not api_key.strip():
-            raise ValueError("api_key must not be empty")
         normalized_url = (base_url or DEFAULT_BASE_URL).strip() or (DEFAULT_BASE_URL)
-        encrypted = encrypt_value(api_key.strip())
-
         existing = self.repository.get_by_org(organization_id)
+        key_provided = bool(api_key and api_key.strip())
+
         if existing is None:
+            if not key_provided:
+                raise ValueError("api_key must not be empty")
+            encrypted = encrypt_value(api_key.strip())
             config = self.repository.create(
                 organization_id=organization_id,
                 api_key_encrypted=encrypted,
@@ -68,6 +69,11 @@ class ProviderConfigService:
             log.info("provider_config_created", organization_id=str(organization_id))
             return config
 
+        encrypted = (
+            encrypt_value(api_key.strip())
+            if key_provided
+            else existing.api_key_encrypted
+        )
         config = self.repository.update(
             existing,
             api_key_encrypted=encrypted,
@@ -97,6 +103,30 @@ class ProviderConfigService:
             raise NotFoundError("ProviderConfig", str(organization_id))
         log.info("provider_config_deleted", organization_id=str(organization_id))
 
+    def adapter_from_config(
+        self,
+        config: ProviderConfig,
+        provider_name: str = "openrouter",
+    ) -> ProviderAdapter:
+        """Build a provider adapter from an already-loaded config row.
+
+        Does not query the database. Callers that already fetched *config*
+        (including via ``sync_to_async``) should use this instead of
+        :meth:`build_adapter` to avoid a second ORM hit.
+
+        Raises:
+            KeyError: If the provider name is not registered.
+            ConflictError: If the registered factory does not return an adapter.
+        """
+        factory = self.registry.get(provider_name)
+        adapter = factory(
+            api_key=decrypt_value(config.api_key_encrypted),
+            base_url=config.base_url or DEFAULT_BASE_URL,
+        )
+        if not isinstance(adapter, ProviderAdapter):
+            raise ConflictError(f"Provider {provider_name!r} did not build an adapter")
+        return adapter
+
     def build_adapter(
         self,
         organization_id: uuid.UUID,
@@ -108,15 +138,6 @@ class ProviderConfigService:
             KeyError: If the provider name is not registered.
             NotFoundError: If no config exists for the organization.
         """
-        config = self.get_config(organization_id)
-        try:
-            factory = self.registry.get(provider_name)
-        except KeyError:
-            raise
-        adapter = factory(
-            api_key=decrypt_value(config.api_key_encrypted),
-            base_url=config.base_url or DEFAULT_BASE_URL,
+        return self.adapter_from_config(
+            self.get_config(organization_id), provider_name=provider_name
         )
-        if not isinstance(adapter, ProviderAdapter):
-            raise ConflictError(f"Provider {provider_name!r} did not build an adapter")
-        return adapter

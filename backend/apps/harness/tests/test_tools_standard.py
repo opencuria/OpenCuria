@@ -32,7 +32,7 @@ def _ctx(accessor: FakeAccessor) -> ToolContext:
     return ToolContext(session_id="sess-1", workspace_id="ws-1", accessor=accessor)
 
 
-async def test_default_registry_has_nine_tools_plus_webfetch() -> None:
+async def test_default_registry_has_standard_tools_plus_webfetch() -> None:
     """The default registry exposes all standard tools."""
     registry = default_tool_registry()
     assert registry.names() == [
@@ -44,6 +44,7 @@ async def test_default_registry_has_nine_tools_plus_webfetch() -> None:
         "grep",
         "list",
         "todowrite",
+        "question",
         "task",
         "webfetch",
     ]

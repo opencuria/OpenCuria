@@ -29,6 +29,12 @@ from .agents.definitions import (
     get_agent,
     subagent_descriptions,
 )
+from .compaction import (
+    COMPACTION_TOKEN_THRESHOLD,
+    apply_compaction_summary,
+    build_compaction_prompt,
+    should_compact,
+)
 from .permissions.evaluator import ASK, DENY, PermissionEvaluator
 from .prompts.composer import compose_system_prompt
 from .providers.base import (
@@ -53,11 +59,15 @@ DEFAULT_MAX_DEPTH = 1
 #: Default wait for the ``on_permission`` callback before auto-deny.
 DEFAULT_PERMISSION_TIMEOUT = 120.0
 
+#: Default wait for the ``on_question`` callback before auto-timeout.
+DEFAULT_QUESTION_TIMEOUT = 600.0
+
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
 DOOM_LOOP_REPEATS = 3
 
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 PermissionCallback = Callable[..., Awaitable[str]]
+QuestionCallback = Callable[..., Awaitable[list[Any]]]
 
 
 @dataclass
@@ -71,11 +81,17 @@ class RunOptions:
     organization_id: str = ""
     cwd: str = HARNESS_WORKSPACE_ROOT
     small_model: str = ""
+    skills: list[str] = field(default_factory=list)
     permission_timeout: float = DEFAULT_PERMISSION_TIMEOUT
+    question_timeout: float = DEFAULT_QUESTION_TIMEOUT
     auto_approve: bool = False
     on_permission: PermissionCallback | None = None
+    on_question: QuestionCallback | None = None
+    run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
+    session_tokens: dict[str, int] = field(default_factory=dict)
+    compaction_threshold: int = COMPACTION_TOKEN_THRESHOLD
 
 
 @dataclass
@@ -209,7 +225,9 @@ class HarnessRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("emit_failed", error=str(exc), event=event.get("type"))
+            log.warning(
+                "emit_failed", error=str(exc), event_type=event.get("type")
+            )
 
     def _filtered_schemas(
         self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
@@ -297,17 +315,6 @@ class HarnessRunner:
         ``auto_approve``) and on callback timeout — the loop never hangs.
         """
         key = "doom_loop" if doom_loop else "permission"
-        await self._send(
-            {
-                "type": "permission_required",
-                "step": step,
-                "call_id": call_id,
-                "tool": tool_name,
-                "action": action,
-                "title": title,
-                "key": key,
-            }
-        )
         if opts.auto_approve:
             log.info("permission_auto_approved", tool=tool_name, action=action)
             return True
@@ -412,6 +419,7 @@ class HarnessRunner:
             subagents=subagent_descriptions(),
             accessor=self.accessor,
             cwd=cwd,
+            skills=list(opts.skills or []),
         )
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=composed.system),
@@ -432,6 +440,9 @@ class HarnessRunner:
             provider=self.provider,
             registry=self.tools,
             evaluator=self.evaluator,
+            run_subagent=opts.run_subagent,
+            on_question=opts.on_question,
+            question_timeout=opts.question_timeout,
         )
 
         total_usage = Usage()
@@ -440,6 +451,13 @@ class HarnessRunner:
         recent_calls: list[str] = []
 
         for step in range(1, max_steps + 1):
+            messages = await self._maybe_compact_history(
+                messages=messages,
+                agent=agent,
+                model=model,
+                mode=mode,
+                opts=opts,
+            )
             await self._send({"type": "step_start", "step": step})
             text, calls, usage = await self._provider_step(
                 model=model, messages=messages, schemas=schemas, step=step
@@ -587,9 +605,11 @@ class HarnessRunner:
                         "call_id": call.call_id,
                         "tool": call.name,
                         "title": title,
+                        "arguments": call.raw_arguments,
                     }
                 )
                 try:
+                    ctx.call_id = call.call_id
                     result = await self.tools.execute(call.name, call.arguments, ctx)
                 except KeyError as exc:
                     await self._send(
@@ -636,6 +656,20 @@ class HarnessRunner:
                         "output": result.output,
                     }
                 )
+                if result.metadata.get("unified_diff"):
+                    await self._send(
+                        {
+                            "type": "patch",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "title": f"Patch {result.metadata.get('path', call.name)}",
+                            "path": result.metadata.get("path", ""),
+                            "unified_diff": result.metadata.get("unified_diff", ""),
+                            "old_content": result.metadata.get("old_content", ""),
+                            "new_content": result.metadata.get("new_content", ""),
+                        }
+                    )
                 if (call.name or "").strip().lower() == "todowrite":
                     await self._send(
                         {
@@ -750,6 +784,64 @@ class HarnessRunner:
             return tool.title(tool.coerce_args(args))
         except Exception:  # pragma: no cover - title must never break loop
             return tool_name
+
+
+    async def _maybe_compact_history(
+        self,
+        *,
+        messages: list[LLMMessage],
+        agent: AgentDefinition,
+        model: str,
+        mode: str,
+        opts: RunOptions,
+    ) -> list[LLMMessage]:
+        """Summarize oversized history via the hidden compaction agent."""
+        threshold = opts.compaction_threshold or COMPACTION_TOKEN_THRESHOLD
+        if not should_compact(
+            messages,
+            session_tokens=opts.session_tokens,
+            threshold=threshold,
+        ):
+            return messages
+        if not opts.small_model:
+            return messages
+        prompt = build_compaction_prompt(messages)
+        if not prompt.strip():
+            return messages
+        try:
+            child = HarnessRunner(
+                provider=self.provider,
+                tools=self.tools,
+                evaluator=self.evaluator,
+                accessor=self.accessor,
+                emit=self._emit,
+                chat_options=self.chat_options,
+            )
+            result = await child.run(
+                prompt,
+                "compaction",
+                opts.small_model,
+                mode,
+                RunOptions(
+                    auto_approve=True,
+                    max_steps=1,
+                    history=[],
+                ),
+            )
+            summary = (result.output or "").strip()
+            if not summary:
+                return messages
+            compacted = apply_compaction_summary(messages, summary)
+            await self._send(
+                {
+                    "type": "compaction",
+                    "summary": summary[:2000],
+                }
+            )
+            return compacted
+        except Exception as exc:  # pragma: no cover - compaction must not abort
+            log.warning("compaction_failed", error=str(exc))
+            return messages
 
 
 class _MissingAccessor(WorkspaceAccessor):

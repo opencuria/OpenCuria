@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .base import ToolRegistry
 from .files import EditTool, ReadTool, WriteTool
+from .question import QuestionTool
 from .shell import BashTool, GlobTool, GrepTool, ListTool
 from .subagents import TaskTool, WebfetchTool
 from .todos import TodoWriteTool
@@ -21,6 +22,7 @@ def default_tool_registry() -> ToolRegistry:
         GrepTool(),
         ListTool(),
         TodoWriteTool(),
+        QuestionTool(),
         TaskTool(),
         WebfetchTool(),
     ):
@@ -34,6 +36,7 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "ListTool",
+    "QuestionTool",
     "ReadTool",
     "TaskTool",
     "TodoWriteTool",

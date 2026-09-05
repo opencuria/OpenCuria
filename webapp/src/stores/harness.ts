@@ -14,6 +14,7 @@ import type {
   HarnessPartDelta,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
+  HarnessQuestionRequest,
   HarnessSession,
   HarnessSessionMode,
   HarnessTodo,
@@ -21,11 +22,15 @@ import type {
 import {
   abortHarnessSession,
   createHarnessSession,
+  deleteHarnessSession,
   listHarnessParts,
   listHarnessSessions,
   listHarnessTodos,
+  patchHarnessSession,
   resolveHarnessPermission,
+  resolveHarnessQuestion,
   sendHarnessMessage,
+  setSessionMode,
 } from '@/services/harness.api'
 import {
   applyPartDelta,
@@ -45,6 +50,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const todosBySession = ref<Record<string, HarnessTodo[]>>({})
   /** Pending permission requests keyed by request id. */
   const pendingPermissions = ref<Record<string, HarnessPermissionRequest>>({})
+  /** Pending question requests keyed by request id. */
+  const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
   const activeSessionId = ref<string | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -70,6 +77,33 @@ export const useHarnessStore = defineStore('harness', () => {
     ),
   )
 
+  const activeQuestionRequests = computed<HarnessQuestionRequest[]>(() =>
+    Object.values(pendingQuestions.value).filter(
+      (request) => request.session_id === activeSessionId.value,
+    ),
+  )
+
+  const rootSessions = computed(() =>
+    sessions.value.filter((session) => !session.parent_id),
+  )
+
+  const childSessionsByParent = computed(() => {
+    const map: Record<string, HarnessSession[]> = {}
+    for (const session of sessions.value) {
+      if (!session.parent_id) continue
+      if (!map[session.parent_id]) map[session.parent_id] = []
+      map[session.parent_id]!.push(session)
+    }
+    for (const children of Object.values(map)) {
+      children.sort((a, b) => {
+        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0
+        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0
+        return aTime - bTime
+      })
+    }
+    return map
+  })
+
   function messagesFor(sessionId: string): HarnessMessage[] {
     if (!messagesBySession.value[sessionId]) {
       messagesBySession.value[sessionId] = []
@@ -84,8 +118,11 @@ export const useHarnessStore = defineStore('harness', () => {
     error.value = null
     try {
       sessions.value = await listHarnessSessions(workspaceId)
-      if (!activeSessionId.value && sessions.value.length > 0) {
-        activeSessionId.value = sessions.value[0]!.id
+      if (
+        activeSessionId.value &&
+        !sessions.value.some((session) => session.id === activeSessionId.value)
+      ) {
+        activeSessionId.value = null
       }
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to load harness sessions'
@@ -128,6 +165,7 @@ export const useHarnessStore = defineStore('harness', () => {
     prompt: string,
     mode: HarnessSessionMode,
     model: string,
+    skillIds: string[] = [],
   ): Promise<HarnessSession | null> {
     const notifications = useNotificationStore()
     try {
@@ -136,6 +174,7 @@ export const useHarnessStore = defineStore('harness', () => {
         mode,
         model,
         agent_name: mode,
+        skill_ids: skillIds,
       })
       sessions.value.unshift(session)
       activeSessionId.value = session.id
@@ -156,10 +195,23 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
-  async function sendMessage(sessionId: string, prompt: string): Promise<void> {
+  async function sendMessage(
+    sessionId: string,
+    prompt: string,
+    options: {
+      mode?: HarnessSessionMode
+      model?: string
+      skillIds?: string[]
+    } = {},
+  ): Promise<void> {
     const notifications = useNotificationStore()
     try {
-      const session = await sendHarnessMessage(sessionId, prompt)
+      const session = await sendHarnessMessage(sessionId, {
+        prompt,
+        mode: options.mode,
+        model: options.model,
+        skill_ids: options.skillIds,
+      })
       upsertSession(session)
       messagesFor(sessionId).push({
         id: `local-user-${sessionId}-${Date.now()}`,
@@ -170,6 +222,44 @@ export const useHarnessStore = defineStore('harness', () => {
       })
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
+    }
+  }
+
+  async function renameSession(sessionId: string, title: string): Promise<void> {
+    const notifications = useNotificationStore()
+    try {
+      const updated = await patchHarnessSession(sessionId, { title })
+      upsertSession(updated)
+    } catch (e: unknown) {
+      notifications.error('Rename failed', e instanceof Error ? e.message : 'Unknown error')
+    }
+  }
+
+  async function removeSession(sessionId: string): Promise<void> {
+    const notifications = useNotificationStore()
+    try {
+      await deleteHarnessSession(sessionId)
+      sessions.value = sessions.value.filter((session) => session.id !== sessionId)
+      delete messagesBySession.value[sessionId]
+      delete todosBySession.value[sessionId]
+      if (activeSessionId.value === sessionId) {
+        activeSessionId.value = null
+      }
+    } catch (e: unknown) {
+      notifications.error('Delete failed', e instanceof Error ? e.message : 'Unknown error')
+    }
+  }
+
+  async function updateSessionMode(
+    sessionId: string,
+    mode: HarnessSessionMode,
+  ): Promise<void> {
+    const notifications = useNotificationStore()
+    try {
+      const updated = await setSessionMode(sessionId, mode)
+      upsertSession(updated)
+    } catch (e: unknown) {
+      notifications.error('Mode change failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
@@ -214,7 +304,13 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function handleSubtaskStarted(
     sessionId: string,
-    event: { subtask_id: string; agent: string; description: string; part_id?: string },
+    event: {
+      subtask_id: string
+      agent: string
+      description: string
+      part_id?: string
+      child_session_id?: string
+    },
   ): void {
     const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
     applySubtaskStarted(message, sessionId, {
@@ -224,6 +320,7 @@ export const useHarnessStore = defineStore('harness', () => {
       agent: event.agent,
       description: event.description,
       part_id: event.part_id,
+      child_session_id: event.child_session_id,
     })
   }
 
@@ -258,6 +355,34 @@ export const useHarnessStore = defineStore('harness', () => {
     delete pendingPermissions.value[requestId]
   }
 
+  function handleQuestionRequired(request: HarnessQuestionRequest): void {
+    pendingQuestions.value[request.request_id] = { ...request, status: 'pending' }
+  }
+
+  function handleQuestionResolved(requestId: string, status: string): void {
+    delete pendingQuestions.value[requestId]
+    if (status === 'answered') return
+  }
+
+  async function resolveQuestion(
+    sessionId: string,
+    requestId: string,
+    answers: string[],
+    reject = false,
+  ): Promise<void> {
+    const notifications = useNotificationStore()
+    if (!pendingQuestions.value[requestId]) return
+    try {
+      const outcome = await resolveHarnessQuestion(sessionId, requestId, answers, reject)
+      handleQuestionResolved(requestId, outcome.status)
+    } catch (e: unknown) {
+      notifications.error(
+        'Question failed',
+        e instanceof Error ? e.message : 'Unknown error',
+      )
+    }
+  }
+
   async function resolvePermission(
     sessionId: string,
     requestId: string,
@@ -282,6 +407,7 @@ export const useHarnessStore = defineStore('harness', () => {
     messagesBySession.value = {}
     todosBySession.value = {}
     pendingPermissions.value = {}
+    pendingQuestions.value = {}
     activeSessionId.value = null
     loading.value = false
     error.value = null
@@ -293,6 +419,7 @@ export const useHarnessStore = defineStore('harness', () => {
     messagesBySession,
     todosBySession,
     pendingPermissions,
+    pendingQuestions,
     activeSessionId,
     loading,
     error,
@@ -302,6 +429,9 @@ export const useHarnessStore = defineStore('harness', () => {
     activeMessages,
     activeTodos,
     activePermissionRequests,
+    activeQuestionRequests,
+    rootSessions,
+    childSessionsByParent,
     // Actions
     fetchSessions,
     setActiveSession,
@@ -309,8 +439,12 @@ export const useHarnessStore = defineStore('harness', () => {
     fetchTodos,
     createSession,
     sendMessage,
+    renameSession,
+    removeSession,
+    updateSessionMode,
     abortSession,
     resolvePermission,
+    resolveQuestion,
     // Real-time
     messagesFor,
     handlePartUpdated,
@@ -320,6 +454,8 @@ export const useHarnessStore = defineStore('harness', () => {
     handleSessionStatus,
     handlePermissionRequired,
     handlePermissionResolved,
+    handleQuestionRequired,
+    handleQuestionResolved,
     reset,
   }
 })

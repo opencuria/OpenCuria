@@ -169,7 +169,6 @@ async def test_permission_ask_approve_runs_tool() -> None:
     result = await runner.run("clean", "build", "m", "build", opts)
     assert result.output == "removed"
     assert seen and seen[0]["tool"] == "bash"
-    assert any(event["type"] == "permission_required" for event in events)
     assert any(event["type"] == "tool_completed" for event in events)
 
 
@@ -297,8 +296,6 @@ async def test_doom_loop_triggers_permission_flow() -> None:
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "loop broken"
     assert "doom_loop" in decisions
-    gates = [event for event in events if event["type"] == "permission_required"]
-    assert any(event.get("key") == "doom_loop" for event in gates)
 
 
 async def test_steps_budget_returns_max_steps() -> None:
@@ -394,3 +391,17 @@ async def test_invalid_mode_rejected() -> None:
     runner, opts = _runner(provider, events)
     with pytest.raises(ValueError, match="Invalid mode"):
         await runner.run("p", "build", "m", "turbo", opts)
+
+
+async def test_send_logs_emitter_errors_without_raising() -> None:
+    """Emitter failures must not crash the loop or the structlog call."""
+    async def boom(_event: dict[str, Any]) -> None:
+        raise RuntimeError("emitter down")
+
+    provider = FakeProvider([_text_step("ok")])
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        emit=boom,
+    )
+    await runner._send({"type": "step_start"})

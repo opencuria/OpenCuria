@@ -8,6 +8,7 @@ import HarnessReasoning from './HarnessReasoning.vue'
 import HarnessToolCard from './HarnessToolCard.vue'
 import HarnessStepFinish from './HarnessStepFinish.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
+import HarnessPatchCard from './HarnessPatchCard.vue'
 
 const props = defineProps<{
   message: HarnessMessage
@@ -51,37 +52,42 @@ function childIdFor(part: HarnessPart): string | null {
     </div>
   </div>
 
-  <!-- Assistant message: block model -->
-  <div v-else class="flex flex-col gap-2">
-    <div v-if="combinedText">
-      <HarnessMarkdown :text="combinedText" />
-    </div>
-    <div v-if="streaming && !combinedText && nonTextParts.length === 0" class="flex items-center gap-2 text-muted-foreground">
-      <LoadingSpinner :size="14" />
-      <span class="text-xs">Agent is thinking…</span>
-    </div>
-    <span
-      v-if="streaming && combinedText"
-      class="inline-block w-2 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle"
-    />
-    <template v-for="part in nonTextParts" :key="part.id">
-      <HarnessReasoning v-if="part.type === 'reasoning'" :part="part" />
-      <HarnessToolCard v-else-if="part.type === 'tool'" :part="part" />
-      <HarnessStepFinish v-else-if="part.type === 'step-finish'" :part="part" />
-      <HarnessSubtaskCard
-        v-else-if="part.type === 'subtask'"
-        :part="part"
-        :child-session-id="childIdFor(part)"
-        @open-subtask="emit('openSubtask', $event)"
-      />
-      <div
-        v-else-if="part.type === 'patch' || part.type === 'agent'"
-        class="w-full overflow-x-auto rounded-xl border border-border bg-card px-3 py-2"
-      >
-        <p class="text-xs font-medium text-muted-foreground">{{ part.title || part.type }}</p>
-        <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{{ part.output }}</pre>
+  <!-- Assistant message: block model in left prose shell -->
+  <div v-else class="flex items-start gap-3">
+    <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
+      <div v-if="combinedText">
+        <HarnessMarkdown :text="combinedText" />
       </div>
-    </template>
-    <p v-if="message.error" class="text-xs text-destructive">{{ message.error }}</p>
+      <div v-if="streaming && !combinedText && nonTextParts.length === 0" class="flex items-center gap-2 text-muted-foreground">
+        <LoadingSpinner :size="14" />
+        <span class="text-xs">Agent is thinking…</span>
+      </div>
+      <span
+        v-if="streaming && combinedText"
+        class="ml-0.5 inline-block h-4 w-2 animate-pulse bg-primary/60 align-middle"
+      />
+      <div class="mt-2 flex flex-col gap-2">
+        <template v-for="part in nonTextParts" :key="part.id">
+          <HarnessReasoning v-if="part.type === 'reasoning'" :part="part" />
+          <HarnessToolCard v-else-if="part.type === 'tool'" :part="part" />
+          <HarnessStepFinish v-else-if="part.type === 'step-finish'" :part="part" />
+          <HarnessSubtaskCard
+            v-else-if="part.type === 'subtask'"
+            :part="part"
+            :child-session-id="childIdFor(part)"
+            @open-subtask="emit('openSubtask', $event)"
+          />
+          <HarnessPatchCard v-else-if="part.type === 'patch'" :part="part" />
+          <div
+            v-else-if="part.type === 'agent'"
+            class="w-full overflow-x-auto rounded-xl border border-border bg-card px-3 py-2"
+          >
+            <p class="text-xs font-medium text-muted-foreground">{{ part.title || part.type }}</p>
+            <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{{ part.output }}</pre>
+          </div>
+        </template>
+      </div>
+      <p v-if="message.error" class="mt-2 text-xs text-destructive">{{ message.error }}</p>
+    </div>
   </div>
 </template>

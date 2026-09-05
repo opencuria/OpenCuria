@@ -91,13 +91,13 @@ watch([() => sortedMessages.value.length, lastMessageLength], () => {
         @open-subtask="emit('openSubtask', $event)"
       />
     </div>
-    <div v-else class="flex flex-col items-center justify-center py-12 px-6 text-center h-full">
+    <div v-else class="flex h-full flex-col items-center justify-center px-6 py-12 text-center">
       <div class="mb-4 text-muted-foreground">
         <MessageSquare :size="40" />
       </div>
-      <h3 class="text-lg font-medium text-foreground mb-1">No messages yet</h3>
-      <p class="text-sm text-muted-foreground max-w-sm">
-        Send a prompt to start this harness session.
+      <h3 class="mb-1 text-lg font-medium text-foreground">Start a chat</h3>
+      <p class="max-w-sm text-sm text-muted-foreground">
+        Send a message below to begin a new harness session.
       </p>
     </div>
   </ScrollArea>

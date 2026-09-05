@@ -4,8 +4,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import DashboardView from '@/views/DashboardView.vue'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import type { HarnessConversation } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
   subscribeToWorkspace: vi.fn(),
@@ -18,6 +20,8 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
+    listHarnessConversations: vi.fn().mockResolvedValue([]),
+    markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),
     getProviderConfig: vi.fn().mockResolvedValue({
       base_url: '',
       default_model: '',
@@ -25,7 +29,6 @@ vi.mock('@/services/harness.api', async () => {
       has_api_key: false,
       api_key_hint: '',
     }),
-    listHarnessSessions: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -35,31 +38,6 @@ vi.mock('@/stores/runners', () => ({
     onlineRunners: [],
     fetchRunners: vi.fn().mockResolvedValue(undefined),
     runnerById: vi.fn().mockReturnValue(undefined),
-  }),
-}))
-
-vi.mock('@/stores/credentials', () => ({
-  useCredentialStore: () => ({
-    credentials: [],
-    fetchCredentials: vi.fn().mockResolvedValue(undefined),
-  }),
-}))
-
-const createHarnessSessionMock = vi.fn()
-
-vi.mock('@/stores/harness', () => ({
-  useHarnessStore: () => ({
-    sessions: [],
-    activeSessionId: null,
-    activeSession: null,
-    activeMessages: [],
-    activeTodos: [],
-    activePermissionRequests: [],
-    loading: false,
-    modelInput: '',
-    setActiveSession: vi.fn(),
-    fetchSessions: vi.fn().mockResolvedValue(undefined),
-    createSession: createHarnessSessionMock,
   }),
 }))
 
@@ -92,8 +70,23 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   }
 }
 
+function makeConversation(overrides: Partial<HarnessConversation> = {}): HarnessConversation {
+  return {
+    session_id: 'session-1',
+    workspace_id: 'ws-1',
+    workspace_name: 'Workspace One',
+    title: 'Dashboard chat',
+    status: 'idle',
+    mode: 'build',
+    agent_name: 'build',
+    unread: false,
+    updated_at: '2026-03-29T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
 function makeRouter() {
-  const router = createRouter({
+  return createRouter({
     history: createWebHistory(),
     routes: [
       { path: '/', name: 'dashboard', component: { template: '<div />' } },
@@ -104,18 +97,20 @@ function makeRouter() {
       },
     ],
   })
-  return router
 }
 
-describe('DashboardView workspace navigation + new harness chat', () => {
+describe('DashboardView harness conversations', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    const store = useWorkspaceStore()
-    store.workspaces = [makeWorkspace()]
+    localStorage.removeItem('opencuria:dashboard-view')
+    const workspaceStore = useWorkspaceStore()
+    workspaceStore.workspaces = [makeWorkspace()]
+    const conversationStore = useHarnessConversationStore()
+    conversationStore.conversations = [makeConversation()]
   })
 
-  it('routes to workspace-detail when a workspace card is clicked', async () => {
+  it('shows kanban/list toggle and search conversations input', async () => {
     const router = makeRouter()
     await router.push('/')
     await router.isReady()
@@ -123,52 +118,45 @@ describe('DashboardView workspace navigation + new harness chat', () => {
     const wrapper = mount(DashboardView, {
       global: { plugins: [router] },
     })
-    await wrapper.vm.$nextTick()
-
-    const card = wrapper.findComponent({ name: 'WorkspaceCard' })
-    expect(card.exists()).toBe(true)
-    await card.vm.$emit('click')
     await flushPromises()
-    await wrapper.vm.$nextTick()
 
-    expect(router.currentRoute.value.name).toBe('workspace-detail')
-    expect(router.currentRoute.value.params.id).toBe('ws-1')
+    expect(wrapper.find('input[placeholder="Search conversations..."]').exists()).toBe(true)
+    expect(wrapper.get('[title="List view"]').exists()).toBe(true)
+    expect(wrapper.get('[title="Kanban view"]').exists()).toBe(true)
   })
 
-  it('creates a harness session from the dashboard and navigates to the workspace', async () => {
+  it('persists selected dashboard view mode in localStorage', async () => {
+    const router = makeRouter()
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(DashboardView, {
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+
+    await wrapper.get('[title="List view"]').trigger('click')
+    expect(localStorage.getItem('opencuria:dashboard-view')).toBe('list')
+  })
+
+  it('navigates to workspace detail with session query on card click', async () => {
     const router = makeRouter()
     await router.push('/')
     await router.isReady()
     const pushSpy = vi.spyOn(router, 'push')
 
-    createHarnessSessionMock.mockResolvedValue({ id: 'session-1', workspace_id: 'ws-1' })
-
     const wrapper = mount(DashboardView, {
       global: { plugins: [router] },
     })
-    await wrapper.vm.$nextTick()
+    await flushPromises()
 
-    const newChatButton = wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('New Chat'))
-    expect(newChatButton).toBeTruthy()
-    await newChatButton!.trigger('click')
+    const listView = wrapper.findComponent({ name: 'HarnessConversationListView' })
+    await listView.vm.$emit('conversationClick', makeConversation())
+    await flushPromises()
 
-    // The new-chat dialog hosts the session switcher composer.
-    const switcher = wrapper.findComponent({ name: 'HarnessSessionSwitcher' })
-    expect(switcher.exists()).toBe(true)
-    await (switcher.vm as unknown as { $emit: (...args: unknown[]) => void }).$emit(
-      'create',
-      'hello agent',
-      'build',
-      '',
-    )
-    await wrapper.vm.$nextTick()
-
-    expect(createHarnessSessionMock).toHaveBeenCalledWith('ws-1', 'hello agent', 'build', '')
     expect(pushSpy).toHaveBeenCalledWith({
-      name: 'workspace-detail',
-      params: { id: 'ws-1' },
+      path: '/workspaces/ws-1',
+      query: { session: 'session-1' },
     })
   })
 })

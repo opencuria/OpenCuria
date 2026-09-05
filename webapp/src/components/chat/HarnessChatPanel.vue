@@ -1,26 +1,40 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
+import { useSkillStore } from '@/stores/skills'
+import { useDesktopStore } from '@/stores/desktop'
+import { useTerminalStore } from '@/stores/terminal'
 import {
   onEvent,
   subscribeToWorkspace,
   unsubscribeFromWorkspace,
 } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
+import { Button } from '@/components/ui/button'
+import { FolderTree, Monitor, TerminalSquare } from '@lucide/vue'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessPermissionDialog from '@/components/chat/HarnessPermissionDialog.vue'
-import HarnessSessionSwitcher from '@/components/chat/HarnessSessionSwitcher.vue'
+import HarnessQuestionForm from '@/components/chat/HarnessQuestionForm.vue'
 
 const props = defineProps<{
   workspaceId: string
+  canPrompt?: boolean
+  showWorkspaceToolbar?: boolean
 }>()
 
 const harness = useHarnessStore()
+const route = useRoute()
 const fileExplorer = useFileExplorerStore()
+const skillStore = useSkillStore()
+const terminalStore = useTerminalStore()
+const desktopStore = useDesktopStore()
+
 const sending = ref(false)
 const resolving = ref(false)
+const answeringQuestion = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
 
 const activeSession = computed(() => harness.activeSession)
@@ -28,7 +42,6 @@ const streamingSessionId = computed(() =>
   activeSession.value?.status === 'busy' ? activeSession.value.id : null,
 )
 
-/** subtask_id -> child session id (parent/child link from child sessions). */
 const childSessionIds = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
   for (const session of harness.sessions) {
@@ -43,10 +56,35 @@ const childSessionIds = computed<Record<string, string>>(() => {
       }
     }
   }
+  for (const session of harness.sessions) {
+    for (const message of harness.messagesBySession[session.id] ?? []) {
+      for (const part of message.parts) {
+        if (part.type !== 'subtask') continue
+        const childId = part.meta?.['child_session_id']
+        const subtaskId = part.meta?.['subtask_id']
+        if (typeof childId === 'string' && childId && typeof subtaskId === 'string') {
+          map[subtaskId] = childId
+        }
+      }
+    }
+  }
   return map
 })
 
 const activeRequest = computed(() => harness.activePermissionRequests[0] ?? null)
+const activeQuestion = computed(() => harness.activeQuestionRequests[0] ?? null)
+
+const inputDisabled = computed(
+  () => !props.canPrompt || (activeSession.value?.status === 'busy'),
+)
+const inputStoppable = computed(
+  () => Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
+)
+const busyMessage = computed(() => {
+  if (!props.canPrompt) return 'Workspace is not ready for prompts.'
+  if (activeSession.value?.status === 'busy') return 'Agent is running — stop or wait to send another message.'
+  return undefined
+})
 
 const cleanupFns: Array<() => void> = []
 
@@ -60,6 +98,9 @@ function setupSocketListeners(): void {
           step: data.step,
           partId: data.part_id,
         })
+        if (data.delta?.patch || data.delta?.compaction) {
+          void harness.fetchParts(data.session_id)
+        }
       }
     }),
   )
@@ -80,7 +121,11 @@ function setupSocketListeners(): void {
           agent: data.agent,
           description: data.description,
           part_id: data.part_id,
+          child_session_id: data.child_session_id,
         })
+        if (data.child_session_id) {
+          void harness.fetchSessions(props.workspaceId)
+        }
       }
     }),
   )
@@ -113,8 +158,6 @@ function setupSocketListeners(): void {
   cleanupFns.push(
     onEvent('harness.permission_required', (data) => {
       if (data.workspace_id === props.workspaceId) {
-        // `request_id` is present on interactive gates; runner-level
-        // notifications without one are informational only.
         if (!data.request_id) return
         harness.handlePermissionRequired({
           request_id: data.request_id,
@@ -128,6 +171,22 @@ function setupSocketListeners(): void {
       }
     }),
   )
+
+  cleanupFns.push(
+    onEvent('harness.question_required', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        if (!data.request_id) return
+        harness.handleQuestionRequired({
+          request_id: data.request_id,
+          session_id: data.session_id,
+          workspace_id: data.workspace_id,
+          questions: data.questions ?? [],
+          call_id: data.call_id,
+          status: data.status === 'pending' ? 'pending' : undefined,
+        })
+      }
+    }),
+  )
 }
 
 function cleanupSocket(): void {
@@ -137,12 +196,12 @@ function cleanupSocket(): void {
 
 onMounted(() => {
   setupSocketListeners()
-  void harness.fetchSessions(props.workspaceId)
+  void harness.fetchSessions(props.workspaceId).then(() => applySessionQuery())
+  void skillStore.fetchSkills()
 })
 
 onUnmounted(() => {
   cleanupSocket()
-  harness.reset()
 })
 
 watch(
@@ -150,29 +209,72 @@ watch(
   (next, prev) => {
     if (next === prev) return
     cleanupSocket()
-    harness.reset()
     setupSocketListeners()
-    void harness.fetchSessions(next)
+    void harness.fetchSessions(next).then(() => applySessionQuery())
+  },
+)
+
+function applySessionQuery(): void {
+  const sessionId = route.query.session
+  if (typeof sessionId !== 'string' || !sessionId) return
+  if (harness.sessions.some((session) => session.id === sessionId)) {
+    harness.setActiveSession(sessionId)
+  }
+}
+
+watch(
+  () => route.query.session,
+  () => {
+    applySessionQuery()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => harness.sessions,
+  () => {
+    applySessionQuery()
   },
 )
 
 watch(
   () => harness.activeSessionId,
   (sessionId) => {
-    if (!sessionId) return
+    if (!sessionId) {
+      composerMode.value = 'build'
+      return
+    }
     void harness.fetchParts(sessionId)
     void harness.fetchTodos(sessionId)
+    const session = harness.sessions.find((item) => item.id === sessionId)
+    if (session) composerMode.value = session.mode
   },
   { immediate: true },
 )
 
-async function handleSend(prompt: string, mode: HarnessSessionMode, model: string): Promise<void> {
+watch(composerMode, async (mode, prev) => {
+  if (!harness.activeSessionId || mode === prev) return
+  const session = harness.activeSession
+  if (!session || session.status === 'busy' || session.mode === mode) return
+  await harness.updateSessionMode(harness.activeSessionId, mode)
+})
+
+async function handleSend(
+  prompt: string,
+  mode: HarnessSessionMode,
+  model: string,
+  skillIds: string[],
+): Promise<void> {
   sending.value = true
   try {
     if (!harness.activeSessionId) {
-      await harness.createSession(props.workspaceId, prompt, mode, model)
+      await harness.createSession(props.workspaceId, prompt, mode, model, skillIds)
     } else {
-      await harness.sendMessage(harness.activeSessionId, prompt)
+      await harness.sendMessage(harness.activeSessionId, prompt, {
+        mode,
+        model,
+        skillIds,
+      })
     }
   } finally {
     sending.value = false
@@ -182,15 +284,6 @@ async function handleSend(prompt: string, mode: HarnessSessionMode, model: strin
 async function handleStop(): Promise<void> {
   if (!harness.activeSessionId) return
   await harness.abortSession(harness.activeSessionId)
-}
-
-async function handleCreateSession(prompt: string, mode: HarnessSessionMode, model: string): Promise<void> {
-  sending.value = true
-  try {
-    await harness.createSession(props.workspaceId, prompt, mode, model)
-  } finally {
-    sending.value = false
-  }
 }
 
 async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<void> {
@@ -204,16 +297,81 @@ async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<vo
   }
 }
 
-function handleOpenSubtask(childSessionId: string): void {
-  if (harness.sessions.some((s) => s.id === childSessionId)) {
-    harness.setActiveSession(childSessionId)
+async function handleQuestionSubmit(answers: string[]): Promise<void> {
+  const request = activeQuestion.value
+  if (!request) return
+  answeringQuestion.value = true
+  try {
+    await harness.resolveQuestion(request.session_id, request.request_id, answers)
+  } finally {
+    answeringQuestion.value = false
   }
 }
+
+async function handleQuestionReject(): Promise<void> {
+  const request = activeQuestion.value
+  if (!request) return
+  answeringQuestion.value = true
+  try {
+    await harness.resolveQuestion(request.session_id, request.request_id, [], true)
+  } finally {
+    answeringQuestion.value = false
+  }
+}
+
+function handleOpenSubtask(childSessionId: string): void {
+  if (harness.sessions.some((session) => session.id === childSessionId)) {
+    harness.setActiveSession(childSessionId)
+  } else {
+    void harness.fetchSessions(props.workspaceId).then(() => {
+      if (harness.sessions.some((session) => session.id === childSessionId)) {
+        harness.setActiveSession(childSessionId)
+      }
+    })
+  }
+}
+
+function handleTerminalButtonClick(): void {
+  if (!props.canPrompt) return
+  if (!terminalStore.isOpen) {
+    terminalStore.open()
+    return
+  }
+  if (terminalStore.isMinimized) {
+    terminalStore.restore()
+    return
+  }
+  terminalStore.minimize()
+}
+
+function handleDesktopButtonClick(): void {
+  if (!props.canPrompt) return
+  if (!desktopStore.isOpen) {
+    desktopStore.open()
+    return
+  }
+  if (desktopStore.isMinimized) {
+    desktopStore.restore()
+    return
+  }
+  desktopStore.minimize()
+}
+
+const terminalButtonTitle = computed(() => {
+  if (!terminalStore.isOpen) return 'Open terminal'
+  if (terminalStore.isMinimized) return 'Restore terminal'
+  return 'Minimize terminal'
+})
+
+const desktopButtonTitle = computed(() => {
+  if (!desktopStore.isOpen) return 'Open desktop'
+  if (desktopStore.isMinimized) return 'Restore desktop'
+  return 'Minimize desktop'
+})
 </script>
 
 <template>
   <div class="flex h-full min-h-0 w-full flex-col">
-    <HarnessSessionSwitcher :workspace-id="props.workspaceId" @create="handleCreateSession" />
     <HarnessChatContainer
       :messages="harness.activeMessages"
       :todos="harness.activeTodos"
@@ -223,19 +381,77 @@ function handleOpenSubtask(childSessionId: string): void {
       class="min-h-0 flex-1"
       @open-subtask="handleOpenSubtask"
     />
-    <HarnessChatInput
-      :disabled="!activeSession || activeSession.status === 'busy'"
-      :sending="sending"
-      :stoppable="activeSession?.status === 'busy'"
-      :mode="composerMode"
-      :model="harness.modelInput"
-      :workspace-id="props.workspaceId"
-      :files="fileExplorer.tree"
-      @update:mode="composerMode = $event"
-      @update:model="harness.modelInput = $event"
-      @send="handleSend"
-      @stop="handleStop"
+    <HarnessQuestionForm
+      :request="activeQuestion"
+      :submitting="answeringQuestion"
+      @submit="handleQuestionSubmit"
+      @reject="handleQuestionReject"
     />
+    <div class="flex min-w-0 items-center gap-0 overflow-x-hidden">
+      <HarnessChatInput
+        class="min-w-0 flex-1"
+        :disabled="inputDisabled"
+        :sending="sending"
+        :stoppable="inputStoppable"
+        :busy-message="busyMessage"
+        :mode="composerMode"
+        :model="harness.modelInput"
+        :workspace-id="props.workspaceId"
+        :session-id="harness.activeSessionId"
+        :files="fileExplorer.tree"
+        :skill-options="skillStore.skills"
+        @update:mode="composerMode = $event"
+        @update:model="harness.modelInput = $event"
+        @send="handleSend"
+        @stop="handleStop"
+      />
+      <template v-if="showWorkspaceToolbar">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="mb-2 shrink-0"
+          :disabled="!canPrompt"
+          :title="fileExplorer.isOpen ? 'Hide files' : 'Open file explorer'"
+          @click="fileExplorer.toggle()"
+        >
+          <FolderTree :size="16" :class="fileExplorer.isOpen ? 'text-primary' : ''" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="mb-2 mr-2 shrink-0"
+          :disabled="!canPrompt"
+          :title="terminalButtonTitle"
+          @click="handleTerminalButtonClick"
+        >
+          <span class="relative inline-flex">
+            <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
+            <span
+              v-if="terminalStore.isOpen && terminalStore.isMinimized"
+              class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+              title="Terminal minimized"
+            />
+          </span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="mb-2 mr-2 shrink-0"
+          :disabled="!canPrompt"
+          :title="desktopButtonTitle"
+          @click="handleDesktopButtonClick"
+        >
+          <span class="relative inline-flex">
+            <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
+            <span
+              v-if="desktopStore.isOpen && desktopStore.isMinimized"
+              class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+              title="Desktop minimized"
+            />
+          </span>
+        </Button>
+      </template>
+    </div>
     <HarnessPermissionDialog
       :request="activeRequest"
       :resolving="resolving"

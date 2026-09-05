@@ -356,7 +356,7 @@ Six separate routers:
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
 | `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
-| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `POST /harness/sessions/{id}/message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}` |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 
@@ -640,7 +640,7 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `terminal:output` | `{workspace_id, terminal_id, data}` (base64) |
 | Backend -> Frontend | `terminal:closed` | `{workspace_id, terminal_id}` |
 | Backend -> Frontend | `harness.part_updated` | `{workspace_id, session_id, delta, step, part_id}` |
-| Backend -> Frontend | `harness.permission_required` / `harness.session_status` | `{workspace_id, session_id, ...}` |
+| Backend -> Frontend | `harness.permission_required` / `harness.question_required` / `harness.session_status` | `{workspace_id, session_id, ...}` |
 | Backend -> Frontend | `harness.todo_updated` / `harness.subtask_started/finished` | `{workspace_id, session_id, ...}` |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.

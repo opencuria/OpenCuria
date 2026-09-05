@@ -285,6 +285,7 @@ export function applySubtaskStarted(
     meta: {
       subtask_id: event.subtask_id,
       agent: event.agent,
+      ...(event.child_session_id ? { child_session_id: event.child_session_id } : {}),
     },
   }
   message.parts.push(part)

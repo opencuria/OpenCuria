@@ -7,14 +7,18 @@
  */
 
 import type {
+  HarnessConversation,
   HarnessMessage,
+  HarnessMessageIn,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessSession,
   HarnessSessionCreateIn,
+  HarnessSessionMode,
+  HarnessSessionPatchIn,
   HarnessTodo,
 } from '@/types/harness'
-import { get, post, put } from './api'
+import { get, post, put, del, patch } from './api'
 
 export interface HarnessProviderConfig {
   base_url: string
@@ -57,14 +61,42 @@ export function createHarnessSession(
     agent_name: data.agent_name ?? 'build',
     mode: data.mode ?? 'build',
     model: data.model ?? '',
+    skill_ids: data.skill_ids ?? [],
   })
 }
 
 export function sendHarnessMessage(
   sessionId: string,
-  prompt: string,
+  data: HarnessMessageIn | string,
 ): Promise<HarnessSession> {
-  return post<HarnessSession>(`/harness/sessions/${sessionId}/message`, { prompt })
+  const body =
+    typeof data === 'string'
+      ? { prompt: data }
+      : {
+          prompt: data.prompt,
+          mode: data.mode ?? '',
+          model: data.model ?? '',
+          skill_ids: data.skill_ids ?? [],
+        }
+  return post<HarnessSession>(`/harness/sessions/${sessionId}/message`, body)
+}
+
+export function patchHarnessSession(
+  sessionId: string,
+  data: HarnessSessionPatchIn,
+): Promise<HarnessSession> {
+  return patch<HarnessSession>(`/harness/sessions/${sessionId}`, data)
+}
+
+export function deleteHarnessSession(sessionId: string): Promise<void> {
+  return del<void>(`/harness/sessions/${sessionId}`)
+}
+
+export function setSessionMode(
+  sessionId: string,
+  mode: HarnessSessionMode,
+): Promise<HarnessSession> {
+  return patch<HarnessSession>(`/harness/sessions/${sessionId}/mode`, { mode })
 }
 
 export function abortHarnessSession(sessionId: string): Promise<HarnessSession> {
@@ -90,18 +122,41 @@ export function resolveHarnessPermission(
   )
 }
 
-export function getProviderConfig(workspaceId: string): Promise<HarnessProviderConfig> {
-  return get<HarnessProviderConfig>(`/workspaces/${workspaceId}/provider-config/`)
+export function resolveHarnessQuestion(
+  sessionId: string,
+  requestId: string,
+  answers: string[],
+  reject = false,
+): Promise<{ request_id: string; status: string }> {
+  return post<{ request_id: string; status: string }>(
+    `/harness/sessions/${sessionId}/questions/${requestId}`,
+    { answers, reject },
+  )
+}
+
+export function getProviderConfig(): Promise<HarnessProviderConfig> {
+  return get<HarnessProviderConfig>('/provider-config/')
 }
 
 export function saveProviderConfig(
-  workspaceId: string,
   data: HarnessProviderConfigIn,
 ): Promise<HarnessProviderConfig> {
-  return put<HarnessProviderConfig>(`/workspaces/${workspaceId}/provider-config/`, {
-    api_key: data.api_key,
+  return put<HarnessProviderConfig>('/provider-config/', {
+    api_key: data.api_key ?? '',
     base_url: data.base_url ?? '',
     default_model: data.default_model ?? '',
     small_model: data.small_model ?? '',
   })
+}
+
+export function deleteProviderConfig(): Promise<void> {
+  return del<void>('/provider-config/')
+}
+
+export function listHarnessConversations(): Promise<HarnessConversation[]> {
+  return get<HarnessConversation[]>('/harness/conversations/')
+}
+
+export function markHarnessSessionRead(sessionId: string): Promise<void> {
+  return post<void>(`/harness/sessions/${sessionId}/read`)
 }

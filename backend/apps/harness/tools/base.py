@@ -64,6 +64,10 @@ class ToolContext:
     provider: Any | None = None
     registry: ToolRegistry | None = None
     evaluator: Any | None = None
+    run_subagent: Any | None = None
+    call_id: str = ""
+    on_question: Callable[..., Awaitable[list[Any]]] | None = None
+    question_timeout: float = 600.0
 
 
 @dataclass

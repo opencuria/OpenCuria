@@ -122,8 +122,39 @@ PERMS = [APIKeyPermission.HARNESS_PERMISSIONS.value]
 
 
 @pytest.mark.django_db(transaction=True)
+def test_create_session_returns_busy_without_waiting(harness_setup, monkeypatch):
+    """POST sessions returns immediately with busy status (fire-and-forget)."""
+    import asyncio as _asyncio
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            await _asyncio.sleep(2)
+            yield Delta(text="slow", usage=Usage(1, 1, 2))
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: SlowProvider(),
+    )
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "agent_name": "build", "mode": "build"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    body = response.json()
+    assert body["status"] == "busy"
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_starts_run(harness_setup, fake_harness_service):
-    """POST sessions creates a session and runs the fake provider."""
+    """POST sessions creates a session and dispatches a background run."""
     client = _client(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
     )
@@ -136,6 +167,26 @@ def test_create_session_starts_run(harness_setup, fake_harness_service):
     body = response.json()
     assert body["status"] in ("busy", "idle")
     assert HarnessSession.objects.count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_session_plan_mode_sets_agent_name(harness_setup, fake_harness_service):
+    """POST create with mode=plan (no agent_name) aligns agent_name and returns busy."""
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "plan it", "mode": "plan"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    body = response.json()
+    assert body["mode"] == "plan"
+    assert body["agent_name"] == "plan"
+    assert body["status"] == "busy"
+    row = HarnessSession.objects.get(id=body["id"])
+    assert row.agent_name == "plan"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -312,7 +363,10 @@ def test_mode_switch_happy_path(harness_setup, fake_harness_service):
     assert response.status_code == 200, response.content[:500]
     body = response.json()
     assert body["mode"] == "plan"
-    assert HarnessSession.objects.get(id=session.id).mode == "plan"
+    assert body["agent_name"] == "plan"
+    row = HarnessSession.objects.get(id=session.id)
+    assert row.mode == "plan"
+    assert row.agent_name == "plan"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -405,6 +459,48 @@ def test_mode_switch_needs_run_permission(harness_setup, fake_harness_service):
     )
     assert response.status_code == 403
     assert response.json()["code"] == "permission_denied"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
+    """Creating a session without provider config returns 404, not a hang."""
+    service = HarnessService(emit=_drop_emit)
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "no provider"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_followup_message_with_mode_plan(harness_setup, fake_harness_service):
+    """Follow-up POST with mode=plan aligns agent_name before the run."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="initial",
+        mode="build",
+        agent_name="build",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/message",
+        data=json.dumps({"prompt": "plan this", "mode": "plan"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 202, response.content[:500]
+    body = response.json()
+    assert body["mode"] == "plan"
+    assert body["agent_name"] == "plan"
+    assert body["status"] == "busy"
 
 
 @pytest.mark.django_db(transaction=True)

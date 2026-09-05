@@ -21,6 +21,10 @@ function mountInput(props: Record<string, unknown> = {}) {
     props: { workspaceId: 'ws-1', ...props },
     global: {
       stubs: {
+        RouterLink: {
+          template: '<a :href="to"><slot /></a>',
+          props: ['to'],
+        },
         Select: { template: '<div><slot /></div>' },
         SelectContent: { template: '<div><slot /></div>' },
         SelectItem: { template: '<div><slot /></div>' },
@@ -44,10 +48,10 @@ describe('HarnessChatInput', () => {
     })
   })
 
-  it('loads default/small models from the provider config as picker options', async () => {
+  it('loads default/small models from the org provider config as picker options', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalledWith('ws-1')
+      expect(getProviderConfigMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
     await wrapper.vm.$nextTick()
@@ -55,6 +59,34 @@ describe('HarnessChatInput', () => {
     expect(html).toContain('model-big')
     expect(html).toContain('model-small')
     expect(wrapper.text()).not.toContain('No ProviderConfig endpoint exists in M6')
+  })
+
+  it('shows org settings CTA when provider config is missing', async () => {
+    getProviderConfigMock.mockRejectedValue(new Error('not found'))
+    const wrapper = mountInput()
+    await vi.waitFor(() => {
+      expect(getProviderConfigMock).toHaveBeenCalled()
+    })
+    await wrapper.vm.$nextTick()
+    const link = wrapper.find('a[href="/org-settings?tab=provider"]')
+    expect(link.exists()).toBe(true)
+    expect(link.text()).toContain('Configure OpenRouter in Org Settings')
+  })
+
+  it('shows org settings CTA when provider config has no API key', async () => {
+    getProviderConfigMock.mockResolvedValue({
+      base_url: 'https://openrouter.ai/api/v1',
+      default_model: 'model-big',
+      small_model: 'model-small',
+      has_api_key: false,
+      api_key_hint: '',
+    })
+    const wrapper = mountInput()
+    await vi.waitFor(() => {
+      expect(getProviderConfigMock).toHaveBeenCalled()
+    })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('a[href="/org-settings?tab=provider"]').exists()).toBe(true)
   })
 
   it('falls back to free-text input when the provider config is missing', async () => {
@@ -86,5 +118,39 @@ describe('HarnessChatInput', () => {
       expect(retried[0]![1]).toBe('plan')
       expect(retried[0]![2]).toBe('')
     }
+  })
+
+  it('includes selected skill ids in the send payload', async () => {
+    const wrapper = mountInput({
+      skillOptions: [
+        {
+          id: 'skill-1',
+          name: 'Lint rules',
+          body: 'Always lint',
+          scope: 'personal',
+          created_by_email: null,
+          created_at: '2026-03-29T10:00:00.000Z',
+          updated_at: '2026-03-29T10:00:00.000Z',
+        },
+      ],
+    })
+    await vi.waitFor(() => {
+      expect(getProviderConfigMock).toHaveBeenCalled()
+    })
+
+    const skillsButton = wrapper.findAll('button').find((button) => button.text().includes('Skills'))
+    expect(skillsButton).toBeTruthy()
+    await skillsButton!.trigger('click')
+    const skillOption = wrapper.findAll('button').find((button) => button.text().includes('Lint rules'))
+    expect(skillOption).toBeTruthy()
+    await skillOption!.trigger('mousedown')
+
+    const textarea = wrapper.find('textarea')
+    await textarea.setValue('use skills')
+    await textarea.trigger('keydown', { key: 'Enter' })
+
+    const sends = wrapper.emitted('send') ?? []
+    expect(sends.length).toBeGreaterThan(0)
+    expect(sends[0]![3]).toEqual(['skill-1'])
   })
 })

@@ -29,6 +29,7 @@ __all__ = [
     "PermissionAllowlist",
     "PermissionRequest",
     "ProviderConfig",
+    "QuestionRequest",
     "Todo",
 ]
 
@@ -138,6 +139,16 @@ class HarnessSession(models.Model):
         default=dict,
         blank=True,
         help_text="Aggregated token usage {prompt, completion, total}.",
+    )
+    skill_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Selected skill UUIDs persisted for subsequent runs.",
+    )
+    last_read_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user last opened this session (null = never read).",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -252,6 +263,52 @@ class HarnessPart(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the part."""
         return f"HarnessPart({self.type}, {self.state})"
+
+
+class QuestionRequestStatus(models.TextChoices):
+    """Lifecycle states of a harness question request."""
+
+    PENDING = "pending", "Pending"
+    ANSWERED = "answered", "Answered"
+    REJECTED = "rejected", "Rejected"
+    TIMED_OUT = "timed_out", "Timed out"
+
+
+class QuestionRequest(models.Model):
+    """A structured question waiting for (or resolved by) user answers."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization_id = models.UUIDField(
+        help_text="Owning organization (scoping, no FK to avoid cycles).",
+    )
+    workspace_id = models.UUIDField(null=True, blank=True)
+    session_id = models.UUIDField(help_text="Harness session UUID.")
+    message_id = models.UUIDField(null=True, blank=True)
+    call_id = models.CharField(max_length=255, blank=True, default="")
+    questions = models.JSONField(
+        default=list,
+        help_text="Structured question schema shown to the user.",
+    )
+    answers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="User-provided answers (list aligned with questions).",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=QuestionRequestStatus.choices,
+        default=QuestionRequestStatus.PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "harness_question_request"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        """Return a short representation of the question request."""
+        return f"QuestionRequest({self.status}, session={str(self.session_id)[:8]})"
 
 
 class TodoStatus(models.TextChoices):

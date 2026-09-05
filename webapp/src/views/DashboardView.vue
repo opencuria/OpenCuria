@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onMounted, computed, ref } from 'vue'
+import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useRunnerStore } from '@/stores/runners'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { usePolling } from '@/composables/usePolling'
 import {
   subscribeToWorkspace,
@@ -9,49 +11,58 @@ import {
   onEvent,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
+import type { HarnessConversation } from '@/types/harness'
+import {
+  isHarnessConversationAvailable,
+  isHarnessConversationDoneUnread,
+  isHarnessConversationRunning,
+} from '@/lib/harnessConversationState'
 import { Input } from '@/components/ui/input'
 import {
   Search,
   Wifi,
   Container,
+  LayoutList,
+  LayoutGrid,
 } from '@lucide/vue'
-import { useRouter } from 'vue-router'
-import { useHarnessStore } from '@/stores/harness'
-import { Button } from '@/components/ui/button'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
-import WorkspaceList from '@/components/workspaces/WorkspaceList.vue'
-import HarnessSessionSwitcher from '@/components/chat/HarnessSessionSwitcher.vue'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import type { Workspace } from '@/types'
-import type { HarnessSessionMode } from '@/types/harness'
+import HarnessConversationListView from '@/components/conversations/HarnessConversationListView.vue'
+import HarnessConversationKanbanView from '@/components/conversations/HarnessConversationKanbanView.vue'
 
 const router = useRouter()
 const runnerStore = useRunnerStore()
 const workspaceStore = useWorkspaceStore()
-const harnessStore = useHarnessStore()
-const searchQuery = ref('')
-const newChatWorkspace = ref<Workspace | null>(null)
-const newChatOpen = computed(() => newChatWorkspace.value !== null)
+const conversationStore = useHarnessConversationStore()
 
-// Poll runners + workspaces
 const { start: startRunnerPolling } = usePolling(() => runnerStore.fetchRunners(), 10000)
 const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
+const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 15000)
 
-// WebSocket cleanup functions
 const cleanupFns: (() => void)[] = []
 const subscribedWorkspaceIds: string[] = []
 
-function setupSocketListeners(): void {
-  for (const workspace of workspaceStore.workspaces) {
-    subscribeToWorkspace(workspace.id)
-    subscribedWorkspaceIds.push(workspace.id)
+function subscribeConversationWorkspaces(): void {
+  for (const wsId of conversationStore.uniqueWorkspaceIds) {
+    if (subscribedWorkspaceIds.includes(wsId)) continue
+    subscribeToWorkspace(wsId)
+    subscribedWorkspaceIds.push(wsId)
   }
+}
+
+function setupSocketListeners(): void {
+  subscribeConversationWorkspaces()
+
+  cleanupFns.push(
+    onEvent('harness.session_status', (data) => {
+      conversationStore.updateSessionStatus(data.session_id, data.status)
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.part_updated', (data) => {
+      conversationStore.touchConversation(data.session_id)
+    }),
+  )
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
@@ -100,16 +111,29 @@ onMounted(async () => {
   startRunnerPolling()
   startWorkspacePolling()
   await workspaceStore.fetchWorkspaces()
+  await conversationStore.fetchConversations()
+  startConvPolling()
   setupSocketListeners()
 })
-
-import { onUnmounted } from 'vue'
 
 onUnmounted(() => {
   cleanupSocket()
 })
 
-// Stats for the compact header bar
+watch(
+  () => conversationStore.uniqueWorkspaceIds,
+  () => {
+    subscribeConversationWorkspaces()
+  },
+)
+
+const VIEW_MODE_KEY = 'opencuria:dashboard-view'
+const savedViewMode = localStorage.getItem(VIEW_MODE_KEY)
+const viewMode = ref<'list' | 'kanban'>(
+  savedViewMode === 'list' || savedViewMode === 'kanban' ? savedViewMode : 'kanban',
+)
+watch(viewMode, (value) => localStorage.setItem(VIEW_MODE_KEY, value))
+
 const onlineRunnersCount = computed(() => runnerStore.onlineRunners.length)
 const totalRunnersCount = computed(() => runnerStore.runners.length)
 const activeWorkspacesCount = computed(
@@ -120,53 +144,17 @@ const activeWorkspacesCount = computed(
     ).length,
 )
 
-function workspaceStatusVariant(
-  status: WorkspaceStatus,
-): 'success' | 'warning' | 'error' | 'muted' {
-  switch (status) {
-    case WorkspaceStatus.RUNNING:
-      return 'success'
-    case WorkspaceStatus.CREATING:
-      return 'warning'
-    case WorkspaceStatus.FAILED:
-      return 'error'
-    default:
-      return 'muted'
-  }
-}
+const idleConvs = computed(() =>
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationAvailable(conv)),
+)
 
-const filteredWorkspaces = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  const list = workspaceStore.workspaces.filter(
-    (w) => w.status !== WorkspaceStatus.DELETED && w.status !== WorkspaceStatus.REMOVED,
-  )
-  if (!q) return list
-  return list.filter(
-    (w) => w.name.toLowerCase().includes(q) || w.id.toLowerCase().includes(q),
-  )
-})
+const workingConvs = computed(() =>
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationRunning(conv)),
+)
 
-function openWorkspace(workspace: Workspace): void {
-  void router.push({ name: 'workspace-detail', params: { id: workspace.id } })
-}
-
-function openNewChat(workspace: Workspace): void {
-  newChatWorkspace.value = workspace
-}
-
-async function handleCreateSession(
-  prompt: string,
-  mode: HarnessSessionMode,
-  model: string,
-): Promise<void> {
-  const workspace = newChatWorkspace.value
-  if (!workspace) return
-  const session = await harnessStore.createSession(workspace.id, prompt, mode, model)
-  newChatWorkspace.value = null
-  if (session) {
-    await router.push({ name: 'workspace-detail', params: { id: workspace.id } })
-  }
-}
+const doneConvs = computed(() =>
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationDoneUnread(conv)),
+)
 
 function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime()
@@ -179,77 +167,98 @@ function formatTimeAgo(isoString: string): string {
   const days = Math.floor(hours / 24)
   return `${days}d ago`
 }
+
+function navigateToConversation(conv: HarnessConversation): void {
+  void conversationStore.markAsRead(conv.session_id)
+  void router.push({
+    path: `/workspaces/${conv.workspace_id}`,
+    query: { session: conv.session_id },
+  })
+}
 </script>
 
 <template>
   <div class="flex flex-col h-full -m-6 lg:-m-8">
-    <!-- Compact stats bar -->
     <div class="border-b border-border bg-header px-4 py-3 lg:px-6 shrink-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">
-          <!-- Runners online -->
           <div class="flex items-center gap-1.5 text-sm">
-            <Wifi :size="14" :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-foreground'" />
+            <Wifi
+              :size="14"
+              :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-foreground'"
+            />
             <span class="text-foreground font-medium">{{ onlineRunnersCount }}</span>
             <span class="text-muted-foreground">/ {{ totalRunnersCount }} runners online</span>
           </div>
-          <!-- Active workspaces -->
           <div class="flex items-center gap-1.5 text-sm">
             <Container :size="14" class="text-success" />
             <span class="text-foreground font-medium">{{ activeWorkspacesCount }}</span>
             <span class="text-muted-foreground">active</span>
           </div>
         </div>
-        <div class="hidden items-center gap-2 sm:flex">
+        <div class="hidden sm:block">
           <CreateWorkspaceDialog />
         </div>
       </div>
     </div>
 
-    <!-- Search bar -->
     <div class="border-b border-border bg-header px-4 py-2 lg:px-6 shrink-0">
       <div class="flex items-center gap-2">
         <div class="relative flex-1">
-          <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search
+            :size="14"
+            class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
           <Input
-            v-model="searchQuery"
-            placeholder="Search workspaces..."
+            v-model="conversationStore.searchQuery"
+            placeholder="Search conversations..."
             class="pl-8 h-8 text-sm"
           />
+        </div>
+        <div class="hidden lg:flex items-center gap-0.5 rounded-md border border-border p-0.5">
+          <button
+            type="button"
+            :class="[
+              'flex items-center justify-center w-7 h-7 rounded transition-colors',
+              viewMode === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
+            ]"
+            title="List view"
+            @click="viewMode = 'list'"
+          >
+            <LayoutList :size="14" />
+          </button>
+          <button
+            type="button"
+            :class="[
+              'flex items-center justify-center w-7 h-7 rounded transition-colors',
+              viewMode === 'kanban' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
+            ]"
+            title="Kanban view"
+            @click="viewMode = 'kanban'"
+          >
+            <LayoutGrid :size="14" />
+          </button>
         </div>
       </div>
     </div>
 
-    <div class="flex-1 overflow-y-auto px-4 py-4 lg:px-6">
-      <WorkspaceList :workspaces="filteredWorkspaces" @select="openWorkspace">
-        <template #actions="{ workspace }">
-          <Button
-            variant="outline"
-            size="sm"
-            title="Start a new harness chat"
-            @click.stop="openNewChat(workspace)"
-          >
-            New Chat
-          </Button>
-        </template>
-      </WorkspaceList>
-      <p v-if="!filteredWorkspaces.length" class="text-sm text-muted-foreground">
-        No workspaces — create one to get started.
-      </p>
+    <div :class="viewMode === 'kanban' ? 'lg:hidden flex flex-col flex-1 min-h-0' : 'flex flex-col flex-1 min-h-0'">
+      <HarnessConversationListView
+        :conversations="conversationStore.filteredConversations"
+        :loading="conversationStore.loading"
+        :search-query="conversationStore.searchQuery"
+        :format-time-ago="formatTimeAgo"
+        @conversation-click="navigateToConversation"
+      />
     </div>
 
-    <Dialog :open="newChatOpen" @update:open="(open) => { if (!open) newChatWorkspace = null }">
-      <DialogContent v-if="newChatWorkspace" class="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>New chat in {{ newChatWorkspace.name }}</DialogTitle>
-        </DialogHeader>
-        <HarnessSessionSwitcher
-          :workspace-id="newChatWorkspace.id"
-          @create="handleCreateSession"
-        />
-        <DialogFooter />
-      </DialogContent>
-    </Dialog>
+    <HarnessConversationKanbanView
+      v-if="viewMode === 'kanban'"
+      :idle-convs="idleConvs"
+      :working-convs="workingConvs"
+      :done-convs="doneConvs"
+      :format-time-ago="formatTimeAgo"
+      @conversation-click="navigateToConversation"
+    />
   </div>
 </template>
-
