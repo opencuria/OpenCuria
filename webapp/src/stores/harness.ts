@@ -48,7 +48,7 @@ export const useHarnessStore = defineStore('harness', () => {
   const activeSessionId = ref<string | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
-  /** Model picker value when no ProviderConfig REST endpoint exists. */
+  /** Model picker value; empty string means "org default". */
   const modelInput = ref('')
 
   // --- Getters ---

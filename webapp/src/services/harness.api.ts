@@ -14,7 +14,22 @@ import type {
   HarnessSessionCreateIn,
   HarnessTodo,
 } from '@/types/harness'
-import { get, post } from './api'
+import { get, post, put } from './api'
+
+export interface HarnessProviderConfig {
+  base_url: string
+  default_model: string
+  small_model: string
+  has_api_key: boolean
+  api_key_hint: string
+}
+
+export interface HarnessProviderConfigIn {
+  api_key: string
+  base_url?: string
+  default_model?: string
+  small_model?: string
+}
 
 export interface HarnessSessionOut extends HarnessSession {}
 
@@ -73,4 +88,20 @@ export function resolveHarnessPermission(
     `/harness/sessions/${sessionId}/permissions/${request.request_id}`,
     { response },
   )
+}
+
+export function getProviderConfig(workspaceId: string): Promise<HarnessProviderConfig> {
+  return get<HarnessProviderConfig>(`/workspaces/${workspaceId}/provider-config/`)
+}
+
+export function saveProviderConfig(
+  workspaceId: string,
+  data: HarnessProviderConfigIn,
+): Promise<HarnessProviderConfig> {
+  return put<HarnessProviderConfig>(`/workspaces/${workspaceId}/provider-config/`, {
+    api_key: data.api_key,
+    base_url: data.base_url ?? '',
+    default_model: data.default_model ?? '',
+    small_model: data.small_model ?? '',
+  })
 }

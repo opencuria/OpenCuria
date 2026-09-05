@@ -292,6 +292,122 @@ def test_permission_resolve_via_api(harness_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_mode_switch_happy_path(harness_setup, fake_harness_service):
+    """PATCH .../mode switches build->plan on an idle session."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="mode switch",
+        mode="build",
+    )
+    assert session.mode == "build"
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}/mode",
+        data=json.dumps({"mode": "plan"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content[:500]
+    body = response.json()
+    assert body["mode"] == "plan"
+    assert HarnessSession.objects.get(id=session.id).mode == "plan"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mode_switch_invalid_mode_is_400(harness_setup, fake_harness_service):
+    """Unknown mode is a validation error, not a 500."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="mode invalid",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}/mode",
+        data=json.dumps({"mode": "turbo"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mode_switch_while_busy_is_409(harness_setup, fake_harness_service):
+    """Mode switch on a session with an active run is rejected with 409."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="mode busy",
+    )
+    # Fake a busy task without running the loop.
+    import asyncio as _asyncio
+
+    async def _never() -> None:
+        await _asyncio.Event().wait()
+
+    loop = _asyncio.new_event_loop()
+    task = loop.create_task(_never())
+    fake_harness_service._tasks[str(session.id)] = task
+    try:
+        client = _client(
+            user=harness_setup["owner"],
+            org=harness_setup["org"],
+            permissions=RUN,
+        )
+        response = client.patch(
+            f"/api/v1/harness/sessions/{session.id}/mode",
+            data=json.dumps({"mode": "plan"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 409
+    finally:
+        task.cancel()
+        loop.close()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mode_switch_foreign_workspace_is_404(harness_setup, fake_harness_service):
+    """Owner scoping: mode switch on another user's session reads as not found."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["foreign"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="mode foreign",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}/mode",
+        data=json.dumps({"mode": "plan"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mode_switch_needs_run_permission(harness_setup, fake_harness_service):
+    """A read-only key cannot switch session mode (403)."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="mode perm",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}/mode",
+        data=json.dumps({"mode": "plan"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+
+
+@pytest.mark.django_db(transaction=True)
 def test_permission_resolve_needs_permission_key(harness_setup, fake_harness_service):
     """Resolving without harness:permissions is 403."""
     run_client = _client(

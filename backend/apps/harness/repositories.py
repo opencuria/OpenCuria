@@ -142,6 +142,13 @@ class HarnessSessionRepository:
         return session
 
     @staticmethod
+    def set_mode(session: HarnessSession, mode: str) -> HarnessSession:
+        """Persist a session mode change (plan|build, idle only enforced by caller)."""
+        session.mode = mode
+        session.save(update_fields=["mode", "updated_at"])
+        return session
+
+    @staticmethod
     def add_usage(
         session: HarnessSession,
         *,

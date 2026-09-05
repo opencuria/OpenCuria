@@ -145,6 +145,14 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
+    def set_mode(self, session_id: uuid.UUID, mode: str) -> HarnessSession:
+        """Persist a mode change (plan|build); busy-check lives in the API layer."""
+        normalized = (mode or "").strip().lower()
+        if normalized not in ("plan", "build"):
+            raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+        session = self.get_session(session_id)
+        return self.sessions.set_mode(session, normalized)
+
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
         """Return all sessions of a workspace."""
         return self.sessions.list_for_workspace(workspace_id)

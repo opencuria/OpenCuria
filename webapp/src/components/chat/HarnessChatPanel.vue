@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import {
   onEvent,
@@ -16,6 +17,7 @@ const props = defineProps<{
 }>()
 
 const harness = useHarnessStore()
+const fileExplorer = useFileExplorerStore()
 const sending = ref(false)
 const resolving = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
@@ -216,6 +218,8 @@ function handleOpenSubtask(childSessionId: string): void {
       :stoppable="activeSession?.status === 'busy'"
       :mode="composerMode"
       :model="harness.modelInput"
+      :workspace-id="props.workspaceId"
+      :files="fileExplorer.tree"
       @update:mode="composerMode = $event"
       @update:model="harness.modelInput = $event"
       @send="handleSend"
