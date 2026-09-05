@@ -4,7 +4,23 @@
  * Shown on the global Images page.
  */
 import { ref, computed, onMounted } from 'vue'
-import { UiDialog, UiInput, UiButton, UiSelect } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { useImageArtifactStore } from '@/stores/imageArtifacts'
@@ -20,17 +36,26 @@ const name = ref('')
 const selectedWorkspaceId = ref('')
 const submitting = ref(false)
 
-// Only QEMU workspaces that are running can be captured as images.
 const snappableWorkspaces = computed(() =>
   workspaceStore.workspaces.filter(
     (w) => {
       const runner = runnerStore.runnerById(w.runner_id)
       return (
         w.runtime_type === RuntimeType.QEMU &&
-        w.status === WorkspaceStatus.RUNNING &&
+        !w.credentials_present &&
+        (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED) &&
         runnerSupportsRuntime(runner, RuntimeType.QEMU)
       )
     },
+  ),
+)
+
+const blockedByCredentials = computed(() =>
+  workspaceStore.workspaces.some(
+    (w) =>
+      w.runtime_type === RuntimeType.QEMU &&
+      w.credentials_present &&
+      (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED),
   ),
 )
 
@@ -78,42 +103,66 @@ function handleClose(): void {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="Capture Image"
-    description="Capture a point-in-time image of a running QEMU workspace. Credentials are selected separately when creating a workspace from the image."
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
-    <template #trigger>
-      <UiButton @click="open = true">Capture Image</UiButton>
-    </template>
+    <DialogTrigger as-child>
+      <Button @click="open = true">Capture Image</Button>
+    </DialogTrigger>
 
-    <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <!-- Image name -->
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Image name</label>
-        <UiInput v-model="name" placeholder="e.g. before-refactor" />
-      </div>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Capture Image</DialogTitle>
+        <DialogDescription>
+          Capture a point-in-time image of a QEMU workspace. Credentials must be
+          removed first — stop the workspace to strip them, then capture. If it
+          was stopped externally, resume and stop it again.
+        </DialogDescription>
+      </DialogHeader>
 
-      <!-- Workspace selection -->
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Source workspace</label>
-        <UiSelect v-model="selectedWorkspaceId" :options="workspaceOptions" />
-        <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-fg mt-1">
-          No running QEMU workspaces found. Only running QEMU/KVM workspaces can be captured.
-        </p>
-        <p v-else class="text-xs text-muted-fg mt-1">
-          Only running QEMU/KVM workspaces are shown.
-        </p>
-      </div>
+      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
+          <Input v-model="name" placeholder="e.g. before-refactor" />
+        </div>
 
-      <!-- Actions -->
-      <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="!isValid || submitting">
-          {{ submitting ? 'Capturing…' : 'Capture Image' }}
-        </UiButton>
-      </div>
-    </form>
-  </UiDialog>
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Source workspace</label>
+          <Select v-model="selectedWorkspaceId">
+            <SelectTrigger>
+              <SelectValue placeholder="Select a workspace" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="opt in workspaceOptions"
+                :key="opt.value || 'empty'"
+                :value="opt.value"
+                :disabled="opt.value === ''"
+              >
+                {{ opt.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-foreground mt-1">
+            No capturable QEMU workspaces found. Capture requires a running or
+            stopped QEMU workspace without credentials on disk.
+          </p>
+          <p v-else class="text-xs text-muted-foreground mt-1">
+            Only QEMU workspaces without credentials on disk are shown.
+          </p>
+          <p v-if="blockedByCredentials" class="text-xs text-muted-foreground mt-1">
+            Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.
+          </p>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+          <Button type="submit" :disabled="!isValid || submitting">
+            {{ submitting ? 'Capturing…' : 'Capture Image' }}
+          </Button>
+        </div>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>

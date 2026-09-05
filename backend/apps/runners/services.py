@@ -16,20 +16,19 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
-from apps.credentials.services import CredentialSvc
+from apps.credentials.services import CredentialSvc, ResolvedCredentials
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_uuid, hash_token, verify_token
 
 from .enums import (
-    AgentCommandPhase,
     RunnerStatus,
     RuntimeType,
-    SessionStatus,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -44,19 +43,17 @@ from .exceptions import (
     WorkspaceStateError,
 )
 from .repositories import (
-    AgentRepository,
-    ChatRepository,
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
     ImageBuildJobRepository,
-    SessionRepository,
     TaskRepository,
     WorkspaceRepository,
 )
 
 logger = logging.getLogger(__name__)
-USER_CANCELLED_PROMPT_ERROR = "Prompt execution cancelled by user"
+
+_CREDENTIAL_INJECT_TIMEOUT_SECONDS = 30
 
 
 class RunnerService:
@@ -79,10 +76,7 @@ class RunnerService:
         self.sio = sio_server
         self.runners = RunnerRepository
         self.workspaces = WorkspaceRepository
-        self.sessions = SessionRepository
         self.tasks = TaskRepository
-        self.agents = AgentRepository
-        self.chats = ChatRepository
         self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
         self.build_jobs = ImageBuildJobRepository
@@ -90,6 +84,7 @@ class RunnerService:
         # already been sent, to avoid emitting duplicate cleanup tasks on every
         # heartbeat while one is still in flight.
         self._pending_unknown_workspace_cleanup: set[tuple[str, str]] = set()
+        self._pending_credential_inject: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------
     # Runner lifecycle
@@ -144,6 +139,8 @@ class RunnerService:
         """
         from .models import ImageBuildJob
 
+        await sync_to_async(self.timeout_stale_image_operations)()
+
         pending_builds = await sync_to_async(
             lambda: list(
                 ImageBuildJob.objects.filter(
@@ -197,7 +194,9 @@ class RunnerService:
                         TaskStatus.IN_PROGRESS,
                     }:
                         task = existing_task
-                        reused_active_task = image.status == ImageInstance.Status.DELETING
+                        reused_active_task = (
+                            image.status == ImageInstance.Status.DELETING
+                        )
                     else:
                         task = None
                 else:
@@ -238,12 +237,9 @@ class RunnerService:
         """
         Mark a runner as offline when it disconnects.
 
-        Looks up the runner by its Socket.IO session ID. Any sessions that are
-        still active (PENDING / RUNNING) on this runner's workspaces are
-        immediately marked as FAILED so the frontend does not get stuck waiting
-        for output that will never arrive.
+        Looks up the runner by its Socket.IO session ID.
         """
-        from .models import Runner, Session, Task
+        from .models import Runner
 
         try:
             runner = Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
@@ -251,54 +247,11 @@ class RunnerService:
             logger.warning("Disconnect from unknown SID: %s", sid)
             return
 
-        # Collect active sessions BEFORE marking runner offline so we can
-        # still resolve them via the FK chain.
-        active_sessions = list(
-            Session.objects.filter(
-                chat__workspace__runner=runner,
-                status__in=[SessionStatus.PENDING, SessionStatus.RUNNING],
-            ).select_related("chat__workspace")
-        )
-
-        # Also fail any pending/in-progress tasks on this runner's workspaces
-        # that are for run_prompt (so task state is consistent).
-        from .enums import TaskStatus as TS
-        Task.objects.filter(
-            runner=runner,
-            status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
-            type=TaskType.RUN_PROMPT,
-        ).update(
-            status=TaskStatus.FAILED,
-            error="Runner went offline",
-        )
-
         self.runners.set_offline(runner)
         logger.info("Runner unregistered: %s", runner.id)
 
         # Notify frontend about runner going offline so it can update display.
         self._forward_runner_status_to_frontend(runner, "offline")
-
-        # Fail stuck sessions and notify frontend.
-        for session in active_sessions:
-            self.sessions.fail(session, error_message="Runner went offline")
-            workspace_id = str(session.chat.workspace_id)
-            session_id = str(session.id)
-            chat_id = str(session.chat_id) if session.chat_id else None
-            logger.warning(
-                "Failing session %s because runner %s went offline",
-                session_id,
-                runner.id,
-            )
-            self._forward_to_frontend(
-                "session:failed",
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "chat_id": chat_id,
-                    "error": "Runner went offline",
-                },
-                workspace_id,
-            )
 
     def _forward_runner_status_to_frontend(
         self,
@@ -311,9 +264,11 @@ class RunnerService:
         workspace managed by the runner so subscribed frontend clients can
         update their display without a full page refresh.
         """
-        workspaces = list(self.workspaces.list_by_runner(runner.id).exclude(
-            status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED]
-        ))
+        workspaces = list(
+            self.workspaces.list_by_runner(runner.id).exclude(
+                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED]
+            )
+        )
         event = "runner:offline" if status == "offline" else "runner:online"
         for ws in workspaces:
             ws_id = str(ws.id)
@@ -336,246 +291,13 @@ class RunnerService:
         await sync_to_async(self.workspaces.touch_activity)(workspace, at=at)
 
     # ------------------------------------------------------------------
-    # Agent command helpers
-    # ------------------------------------------------------------------
-
-    def get_configure_commands(self, agent_definition_id: uuid.UUID) -> list[dict]:
-        """Load configure-phase commands from the DB for an agent.
-
-        Returns a list of structured command dicts ready for dispatch.
-        """
-        commands = self.agents.get_configure_commands(agent_definition_id)
-        return [
-            {
-                "args": cmd.args,
-                "workdir": cmd.workdir,
-                "env": cmd.env or {},
-                "description": cmd.description,
-            }
-            for cmd in commands
-        ]
-
-    @staticmethod
-    def _get_agent_required_credential_service_slugs(agent_def) -> list[str]:
-        """Return the credential service slugs required by an agent."""
-        return [
-            svc.slug
-            for svc in agent_def.required_credential_services.all()
-            if svc.slug
-        ]
-
-    @staticmethod
-    def _get_workspace_credential_service_slugs(workspace) -> set[str]:
-        """Return the credential service slugs available inside a workspace."""
-        return {
-            credential.service.slug
-            for credential in workspace.credentials.all()
-            if credential.service_id and credential.service.slug
-        }
-
-    @staticmethod
-    def _merge_workspace_env_vars(
-        command: dict,
-        workspace_env_vars: dict[str, str],
-    ) -> dict:
-        """Return a command dict with workspace env vars merged in."""
-        return {
-            **command,
-            "env": {
-                **workspace_env_vars,
-                **(command.get("env") or {}),
-            },
-        }
-
-    def build_run_command(
-        self,
-        agent_definition_id: uuid.UUID,
-        prompt: str,
-        model: str = "",
-        workdir: str = "/workspace",
-        chat_id: str = "",
-        is_first_message: bool = False,
-        extra_options: dict[str, str] | None = None,
-        additional_default_env: dict[str, str] | None = None,
-    ) -> dict:
-        """Build a run command dict by rendering the DB template.
-
-        Substitutes ``{prompt}``, ``{workdir}``, ``{model}``, ``{chat_id}``
-        and any additional ``{key}`` placeholders from ``extra_options`` in
-        the stored command template.
-
-        When ``is_first_message`` is True and the agent has a ``run_first``
-        command defined, that template is used instead of ``run``. This
-        supports agents like Claude Code that require a different invocation
-        (e.g. ``--session-id``) for the very first message in a chat.
-
-        Returns a structured command dict ready for dispatch to a runner.
-        """
-        cmd = None
-        if is_first_message:
-            cmd = self.agents.get_run_first_command(agent_definition_id)
-        if cmd is None:
-            cmd = self.agents.get_run_command(agent_definition_id)
-        if cmd is None:
-            raise ValueError(
-                f"No run command defined for agent '{agent_definition_id}'"
-            )
-
-        # Fetch agent default_env; per-command env takes precedence.
-        agent_def = self.agents.get_by_id(agent_definition_id)
-        default_env: dict[str, str] = (
-            agent_def.default_env if agent_def and agent_def.default_env else {}
-        )
-        merged_env = {
-            **(additional_default_env or {}),
-            **default_env,
-            **(cmd.env or {}),
-        }
-
-        options = extra_options or {}
-
-        def _render(arg: str) -> str:
-            result = (
-                arg.replace("{prompt}", prompt)
-                .replace("{workdir}", workdir)
-                .replace("{model}", model)
-                .replace("{chat_id}", chat_id)
-            )
-            for key, value in options.items():
-                result = result.replace(f"{{{key}}}", value)
-            return result
-
-        rendered_args = [_render(arg) for arg in cmd.args]
-        rendered_workdir = (
-            _render(cmd.workdir)
-            if cmd.workdir
-            else workdir
-        )
-
-        return {
-            "args": rendered_args,
-            "workdir": rendered_workdir,
-            "env": merged_env,
-            "description": cmd.description,
-        }
-
-    def _build_render_context(
-        self,
-        *,
-        prompt: str,
-        model: str,
-        workdir: str,
-        chat_id: str,
-        extra_options: dict[str, str] | None,
-    ) -> dict[str, str]:
-        """Return placeholder values for rendering agent commands."""
-        return {
-            "prompt": prompt,
-            "workdir": workdir,
-            "model": model,
-            "chat_id": chat_id,
-            **(extra_options or {}),
-        }
-
-    def _render_template_value(
-        self,
-        template: str,
-        context: dict[str, str],
-    ) -> str:
-        """Render supported ``{placeholder}`` values in a command field."""
-        rendered = template
-        for key, value in context.items():
-            rendered = rendered.replace(f"{{{key}}}", value)
-        return rendered
-
-    def _build_credential_relation_operation_data(
-        self,
-        *,
-        workspace,
-        agent_definition_id: uuid.UUID,
-        phase: str,
-        prompt: str = "",
-        model: str = "",
-        workdir: str = "/workspace",
-        chat_id: str = "",
-        extra_options: dict[str, str] | None = None,
-    ) -> tuple[dict[str, str], list[dict]]:
-        """Resolve relation default env and commands for an operation phase."""
-
-        agent_def = self.agents.get_by_id(agent_definition_id)
-        if agent_def is None:
-            return {}, []
-
-        workspace_service_ids = {
-            credential.service_id
-            for credential in workspace.credentials.all()
-            if credential.service_id
-        }
-        if not workspace_service_ids:
-            return {}, []
-
-        relations = list(
-            agent_def.credential_relations.select_related(
-                "credential_service"
-            ).prefetch_related("commands").filter(
-                credential_service_id__in=workspace_service_ids
-            ).order_by("credential_service__slug", "id")
-        )
-        if not relations:
-            return {}, []
-
-        render_context = self._build_render_context(
-            prompt=prompt,
-            model=model,
-            workdir=workdir,
-            chat_id=chat_id,
-            extra_options=extra_options,
-        )
-        agent_default_env = dict(agent_def.default_env or {})
-        merged_default_env: dict[str, str] = {}
-        commands: list[dict] = []
-
-        for relation in relations:
-            relation_default_env = dict(relation.default_env or {})
-            merged_default_env.update(relation_default_env)
-            phase_commands = sorted(
-                (
-                    cmd
-                    for cmd in relation.commands.all()
-                    if cmd.phase == phase
-                ),
-                key=lambda cmd: cmd.order,
-            )
-            for cmd in phase_commands:
-                command_env = {
-                    **relation_default_env,
-                    **agent_default_env,
-                    **(cmd.env or {}),
-                }
-                commands.append(
-                    {
-                        "args": [
-                            self._render_template_value(arg, render_context)
-                            for arg in cmd.args
-                        ],
-                        "workdir": (
-                            self._render_template_value(cmd.workdir, render_context)
-                            if cmd.workdir
-                            else workdir
-                        ),
-                        "env": command_env,
-                        "description": cmd.description,
-                    }
-                )
-
-        return merged_default_env, commands
-
-    # ------------------------------------------------------------------
     # Workspace operations (initiated by REST API or frontend)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _derive_workspace_name(name: str, repos: list[str], workspace_id: uuid.UUID) -> str:
+    def _derive_workspace_name(
+        name: str, repos: list[str], workspace_id: uuid.UUID
+    ) -> str:
         """Return a non-empty workspace name from user input or sensible defaults."""
         trimmed = name.strip()
         if trimmed:
@@ -594,25 +316,50 @@ class RunnerService:
         """Validate min/max/default and total limits for a runner's QEMU config."""
         if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
             raise ConflictError("Runner vCPU minimum cannot exceed maximum")
-        if not (runner.qemu_min_vcpus <= runner.qemu_default_vcpus <= runner.qemu_max_vcpus):
+        if not (
+            runner.qemu_min_vcpus <= runner.qemu_default_vcpus <= runner.qemu_max_vcpus
+        ):
             raise ConflictError("Runner default vCPU must be within min/max range")
 
         if runner.qemu_min_memory_mb > runner.qemu_max_memory_mb:
             raise ConflictError("Runner RAM minimum cannot exceed maximum")
-        if not (runner.qemu_min_memory_mb <= runner.qemu_default_memory_mb <= runner.qemu_max_memory_mb):
+        if not (
+            runner.qemu_min_memory_mb
+            <= runner.qemu_default_memory_mb
+            <= runner.qemu_max_memory_mb
+        ):
             raise ConflictError("Runner default RAM must be within min/max range")
 
         if runner.qemu_min_disk_size_gb > runner.qemu_max_disk_size_gb:
             raise ConflictError("Runner disk minimum cannot exceed maximum")
-        if not (runner.qemu_min_disk_size_gb <= runner.qemu_default_disk_size_gb <= runner.qemu_max_disk_size_gb):
+        if not (
+            runner.qemu_min_disk_size_gb
+            <= runner.qemu_default_disk_size_gb
+            <= runner.qemu_max_disk_size_gb
+        ):
             raise ConflictError("Runner default disk must be within min/max range")
 
-        if runner.qemu_max_active_vcpus is not None and runner.qemu_max_active_vcpus < runner.qemu_default_vcpus:
-            raise ConflictError("Runner total active vCPU limit cannot be smaller than default vCPU")
-        if runner.qemu_max_active_memory_mb is not None and runner.qemu_max_active_memory_mb < runner.qemu_default_memory_mb:
-            raise ConflictError("Runner total active RAM limit cannot be smaller than default RAM")
-        if runner.qemu_max_active_disk_size_gb is not None and runner.qemu_max_active_disk_size_gb < runner.qemu_default_disk_size_gb:
-            raise ConflictError("Runner total active disk limit cannot be smaller than default disk")
+        if (
+            runner.qemu_max_active_vcpus is not None
+            and runner.qemu_max_active_vcpus < runner.qemu_default_vcpus
+        ):
+            raise ConflictError(
+                "Runner total active vCPU limit cannot be smaller than default vCPU"
+            )
+        if (
+            runner.qemu_max_active_memory_mb is not None
+            and runner.qemu_max_active_memory_mb < runner.qemu_default_memory_mb
+        ):
+            raise ConflictError(
+                "Runner total active RAM limit cannot be smaller than default RAM"
+            )
+        if (
+            runner.qemu_max_active_disk_size_gb is not None
+            and runner.qemu_max_active_disk_size_gb < runner.qemu_default_disk_size_gb
+        ):
+            raise ConflictError(
+                "Runner total active disk limit cannot be smaller than default disk"
+            )
 
     @staticmethod
     def _task_workspace_operation(task_type: TaskType) -> WorkspaceOperation | None:
@@ -664,6 +411,164 @@ class RunnerService:
             workspace_id,
         )
 
+    def _forward_workspace_status(
+        self,
+        workspace: "Workspace",
+        *,
+        task_id: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Forward workspace status and credential presence to the frontend."""
+        payload = {
+            "workspace_id": str(workspace.id),
+            "status": status or workspace.status,
+            "credentials_present": bool(workspace.credentials_present),
+        }
+        if task_id:
+            payload["task_id"] = task_id
+        self._forward_to_frontend(
+            "workspace:status_changed",
+            payload,
+            str(workspace.id),
+        )
+
+    @staticmethod
+    def _resolved_credentials_payload(resolved) -> dict:
+        """Serialize resolved credentials for a runner task payload."""
+        return {
+            "env_vars": dict(getattr(resolved, "env_vars", None) or {}),
+            "files": [
+                {
+                    "target_path": file.target_path,
+                    "content": file.content,
+                    "mode": file.mode,
+                }
+                for file in (getattr(resolved, "files", None) or [])
+            ],
+            "ssh_keys": list(getattr(resolved, "ssh_keys", None) or []),
+        }
+
+    async def _dispatch_credential_inject(
+        self,
+        workspace: "Workspace",
+        *,
+        resolved: ResolvedCredentials | None = None,
+        wait: bool = False,
+    ) -> bool | None:
+        """Replace persisted credentials on a running workspace.
+
+        Args:
+            workspace: Workspace whose on-disk secrets should match the
+                desired attachment.
+            resolved: Pre-resolved secrets. When omitted, secrets are loaded
+                from the current workspace attachment (heartbeat path).
+            wait: When True, wait for the runner acknowledgement and return
+                whether credential material is present on disk.
+
+        Returns:
+            ``credentials_present`` when *wait* is True, otherwise ``None``.
+        """
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+        key = (str(runner.id), str(workspace.id))
+
+        if resolved is None:
+            fresh = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
+            if fresh is None:
+                return None
+            workspace = fresh
+            runner = workspace.runner
+            resolved = await sync_to_async(
+                CredentialSvc().resolve_workspace_credentials
+            )(workspace)
+
+        if not wait and key in self._pending_credential_inject:
+            return None
+
+        task_id = generate_uuid()
+        task = await sync_to_async(self.tasks.create)(
+            task_id=task_id,
+            runner=runner,
+            task_type=TaskType.INJECT_CREDENTIALS,
+            workspace=workspace,
+        )
+        self._pending_credential_inject.add(key)
+        payload = {
+            "task_id": str(task_id),
+            "workspace_id": str(workspace.id),
+            **self._resolved_credentials_payload(resolved),
+        }
+        try:
+            if wait:
+                await sync_to_async(self.tasks.mark_in_progress)(task)
+                response = await self._call_runner(
+                    runner,
+                    "task:inject_credentials",
+                    payload,
+                    timeout=_CREDENTIAL_INJECT_TIMEOUT_SECONDS,
+                )
+                if response.get("ok") is False:
+                    error = str(response.get("error") or "Credential inject failed")
+                    self._pending_credential_inject.discard(key)
+                    await sync_to_async(self.tasks.fail)(task, error)
+                    raise ConflictError(error)
+                if "credentials_present" in response:
+                    credentials_present = bool(response["credentials_present"])
+                else:
+                    secrets = self._resolved_credentials_payload(resolved)
+                    credentials_present = bool(
+                        secrets["env_vars"]
+                        or secrets["files"]
+                        or secrets["ssh_keys"]
+                    )
+                workspace = await sync_to_async(
+                    self.workspaces.update_credentials_present
+                )(workspace, credentials_present)
+                await sync_to_async(self.tasks.complete)(task)
+                self._pending_credential_inject.discard(key)
+                self._forward_workspace_status(workspace, task_id=str(task_id))
+                return credentials_present
+
+            await self._emit_to_runner(
+                runner,
+                "task:inject_credentials",
+                payload,
+            )
+            await sync_to_async(self.tasks.mark_in_progress)(task)
+            return None
+        except ConflictError:
+            raise
+        except Exception as exc:
+            self._pending_credential_inject.discard(key)
+            await sync_to_async(self.tasks.fail)(task, str(exc))
+            if wait:
+                raise ConflictError(
+                    "Failed to apply credentials to the running workspace: "
+                    f"{exc}"
+                ) from exc
+            raise
+
+    async def dispatch_credential_reconcile(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> None:
+        """Apply desired credentials onto running workspaces (heartbeat)."""
+        for workspace_id in workspace_ids:
+            try:
+                workspace = await sync_to_async(self.workspaces.get_by_id)(
+                    workspace_id
+                )
+                if workspace is None:
+                    continue
+                if workspace.status != WorkspaceStatus.RUNNING:
+                    continue
+                await self._dispatch_credential_inject(workspace, wait=False)
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile credentials for workspace %s",
+                    workspace_id,
+                )
+
     async def _set_workspace_operation(
         self,
         workspace: "Workspace",
@@ -711,21 +616,33 @@ class RunnerService:
         """Resolve effective QEMU resources and validate against runner limits."""
         current_vcpus = current[0] if current else runner.qemu_default_vcpus
         current_memory_mb = current[1] if current else runner.qemu_default_memory_mb
-        current_disk_size_gb = current[2] if current else runner.qemu_default_disk_size_gb
+        current_disk_size_gb = (
+            current[2] if current else runner.qemu_default_disk_size_gb
+        )
 
         resolved_vcpus = qemu_vcpus if qemu_vcpus is not None else current_vcpus
-        resolved_memory_mb = qemu_memory_mb if qemu_memory_mb is not None else current_memory_mb
-        resolved_disk_size_gb = qemu_disk_size_gb if qemu_disk_size_gb is not None else current_disk_size_gb
+        resolved_memory_mb = (
+            qemu_memory_mb if qemu_memory_mb is not None else current_memory_mb
+        )
+        resolved_disk_size_gb = (
+            qemu_disk_size_gb if qemu_disk_size_gb is not None else current_disk_size_gb
+        )
 
         if not (runner.qemu_min_vcpus <= resolved_vcpus <= runner.qemu_max_vcpus):
             raise ConflictError(
                 f"vCPU value must be between {runner.qemu_min_vcpus} and {runner.qemu_max_vcpus}"
             )
-        if not (runner.qemu_min_memory_mb <= resolved_memory_mb <= runner.qemu_max_memory_mb):
+        if not (
+            runner.qemu_min_memory_mb <= resolved_memory_mb <= runner.qemu_max_memory_mb
+        ):
             raise ConflictError(
                 f"RAM value must be between {runner.qemu_min_memory_mb} and {runner.qemu_max_memory_mb} MiB"
             )
-        if not (runner.qemu_min_disk_size_gb <= resolved_disk_size_gb <= runner.qemu_max_disk_size_gb):
+        if not (
+            runner.qemu_min_disk_size_gb
+            <= resolved_disk_size_gb
+            <= runner.qemu_max_disk_size_gb
+        ):
             raise ConflictError(
                 f"Disk value must be between {runner.qemu_min_disk_size_gb} and {runner.qemu_max_disk_size_gb} GiB"
             )
@@ -763,7 +680,9 @@ class RunnerService:
                 continue
             total_vcpus += ws.qemu_vcpus or runner.qemu_default_vcpus
             total_memory_mb += ws.qemu_memory_mb or runner.qemu_default_memory_mb
-            total_disk_size_gb += ws.qemu_disk_size_gb or runner.qemu_default_disk_size_gb
+            total_disk_size_gb += (
+                ws.qemu_disk_size_gb or runner.qemu_default_disk_size_gb
+            )
 
         next_total_vcpus = total_vcpus + requested_vcpus
         next_total_memory_mb = total_memory_mb + requested_memory_mb
@@ -812,9 +731,8 @@ class RunnerService:
         """
         Create a new workspace on a runner.
 
-        Agent type is no longer required at workspace creation time — it is
-        selected when creating the first chat. If runner_id is not specified,
-        any online runner in the organization is selected.
+        If runner_id is not specified, any online runner in the
+        organization is selected.
 
         Returns the created Workspace and Task records.
         """
@@ -836,6 +754,14 @@ class RunnerService:
         if selected_build_job is not None:
             if selected_build_job.status != "active":
                 raise ConflictError("Selected image artifact is not active on runner")
+            origin_definition = selected_build_job.image_definition
+            if origin_definition is not None and (
+                not origin_definition.is_active
+                or origin_definition.status != origin_definition.Status.ACTIVE
+            ):
+                raise ConflictError(
+                    "Selected image definition is not available for new workspaces"
+                )
             if (
                 organization_id
                 and selected_build_job.runner.organization_id != organization_id
@@ -852,7 +778,9 @@ class RunnerService:
             runner_id = selected_build_job.runner_id
         else:
             if source_workspace is None:
-                raise ConflictError("Captured image artifact is missing its source workspace")
+                raise ConflictError(
+                    "Captured image artifact is missing its source workspace"
+                )
             if (
                 organization_id
                 and source_workspace.runner.organization_id != organization_id
@@ -879,10 +807,14 @@ class RunnerService:
             if organization_id and runner.organization_id != organization_id:
                 raise RunnerNotFoundError(str(runner_id))
         else:
-            # Pick any online runner (no agent filter needed)
-            runners_qs = self.runners.list_by_organization(organization_id).filter(
-                status=RunnerStatus.ONLINE
-            ) if organization_id else self.runners.list_online()
+            # Pick any online runner
+            runners_qs = (
+                self.runners.list_by_organization(organization_id).filter(
+                    status=RunnerStatus.ONLINE
+                )
+                if organization_id
+                else self.runners.list_online()
+            )
             runner = await sync_to_async(lambda: runners_qs.first())()
             if runner is None:
                 raise NoAvailableRunnerError("any")
@@ -940,8 +872,7 @@ class RunnerService:
         )
 
         # Dispatch to runner — include workspace_id so the runner
-        # uses the same UUID the backend assigned. No configure_commands
-        # at this stage — they run on first chat usage.
+        # uses the same UUID the backend assigned.
         await self._dispatch_workspace_task(
             runner=runner,
             event="task:create_workspace",
@@ -968,8 +899,12 @@ class RunnerService:
                 ],
                 "ssh_keys": ssh_keys or [],
                 "image_artifact_id": str(image_artifact_id),
-                "image_tag": selected_image.runner_ref if runtime_type == RuntimeType.DOCKER else "",
-                "base_image_path": selected_image.runner_ref if runtime_type == RuntimeType.QEMU else "",
+                "image_tag": selected_image.runner_ref
+                if runtime_type == RuntimeType.DOCKER
+                else "",
+                "base_image_path": selected_image.runner_ref
+                if runtime_type == RuntimeType.QEMU
+                else "",
             },
         )
         logger.info(
@@ -980,308 +915,13 @@ class RunnerService:
         )
         return workspace, task
 
-    async def run_prompt(
-        self,
-        workspace_id: uuid.UUID,
-        prompt: str,
-        agent_model: str | None = None,
-        agent_options: dict[str, str] | None = None,
-        chat_id: str | None = None,
-        skill_ids: list[uuid.UUID] | None = None,
-    ) -> tuple["Session", "Task", "Chat"]:
-        """
-        Run a prompt in an existing workspace.
-
-        Creates a Session and Task, then dispatches to the runner.
-        If the agent supports multi-chat and no chat_id is provided,
-        a new chat is created automatically.
-
-        ``agent_options`` is a dict of option key/value pairs (e.g.
-        ``{"model": "claude-opus-4-6", "permission_mode": "plan"}``).
-        The legacy ``agent_model`` parameter is still accepted for
-        backwards compatibility; if both are provided, ``agent_options``
-        takes precedence for the model key.
-        """
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
-
-        if workspace.status != WorkspaceStatus.RUNNING:
-            raise WorkspaceStateError(
-                f"Workspace '{workspace_id}' is '{workspace.status}', "
-                f"must be '{WorkspaceStatus.RUNNING}' to run prompts"
-            )
-
-        has_active = await sync_to_async(self.sessions.has_active_for_workspace)(
-            workspace_id
-        )
-        if has_active:
-            raise ConflictError("Workspace already has an active session")
-
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
-
-        # Determine agent definition from the chat
-        chat_agent_definition_id: uuid.UUID | None = None
-        if chat_id:
-            _temp_chat = await sync_to_async(self.chats.get_by_id)(uuid.UUID(chat_id))
-            if _temp_chat:
-                chat_agent_definition_id = _temp_chat.agent_definition_id
-
-        if chat_agent_definition_id is None:
-            raise ValueError("No agent definition defined for this chat")
-
-        agent_def = await sync_to_async(self.agents.get_by_id)(chat_agent_definition_id)
-        if agent_def is None:
-            raise ValueError(
-                f"Unknown agent definition for chat '{chat_id}': '{chat_agent_definition_id}'"
-            )
-
-        # Merge legacy agent_model into agent_options for unified handling
-        resolved_options: dict[str, str] = dict(agent_options or {})
-        if agent_model and "model" not in resolved_options:
-            resolved_options["model"] = agent_model.strip()
-
-        # Resolve defaults for any available_options defined on the agent
-        available_opt_defs: list[dict] = list(agent_def.available_options or [])
-        for opt_def in available_opt_defs:
-            key = opt_def.get("key", "")
-            if not key:
-                continue
-            choices: list[str] = opt_def.get("choices", [])
-            default: str = opt_def.get("default", choices[0] if choices else "")
-            if key not in resolved_options or not resolved_options[key]:
-                # Fall back to last session's value for this key
-                if key == "model":
-                    latest_session = await sync_to_async(
-                        self.sessions.get_latest_for_workspace
-                    )(workspace_id)
-                    latest_val = (
-                        (latest_session.agent_options or {}).get("model", "")
-                        if latest_session else ""
-                    ).strip()
-                    resolved_options[key] = (
-                        latest_val if (latest_val and (not choices or latest_val in choices))
-                        else default
-                    )
-                else:
-                    resolved_options[key] = default
-            elif choices and resolved_options[key] not in choices:
-                raise ValueError(
-                    f"Option '{key}' value '{resolved_options[key]}' is not in "
-                    f"allowed choices for agent '{agent_def.name}'"
-                )
-
-        selected_model = resolved_options.get("model", "")
-
-        # Resolve or create chat
-        chat = await self._resolve_chat(
-            workspace, agent_def, chat_id, prompt
-        )
-        await self._assert_chat_is_writable(workspace, agent_def, chat)
-
-        # Build augmented prompt: append skill bodies for the runner.
-        # The session record stores only the original user prompt.
-        effective_prompt = prompt
-        resolved_skills = []
-        if skill_ids:
-            from apps.skills.repositories import SkillRepository
-            resolved_skills = await sync_to_async(SkillRepository.get_many_by_ids)(
-                skill_ids
-            )
-            if resolved_skills:
-                appendix = "\n\n---\n# Follow these instructions (skills) carefully:\n\n"
-                appendix += "\n\n".join(
-                    f"## {s.name}\n\n{s.body}" for s in resolved_skills
-                )
-                effective_prompt = prompt + appendix
-
-        # Detect whether this is the first message in the chat so agents that
-        # need different initialisation (e.g. Claude Code's --session-id flag)
-        # can use their run_first command template.
-        #
-        # We intentionally ignore failed sessions: if all prior sessions in
-        # this chat failed (e.g. the runner went offline mid-conversation),
-        # the next prompt should be treated as a fresh first message so the
-        # correct agent initialisation command is used.
-        is_first_message = not await sync_to_async(
-            self.sessions.has_any_successful_for_chat
-        )(chat.id)
-
-        # Build the run command from the agent definition in DB
-        workspace_credentials = await sync_to_async(
-            CredentialSvc().resolve_workspace_credentials
-        )(workspace)
-        relation_default_env, relation_preflight_commands = await sync_to_async(
-            self._build_credential_relation_operation_data
-        )(
-            workspace=workspace,
-            agent_definition_id=agent_def.id,
-            phase=AgentCommandPhase.CONFIGURE,
-            prompt=effective_prompt,
-            model=selected_model,
-            chat_id=str(chat.id),
-            extra_options=resolved_options,
-        )
-        run_command = await sync_to_async(self.build_run_command)(
-            agent_def.id,
-            effective_prompt,
-            selected_model,
-            chat_id=str(chat.id),
-            is_first_message=is_first_message,
-            extra_options=resolved_options,
-            additional_default_env=relation_default_env,
-        )
-        run_command = self._merge_workspace_env_vars(
-            run_command,
-            workspace_credentials.env_vars,
-        )
-
-        configure_commands: list[dict] = [
-            self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-            for cmd in relation_preflight_commands
-        ]
-        fallback_configure_commands = await sync_to_async(self.get_configure_commands)(
-            agent_def.id
-        )
-        fallback_configure_commands = [
-            self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-            for cmd in fallback_configure_commands
-        ]
-
-        # Create session and task
-        session_id = generate_uuid()
-        session = await sync_to_async(self.sessions.create)(
-            session_id=session_id,
-            prompt=prompt,  # store original prompt, not augmented
-            agent_model=selected_model,
-            agent_options=resolved_options,
-            chat=chat,
-        )
-
-        # Snapshot skills immediately after session creation
-        if resolved_skills:
-            from apps.skills.repositories import SessionSkillRepository
-            await sync_to_async(SessionSkillRepository.create_snapshots)(
-                session, resolved_skills
-            )
-
-        task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.RUN_PROMPT,
-            workspace=workspace,
-            session=session,
-        )
-
-        # Dispatch — include configure_commands if this agent needs first-time setup
-        await self._emit_to_runner(
-            runner,
-            "task:run_prompt",
-            {
-                "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-                "prompt": prompt,
-                "command": run_command,
-                "configure_commands": configure_commands,
-                "fallback_configure_commands": fallback_configure_commands,
-                "env_vars": workspace_credentials.env_vars,
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in workspace_credentials.files
-                ],
-                "ssh_keys": workspace_credentials.ssh_keys,
-            },
-        )
-
-        await sync_to_async(self.tasks.mark_in_progress)(task)
-        logger.info(
-            "Dispatched run_prompt to runner %s (workspace=%s, chat=%s, task=%s)",
-            runner.id,
-            workspace_id,
-            chat.id,
-            task_id,
-        )
-        return session, task, chat
-
-    async def _resolve_chat(
-        self,
-        workspace,
-        agent_def,
-        chat_id: str | None,
-        prompt: str,
-    ):
-        """Resolve or create the chat for a prompt dispatch.
-
-        - If chat_id is given: use that chat (validate it belongs to workspace).
-        - If agent supports multi-chat and no chat_id: create a new chat.
-        - If agent does NOT support multi-chat: use the single implicit chat
-          (create if needed).
-        """
-        if chat_id:
-            chat = await sync_to_async(self.chats.get_by_id)(uuid.UUID(chat_id))
-            if chat is None or chat.workspace_id != workspace.id:
-                raise ValueError(f"Chat '{chat_id}' not found in workspace '{workspace.id}'")
-            return chat
-
-        if agent_def.supports_multi_chat:
-            # Create a new chat for each prompt without an explicit chat_id
-            chat_name = prompt[:50] + "…" if len(prompt) > 50 else prompt
-            new_chat = await sync_to_async(self.chats.create)(
-                chat_id=generate_uuid(),
-                workspace=workspace,
-                name=chat_name,
-                agent_definition=agent_def,
-                agent_type=agent_def.name,
-            )
-            return new_chat
-        else:
-            # Single-chat agent: reuse latest chat for this agent.
-            latest_chat = await sync_to_async(
-                self.chats.get_latest_for_workspace_agent
-            )(workspace.id, agent_def.id)
-            if latest_chat:
-                return latest_chat
-            # Create the first (and only) chat
-            return await sync_to_async(self.chats.create)(
-                chat_id=generate_uuid(),
-                workspace=workspace,
-                name="Chat",
-                agent_definition=agent_def,
-                agent_type=agent_def.name,
-            )
-
-    async def _assert_chat_is_writable(self, workspace, agent_def, chat) -> None:
-        """Reject writes to stale chats for single-chat agents."""
-        if agent_def.supports_multi_chat:
-            return
-
-        latest_chat = await sync_to_async(self.chats.get_latest_for_workspace_agent)(
-            workspace.id,
-            agent_def.id,
-        )
-        if latest_chat is None:
-            return
-        if latest_chat.id != chat.id:
-            raise ConflictError(
-                "This chat is locked because a newer chat exists for this agent. "
-                "Please use the latest chat."
-            )
-
     async def update_workspace(
         self,
         workspace_id: uuid.UUID,
         *,
         name: str | None = None,
         credentials: list | None = None,
+        resolved_credentials: ResolvedCredentials | None = None,
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -1291,19 +931,54 @@ class RunnerService:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
+        self._ensure_workspace_available(workspace)
+
         if name is not None:
             trimmed = name.strip()
             if not trimmed:
                 raise ValueError("Workspace name must not be empty")
-            workspace = await sync_to_async(self.workspaces.update_name)(workspace, trimmed)
-
-        if credentials is not None:
-            workspace = await sync_to_async(self.workspaces.set_credentials)(
-                workspace,
-                credentials,
+            workspace = await sync_to_async(self.workspaces.update_name)(
+                workspace, trimmed
             )
 
-        self._ensure_workspace_available(workspace)
+        credential_records = (
+            resolved_credentials.credentials
+            if resolved_credentials is not None
+            else credentials
+        )
+        if credential_records is not None:
+            current_ids = {
+                credential.id for credential in workspace.credentials.all()
+            }
+            new_ids = {credential.id for credential in credential_records}
+            ids_changed = current_ids != new_ids
+            desired_present = bool(new_ids)
+            needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
+                ids_changed
+                or bool(workspace.credentials_present) != desired_present
+            )
+            if needs_disk_sync:
+                runner = workspace.runner
+                if not runner.is_online:
+                    raise RunnerOfflineError(str(runner.id))
+
+            if ids_changed:
+                workspace = await sync_to_async(self.workspaces.set_credentials)(
+                    workspace,
+                    credential_records,
+                )
+
+            if needs_disk_sync:
+                resolved = resolved_credentials
+                if resolved is None:
+                    resolved = await sync_to_async(
+                        CredentialSvc().resolve_workspace_credentials
+                    )(workspace)
+                await self._dispatch_credential_inject(
+                    workspace,
+                    resolved=resolved,
+                    wait=True,
+                )
 
         qemu_fields_requested = any(
             value is not None
@@ -1312,7 +987,10 @@ class RunnerService:
         if qemu_fields_requested:
             if workspace.runtime_type != RuntimeType.QEMU:
                 raise ValueError("QEMU resources can only be set for QEMU workspaces")
-            if workspace.status not in (WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED):
+            if workspace.status not in (
+                WorkspaceStatus.RUNNING,
+                WorkspaceStatus.STOPPED,
+            ):
                 raise WorkspaceStateError(
                     f"Workspace '{workspace_id}' is '{workspace.status}', must be running or stopped to reconfigure resources"
                 )
@@ -1373,7 +1051,9 @@ class RunnerService:
                         event="task:update_workspace",
                         task=task,
                         workspace=workspace,
-                        operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
+                        operation=self._task_workspace_operation(
+                            TaskType.UPDATE_WORKSPACE
+                        ),
                         payload={
                             "task_id": str(task_id),
                             "workspace_id": str(workspace_id),
@@ -1426,64 +1106,6 @@ class RunnerService:
                 "workspace_id": str(workspace_id),
             },
         )
-        return task
-
-    async def cancel_session_prompt(
-        self,
-        workspace_id: uuid.UUID,
-        session_id: uuid.UUID,
-    ) -> "Task":
-        """Cancel a running prompt session without stopping the workspace."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
-
-        session = await sync_to_async(self.sessions.get_by_id)(session_id)
-        if session is None or session.chat.workspace_id != workspace_id:
-            raise ValueError(
-                f"Session '{session_id}' not found in workspace '{workspace_id}'"
-            )
-
-        if session.status not in [SessionStatus.PENDING, SessionStatus.RUNNING]:
-            raise ConflictError(
-                f"Session '{session_id}' is '{session.status}' and cannot be cancelled"
-            )
-
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
-
-        run_task = await sync_to_async(self.tasks.get_active_run_task_for_session)(
-            session_id
-        )
-        if run_task is None:
-            raise ConflictError(
-                f"No active run task found for session '{session_id}'"
-            )
-
-        task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.CANCEL_SESSION,
-            workspace=workspace,
-            session=session,
-        )
-
-        await self._emit_to_runner(
-            runner,
-            "task:cancel_prompt",
-            {
-                "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-                "target_task_id": str(run_task.id),
-                "session_id": str(session_id),
-            },
-        )
-
-        await sync_to_async(self.tasks.mark_in_progress)(task)
         return task
 
     async def resume_workspace(self, workspace_id: uuid.UUID) -> "Task":
@@ -1539,6 +1161,10 @@ class RunnerService:
             workspace=workspace,
         )
 
+        workspace_credentials = await sync_to_async(
+            CredentialSvc().resolve_workspace_credentials
+        )(workspace)
+
         await self._dispatch_workspace_task(
             runner=runner,
             event="task:resume_workspace",
@@ -1551,6 +1177,7 @@ class RunnerService:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
+                **self._resolved_credentials_payload(workspace_credentials),
             },
         )
         return task
@@ -1575,7 +1202,10 @@ class RunnerService:
                 f"Workspace '{workspace.id}' is already in deletion state '{workspace.status}'"
             )
 
-        if workspace.active_operation and workspace.active_operation != WorkspaceOperation.REMOVING:
+        if (
+            workspace.active_operation
+            and workspace.active_operation != WorkspaceOperation.REMOVING
+        ):
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
             )
@@ -1617,7 +1247,9 @@ class RunnerService:
             "workspace:status_changed",
             {
                 "workspace_id": str(workspace_id),
-                "status": WorkspaceStatus.DELETING if runner.is_online else WorkspaceStatus.PENDING_DELETION,
+                "status": WorkspaceStatus.DELETING
+                if runner.is_online
+                else WorkspaceStatus.PENDING_DELETION,
                 "task_id": str(task_id),
             },
             str(workspace_id),
@@ -1653,6 +1285,7 @@ class RunnerService:
         workspace_id: str,
         status: str,
         runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:created event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1670,14 +1303,14 @@ class RunnerService:
 
         self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
         self.workspaces.update_active_operation(workspace, None)
+        if credentials_present is not None:
+            self.workspaces.update_credentials_present(
+                workspace, bool(credentials_present)
+            )
         self.tasks.complete(task)
         logger.info("Workspace created: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "running", "task_id": task_id},
-            workspace_id,
-        )
+        self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_stopped(
@@ -1696,19 +1329,24 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.STOPPED)
             self.workspaces.update_active_operation(workspace, None)
+            self.workspaces.update_credentials_present(workspace, False)
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
         self._cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "stopped", "task_id": task_id},
-            workspace_id,
-        )
+        if workspace:
+            self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_resumed(
-        self, task_id: str, workspace_id: str, runner_id: str | None = None
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1723,15 +1361,58 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
             self.workspaces.update_active_operation(workspace, None)
+            if credentials_present is not None:
+                self.workspaces.update_credentials_present(
+                    workspace, bool(credentials_present)
+                )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "running", "task_id": task_id},
-            workspace_id,
-        )
+        if workspace:
+            self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
+
+    def handle_credentials_injected(
+        self,
+        task_id: str,
+        workspace_id: str,
+        credentials_present: bool,
+        runner_id: str | None = None,
+    ) -> None:
+        """Handle workspace:credentials_injected event from a runner."""
+        task = self.tasks.get_by_id(uuid.UUID(task_id))
+        if task is None:
+            logger.warning(
+                "Received workspace:credentials_injected for unknown task: %s",
+                task_id,
+            )
+            return
+
+        if not self._validate_task_runner(task, runner_id):
+            return
+
+        workspace = task.workspace
+        if task.status == TaskStatus.COMPLETED:
+            if workspace:
+                self._pending_credential_inject.discard(
+                    (str(workspace.runner_id), str(workspace.id))
+                )
+            return
+
+        if workspace:
+            self.workspaces.update_credentials_present(
+                workspace, bool(credentials_present)
+            )
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
+            self._forward_workspace_status(workspace, task_id=task_id)
+        self.tasks.complete(task)
+        logger.info(
+            "Workspace credentials injected: %s present=%s",
+            workspace_id,
+            credentials_present,
+        )
 
     def handle_workspace_updated(
         self, task_id: str, workspace_id: str, runner_id: str | None = None
@@ -1769,6 +1450,9 @@ class RunnerService:
         workspace_id = str(workspace.id) if workspace else None
         if workspace:
             self.workspaces.update_active_operation(workspace, None)
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
         if workspace and task.type in {
             TaskType.CREATE_WORKSPACE,
             TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
@@ -1798,202 +1482,6 @@ class RunnerService:
                 workspace_id,
             )
 
-    def handle_output_chunk(
-        self,
-        task_id: str,
-        workspace_id: str,
-        line: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """
-        Handle output:chunk event from a runner.
-
-        Appends the line to the session output and forwards the chunk
-        to subscribed frontend clients via Socket.IO.
-        """
-        # Normalize line endings: some runtimes (e.g. QEMU/asyncssh) include
-        # a trailing newline in each yielded line. Strip it so that
-        # append_output (which joins lines with "\n") does not produce
-        # double newlines in the stored output.
-        line = line.rstrip("\r\n")
-
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        if session:
-            self.sessions.append_output(session, line)
-
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        self._forward_to_frontend(
-            "session:output_chunk",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "line": line,
-            },
-            workspace_id,
-        )
-
-    def handle_output_status(
-        self,
-        task_id: str,
-        workspace_id: str,
-        status: str,
-        detail: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle output:status event from a runner and forward to frontend."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        self._forward_to_frontend(
-            "session:status",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "status": status,
-                "detail": detail,
-            },
-            workspace_id,
-        )
-
-    def handle_output_complete(
-        self, task_id: str, workspace_id: str, runner_id: str | None = None
-    ) -> None:
-        """Handle output:complete event from a runner."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received output:complete for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        if session:
-            self.sessions.complete(session)
-
-        self.tasks.complete(task)
-        logger.info(
-            "Prompt completed (task=%s, workspace=%s)", task_id, workspace_id
-        )
-
-        self._forward_to_frontend(
-            "session:completed",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-            },
-            workspace_id,
-        )
-
-    def handle_output_error(
-        self,
-        task_id: str,
-        workspace_id: str,
-        error: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle output:error event from a runner."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received output:error for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        normalized_error = error.strip()
-        is_user_cancelled = (
-            normalized_error.casefold()
-            == USER_CANCELLED_PROMPT_ERROR.casefold()
-        )
-        if session:
-            failed_output = (
-                f"{session.output}\n[Error] {normalized_error}"
-                if session.output
-                else f"[Error] {normalized_error}"
-            )
-            self.sessions.fail(
-                session,
-                output=failed_output,
-                error_message=None if is_user_cancelled else normalized_error,
-            )
-
-        self.tasks.fail(task, normalized_error)
-        logger.error(
-            "Prompt error (task=%s, workspace=%s): %s",
-            task_id,
-            workspace_id,
-            normalized_error,
-        )
-
-        self._forward_to_frontend(
-            "session:failed",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "error": normalized_error,
-            },
-            workspace_id,
-        )
-
-    def handle_prompt_cancelled(
-        self,
-        task_id: str,
-        workspace_id: str,
-        target_task_id: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle prompt:cancelled from runner and complete cancel task."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received prompt:cancelled for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        self.tasks.complete(task)
-        logger.info(
-            "Prompt cancellation completed (task=%s, workspace=%s, target=%s)",
-            task_id,
-            workspace_id,
-            target_task_id,
-        )
-
     def handle_workspace_removed(
         self,
         task_id: str,
@@ -2005,9 +1493,7 @@ class RunnerService:
         """Handle workspace:removed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
-            logger.warning(
-                "Received workspace:removed for unknown task: %s", task_id
-            )
+            logger.warning("Received workspace:removed for unknown task: %s", task_id)
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -2101,29 +1587,6 @@ class RunnerService:
             workspace=workspace,
         )
 
-        workspace_credentials = await sync_to_async(
-            CredentialSvc().resolve_workspace_credentials
-        )(workspace)
-        latest_chat = await sync_to_async(
-            lambda: self.chats.list_by_workspace(workspace.id)
-            .order_by("-created_at", "-id")
-            .first()
-        )()
-        terminal_agent_definition_id = latest_chat.agent_definition_id if latest_chat else None
-        configure_commands: list[dict] = []
-        if terminal_agent_definition_id:
-            _, relation_preflight_commands = await sync_to_async(
-                self._build_credential_relation_operation_data
-            )(
-                workspace=workspace,
-                agent_definition_id=terminal_agent_definition_id,
-                phase=AgentCommandPhase.CONFIGURE,
-            )
-            configure_commands = [
-                self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-                for cmd in relation_preflight_commands
-            ]
-
         await self._emit_to_runner(
             runner,
             "task:start_terminal",
@@ -2132,17 +1595,6 @@ class RunnerService:
                 "workspace_id": str(workspace_id),
                 "cols": cols,
                 "rows": rows,
-                "configure_commands": configure_commands,
-                "env_vars": workspace_credentials.env_vars,
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in workspace_credentials.files
-                ],
-                "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
 
@@ -2519,8 +1971,11 @@ class RunnerService:
         container_ip: str,
         network_name: str,
         runner_id: str | None = None,
+        *,
+        viewer: bool = True,
+        computer_use: bool = False,
     ) -> None:
-        """Handle desktop:started event from a runner."""
+        """Handle desktop:started after a viewer lease is acquired."""
         from .sio_server import emit_to_frontend
 
         task = None
@@ -2529,15 +1984,15 @@ class RunnerService:
             if task and not self._validate_task_runner(task, runner_id):
                 return
 
-        desktop_state = {
-            "port": port,
-            "container_ip": container_ip,
-            "network_name": network_name,
-        }
-
         self._record_active_desktop(
             workspace_id,
-            desktop_state,
+            {
+                "port": port,
+                "container_ip": container_ip,
+                "network_name": network_name,
+                "viewer": viewer,
+                "computer_use": computer_use,
+            },
             runner_id=runner_id,
         )
 
@@ -2551,12 +2006,101 @@ class RunnerService:
             container_ip,
         )
 
+        if not task_id:
+            return
+
         await emit_to_frontend(
             "desktop:started",
             {
                 "workspace_id": workspace_id,
                 "task_id": task_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
+                "computer_use_active": computer_use,
+            },
+            workspace_id,
+        )
+
+    async def handle_desktop_process(
+        self,
+        workspace_id: str,
+        port: int,
+        container_ip: str,
+        network_name: str,
+        runner_id: str | None = None,
+        *,
+        viewer: bool = False,
+        computer_use: bool = False,
+    ) -> None:
+        """Record live desktop process routing without a viewer acquire."""
+        self._record_active_desktop(
+            workspace_id,
+            {
+                "port": port,
+                "container_ip": container_ip,
+                "network_name": network_name,
+                "viewer": viewer,
+                "computer_use": computer_use,
+            },
+            runner_id=runner_id,
+        )
+        logger.info(
+            "Desktop process announced: workspace=%s, viewer=%s, computer_use=%s",
+            workspace_id,
+            viewer,
+            computer_use,
+        )
+
+    async def handle_desktop_viewer_released(
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+        *,
+        computer_use_active: bool = False,
+    ) -> None:
+        """Handle viewer lease release while the desktop process stays up."""
+        from .sio_server import emit_to_frontend
+
+        if runner_id:
+            cached = self._desktop_workspace_runner.get(workspace_id)
+            if cached is not None and cached != runner_id:
+                logger.warning(
+                    "desktop:viewer_released rejected: workspace %s is owned by "
+                    "runner %s, not %s",
+                    workspace_id,
+                    cached,
+                    runner_id,
+                )
+                return
+
+        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
+        if task:
+            if not self._validate_task_runner(task, runner_id):
+                return
+            await sync_to_async(self.tasks.complete)(task)
+
+        current = self._active_desktops.get(workspace_id)
+        if current is not None:
+            updated = dict(current)
+            updated["viewer"] = False
+            updated["computer_use"] = computer_use_active
+            self._record_active_desktop(
+                workspace_id,
+                updated,
+                runner_id=runner_id,
+            )
+
+        logger.info(
+            "Desktop viewer released: workspace=%s, computer_use=%s",
+            workspace_id,
+            computer_use_active,
+        )
+        await emit_to_frontend(
+            "desktop:viewer_released",
+            {
+                "workspace_id": workspace_id,
+                "task_id": task_id,
+                "computer_use_active": computer_use_active,
             },
             workspace_id,
         )
@@ -2610,6 +2154,17 @@ class RunnerService:
         """Get cached desktop session info if the runner reported one active."""
         return self._active_desktops.get(workspace_id)
 
+    @staticmethod
+    def _normalize_desktop_state(desktop_state: dict) -> dict:
+        """Normalize runner desktop payloads to the backend cache shape."""
+        return {
+            "port": desktop_state.get("port", 6901),
+            "container_ip": desktop_state.get("container_ip", ""),
+            "network_name": desktop_state.get("network_name", ""),
+            "viewer": bool(desktop_state.get("viewer", False)),
+            "computer_use": bool(desktop_state.get("computer_use", False)),
+        }
+
     def _record_active_desktop(
         self,
         workspace_id: str,
@@ -2618,7 +2173,9 @@ class RunnerService:
         runner_id: str | None = None,
     ) -> None:
         """Persist backend desktop state without performing network I/O."""
-        self._active_desktops[workspace_id] = dict(desktop_state)
+        self._active_desktops[workspace_id] = self._normalize_desktop_state(
+            desktop_state
+        )
         if runner_id:
             self._desktop_workspace_runner[workspace_id] = runner_id
 
@@ -2634,15 +2191,16 @@ class RunnerService:
             self._cleanup_desktop_state(workspace_id)
             return
 
+        normalized = self._normalize_desktop_state(desktop_state)
         current = self._active_desktops.get(workspace_id)
         current_runner = self._desktop_workspace_runner.get(workspace_id)
-        if current == desktop_state and current_runner == runner_id:
+        if current == normalized and current_runner == runner_id:
             return
 
         self._cleanup_desktop_state(workspace_id)
         self._record_active_desktop(
             workspace_id,
-            desktop_state,
+            normalized,
             runner_id=runner_id,
         )
 
@@ -2673,6 +2231,7 @@ class RunnerService:
         _result_event: dict[str, str] = {
             "files:read": "files:content_result",
             "files:list": "files:list_result",
+            "files:find": "files:find_result",
             "files:upload": "files:upload_result",
             "files:download": "files:download_result",
         }
@@ -2697,6 +2256,10 @@ class RunnerService:
                     error_payload.update({"content": "", "size": 0, "truncated": False})
                 elif result_event == "files:list_result":
                     error_payload["entries"] = []
+                elif result_event == "files:find_result":
+                    error_payload["paths"] = []
+                    error_payload["query"] = data.get("query", "")
+                    error_payload["truncated"] = False
                 elif result_event == "files:upload_result":
                     error_payload["status"] = "error"
                 await emit_to_frontend(result_event, error_payload, workspace_id)
@@ -2712,6 +2275,9 @@ class RunnerService:
         runner_id: str | None = None,
     ) -> None:
         """Forward a file result event from runner to subscribed frontends."""
+        routed = self._route_harness_reply(event, data, runner_id=runner_id)
+        if routed is not None:
+            return
         from .sio_server import emit_to_frontend
 
         workspace_id = data.get("workspace_id", "")
@@ -2762,8 +2328,6 @@ class RunnerService:
         if workspace.status != WorkspaceStatus.RUNNING:
             return False
         if workspace.active_operation:
-            return False
-        if bool(getattr(workspace, "has_active_session", False)):
             return False
         runner = getattr(workspace, "runner", None)
         if runner is None or not runner.is_online:
@@ -2818,7 +2382,7 @@ class RunnerService:
         self,
         runner: "Runner",
         workspaces: list[dict],
-    ) -> None:
+    ) -> list[uuid.UUID]:
         """Handle runner:heartbeat event — reconcile workspace state.
 
         Compares the runner's reported container states with the backend's
@@ -2826,7 +2390,10 @@ class RunnerService:
 
         Args:
             runner: The Runner that sent the heartbeat.
-            workspaces: List of dicts with workspace_id, status, agent_type.
+            workspaces: List of dicts with workspace_id and status.
+
+        Returns:
+            Workspace IDs whose on-disk credentials need live reconciliation.
         """
         from django.utils import timezone as tz
 
@@ -2843,9 +2410,7 @@ class RunnerService:
             runner_ws_states[ws_id] = status
 
         # Check backend workspaces for this runner
-        backend_workspaces = list(
-            self.workspaces.list_by_runner(runner.id)
-        )
+        backend_workspaces = list(self.workspaces.list_by_runner(runner.id))
         backend_workspace_ids = {str(ws.id) for ws in backend_workspaces}
         runner_id_str = str(runner.id)
 
@@ -2871,6 +2436,7 @@ class RunnerService:
                 reason="unknown_runtime_workspace",
             )
 
+        credential_sync_ids: list[uuid.UUID] = []
         for ws in backend_workspaces:
             ws_id_str = str(ws.id)
             cleanup_key = (runner_id_str, ws_id_str)
@@ -2915,17 +2481,8 @@ class RunnerService:
                         ws_id_str,
                         runner.id,
                     )
-                    self.workspaces.update_status(
-                        ws, WorkspaceStatus.FAILED
-                    )
-                    self._forward_to_frontend(
-                        "workspace:status_changed",
-                        {
-                            "workspace_id": ws_id_str,
-                            "status": "failed",
-                        },
-                        ws_id_str,
-                    )
+                    self.workspaces.update_status(ws, WorkspaceStatus.FAILED)
+                    self._forward_workspace_status(ws, status="failed")
                 self._cleanup_desktop_state(ws_id_str)
             else:
                 # Map Docker container status to workspace status
@@ -2946,14 +2503,7 @@ class RunnerService:
                         new_status,
                     )
                     self.workspaces.update_status(ws, new_status)
-                    self._forward_to_frontend(
-                        "workspace:status_changed",
-                        {
-                            "workspace_id": ws_id_str,
-                            "status": new_status,
-                        },
-                        ws_id_str,
-                    )
+                    self._forward_workspace_status(ws, status=new_status)
 
                 if not (
                     new_status == WorkspaceStatus.RUNNING
@@ -2961,6 +2511,12 @@ class RunnerService:
                 ):
                     self._cleanup_desktop_state(ws_id_str)
                     continue
+
+                has_credentials = ws.credentials.exists()
+                if (not ws.credentials_present and has_credentials) or (
+                    ws.credentials_present and not has_credentials
+                ):
+                    credential_sync_ids.append(ws.id)
 
                 if "desktop" in runner_payload:
                     self._sync_desktop_state_from_heartbeat(
@@ -2970,6 +2526,7 @@ class RunnerService:
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
+        return credential_sync_ids
 
     def handle_unknown_workspace_cleanup_result(
         self,
@@ -3121,173 +2678,6 @@ class RunnerService:
             raise WorkspaceNotFoundError(str(workspace_id))
         return workspace
 
-    def list_sessions(self, workspace_id: uuid.UUID) -> list["Session"]:
-        """Return all sessions for a workspace."""
-        return list(self.sessions.list_by_workspace(workspace_id))
-
-    def list_chats(self, workspace_id: uuid.UUID) -> list:
-        """Return all chats for a workspace."""
-        return list(self.chats.list_by_workspace(workspace_id))
-
-    def list_chat_sessions(self, chat_id: uuid.UUID) -> list["Session"]:
-        """Return all sessions for a specific chat."""
-        return list(self.sessions.list_by_chat(chat_id))
-
-    def create_chat(
-        self,
-        workspace_id: uuid.UUID,
-        name: str = "",
-        agent_definition_id: uuid.UUID | None = None,
-    ) -> "Chat":
-        """Create a new chat within a workspace."""
-        workspace = self.workspaces.get_by_id(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        # Validate agent exists if specified
-        agent_def = None
-        agent_type = ""
-        if agent_definition_id:
-            agent_def = self.agents.get_visible_by_id(
-                agent_definition_id,
-                workspace.runner.organization_id,
-            )
-            if agent_def is None:
-                raise ValueError(f"Unknown agent definition: '{agent_definition_id}'")
-            agent_type = agent_def.name
-            if agent_def.required_credential_services.exists():
-                required_slugs = self._get_agent_required_credential_service_slugs(agent_def)
-                workspace_slugs = self._get_workspace_credential_service_slugs(workspace)
-                missing_slugs = [slug for slug in required_slugs if slug not in workspace_slugs]
-                if missing_slugs:
-                    raise ConflictError(
-                        "Workspace is missing required credentials for agent "
-                        f"'{agent_def.name}': {', '.join(missing_slugs)}"
-                    )
-
-        return self.chats.create(
-            chat_id=generate_uuid(),
-            workspace=workspace,
-            name=name,
-            agent_definition=agent_def,
-            agent_type=agent_type,
-        )
-
-    def rename_chat(self, chat_id: uuid.UUID, name: str) -> "Chat":
-        """Rename an existing chat."""
-        chat = self.chats.get_by_id(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        trimmed = name.strip()
-        if not trimmed:
-            raise ValueError("Chat name must not be empty")
-        return self.chats.update_name(chat, trimmed)
-
-    def delete_chat(self, chat_id: uuid.UUID) -> None:
-        """Delete a chat and its sessions."""
-        chat = self.chats.get_by_id(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        self.chats.delete(chat_id)
-
-    def mark_conversation_read(
-        self,
-        session_id: uuid.UUID,
-    ) -> None:
-        """
-        Mark a session as read.
-
-        Sets ``read_at`` if the session was previously COMPLETED or FAILED, so
-        that ``ConversationRepository.list_for_user`` reflects ``is_read=True``
-        for the corresponding conversation without overwriting the outcome.
-        """
-        session = self.sessions.get_by_id(session_id)
-        if session is not None:
-            self.sessions.mark_read(session)
-
-    def mark_conversation_unread(
-        self,
-        session_id: uuid.UUID,
-    ) -> None:
-        """
-        Mark a session as unread again.
-
-        Clears ``read_at`` for completed or failed sessions so the frontend can
-        explicitly resurface a reply as unread until the user re-enters the
-        conversation.
-        """
-        session = self.sessions.get_by_id(session_id)
-        if session is not None:
-            self.sessions.mark_unread(session)
-
-    def get_available_agents(
-        self,
-        organization_id: uuid.UUID | None = None,
-        user=None,
-        workspace=None,
-    ) -> list[dict]:
-        """Return agent definitions from the DB with availability metadata.
-
-        When ``workspace`` is provided, availability is calculated against
-        the credentials already attached to the workspace. Otherwise, credential
-        availability falls back to credentials visible to the current user
-        within the organization.
-
-        Note: Agents are independent of runners. All agents are available
-        as long as there is at least one online runner in the organization.
-        """
-        all_agents = list(self.agents.list_all_with_credential_slugs(organization_id=organization_id))
-
-        # Check online runner availability (generic, no agent-specific support).
-        if workspace is not None:
-            has_online_runner = workspace.runner.is_online
-        elif organization_id:
-            has_online_runner = self.runners.list_by_organization(organization_id).filter(
-                status=RunnerStatus.ONLINE
-            ).exists()
-        else:
-            has_online_runner = self.runners.list_online().exists()
-
-        if workspace is not None:
-            available_credential_slugs = self._get_workspace_credential_service_slugs(
-                workspace
-            )
-        else:
-            # Gather credential service slugs the user already has credentials for
-            available_credential_slugs: set[str] = set()
-            if user and organization_id:
-                from apps.credentials.models import Credential
-
-                user_creds = Credential.objects.filter(
-                    user=user,
-                ).select_related("service")
-                org_creds = Credential.objects.filter(
-                    organization__id=organization_id,
-                ).select_related("service")
-                for cred in list(user_creds) + list(org_creds):
-                    if cred.service.slug:
-                        available_credential_slugs.add(cred.service.slug)
-
-        result = []
-        for agent in all_agents:
-            required_slugs = self._get_agent_required_credential_service_slugs(agent)
-            has_credentials = all(
-                slug in available_credential_slugs for slug in required_slugs
-            )
-            result.append(
-                {
-                    "id": str(agent.id),
-                    "name": agent.name,
-                    "description": agent.description,
-                    "available_options": list(agent.available_options or []),
-                    "supports_multi_chat": agent.supports_multi_chat,
-                    "has_online_runner": has_online_runner,
-                    "required_credential_service_slugs": required_slugs,
-                    "has_credentials": has_credentials,
-                }
-            )
-        return result
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -3331,14 +2721,117 @@ class RunnerService:
         try:
             response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
         except SocketIOTimeoutError as exc:
-            raise RuntimeError(
-                f"Runner call timed out for event '{event}'"
-            ) from exc
+            raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
         if response is None:
             return {}
         if isinstance(response, dict):
             return response
         return {"result": response}
+
+    def _route_harness_reply(
+        self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> bool | None:
+        """Route harness reply events to the owning accessor.
+
+        Returns None when *event* is not a harness reply, True when the
+        payload was routed to an accessor (or dropped after validation),
+        in which case callers must not forward it to the frontend.
+        """
+        harness_events = {
+            "harness:exec_chunk",
+            "harness:exec_done",
+            "harness:exec_wait_result",
+            "harness:read_file_result",
+            "harness:write_file_result",
+            "harness:list_result",
+            "harness:stat_result",
+            "harness:desktop_action_result",
+        }
+        if event not in harness_events:
+            return None
+        from apps.harness.access.runner_accessor import (
+            route_harness_chunk,
+            route_harness_done,
+            route_harness_result,
+        )
+
+        workspace_id = data.get("workspace_id", "")
+        if runner_id and workspace_id:
+            try:
+                workspace_id_uuid = uuid.UUID(workspace_id)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "%s rejected: invalid workspace_id %s",
+                    event,
+                    workspace_id,
+                )
+                return True
+            if not self._validate_harness_workspace_runner(
+                workspace_id_uuid, runner_id
+            ):
+                return True
+        if event == "harness:exec_chunk":
+            route_harness_chunk(data)
+        elif event == "harness:exec_done":
+            route_harness_done(data)
+        else:
+            route_harness_result(data)
+        return True
+
+    def _validate_harness_workspace_runner(
+        self,
+        workspace_id: uuid.UUID,
+        runner_id: str,
+    ) -> bool:
+        """Return True when *workspace_id* belongs to *runner_id* (sync)."""
+        try:
+            claimed_runner_id = uuid.UUID(str(runner_id))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "harness reply rejected: invalid runner_id %s",
+                runner_id,
+            )
+            return False
+        owner_id = self.workspaces.get_runner_id(workspace_id)
+        if owner_id is None:
+            logger.warning(
+                "harness reply rejected: workspace %s not found",
+                workspace_id,
+            )
+            return False
+        if owner_id != claimed_runner_id:
+            logger.warning(
+                "harness reply rejected: workspace %s not owned by %s",
+                workspace_id,
+                runner_id,
+            )
+            return False
+        return True
+
+    async def emit_harness_event(
+        self,
+        runner: "Runner",
+        event: str,
+        payload: dict,
+    ) -> None:
+        """Emit a harness RPC event to the runner owning a workspace."""
+        await self._emit_to_runner(runner, event, payload)
+
+    def handle_harness_reply(
+        self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> None:
+        """Route a harness reply from a runner to its accessor (sync).
+
+        Called from Socket.IO handlers via ``sync_to_async``. Harness
+        operations never touch the frontend event bus.
+        """
+        self._route_harness_reply(event, data, runner_id=runner_id)
 
     def _forward_to_frontend(
         self,
@@ -3407,7 +2900,7 @@ class RunnerService:
         """Return Dockerfile lines that install KasmVNC desktop session support."""
         return """# --- KasmVNC desktop session support ---
 RUN apt-get update && apt-get install -y \\
-    xfonts-base openbox dbus-x11 x11-xserver-utils \\
+    xfonts-base openbox dbus-x11 x11-xserver-utils ffmpeg xdotool \\
     libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
@@ -3440,134 +2933,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
 
     @staticmethod
     def _desktop_session_init_script_block() -> str:
-        """Return shell script lines that install KasmVNC in a QEMU init script."""
-        return """
-# --- KasmVNC desktop session support ---
-apt-get update
-apt-get install -y xfonts-base openbox dbus-x11 x11-xserver-utils \\
-    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
-    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
-    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 wget ca-certificates
-(apt-get install -y libasound2t64 || apt-get install -y libasound2)
-
-wget -q -O /tmp/kasmvnc.deb \\
-    "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
-apt-get install -y /tmp/kasmvnc.deb || true
-apt-get install -f -y
-rm -f /tmp/kasmvnc.deb
-
-wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
-rm -f /tmp/google-chrome.deb
-
-# Pre-configure KasmVNC
-mkdir -p /root/.vnc
-touch /root/.vnc/.de-was-selected
-printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true
-
-cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
-desktop:
-  resolution:
-    width: 1920
-    height: 1080
-  allow_resize: true
-network:
-  protocol: http
-  interface: 0.0.0.0
-  websocket_port: 6901
-  ssl:
-    require_ssl: false
-    pem_certificate:
-    pem_key:
-KASMCFG
-
-cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
-#!/bin/bash
-set -eu
-for browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do
-  if [ "${browser#/}" != "$browser" ]; then
-    if [ -x "$browser" ]; then
-      exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
-    fi
-    continue
-  fi
-  if command -v "$browser" >/dev/null 2>&1; then
-    if [ "$browser" = "chromium-browser" ] && ! chromium-browser --version >/dev/null 2>&1; then
-      continue
-    fi
-    exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
-  fi
-done
-echo "No supported browser binary found for desktop session" >&2
-BROWSER
-
-cat >/root/.vnc/xstartup <<'XSTARTUP'
-#!/bin/bash
-export DISPLAY=:1
-export HOME=/root
-openbox-session &
-sleep 1
-/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
-wait
-XSTARTUP
-chmod +x /root/.vnc/xstartup
-chmod +x /usr/local/bin/opencuria-desktop-browser
-
-cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
-#!/bin/bash
-set -e
-export DISPLAY=:1
-export HOME=/root
-/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
-mkdir -p /root/.vnc
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-# Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
-/usr/bin/Xvnc :1 \
-    -geometry 1920x1080 \
-    -depth 24 \
-    -rfbport 5901 \
-    -SecurityTypes None \
-    -disableBasicAuth \
-    -websocketPort 6901 \
-    -httpd /usr/share/kasmvnc/www \
-    -interface 0.0.0.0 \
-    -AlwaysShared \
-    -AcceptKeyEvents \
-    -AcceptPointerEvents \
-    -AcceptSetDesktopSize \
-    -SendCutText \
-    -AcceptCutText \
-    >>/root/.vnc/server.log 2>&1 &
-
-for _ in $(seq 1 120); do
-  if [ -e /tmp/.X11-unix/X1 ]; then
-    # Start the window manager and browser via xstartup
-    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
-    echo "Desktop session started on :1 (ws port 6901)"
-    exit 0
-  fi
-  sleep 0.25
-done
-echo "Desktop session failed to start" >&2
-exit 1
-DESKSTART
-
-cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
-#!/bin/bash
-# Stop Xvnc and all desktop processes
-for pid in $(pgrep -f 'Xvnc.*:1' 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-done
-for pid in $(pgrep -f 'openbox' 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-done
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-DESKSTOP
-
-chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
-rm -rf /var/lib/apt/lists/*
-"""
+        """Return shell script lines that install the QEMU KasmVNC desktop."""
+        script_path = (
+            Path(__file__).resolve().parent / "scripts" / "qemu_desktop_session.sh"
+        )
+        return "\n" + script_path.read_text(encoding="utf-8").strip() + "\n"
 
     @classmethod
     def _build_qemu_init_script_content(cls, definition) -> str:
@@ -3660,6 +3030,7 @@ rm -rf /var/lib/apt/lists/*
 
     def list_image_definitions(self, organization_id: uuid.UUID) -> list:
         """List image definitions for an organization."""
+        self.timeout_stale_image_operations()
         return list(self.image_definitions.list_by_org(organization_id))
 
     def list_build_jobs(
@@ -3668,12 +3039,121 @@ rm -rf /var/lib/apt/lists/*
         organization_id: uuid.UUID,
     ) -> list:
         """List runner build records for an image definition."""
+        self.timeout_stale_image_operations()
         return list(
             self.build_jobs.list_for_definition(
                 image_definition_id,
                 organization_id=organization_id,
             )
         )
+
+    def timeout_stale_image_operations(self, *, timeout_hours: int = 1) -> None:
+        """Fail hung builds and stuck deletions so the UI can retry."""
+        from .models import ImageDefinition, ImageInstance
+
+        cutoff = timezone.now() - timedelta(hours=timeout_hours)
+        stale_message = f"Timed out after {timeout_hours}h without progress"
+
+        def _instance_or_none(build):
+            try:
+                return build.image_instance
+            except ImageInstance.DoesNotExist:
+                return None
+
+        for build in self.build_jobs.list_stale_builds(cutoff=cutoff):
+            self.build_jobs.mark_failed(build.id, error=stale_message)
+            instance = _instance_or_none(build)
+            if instance is not None and instance.status in {
+                ImageInstance.Status.BUILDING,
+                ImageInstance.Status.CAPTURING,
+            }:
+                self.image_instances.mark_failed(instance.id)
+
+        for build in self.build_jobs.list_stale_deletes(cutoff=cutoff):
+            self.build_jobs.mark_delete_failed(build.id, error=stale_message)
+            instance = _instance_or_none(build)
+            if instance is not None and instance.status in {
+                ImageInstance.Status.PENDING_DELETION,
+                ImageInstance.Status.DELETING,
+            }:
+                self.image_instances.mark_delete_failed(
+                    instance.id, error=stale_message
+                )
+            self._mark_definition_delete_failed(
+                build.image_definition_id,
+                error=stale_message,
+            )
+
+        deleting_definitions = ImageDefinition.objects.filter(
+            status__in=[
+                ImageDefinition.Status.PENDING_DELETION,
+                ImageDefinition.Status.DELETING,
+            ]
+        )
+        for definition in deleting_definitions:
+            self._check_definition_deletion_complete(definition.id)
+            definition.refresh_from_db()
+            if definition.status not in {
+                ImageDefinition.Status.PENDING_DELETION,
+                ImageDefinition.Status.DELETING,
+            }:
+                continue
+            if self.build_jobs.list_in_progress_deletes_for_definition(
+                definition.id
+            ).exists():
+                continue
+            self._mark_definition_delete_failed(
+                definition.id,
+                error=stale_message,
+            )
+
+    def _ensure_definition_mutable(self, definition) -> None:
+        """Reject runner mutations while a definition is deleted or being removed."""
+        from .models import ImageDefinition
+
+        if definition.status in {
+            ImageDefinition.Status.PENDING_DELETION,
+            ImageDefinition.Status.DELETING,
+            ImageDefinition.Status.DELETED,
+            ImageDefinition.Status.DELETE_FAILED,
+        }:
+            raise ConflictError(
+                f"Cannot modify image definition in state '{definition.status}'"
+            )
+
+    async def activate_build_job(self, build, *, created_by=None):
+        """Make an existing runner image selectable, or build it if none exists."""
+        from .models import ImageBuildJob, ImageInstance
+
+        self._ensure_definition_mutable(build.image_definition)
+        instance = await sync_to_async(self.image_instances.get_by_build_job_id)(
+            build.id
+        )
+        has_ready_image = (
+            build.built_at is not None
+            and instance is not None
+            and instance.status
+            in {ImageInstance.Status.READY, ImageInstance.Status.RETIRED}
+            and bool(instance.runner_ref)
+        )
+        if not has_ready_image:
+            return await self.trigger_build_job(
+                image_definition=build.image_definition,
+                runner=build.runner,
+                activate=True,
+                created_by=created_by,
+            )
+
+        build.status = ImageBuildJob.Status.ACTIVE
+        build.deactivated_at = None
+        await sync_to_async(build.save)(
+            update_fields=["status", "deactivated_at", "updated_at"]
+        )
+        if instance.status == ImageInstance.Status.RETIRED:
+            await sync_to_async(self.image_instances.mark_ready_from_retired)(
+                instance.id
+            )
+        return build
 
     async def trigger_build_job(
         self,
@@ -3690,10 +3170,19 @@ rm -rf /var/lib/apt/lists/*
             runner=runner,
             runtime_type=image_definition.runtime_type,
         )
+        self._ensure_definition_mutable(image_definition)
 
         existing = await sync_to_async(self.build_jobs.get)(
             image_definition.id, runner.id
         )
+        if existing is not None and existing.status in {
+            ImageBuildJob.Status.PENDING_DELETION,
+            ImageBuildJob.Status.DELETING,
+        }:
+            raise ConflictError(
+                f"Build job is already in deletion state '{existing.status}'"
+            )
+
         if existing is None:
             build = await sync_to_async(ImageBuildJob.objects.create)(
                 image_definition=image_definition,
@@ -3702,17 +3191,46 @@ rm -rf /var/lib/apt/lists/*
             )
         else:
             build = existing
-            build.status = ImageBuildJob.Status.PENDING
-            if not activate:
-                build.status = ImageBuildJob.Status.DEACTIVATED
-            await sync_to_async(build.save)(update_fields=["status", "updated_at"])
+            build.status = (
+                ImageBuildJob.Status.DEACTIVATED
+                if not activate
+                else ImageBuildJob.Status.PENDING
+            )
+            build.build_task = None
+            build.deleting_task_id = None
+            build.delete_requested_at = None
+            build.delete_started_at = None
+            build.delete_confirmed_at = None
+            build.delete_last_error = ""
+            await sync_to_async(build.save)(
+                update_fields=[
+                    "status",
+                    "build_task",
+                    "deleting_task_id",
+                    "delete_requested_at",
+                    "delete_started_at",
+                    "delete_confirmed_at",
+                    "delete_last_error",
+                    "updated_at",
+                ]
+            )
 
         if not activate:
             existing_image = await sync_to_async(
                 self.image_instances.get_by_build_job_id
             )(build.id)
             if existing_image is not None:
-                await sync_to_async(self.image_instances.mark_retired)(existing_image.id)
+                await sync_to_async(self.image_instances.mark_retired)(
+                    existing_image.id
+                )
+            return build
+
+        if not runner.sid:
+            logger.info(
+                "Runner %s is offline; leaving image build %s pending",
+                runner.id,
+                build.id,
+            )
             return build
 
         if image_definition.runtime_type == RuntimeType.QEMU:
@@ -3728,15 +3246,11 @@ rm -rf /var/lib/apt/lists/*
             if image_definition.runtime_type == RuntimeType.DOCKER
             else f"/var/lib/opencuria/base-images/{build.id}.qcow2"
         )
-        await sync_to_async(
-            ImageBuildJob.objects.filter(id=build.id).update
-        )(
+        await sync_to_async(ImageBuildJob.objects.filter(id=build.id).update)(
             build_task=task,
             status=ImageBuildJob.Status.PENDING,
         )
-        image = await sync_to_async(
-            self.image_instances.get_by_build_job_id
-        )(build.id)
+        image = await sync_to_async(self.image_instances.get_by_build_job_id)(build.id)
         image_name = f"{image_definition.name} ({runner.name})"
         if image is None:
             await sync_to_async(self.image_instances.create_pending)(
@@ -3771,9 +3285,11 @@ rm -rf /var/lib/apt/lists/*
                 ]
             )
 
-        build = await sync_to_async(ImageBuildJob.objects.select_related(
-            "image_definition", "runner", "build_task"
-        ).get)(id=build.id)
+        build = await sync_to_async(
+            ImageBuildJob.objects.select_related(
+                "image_definition", "runner", "build_task"
+            ).get
+        )(id=build.id)
 
         payload = {
             "task_id": str(task.id),
@@ -3803,9 +3319,7 @@ rm -rf /var/lib/apt/lists/*
         from .models import ImageBuildJob
 
         try:
-            build = ImageBuildJob.objects.select_related("runner").get(
-                id=build_job_id
-            )
+            build = ImageBuildJob.objects.select_related("runner").get(id=build_job_id)
         except ImageBuildJob.DoesNotExist:
             return
         if runner_id and str(build.runner_id) != str(runner_id):
@@ -3836,12 +3350,8 @@ rm -rf /var/lib/apt/lists/*
         build = ImageBuildJob.objects.get(id=build_job_id)
         build.status = ImageBuildJob.Status.ACTIVE
         build.built_at = timezone.now()
-        build.save(
-            update_fields=["status", "built_at", "updated_at"]
-        )
-        image = self.image_instances.get_by_build_job_id(
-            uuid.UUID(build_job_id)
-        )
+        build.save(update_fields=["status", "built_at", "updated_at"])
+        image = self.image_instances.get_by_build_job_id(uuid.UUID(build_job_id))
         runner_ref = image_tag or image_path
         image_name = f"{build.image_definition.name} ({build.runner.name})"
         if image is None:
@@ -3892,9 +3402,7 @@ rm -rf /var/lib/apt/lists/*
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.FAILED
         )
-        image = self.image_instances.get_by_build_job_id(
-            uuid.UUID(build_job_id)
-        )
+        image = self.image_instances.get_by_build_job_id(uuid.UUID(build_job_id))
         if image is not None:
             self.image_instances.mark_failed(image.id)
         if task is not None:
@@ -3923,6 +3431,21 @@ rm -rf /var/lib/apt/lists/*
         if organization_id and workspace.runner.organization_id != organization_id:
             raise WorkspaceNotFoundError(str(workspace_id))
         self._ensure_workspace_available(workspace)
+
+        if workspace.status not in (
+            WorkspaceStatus.RUNNING,
+            WorkspaceStatus.STOPPED,
+        ):
+            raise WorkspaceStateError(
+                f"Workspace '{workspace_id}' is '{workspace.status}', "
+                "must be running or stopped to capture an image"
+            )
+        if workspace.credentials_present:
+            raise ConflictError(
+                "Workspace still has credentials on disk and cannot be captured. "
+                "Stop the workspace to remove them first. If it was stopped "
+                "externally, resume it and stop it again."
+            )
 
         runner = workspace.runner
         if not runner.is_online:
@@ -4082,6 +3605,7 @@ rm -rf /var/lib/apt/lists/*
     ) -> None:
         """Delete an image instance safely and dispatch cleanup to the runner if needed."""
         from .models import ImageInstance
+
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -4104,7 +3628,10 @@ rm -rf /var/lib/apt/lists/*
             )
 
         # Built images can only be deleted via their build job
-        if image.origin_type == ImageInstance.OriginType.DEFINITION_BUILD and image.build_job_id:
+        if (
+            image.origin_type == ImageInstance.OriginType.DEFINITION_BUILD
+            and image.build_job_id
+        ):
             raise ConflictError(
                 f"Built image artifact '{image_artifact_id}' can only be deleted via its runner build job"
             )
@@ -4119,7 +3646,9 @@ rm -rf /var/lib/apt/lists/*
                     f"Image artifact '{image_artifact_id}' cannot be deleted while it is still {image.status}"
                 )
             await sync_to_async(self.image_instances.mark_deleted)(image_artifact_id)
-            logger.info("Image artifact deleted without runner cleanup: %s", image_artifact_id)
+            logger.info(
+                "Image artifact deleted without runner cleanup: %s", image_artifact_id
+            )
             return
 
         task_id = generate_uuid()
@@ -4146,7 +3675,9 @@ rm -rf /var/lib/apt/lists/*
             )
             await sync_to_async(self.tasks.mark_in_progress)(task)
         else:
-            await sync_to_async(self.image_instances.mark_pending_deletion)(image_artifact_id)
+            await sync_to_async(self.image_instances.mark_pending_deletion)(
+                image_artifact_id
+            )
 
         logger.info("Image artifact marked for deletion: %s", image_artifact_id)
 
@@ -4178,9 +3709,13 @@ rm -rf /var/lib/apt/lists/*
             image = self.image_instances.get_by_task_id(task_id)
         if image is None and runner_ref and runner_id:
             pending = list(
-                self.image_instances.list_pending_delete_for_runner(uuid.UUID(runner_id))
+                self.image_instances.list_pending_delete_for_runner(
+                    uuid.UUID(runner_id)
+                )
             )
-            image = next((item for item in pending if item.runner_ref == runner_ref), None)
+            image = next(
+                (item for item in pending if item.runner_ref == runner_ref), None
+            )
 
         if image is not None:
             self.image_instances.mark_deleted(image.id)
@@ -4287,7 +3822,9 @@ rm -rf /var/lib/apt/lists/*
             # Runner offline
             await sync_to_async(self.build_jobs.mark_pending_deletion)(build_job_id)
             if instance:
-                await sync_to_async(self.image_instances.mark_pending_deletion)(instance.id)
+                await sync_to_async(self.image_instances.mark_pending_deletion)(
+                    instance.id
+                )
         else:
             # No physical artifact to clean up
             await sync_to_async(self.build_jobs.mark_deleted)(build_job_id)
@@ -4374,7 +3911,9 @@ rm -rf /var/lib/apt/lists/*
             return
         self.image_definitions.mark_delete_failed(definition_id, error=error)
 
-    def _mark_definition_deleting_if_needed(self, definition_id: uuid.UUID | None) -> None:
+    def _mark_definition_deleting_if_needed(
+        self, definition_id: uuid.UUID | None
+    ) -> None:
         """Promote a pending definition delete to deleting once runner cleanup starts."""
         if definition_id is None:
             return
@@ -4393,7 +3932,9 @@ rm -rf /var/lib/apt/lists/*
 
     async def deactivate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Deactivate a definition — immediately not selectable for new workspaces."""
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
         await sync_to_async(self.image_definitions.deactivate)(definition_id)
@@ -4402,16 +3943,30 @@ rm -rf /var/lib/apt/lists/*
     async def activate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Re-activate a deactivated definition."""
         from .models import ImageDefinition
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
         if definition.status not in (
             ImageDefinition.Status.DEACTIVATED,
             ImageDefinition.Status.ACTIVE,
+            ImageDefinition.Status.DELETE_FAILED,
         ):
             raise ConflictError(
                 f"Cannot activate definition in state '{definition.status}'"
             )
+        if definition.status == ImageDefinition.Status.DELETE_FAILED:
+            in_progress = await sync_to_async(
+                lambda: self.build_jobs.list_in_progress_deletes_for_definition(
+                    definition_id
+                ).exists()
+            )()
+            if in_progress:
+                raise ConflictError(
+                    "Cannot restore while runner image removal is still in progress"
+                )
         await sync_to_async(self.image_definitions.activate)(definition_id)
         logger.info("Image definition activated: %s", definition_id)
 
@@ -4424,7 +3979,9 @@ rm -rf /var/lib/apt/lists/*
         """
         from .models import ImageDefinition, ImageBuildJob
 
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
 
@@ -4494,6 +4051,7 @@ rm -rf /var/lib/apt/lists/*
             try:
                 # Find existing task
                 from .models import Task as TaskModel
+
                 task = await sync_to_async(
                     lambda: TaskModel.objects.filter(
                         workspace=ws,
@@ -4527,7 +4085,8 @@ rm -rf /var/lib/apt/lists/*
             except Exception:
                 logger.exception(
                     "Failed to dispatch pending workspace deletion %s for runner %s",
-                    ws.id, runner.id,
+                    ws.id,
+                    runner.id,
                 )
         return dispatched
 
@@ -4541,7 +4100,9 @@ rm -rf /var/lib/apt/lists/*
 
         dispatched = []
         for build in pending:
-            instance = await sync_to_async(lambda: getattr(build, "image_instance", None))()
+            instance = await sync_to_async(
+                lambda: getattr(build, "image_instance", None)
+            )()
             if not instance or not instance.runner_ref:
                 continue
             try:
@@ -4596,7 +4157,8 @@ rm -rf /var/lib/apt/lists/*
             except Exception:
                 logger.exception(
                     "Failed to dispatch pending build deletion %s for runner %s",
-                    build.id, runner.id,
+                    build.id,
+                    runner.id,
                 )
         return dispatched
 
@@ -4613,9 +4175,9 @@ rm -rf /var/lib/apt/lists/*
     ) -> tuple["Workspace", "Task"]:
         """Create a workspace from an image artifact.
 
-        Credentials are explicitly supplied by the caller and injected for the
-        create operation only. Captured artifacts do not retain credential
-        associations.
+        Credentials are explicitly supplied by the caller and persisted in
+        the new workspace until a controlled stop. Captured artifacts do
+        not retain credential associations.
         """
         credential_svc = CredentialSvc()
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
@@ -4676,7 +4238,9 @@ rm -rf /var/lib/apt/lists/*
         resolved_ssh_keys = ssh_keys or []
 
         if credentials is not None:
-            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(credentials)
+            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(
+                credentials
+            )
 
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)

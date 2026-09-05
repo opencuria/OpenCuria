@@ -3,16 +3,11 @@ from __future__ import annotations
 from django.contrib import admin
 
 from .models import (
-    AgentCommand,
-    AgentDefinition,
-    Chat,
     ImageDefinition,
     ImageInstance,
-    OrgAgentDefinitionActivation,
     Runner,
     ImageBuildJob,
     RunnerSystemMetrics,
-    Session,
     Task,
     Workspace,
 )
@@ -32,58 +27,10 @@ class WorkspaceAdmin(admin.ModelAdmin):
     readonly_fields = ["id", "created_at", "updated_at"]
 
 
-@admin.register(Session)
-class SessionAdmin(admin.ModelAdmin):
-    list_display = ["id", "chat", "status", "created_at", "completed_at"]
-    list_filter = ["status"]
-    readonly_fields = ["id", "created_at"]
-
-
-@admin.register(Chat)
-class ChatAdmin(admin.ModelAdmin):
-    list_display = ["id", "workspace", "name", "created_at"]
-    readonly_fields = ["id", "created_at", "updated_at"]
-
-
 @admin.register(Task)
 class TaskAdmin(admin.ModelAdmin):
     list_display = ["id", "runner", "type", "status", "created_at", "completed_at"]
     list_filter = ["type", "status"]
-    readonly_fields = ["id", "created_at"]
-
-
-class AgentCommandInline(admin.TabularInline):
-    model = AgentCommand
-    extra = 0
-    ordering = ["phase", "order"]
-
-
-@admin.register(AgentDefinition)
-class AgentDefinitionAdmin(admin.ModelAdmin):
-    list_display = ["name", "description", "supports_multi_chat", "created_at"]
-    search_fields = [
-        "name",
-        "description",
-        "required_credential_services__name",
-        "required_credential_services__slug",
-    ]
-    filter_horizontal = ["required_credential_services"]
-    inlines = [AgentCommandInline]
-
-
-@admin.register(AgentCommand)
-class AgentCommandAdmin(admin.ModelAdmin):
-    list_display = ["id", "agent", "phase", "order", "description"]
-    list_filter = ["phase", "agent"]
-    search_fields = ["agent__name", "description"]
-    readonly_fields = ["id"]
-
-
-@admin.register(OrgAgentDefinitionActivation)
-class OrgAgentDefinitionActivationAdmin(admin.ModelAdmin):
-    list_display = ["id", "organization", "agent_definition", "created_at"]
-    list_filter = ["organization", "agent_definition"]
-    search_fields = ["organization__name", "agent_definition__name"]
     readonly_fields = ["id", "created_at"]
 
 

@@ -2,7 +2,7 @@
  * Socket.IO client for real-time frontend updates.
  *
  * Connects to the backend's /frontend namespace to receive
- * workspace status changes and streaming prompt output.
+ * workspace status changes and harness streaming events.
  *
  * The client is a singleton — call `connect()` once on app init
  * and `disconnect()` on teardown.
@@ -14,10 +14,35 @@ import { getConfig } from './config'
 import { tryRefreshToken } from './api'
 import type {
   FilesListResultEvent,
+  FilesFindResultEvent,
   FilesContentResultEvent,
   FilesUploadResultEvent,
   FilesDownloadResultEvent,
 } from '@/types'
+import type {
+  HarnessPartUpdatedEvent,
+  HarnessPermissionRequiredEvent,
+  HarnessPermissionResolvedEvent,
+  HarnessQuestionRequiredEvent,
+  HarnessQuestionResolvedEvent,
+  HarnessSessionStatusEvent,
+  HarnessSubtaskFinishedEvent,
+  HarnessSubtaskStartedEvent,
+  HarnessTodoUpdatedEvent,
+} from '@/types/harness'
+
+// Re-exported for socket listeners in harness views (avoids a second import).
+export type {
+  HarnessPartUpdatedEvent,
+  HarnessPermissionRequiredEvent,
+  HarnessPermissionResolvedEvent,
+  HarnessQuestionRequiredEvent,
+  HarnessQuestionResolvedEvent,
+  HarnessSessionStatusEvent,
+  HarnessSubtaskFinishedEvent,
+  HarnessSubtaskStartedEvent,
+  HarnessTodoUpdatedEvent,
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -58,43 +83,12 @@ export interface WorkspaceStatusEvent {
   workspace_id: string
   status: string
   task_id?: string
+  credentials_present?: boolean
 }
 
 export interface WorkspaceOperationEvent {
   workspace_id: string
   active_operation: string | null
-}
-
-export interface OutputChunkEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  line: string
-}
-
-export interface SessionCompleteEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-}
-
-export interface SessionFailedEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  error: string
-}
-
-export interface SessionStatusEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  status: string
-  detail: string
 }
 
 export interface WorkspaceErrorEvent {
@@ -124,11 +118,18 @@ export interface DesktopStartedEvent {
   workspace_id: string
   task_id: string
   proxy_url: string
+  computer_use_active?: boolean
 }
 
 export interface DesktopStoppedEvent {
   workspace_id: string
   task_id: string
+}
+
+export interface DesktopViewerReleasedEvent {
+  workspace_id: string
+  task_id: string
+  computer_use_active: boolean
 }
 
 export interface RunnerOfflineEvent {
@@ -146,16 +147,21 @@ type EventMap = {
   'workspace:status_changed': WorkspaceStatusEvent
   'workspace:operation_changed': WorkspaceOperationEvent
   'workspace:error': WorkspaceErrorEvent
-  'session:output_chunk': OutputChunkEvent
-  'session:status': SessionStatusEvent
-  'session:completed': SessionCompleteEvent
-  'session:failed': SessionFailedEvent
+  'harness.part_updated': HarnessPartUpdatedEvent
+  'harness.permission_required': HarnessPermissionRequiredEvent
+  'harness.question_required': HarnessQuestionRequiredEvent
+  'harness.session_status': HarnessSessionStatusEvent
+  'harness.todo_updated': HarnessTodoUpdatedEvent
+  'harness.subtask_started': HarnessSubtaskStartedEvent
+  'harness.subtask_finished': HarnessSubtaskFinishedEvent
   'terminal:started': TerminalStartedEvent
   'terminal:output': TerminalOutputEvent
   'terminal:closed': TerminalClosedEvent
   'desktop:started': DesktopStartedEvent
   'desktop:stopped': DesktopStoppedEvent
+  'desktop:viewer_released': DesktopViewerReleasedEvent
   'files:list_result': FilesListResultEvent
+  'files:find_result': FilesFindResultEvent
   'files:content_result': FilesContentResultEvent
   'files:upload_result': FilesUploadResultEvent
   'files:download_result': FilesDownloadResultEvent
@@ -407,6 +413,28 @@ export function sendFilesList(
     request_id: requestId,
     path,
   })
+}
+
+/**
+ * Search workspace files for `@` mention autocomplete.
+ *
+ * Returns false when the socket is not connected so callers can resolve
+ * immediately instead of waiting for a result that will never arrive.
+ */
+export function sendFilesFind(
+  workspaceId: string,
+  requestId: string,
+  query: string,
+  limit: number,
+): boolean {
+  if (!socket) return false
+  socket.emit('frontend:files_find', {
+    workspace_id: workspaceId,
+    request_id: requestId,
+    query,
+    limit,
+  })
+  return true
 }
 
 /**

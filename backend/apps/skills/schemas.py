@@ -8,14 +8,6 @@ from datetime import datetime
 from ninja import Schema
 
 
-class SessionSkillOut(Schema):
-    """Snapshot of a skill attached to a session."""
-
-    id: uuid.UUID
-    skill_id: uuid.UUID | None
-    name: str
-    body: str
-    created_at: datetime
 
 
 class SkillOut(Schema):

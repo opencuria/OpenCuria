@@ -19,8 +19,9 @@ import {
   sendTerminalResize,
   sendTerminalClose,
 } from '@/services/socket'
-import { UiButton, UiSpinner } from '@/components/ui'
-import { X, Minus } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { X, Minus } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -292,14 +293,14 @@ watch(
           v-if="terminalStore.isConnected"
           class="inline-block w-1.5 h-1.5 rounded-full bg-green-500"
         />
-        <UiSpinner v-else-if="connecting" :size="12" />
+        <LoadingSpinner v-else-if="connecting" :size="12" />
         <span
           v-else
           class="inline-block w-1.5 h-1.5 rounded-full bg-red-500"
         />
       </div>
       <div class="flex items-center gap-1">
-        <UiButton
+        <Button
           v-if="!terminalStore.isConnected && !connecting"
           size="sm"
           variant="ghost"
@@ -307,7 +308,7 @@ watch(
           @click="connectTerminal"
         >
           Reconnect
-        </UiButton>
+        </Button>
         <button
           class="p-1 rounded hover:bg-[#1e3545] text-[#94a3b8] hover:text-white transition-colors"
           title="Minimize"
@@ -335,9 +336,9 @@ watch(
     >
       <div class="text-center">
         <p class="text-red-400 text-sm mb-2">{{ error }}</p>
-        <UiButton size="sm" variant="outline" @click="connectTerminal">
+        <Button size="sm" variant="outline" @click="connectTerminal">
           Retry
-        </UiButton>
+        </Button>
       </div>
     </div>
   </div>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from .models import SessionSkill, Skill
+from .models import Skill
 
 
 @admin.register(Skill)
@@ -13,9 +13,3 @@ class SkillAdmin(admin.ModelAdmin):
     readonly_fields = ["id", "created_at", "updated_at"]
 
 
-@admin.register(SessionSkill)
-class SessionSkillAdmin(admin.ModelAdmin):
-    list_display = ["id", "session", "skill", "name", "created_at"]
-    list_filter = ["created_at"]
-    search_fields = ["name", "session__id"]
-    readonly_fields = ["id", "created_at"]

@@ -3,6 +3,10 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -28,46 +32,39 @@ async function handleCreate() {
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-bg px-4">
-    <div
-      class="w-full max-w-md bg-surface rounded-[var(--radius-lg)] shadow-lg p-8 border border-border"
-    >
-      <!-- Brand -->
-      <div class="flex items-center gap-3 mb-8 justify-center">
-        <OpenCuriaLogo class="h-10 w-auto" alt="OpenCuria" />
-      </div>
-
-      <h2 class="text-lg font-semibold text-fg mb-2 text-center">Create your organization</h2>
-      <p class="text-sm text-muted-fg text-center mb-6">
-        You need an organization to start managing runners and workspaces.
-      </p>
-
-      <form @submit.prevent="handleCreate" class="space-y-4">
-        <div>
-          <label for="orgName" class="block text-sm font-medium text-fg mb-1.5">
-            Organization name
-          </label>
-          <input
-            id="orgName"
-            v-model="name"
-            type="text"
-            required
-            class="w-full px-3 py-2.5 bg-bg border border-border rounded-[var(--radius-md)] text-fg text-sm placeholder:text-muted-fg focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors"
-            placeholder="My Company"
-          />
+  <div class="min-h-screen flex items-center justify-center bg-background px-4">
+    <Card class="w-full max-w-md">
+      <CardContent class="pt-6">
+        <div class="flex items-center gap-3 mb-6 justify-center">
+          <OpenCuriaLogo class="h-10 w-auto" alt="OpenCuria" />
         </div>
 
-        <!-- Error message -->
-        <p v-if="error" class="text-sm text-error">{{ error }}</p>
+        <CardHeader class="px-0 pb-4 text-center">
+          <CardTitle>Create your organization</CardTitle>
+          <CardDescription>
+            You need an organization to start managing runners and workspaces.
+          </CardDescription>
+        </CardHeader>
 
-        <button
-          type="submit"
-          :disabled="authStore.loading"
-          class="w-full py-2.5 px-4 bg-primary text-primary-fg rounded-[var(--radius-md)] text-sm font-medium hover:bg-primary-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-        >
-          {{ authStore.loading ? 'Creating...' : 'Create organization' }}
-        </button>
-      </form>
-    </div>
+        <form @submit.prevent="handleCreate" class="space-y-4">
+          <div class="space-y-2">
+            <Label for="orgName">Organization name</Label>
+            <Input
+              id="orgName"
+              v-model="name"
+              type="text"
+              required
+              placeholder="My Company"
+            />
+          </div>
+
+          <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
+
+          <Button type="submit" class="w-full" :disabled="authStore.loading">
+            {{ authStore.loading ? 'Creating...' : 'Create organization' }}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   </div>
 </template>

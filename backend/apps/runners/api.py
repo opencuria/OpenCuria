@@ -10,7 +10,6 @@ Organization context is passed via X-Organization-Id header.
 Split into separate routers to avoid URL path conflicts:
 - runner_router    → /api/v1/runners/
 - workspace_router → /api/v1/workspaces/
-- agent_router     → /api/v1/agents/
 """
 
 from __future__ import annotations
@@ -32,48 +31,25 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_api_token, hash_token
 
-from .enums import RunnerStatus as RS, SessionStatus, WorkspaceStatus
+from .enums import RunnerStatus as RS, WorkspaceStatus
 from .exceptions import RunnerOfflineError
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
-    AgentCommandIn,
-    AgentCommandOut,
-    AgentCredentialRelationCommandIn,
-    AgentCredentialRelationCommandOut,
-    AgentCredentialRelationCreateIn,
-    AgentCredentialRelationOut,
-    AgentCredentialRelationUpdateIn,
-    AgentOut,
-    ChatCreateIn,
-    ChatOut,
-    ChatRenameIn,
-    ConversationOut,
     ErrorOut,
-    LastSessionOut,
-    MarkConversationReadIn,
-    MarkConversationUnreadIn,
-    OrgAgentActivationToggleIn,
-    OrgAgentDefinitionCreateIn,
-    OrgAgentDefinitionDuplicateIn,
-    OrgAgentDefinitionOut,
-    OrgAgentDefinitionUpdateIn,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
     ImageArtifactUpdateIn,
     ImageDefinitionCreateIn,
     ImageDefinitionDuplicateIn,
+    ImageDefinitionBuildSummaryOut,
     ImageDefinitionOut,
     ImageDefinitionUpdateIn,
-    PromptIn,
-    PromptOut,
     RunnerCreateIn,
     RunnerCreateOut,
     RunnerOut,
     RunnerUpdateIn,
     RunnerSystemMetricsOut,
-    SessionOut,
-    SessionSkillOut,
     ImageBuildJobCreateIn,
     ImageBuildJobOut,
     ImageBuildJobUpdateIn,
@@ -85,6 +61,7 @@ from .schemas import (
     DesktopStartOut,
     DesktopStopOut,
     DesktopStatusOut,
+    DesktopTakeControlOut,
     DesktopClipboardWriteIn,
     DesktopClipboardReadOut,
     WorkspaceCreateIn,
@@ -130,6 +107,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         runner_online = bool(workspace.runner_is_online)
     elif hasattr(workspace, "runner") and workspace.runner is not None:
         from .enums import RunnerStatus as RS
+
         runner_online = workspace.runner.status == RS.ONLINE
 
     auto_stop_timeout_minutes = None
@@ -172,9 +150,12 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         delete_attempt_count=getattr(workspace, "delete_attempt_count", 0) or 0,
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
-        has_active_session=bool(getattr(workspace, "has_active_session", False)),
+        has_active_session=bool(
+            getattr(workspace, "has_active_harness_session", False)
+        ),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
+        credentials_present=bool(getattr(workspace, "credentials_present", False)),
         base_image_name=_workspace_base_image_name(workspace),
     )
 
@@ -201,32 +182,6 @@ def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
-def _org_copy_name(base_name: str, org_id: uuid.UUID) -> str:
-    """Return a unique copy name scoped to an organization."""
-    from .models import AgentDefinition
-
-    base = (base_name or "").strip() or "agent"
-    if len(base) > 64:
-        base = base[:64]
-
-    candidate = base
-    if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-        return candidate
-
-    suffix = " (Copy)"
-    candidate = f"{base[: 64 - len(suffix)]}{suffix}"
-    if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-        return candidate
-
-    index = 2
-    while True:
-        suffix = f" (Copy {index})"
-        candidate = f"{base[: 64 - len(suffix)]}{suffix}"
-        if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-            return candidate
-        index += 1
-
-
 def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
     """Return a unique image definition copy name scoped to an organization."""
     from .models import ImageDefinition
@@ -236,19 +191,25 @@ def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
         base = base[:255]
 
     candidate = base
-    if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+    if not ImageDefinition.objects.filter(
+        organization_id=org_id, name=candidate
+    ).exists():
         return candidate
 
     suffix = " (Copy)"
     candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-    if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+    if not ImageDefinition.objects.filter(
+        organization_id=org_id, name=candidate
+    ).exists():
         return candidate
 
     index = 2
     while True:
         suffix = f" (Copy {index})"
         candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-        if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+        if not ImageDefinition.objects.filter(
+            organization_id=org_id, name=candidate
+        ).exists():
             return candidate
         index += 1
 
@@ -275,7 +236,9 @@ async def _get_org_admin_flag_async(request: HttpRequest, org_id: uuid.UUID) -> 
     return role == "admin"
 
 
-async def _require_org_membership_async(request: HttpRequest, org_id: uuid.UUID) -> None:
+async def _require_org_membership_async(
+    request: HttpRequest, org_id: uuid.UUID
+) -> None:
     """Validate organization membership for async endpoints."""
     org_service = _get_org_service()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
@@ -288,7 +251,9 @@ def _is_org_admin(user, org_id: uuid.UUID) -> bool:
     return org_service.get_user_role(user, org_id) == "admin"
 
 
-def _get_owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):
+def _get_owned_workspace(
+    request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
+):
     """Return a workspace only when it belongs to the active org and owner."""
     service = _get_service()
     try:
@@ -333,9 +298,11 @@ def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
     """Return a visible image definition for an organization."""
     from .models import ImageDefinition
 
-    return ImageDefinition.objects.filter(id=definition_id).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id)
-    ).first()
+    return (
+        ImageDefinition.objects.filter(id=definition_id)
+        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+        .first()
+    )
 
 
 def _get_build_job_for_org(
@@ -356,36 +323,8 @@ def _get_build_job_for_org(
             Q(image_definition__organization_id=org_id)
             | Q(image_definition__organization__isnull=True)
         )
-        .select_related("image_definition", "runner", "build_task")
+        .select_related("image_definition", "runner", "build_task", "image_instance")
         .first()
-    )
-
-
-def _session_to_out(session) -> SessionOut:
-    """Map a Session ORM instance to SessionOut, including skill snapshots."""
-    skills = [
-        SessionSkillOut(
-            id=ss.id,
-            skill_id=ss.skill_id,
-            name=ss.name,
-            body=ss.body,
-            created_at=ss.created_at,
-        )
-        for ss in session.session_skills.all()
-    ]
-    return SessionOut(
-        id=session.id,
-        chat_id=session.chat_id,
-        prompt=session.prompt,
-        agent_model=session.agent_model,
-        agent_options=session.agent_options,
-        output=session.output,
-        error_message=session.error_message,
-        status=session.status,
-        read_at=session.read_at,
-        created_at=session.created_at,
-        completed_at=session.completed_at,
-        skills=skills,
     )
 
 
@@ -396,7 +335,9 @@ def _session_to_out(session) -> SessionOut:
 runner_router = Router(tags=["runners"])
 
 
-@runner_router.get("/", response={200: list[RunnerOut], 403: ErrorOut}, summary="List runners")
+@runner_router.get(
+    "/", response={200: list[RunnerOut], 403: ErrorOut}, summary="List runners"
+)
 def list_runners(request: HttpRequest):
     """Return all runners for the user's active organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
@@ -444,7 +385,9 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     )
 
 
-@runner_router.get("/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut})
+@runner_router.get(
+    "/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut}
+)
 def get_runner(request: HttpRequest, runner_id: uuid.UUID):
     """Return a runner by ID. User must be a member of the runner's organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
@@ -466,7 +409,13 @@ def get_runner(request: HttpRequest, runner_id: uuid.UUID):
 
 @runner_router.patch(
     "/{runner_id}/",
-    response={200: RunnerOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: RunnerOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Update runner QEMU settings",
 )
 def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpdateIn):
@@ -532,7 +481,9 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     response={200: list[RunnerSystemMetricsOut], 404: ErrorOut},
     summary="Get system metrics history for a runner",
 )
-def get_runner_metrics_history(request: HttpRequest, runner_id: uuid.UUID, hours: int = 24):
+def get_runner_metrics_history(
+    request: HttpRequest, runner_id: uuid.UUID, hours: int = 24
+):
     """Return historical system metrics for a runner (default: last 24h)."""
     org_id = _get_org_id(request)
     org_service = _get_org_service()
@@ -555,7 +506,8 @@ def get_runner_metrics_history(request: HttpRequest, runner_id: uuid.UUID, hours
             disk_used_bytes=m.disk_used_bytes,
             disk_total_bytes=m.disk_total_bytes,
             vm_metrics=m.vm_metrics,
-        ) for m in metrics
+        )
+        for m in metrics
     ]
 
 
@@ -648,7 +600,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
     response={200: WorkspaceOut, 403: ErrorOut, 404: ErrorOut},
 )
 def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return workspace details without chat session history."""
+    """Return workspace details."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
     org_id = _get_org_id(request)
@@ -657,7 +609,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
         from .enums import RunnerStatus as RS
-        from .models import Session
+
         return 200, WorkspaceOut(
             id=workspace.id,
             runner_id=workspace.runner_id,
@@ -685,82 +637,14 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             ),
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
-            has_active_session=Session.objects.filter(
-                chat__workspace_id=workspace_id,
-                status__in=(SessionStatus.PENDING, SessionStatus.RUNNING),
-            ).exists(),
+            has_active_session=False,
             runner_online=workspace.runner.status == RS.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
+            credentials_present=bool(workspace.credentials_present),
             base_image_name=_workspace_base_image_name(workspace),
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.post(
-    "/{workspace_id}/prompt/",
-    response={202: PromptOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Run a prompt",
-)
-async def run_prompt(request: HttpRequest, workspace_id: uuid.UUID, payload: PromptIn):
-    """Run a prompt in a workspace — dispatches async task to the runner."""
-    if not check_api_key_permission(request, APIKeyPermission.PROMPTS_RUN):
-        return _perm_denied(APIKeyPermission.PROMPTS_RUN)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-
-        session, task, chat = await service.run_prompt(
-            workspace_id,
-            payload.prompt,
-            payload.agent_model,
-            agent_options=payload.agent_options or {},
-            chat_id=payload.chat_id,
-            skill_ids=payload.skill_ids or [],
-        )
-        return 202, PromptOut(
-            session_id=session.id,
-            task_id=task.id,
-            chat_id=chat.id,
-            status=session.status,
-        )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.post(
-    "/{workspace_id}/sessions/{session_id}/cancel/",
-    response={202: TaskOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Cancel a running session prompt",
-)
-async def cancel_session_prompt(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    session_id: uuid.UUID,
-):
-    """Cancel a running prompt session without stopping the workspace."""
-    if not check_api_key_permission(request, APIKeyPermission.PROMPTS_CANCEL):
-        return _perm_denied(APIKeyPermission.PROMPTS_CANCEL)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-
-        task = await service.cancel_session_prompt(workspace_id, session_id)
-        return 202, task
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
 
 
 @workspace_router.post(
@@ -833,7 +717,7 @@ async def stop_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
 ):
-    """Stop the desktop session in a workspace container."""
+    """Release the viewer lease. The display stays up if computer-use holds it."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
@@ -853,6 +737,42 @@ async def stop_desktop(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/take-control/",
+    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Take desktop control from computer-use",
+)
+async def take_desktop_control(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Abort busy computer-use sessions so the viewer can drive the desktop."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        from apps.harness.harness_service import get_harness_service
+
+        harness = get_harness_service()
+        aborted = await harness.abort_busy_computeruse_for_workspace(workspace_id)
+        return 200, DesktopTakeControlOut(
+            aborted_session_ids=[session.id for session in aborted]
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.get(
@@ -881,14 +801,27 @@ async def desktop_status(
         desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
         is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
-        return 200, DesktopStatusOut(active=is_active, proxy_url=proxy_url)
+        viewer_held = bool((desktop_info or {}).get("viewer"))
+        computer_use_active = bool((desktop_info or {}).get("computer_use"))
+        return 200, DesktopStatusOut(
+            active=is_active,
+            proxy_url=proxy_url,
+            viewer_held=viewer_held,
+            computer_use_active=computer_use_active,
+        )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.post(
     "/{workspace_id}/desktop/clipboard/write/",
-    response={200: DesktopClipboardReadOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: DesktopClipboardReadOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Write text into desktop clipboard",
 )
 async def desktop_clipboard_write(
@@ -923,7 +856,12 @@ async def desktop_clipboard_write(
 
 @workspace_router.post(
     "/{workspace_id}/desktop/clipboard/read/",
-    response={200: DesktopClipboardReadOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: DesktopClipboardReadOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Read text from desktop clipboard",
 )
 async def desktop_clipboard_read(
@@ -954,10 +892,18 @@ async def desktop_clipboard_read(
 
 @workspace_router.patch(
     "/{workspace_id}/",
-    response={200: WorkspaceUpdateOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: WorkspaceUpdateOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Update a workspace",
 )
-async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceUpdateIn):
+async def update_workspace(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceUpdateIn
+):
     """Update mutable workspace metadata."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
@@ -971,7 +917,9 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
         resolved_credentials = None
         if payload.credential_ids is not None:
             credential_svc = CredentialSvc()
-            resolved_credentials = await sync_to_async(credential_svc.resolve_credentials)(
+            resolved_credentials = await sync_to_async(
+                credential_svc.resolve_credentials
+            )(
                 payload.credential_ids,
                 org_id=org_id,
                 user=request.user,
@@ -980,7 +928,12 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
         workspace = await service.update_workspace(
             workspace_id,
             name=payload.name,
-            credentials=(resolved_credentials.credentials if resolved_credentials is not None else None),
+            credentials=(
+                resolved_credentials.credentials
+                if resolved_credentials is not None
+                else None
+            ),
+            resolved_credentials=resolved_credentials,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
@@ -991,6 +944,7 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
             updated_at=workspace.updated_at,
             active_operation=workspace.active_operation,
             credential_ids=_workspace_credential_ids(workspace),
+            credentials_present=bool(workspace.credentials_present),
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=workspace.qemu_disk_size_gb,
@@ -1073,357 +1027,6 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.get(
-    "/{workspace_id}/sessions/",
-    response={200: list[SessionOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List sessions for a workspace",
-)
-def list_sessions(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return all sessions for a workspace."""
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return _perm_denied(APIKeyPermission.CONVERSATIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-        service = _get_service()
-        sessions = service.list_sessions(workspace_id)
-        return [_session_to_out(s) for s in sessions]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-# --- Chat endpoints ---
-
-
-@workspace_router.get(
-    "/{workspace_id}/chats/",
-    response={200: list[ChatOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List chats for a workspace",
-)
-def list_chats(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return all chats for a workspace with session counts."""
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return _perm_denied(APIKeyPermission.CONVERSATIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    from django.db.models import Count
-
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-        from .models import Chat as ChatModel
-
-        annotated = ChatModel.objects.filter(
-            workspace_id=workspace_id,
-        ).annotate(
-            _session_count=Count("sessions"),
-        ).order_by("-created_at")
-
-        return [
-            ChatOut(
-                id=c.id,
-                workspace_id=c.workspace_id,
-                name=c.name,
-                agent_definition_id=c.agent_definition_id,
-                agent_type=c.agent_type,
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-                session_count=c._session_count,
-            )
-            for c in annotated
-        ]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.post(
-    "/{workspace_id}/chats/",
-    response={201: ChatOut, 400: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Create a chat",
-)
-def create_chat(request: HttpRequest, workspace_id: uuid.UUID, payload: ChatCreateIn):
-    """Create a new chat within a workspace."""
-    if not check_api_key_permission(request, APIKeyPermission.PROMPTS_RUN):
-        return _perm_denied(APIKeyPermission.PROMPTS_RUN)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-
-        chat = service.create_chat(
-            workspace_id,
-            payload.name,
-            agent_definition_id=payload.agent_definition_id,
-        )
-        return 201, ChatOut(
-            id=chat.id,
-            workspace_id=chat.workspace_id,
-            name=chat.name,
-            agent_definition_id=chat.agent_definition_id,
-            agent_type=chat.agent_type,
-            created_at=chat.created_at,
-            updated_at=chat.updated_at,
-            session_count=0,
-        )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
-
-
-@workspace_router.patch(
-    "/{workspace_id}/chats/{chat_id}/",
-    response={200: ChatOut, 400: ErrorOut, 404: ErrorOut},
-    summary="Rename a chat",
-)
-def rename_chat(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    chat_id: uuid.UUID,
-    payload: ChatRenameIn,
-):
-    """Rename an existing chat."""
-    if not check_api_key_permission(request, APIKeyPermission.PROMPTS_RUN):
-        return _perm_denied(APIKeyPermission.PROMPTS_RUN)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-
-        chat = service.rename_chat(chat_id, payload.name)
-        session_count = chat.sessions.count()
-        return 200, ChatOut(
-            id=chat.id,
-            workspace_id=chat.workspace_id,
-            name=chat.name,
-            agent_definition_id=chat.agent_definition_id,
-            agent_type=chat.agent_type,
-            created_at=chat.created_at,
-            updated_at=chat.updated_at,
-            session_count=session_count,
-        )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
-
-
-@workspace_router.delete(
-    "/{workspace_id}/chats/{chat_id}/",
-    response={204: None, 404: ErrorOut},
-    summary="Delete a chat",
-)
-def delete_chat(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    chat_id: uuid.UUID,
-):
-    """Delete a chat and all its sessions."""
-    if not check_api_key_permission(request, APIKeyPermission.PROMPTS_RUN):
-        return _perm_denied(APIKeyPermission.PROMPTS_RUN)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-
-        service.delete_chat(chat_id)
-        return 204, None
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.get(
-    "/{workspace_id}/chats/{chat_id}/sessions/",
-    response={200: list[SessionOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List sessions for a chat",
-)
-def list_chat_sessions(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    chat_id: uuid.UUID,
-):
-    """Return all sessions for a specific chat."""
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return _perm_denied(APIKeyPermission.CONVERSATIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-        service = _get_service()
-        sessions = service.list_chat_sessions(chat_id)
-        return [_session_to_out(s) for s in sessions]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-# ===========================================================================
-# Agent Router — /api/v1/agents/
-# ===========================================================================
-
-agent_router = Router(tags=["agents"])
-
-
-@agent_router.get(
-    "/",
-    response={200: list[AgentOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List available agents",
-)
-def list_agents(request: HttpRequest, workspace_id: uuid.UUID | None = None):
-    """Return agent definitions with org- or workspace-specific availability."""
-    if not check_api_key_permission(request, APIKeyPermission.AGENTS_READ):
-        return 403, ErrorOut(detail="API key lacks permission: agents:read", code="permission_denied")
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    workspace = None
-    if workspace_id is not None:
-        try:
-            workspace = _get_owned_workspace(request, org_id, workspace_id)
-        except NotFoundError as e:
-            return 404, ErrorOut(detail=e.message, code=e.code)
-
-    agents = service.get_available_agents(
-        organization_id=org_id,
-        user=request.user,
-        workspace=workspace,
-    )
-    return 200, [
-        AgentOut(
-            id=a["id"],
-            name=a["name"],
-            description=a["description"],
-            available_options=a["available_options"],
-            supports_multi_chat=a["supports_multi_chat"],
-            has_online_runner=a["has_online_runner"],
-            required_credential_service_slugs=a["required_credential_service_slugs"],
-            has_credentials=a["has_credentials"],
-        )
-        for a in agents
-    ]
-
-
-# ===========================================================================
-# Conversation Router — /api/v1/conversations/
-# ===========================================================================
-
-conversation_router = Router(tags=["conversations"])
-
-
-@conversation_router.get(
-    "/", response={200: list[ConversationOut], 403: ErrorOut}, summary="List conversations"
-)
-def list_conversations(request: HttpRequest):
-    """
-    Return all conversations for the user, sorted by last activity DESC.
-
-    Each Chat becomes one entry; workspaces without any chats appear as
-    fallback entries. Visibility is always limited to the current user's workspaces.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return 403, ErrorOut(detail="API key lacks permission: conversations:read", code="permission_denied")
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    from .repositories import ConversationRepository
-
-    rows = ConversationRepository.list_for_user(org_id, request.user.id)
-    return [
-        ConversationOut(
-            chat_id=r["chat_id"],
-            workspace_id=r["workspace_id"],
-            workspace_name=r["workspace_name"],
-            workspace_status=r["workspace_status"],
-            agent_definition_id=r["agent_definition_id"],
-            agent_type=r["agent_type"],
-            chat_name=r["chat_name"],
-            last_session=(
-                LastSessionOut(
-                    id=r["last_session"]["id"],
-                    prompt=r["last_session"]["prompt"],
-                    status=r["last_session"]["status"],
-                    created_at=r["last_session"]["created_at"],
-                )
-                if r["last_session"]
-                else None
-            ),
-            session_count=r["session_count"],
-            updated_at=r["updated_at"],
-            is_read=r["is_read"],
-        )
-        for r in rows
-    ]
-
-
-@conversation_router.post(
-    "/read/",
-    response={204: None, 403: ErrorOut},
-    summary="Mark a conversation as read",
-)
-def mark_conversation_read(request: HttpRequest, payload: MarkConversationReadIn):
-    """
-    Mark a conversation as read by setting the session read timestamp.
-
-    Called by the frontend when the user opens a conversation. Only sessions
-    with status COMPLETED or FAILED are updated; running sessions remain unread.
-    The next call to GET /conversations/ will reflect ``is_read=true``.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return _perm_denied(APIKeyPermission.CONVERSATIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    service.mark_conversation_read(
-        session_id=payload.session_id,
-    )
-    return 204, None
-
-
-@conversation_router.post(
-    "/unread/",
-    response={204: None, 403: ErrorOut},
-    summary="Mark a conversation as unread",
-)
-def mark_conversation_unread(request: HttpRequest, payload: MarkConversationUnreadIn):
-    """
-    Mark a conversation as unread by clearing the session read timestamp.
-
-    Called by the frontend when the user explicitly wants a completed or failed
-    reply to surface as unread again. Running sessions remain unchanged.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.CONVERSATIONS_READ):
-        return _perm_denied(APIKeyPermission.CONVERSATIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    service.mark_conversation_unread(
-        session_id=payload.session_id,
-    )
-    return 204, None
 
 
 # ===========================================================================
@@ -1587,7 +1190,9 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(
+            image_artifact_id
+        )
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1626,7 +1231,9 @@ async def create_workspace_from_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(
+            image_artifact_id
+        )
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1810,6 +1417,9 @@ image_definition_router = Router(tags=["image-definitions"])
 
 
 def _image_definition_to_out(defn) -> ImageDefinitionOut:
+    from .repositories import ImageDefinitionRepository
+
+    summary = ImageDefinitionRepository.build_summary(defn)
     return ImageDefinitionOut(
         id=defn.id,
         organization_id=defn.organization_id,
@@ -1825,6 +1435,7 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         custom_init_script=defn.custom_init_script or "",
         is_active=defn.is_active,
         status=getattr(defn, "status", "active"),
+        runner_build_summary=ImageDefinitionBuildSummaryOut(**summary),
         delete_requested_at=getattr(defn, "delete_requested_at", None),
         delete_started_at=getattr(defn, "delete_started_at", None),
         delete_confirmed_at=getattr(defn, "delete_confirmed_at", None),
@@ -1872,7 +1483,9 @@ def list_image_definitions(request: HttpRequest):
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     service = _get_service()
-    return 200, [_image_definition_to_out(d) for d in service.list_image_definitions(org_id)]
+    return 200, [
+        _image_definition_to_out(d) for d in service.list_image_definitions(org_id)
+    ]
 
 
 @image_definition_router.post(
@@ -1931,9 +1544,11 @@ def duplicate_image_definition(
 
     from .models import ImageDefinition
 
-    source = ImageDefinition.objects.filter(id=definition_id).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id)
-    ).first()
+    source = (
+        ImageDefinition.objects.filter(id=definition_id)
+        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+        .first()
+    )
     if source is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
@@ -2005,7 +1620,13 @@ def update_image_definition(
 
 @image_definition_router.delete(
     "/{definition_id}/",
-    response={202: ImageDefinitionOut, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    response={
+        202: ImageDefinitionOut,
+        204: None,
+        404: ErrorOut,
+        403: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Delete image definition (orchestrated)",
 )
 async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
@@ -2019,14 +1640,18 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             return 204, None
         return 202, await sync_to_async(_image_definition_to_out)(definition)
@@ -2049,14 +1674,18 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -2075,14 +1704,18 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -2103,8 +1736,7 @@ def list_image_definition_runner_builds(request: HttpRequest, definition_id: uui
     if _get_image_definition_for_org(org_id, definition_id) is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     return 200, [
-        _build_job_to_out(b)
-        for b in service.list_build_jobs(definition_id, org_id)
+        _build_job_to_out(b) for b in service.list_build_jobs(definition_id, org_id)
     ]
 
 
@@ -2123,7 +1755,9 @@ async def create_image_definition_runner_build(
     org_id = _get_org_id(request)
     if not await _get_org_admin_flag_async(request, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     runner = await sync_to_async(RunnerRepository.get_by_id)(payload.runner_id)
@@ -2173,25 +1807,43 @@ async def update_image_definition_runner_build(
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
 
     action = payload.action.strip().lower()
+    service = _get_service()
     if action == "deactivate":
+        try:
+            service._ensure_definition_mutable(build.image_definition)
+        except ConflictError as e:
+            return 409, ErrorOut(detail=e.message, code=e.code)
         build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
-        await sync_to_async(build.save)(update_fields=["status", "deactivated_at", "updated_at"])
+        await sync_to_async(build.save)(
+            update_fields=["status", "deactivated_at", "updated_at"]
+        )
         return 200, _build_job_to_out(build)
 
-    service = _get_service()
+    if action not in {"activate", "rebuild"}:
+        return 409, ErrorOut(
+            detail="action must be one of: deactivate, activate, rebuild",
+            code="conflict",
+        )
+
     definition = build.image_definition
     runner = build.runner
     try:
-        rebuilt = await service.trigger_build_job(
-            image_definition=definition,
-            runner=runner,
-            activate=True,
-            created_by=request.user,
-        )
+        if action == "activate":
+            updated = await service.activate_build_job(
+                build,
+                created_by=request.user,
+            )
+        else:
+            updated = await service.trigger_build_job(
+                image_definition=definition,
+                runner=runner,
+                activate=True,
+                created_by=request.user,
+            )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-    return 200, _build_job_to_out(rebuilt)
+    return 200, _build_job_to_out(updated)
 
 
 @image_definition_router.delete(
@@ -2210,7 +1862,9 @@ async def delete_image_definition_runner_build(
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    build = await sync_to_async(_get_build_job_for_org)(org_id, definition_id, runner_id)
+    build = await sync_to_async(_get_build_job_for_org)(
+        org_id, definition_id, runner_id
+    )
     if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
 
@@ -2244,625 +1898,3 @@ def get_image_definition_runner_build_log(
     if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
     return 200, {"build_log": build.build_log}
-
-
-# ===========================================================================
-# Org Agent Definitions Router — /api/v1/org-agent-definitions/
-# ===========================================================================
-
-org_agent_def_router = Router(tags=["org-agent-definitions"])
-
-
-def _agent_def_to_out(agent, org_id: uuid.UUID, activated_ids: set) -> OrgAgentDefinitionOut:
-    """Map an AgentDefinition ORM instance to OrgAgentDefinitionOut."""
-    commands = [
-        AgentCommandOut(
-            id=cmd.id,
-            phase=cmd.phase,
-            args=list(cmd.args or []),
-            workdir=cmd.workdir,
-            env=dict(cmd.env or {}),
-            description=cmd.description,
-            order=cmd.order,
-        )
-        for cmd in agent.commands.all().order_by("phase", "order")
-    ]
-    required_ids = [svc.id for svc in agent.required_credential_services.all()]
-    return OrgAgentDefinitionOut(
-        id=agent.id,
-        name=agent.name,
-        description=agent.description,
-        is_standard=agent.organization_id is None,
-        organization_id=agent.organization_id,
-        available_options=list(agent.available_options or []),
-        default_env=dict(agent.default_env or {}),
-        supports_multi_chat=agent.supports_multi_chat,
-        required_credential_service_ids=required_ids,
-        commands=commands,
-        is_active=agent.id in activated_ids,
-    )
-
-
-@org_agent_def_router.get(
-    "/",
-    response={200: list[OrgAgentDefinitionOut], 403: ErrorOut},
-    summary="List all agent definitions for the org (admin only)",
-)
-def list_org_agent_definitions(request: HttpRequest):
-    """Return all standard and org-specific agent definitions with activation status."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_READ):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org = org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db.models import Q
-    from .models import AgentDefinition, OrgAgentDefinitionActivation
-
-    # All standard + org-specific definitions
-    definitions = list(
-        AgentDefinition.objects.filter(
-            Q(organization__isnull=True) | Q(organization_id=org_id)
-        )
-        .prefetch_related("commands", "required_credential_services")
-        .order_by("name")
-    )
-
-    activated_ids = set(
-        OrgAgentDefinitionActivation.objects.filter(
-            organization_id=org_id
-        ).values_list("agent_definition_id", flat=True)
-    )
-
-    return 200, [_agent_def_to_out(a, org_id, activated_ids) for a in definitions]
-
-
-@org_agent_def_router.post(
-    "/{agent_id}/duplicate/",
-    response={201: OrgAgentDefinitionOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Duplicate an agent definition into this organization",
-)
-def duplicate_org_agent_definition(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    payload: OrgAgentDefinitionDuplicateIn,
-):
-    """Create an org-owned copy of a visible standard or org-owned definition."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db import connection, transaction
-    from django.db.models import Q
-    from .models import (
-        AgentCommand,
-        AgentCredentialRelationCommand,
-        AgentDefinition,
-        AgentDefinitionCredentialRelation,
-        OrgAgentDefinitionActivation,
-    )
-
-    relation_table = AgentDefinitionCredentialRelation._meta.db_table
-    has_relation_table = relation_table in connection.introspection.table_names()
-    prefetches = ["commands", "required_credential_services"]
-    if has_relation_table:
-        prefetches.append("credential_relations__commands")
-
-    source = (
-        AgentDefinition.objects.filter(
-            Q(organization__isnull=True) | Q(organization_id=org_id),
-            id=agent_id,
-        )
-        .prefetch_related(*prefetches)
-        .first()
-    )
-    if source is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    if payload.name is not None and not payload.name.strip():
-        return 400, ErrorOut(detail="name cannot be empty", code="validation_error")
-
-    target_name = _org_copy_name(payload.name or source.name, org_id)
-
-    with transaction.atomic():
-        copied = AgentDefinition.objects.create(
-            organization_id=org_id,
-            name=target_name,
-            description=source.description,
-            available_options=list(source.available_options or []),
-            default_env=dict(source.default_env or {}),
-            supports_multi_chat=source.supports_multi_chat,
-        )
-        copied.required_credential_services.set(source.required_credential_services.all())
-
-        for cmd in source.commands.all():
-            AgentCommand.objects.create(
-                agent=copied,
-                phase=cmd.phase,
-                args=list(cmd.args or []),
-                workdir=cmd.workdir,
-                env=dict(cmd.env or {}),
-                description=cmd.description,
-                order=cmd.order,
-            )
-
-        if has_relation_table:
-            for relation in source.credential_relations.all():
-                copied_relation = AgentDefinitionCredentialRelation.objects.create(
-                    agent_definition=copied,
-                    credential_service=relation.credential_service,
-                    default_env=dict(relation.default_env or {}),
-                )
-                for rel_cmd in relation.commands.all():
-                    AgentCredentialRelationCommand.objects.create(
-                        relation=copied_relation,
-                        phase=rel_cmd.phase,
-                        args=list(rel_cmd.args or []),
-                        workdir=rel_cmd.workdir,
-                        env=dict(rel_cmd.env or {}),
-                        description=rel_cmd.description,
-                        order=rel_cmd.order,
-                    )
-
-        if payload.activate:
-            OrgAgentDefinitionActivation.objects.get_or_create(
-                organization_id=org_id,
-                agent_definition=copied,
-            )
-
-    copied = AgentDefinition.objects.prefetch_related(
-        "commands",
-        "required_credential_services",
-    ).get(id=copied.id)
-    activated_ids = {copied.id} if payload.activate else set()
-    return 201, _agent_def_to_out(copied, org_id, activated_ids)
-
-
-@org_agent_def_router.post(
-    "/",
-    response={201: OrgAgentDefinitionOut, 400: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Create an org-specific agent definition",
-)
-def create_org_agent_definition(request: HttpRequest, payload: OrgAgentDefinitionCreateIn):
-    """Create a new agent definition owned by the organization."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org = org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db import IntegrityError
-    from apps.credentials.models import CredentialService
-    from .models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
-
-    # Validate commands: must have exactly one run command
-    run_commands = [c for c in payload.commands if c.phase == "run"]
-    if len(run_commands) != 1:
-        return 400, ErrorOut(
-            detail="Exactly one 'run' command is required", code="validation_error"
-        )
-
-    try:
-        agent = AgentDefinition.objects.create(
-            organization_id=org_id,
-            name=payload.name,
-            description=payload.description,
-            available_options=payload.available_options,
-            default_env=payload.default_env,
-            supports_multi_chat=payload.supports_multi_chat,
-        )
-    except IntegrityError:
-        return 409, ErrorOut(
-            detail=f"Agent definition '{payload.name}' already exists in this organization",
-            code="conflict",
-        )
-
-    # Set required credential services
-    if payload.required_credential_service_ids:
-        services = CredentialService.objects.filter(
-            id__in=payload.required_credential_service_ids
-        )
-        agent.required_credential_services.set(services)
-
-    # Create commands
-    for cmd in payload.commands:
-        AgentCommand.objects.create(
-            agent=agent,
-            phase=cmd.phase,
-            args=cmd.args,
-            workdir=cmd.workdir,
-            env=cmd.env,
-            description=cmd.description,
-            order=cmd.order,
-        )
-
-    # Auto-activate for this org
-    OrgAgentDefinitionActivation.objects.create(
-        organization_id=org_id, agent_definition=agent
-    )
-
-    # Reload with prefetch
-    agent = AgentDefinition.objects.prefetch_related(
-        "commands", "required_credential_services"
-    ).get(id=agent.id)
-
-    return 201, _agent_def_to_out(agent, org_id, {agent.id})
-
-
-@org_agent_def_router.patch(
-    "/{agent_id}/",
-    response={200: OrgAgentDefinitionOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Update an org-specific agent definition",
-)
-def update_org_agent_definition(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    payload: OrgAgentDefinitionUpdateIn,
-):
-    """Update an org-specific agent definition. Standard definitions cannot be modified."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from apps.credentials.models import CredentialService
-    from .models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
-
-    agent = AgentDefinition.objects.filter(id=agent_id, organization_id=org_id).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found or is not org-owned", code="not_found")
-
-    if payload.name is not None:
-        agent.name = payload.name
-    if payload.description is not None:
-        agent.description = payload.description
-    if payload.available_options is not None:
-        agent.available_options = payload.available_options
-    if payload.default_env is not None:
-        agent.default_env = payload.default_env
-    if payload.supports_multi_chat is not None:
-        agent.supports_multi_chat = payload.supports_multi_chat
-    agent.save()
-
-    if payload.required_credential_service_ids is not None:
-        services = CredentialService.objects.filter(
-            id__in=payload.required_credential_service_ids
-        )
-        agent.required_credential_services.set(services)
-
-    if payload.commands is not None:
-        # Validate: exactly one run command
-        run_commands = [c for c in payload.commands if c.phase == "run"]
-        if len(run_commands) != 1:
-            return 400, ErrorOut(
-                detail="Exactly one 'run' command is required", code="validation_error"
-            )
-        # Replace all commands
-        AgentCommand.objects.filter(agent=agent).delete()
-        for cmd in payload.commands:
-            AgentCommand.objects.create(
-                agent=agent,
-                phase=cmd.phase,
-                args=cmd.args,
-                workdir=cmd.workdir,
-                env=cmd.env,
-                description=cmd.description,
-                order=cmd.order,
-            )
-
-    agent = AgentDefinition.objects.prefetch_related(
-        "commands", "required_credential_services"
-    ).get(id=agent.id)
-
-    activated_ids = set(
-        OrgAgentDefinitionActivation.objects.filter(
-            organization_id=org_id
-        ).values_list("agent_definition_id", flat=True)
-    )
-
-    return 200, _agent_def_to_out(agent, org_id, activated_ids)
-
-
-@org_agent_def_router.delete(
-    "/{agent_id}/",
-    response={204: None, 403: ErrorOut, 404: ErrorOut},
-    summary="Delete an org-specific agent definition",
-)
-def delete_org_agent_definition(request: HttpRequest, agent_id: uuid.UUID):
-    """Delete an org-specific agent definition. Standard definitions cannot be deleted."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from .models import AgentDefinition
-
-    agent = AgentDefinition.objects.filter(id=agent_id, organization_id=org_id).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found or is not org-owned", code="not_found")
-
-    agent.delete()
-    return 204, None
-
-
-@org_agent_def_router.post(
-    "/{agent_id}/activation/",
-    response={200: OrgAgentDefinitionOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Toggle activation of an agent definition for the org",
-)
-def toggle_org_agent_activation(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    payload: OrgAgentActivationToggleIn,
-):
-    """Activate or deactivate an agent definition for the organization."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db.models import Q
-    from .models import AgentDefinition, OrgAgentDefinitionActivation
-
-    # The definition must be standard OR owned by this org
-    agent = AgentDefinition.objects.prefetch_related(
-        "commands", "required_credential_services"
-    ).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id),
-        id=agent_id,
-    ).first()
-
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    if agent.organization_id is None and not request.user.is_staff:
-        return 403, ErrorOut(
-            detail="Only staff users can modify standard agent definition activation",
-            code="forbidden",
-        )
-
-    if payload.active:
-        OrgAgentDefinitionActivation.objects.get_or_create(
-            organization_id=org_id, agent_definition=agent
-        )
-        activated_ids = {agent.id}
-    else:
-        OrgAgentDefinitionActivation.objects.filter(
-            organization_id=org_id, agent_definition=agent
-        ).delete()
-        activated_ids = set()
-
-    return 200, _agent_def_to_out(agent, org_id, activated_ids)
-
-
-# ---------------------------------------------------------------------------
-# Org Agent Credential Relations — /api/v1/org-agent-definitions/{agent_id}/credential-relations/
-# ---------------------------------------------------------------------------
-
-
-def _relation_to_out(relation) -> AgentCredentialRelationOut:
-    """Map an AgentDefinitionCredentialRelation ORM instance to schema."""
-    return AgentCredentialRelationOut(
-        id=relation.id,
-        credential_service_id=relation.credential_service_id,
-        credential_service_name=relation.credential_service.name,
-        default_env=relation.default_env or {},
-        commands=[
-            AgentCredentialRelationCommandOut(
-                id=cmd.id,
-                phase=cmd.phase,
-                args=cmd.args,
-                workdir=cmd.workdir,
-                env=cmd.env or {},
-                description=cmd.description,
-                order=cmd.order,
-            )
-            for cmd in relation.commands.all().order_by("phase", "order")
-        ],
-    )
-
-
-@org_agent_def_router.get(
-    "/{agent_id}/credential-relations/",
-    response={200: list[AgentCredentialRelationOut], 403: ErrorOut, 404: ErrorOut},
-)
-def list_agent_credential_relations(request: HttpRequest, agent_id: uuid.UUID):
-    """List all credential relations for an agent definition."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_READ):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = OrganizationService()
-    org_service.require_membership(request.user, org_id)
-
-    from django.db.models import Q
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation
-
-    agent = AgentDefinition.objects.filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id),
-        id=agent_id,
-    ).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    relations = AgentDefinitionCredentialRelation.objects.select_related(
-        "credential_service"
-    ).prefetch_related("commands").filter(agent_definition=agent)
-
-    return 200, [_relation_to_out(r) for r in relations]
-
-
-@org_agent_def_router.post(
-    "/{agent_id}/credential-relations/",
-    response={201: AgentCredentialRelationOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-)
-def create_agent_credential_relation(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    payload: AgentCredentialRelationCreateIn,
-):
-    """Create a credential relation for an agent definition."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = OrganizationService()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db import IntegrityError
-    from django.db.models import Q
-    from apps.credentials.models import CredentialService
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation, AgentCredentialRelationCommand
-
-    agent = AgentDefinition.objects.filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id),
-        id=agent_id,
-    ).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    svc = CredentialService.objects.filter(id=payload.credential_service_id).first()
-    if svc is None:
-        return 404, ErrorOut(detail="Credential service not found", code="not_found")
-
-    try:
-        relation = AgentDefinitionCredentialRelation.objects.create(
-            agent_definition=agent,
-            credential_service=svc,
-            default_env=payload.default_env or {},
-        )
-    except IntegrityError:
-        return 409, ErrorOut(
-            detail="Relation already exists for this credential service",
-            code="conflict",
-        )
-
-    for i, cmd in enumerate(payload.commands):
-        AgentCredentialRelationCommand.objects.create(
-            relation=relation,
-            phase=cmd.phase,
-            args=cmd.args,
-            workdir=cmd.workdir,
-            env=cmd.env or {},
-            description=cmd.description,
-            order=cmd.order if cmd.order is not None else i,
-        )
-
-    relation = AgentDefinitionCredentialRelation.objects.select_related(
-        "credential_service"
-    ).prefetch_related("commands").get(id=relation.id)
-
-    return 201, _relation_to_out(relation)
-
-
-@org_agent_def_router.patch(
-    "/{agent_id}/credential-relations/{relation_id}/",
-    response={200: AgentCredentialRelationOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut},
-)
-def update_agent_credential_relation(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    relation_id: uuid.UUID,
-    payload: AgentCredentialRelationUpdateIn,
-):
-    """Update a credential relation (default_env and/or commands)."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = OrganizationService()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db.models import Q
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation, AgentCredentialRelationCommand
-
-    agent = AgentDefinition.objects.filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id),
-        id=agent_id,
-    ).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    relation = AgentDefinitionCredentialRelation.objects.select_related(
-        "credential_service"
-    ).filter(agent_definition=agent, id=relation_id).first()
-    if relation is None:
-        return 404, ErrorOut(detail="Credential relation not found", code="not_found")
-
-    if payload.default_env is not None:
-        relation.default_env = payload.default_env
-        relation.save(update_fields=["default_env", "updated_at"])
-
-    if payload.commands is not None:
-        relation.commands.all().delete()
-        for i, cmd in enumerate(payload.commands):
-            AgentCredentialRelationCommand.objects.create(
-                relation=relation,
-                phase=cmd.phase,
-                args=cmd.args,
-                workdir=cmd.workdir,
-                env=cmd.env or {},
-                description=cmd.description,
-                order=cmd.order if cmd.order is not None else i,
-            )
-
-    relation = AgentDefinitionCredentialRelation.objects.select_related(
-        "credential_service"
-    ).prefetch_related("commands").get(id=relation.id)
-
-    return 200, _relation_to_out(relation)
-
-
-@org_agent_def_router.delete(
-    "/{agent_id}/credential-relations/{relation_id}/",
-    response={204: None, 403: ErrorOut, 404: ErrorOut},
-)
-def delete_agent_credential_relation(
-    request: HttpRequest,
-    agent_id: uuid.UUID,
-    relation_id: uuid.UUID,
-):
-    """Delete a credential relation from an agent definition."""
-    if not check_api_key_permission(request, APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = OrganizationService()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from django.db.models import Q
-    from .models import AgentDefinition, AgentDefinitionCredentialRelation
-
-    agent = AgentDefinition.objects.filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id),
-        id=agent_id,
-    ).first()
-    if agent is None:
-        return 404, ErrorOut(detail="Agent definition not found", code="not_found")
-
-    deleted, _ = AgentDefinitionCredentialRelation.objects.filter(
-        agent_definition=agent, id=relation_id
-    ).delete()
-    if not deleted:
-        return 404, ErrorOut(detail="Credential relation not found", code="not_found")
-
-    return 204, None

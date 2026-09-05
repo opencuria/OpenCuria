@@ -6,13 +6,15 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 export const useDesktopStore = defineStore('desktop', () => {
   const isOpen = ref(false)
   const isMinimized = ref(false)
   const isConnecting = ref(false)
   const isConnected = ref(false)
+  const computerUseRuns = ref<Set<string>>(new Set())
+  const computerUseActive = computed(() => computerUseRuns.value.size > 0)
   const proxyUrl = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
 
@@ -52,6 +54,23 @@ export const useDesktopStore = defineStore('desktop', () => {
     isConnecting.value = false
   }
 
+  function setComputerUseActive(active: boolean): void {
+    computerUseRuns.value = active ? new Set(['active']) : new Set()
+  }
+
+  function markComputerUseStarted(runId: string): void {
+    const next = new Set(computerUseRuns.value)
+    next.add(runId)
+    computerUseRuns.value = next
+  }
+
+  function markComputerUseFinished(runId: string): void {
+    const next = new Set(computerUseRuns.value)
+    next.delete(runId)
+    next.delete('active')
+    computerUseRuns.value = next
+  }
+
   function setDisconnected(): void {
     proxyUrl.value = null
     isConnected.value = false
@@ -63,6 +82,7 @@ export const useDesktopStore = defineStore('desktop', () => {
     isMinimized.value = false
     isConnected.value = false
     isConnecting.value = false
+    computerUseRuns.value = new Set()
     proxyUrl.value = null
     workspaceId.value = null
   }
@@ -72,6 +92,7 @@ export const useDesktopStore = defineStore('desktop', () => {
     isMinimized,
     isConnecting,
     isConnected,
+    computerUseActive,
     proxyUrl,
     workspaceId,
     toggle,
@@ -81,6 +102,9 @@ export const useDesktopStore = defineStore('desktop', () => {
     restore,
     setConnecting,
     setConnected,
+    setComputerUseActive,
+    markComputerUseStarted,
+    markComputerUseFinished,
     setDisconnected,
     reset,
   }

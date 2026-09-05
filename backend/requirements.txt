@@ -13,6 +13,9 @@ python-socketio>=5.0,<6.0
 # WebSocket proxy (desktop sessions)
 aiohttp>=3.9,<4.0
 
+# HTTP client (LLM provider streaming)
+httpx>=0.27,<1.0
+
 # Docker SDK (desktop proxy network management)
 docker>=7.0,<8.0
 

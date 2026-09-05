@@ -29,10 +29,6 @@ class APIKeyPermission(str, enum.Enum):
     WORKSPACES_RESUME = "workspaces:resume"
     WORKSPACES_DELETE = "workspaces:delete"
 
-    # Prompts
-    PROMPTS_RUN = "prompts:run"
-    PROMPTS_CANCEL = "prompts:cancel"
-
     # Terminal
     TERMINAL_ACCESS = "terminal:access"
 
@@ -44,19 +40,11 @@ class APIKeyPermission(str, enum.Enum):
     ORGANIZATIONS_READ = "organizations:read"
     ORGANIZATIONS_WRITE = "organizations:write"
 
-    # Agents
-    AGENTS_READ = "agents:read"
-    ORG_AGENT_DEFINITIONS_READ = "org_agent_definitions:read"
-    ORG_AGENT_DEFINITIONS_WRITE = "org_agent_definitions:write"
-
     # Credentials
     CREDENTIALS_READ = "credentials:read"
     CREDENTIALS_WRITE = "credentials:write"
     ORG_CREDENTIAL_SERVICES_READ = "org_credential_services:read"
     ORG_CREDENTIAL_SERVICES_WRITE = "org_credential_services:write"
-
-    # Conversations
-    CONVERSATIONS_READ = "conversations:read"
 
     # Image artifacts
     IMAGES_READ = "images:read"
@@ -72,6 +60,11 @@ class APIKeyPermission(str, enum.Enum):
     # Skills
     SKILLS_READ = "skills:read"
     SKILLS_WRITE = "skills:write"
+
+    # Harness (M6, additive; existing keys are never auto-granted these)
+    HARNESS_READ = "harness:read"
+    HARNESS_RUN = "harness:run"
+    HARNESS_PERMISSIONS = "harness:permissions"
 
     # MCP
     MCP_ACCESS = "mcp:access"

@@ -3,89 +3,74 @@ import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRunnerStore } from '@/stores/runners'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import { useConversationStore } from '@/stores/conversations'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { usePolling } from '@/composables/usePolling'
 import {
   subscribeToWorkspace,
   unsubscribeFromWorkspace,
   onEvent,
 } from '@/services/socket'
-import { SessionStatus, WorkspaceOperation, WorkspaceStatus } from '@/types'
+import { WorkspaceOperation, WorkspaceStatus } from '@/types'
+import type { HarnessConversation } from '@/types/harness'
 import {
-  isConversationIdle,
-  isConversationRunning,
-  isSessionActive,
-} from '@/lib/sessionState'
-import { UiInput } from '@/components/ui'
+  isHarnessConversationAvailable,
+  isHarnessConversationDoneUnread,
+  isHarnessConversationRunning,
+} from '@/lib/harnessConversationState'
+import { Input } from '@/components/ui/input'
 import {
   Search,
   Wifi,
   Container,
   LayoutList,
   LayoutGrid,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
-import ConversationListView from '@/components/conversations/ConversationListView.vue'
-import ConversationKanbanView from '@/components/conversations/ConversationKanbanView.vue'
+import HarnessConversationListView from '@/components/conversations/HarnessConversationListView.vue'
+import HarnessConversationKanbanView from '@/components/conversations/HarnessConversationKanbanView.vue'
 
 const router = useRouter()
 const runnerStore = useRunnerStore()
 const workspaceStore = useWorkspaceStore()
-const conversationStore = useConversationStore()
+const conversationStore = useHarnessConversationStore()
 
-// Poll runners + workspaces for the stats bar
 const { start: startRunnerPolling } = usePolling(() => runnerStore.fetchRunners(), 10000)
 const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
-// Poll conversations for fresh data
 const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 15000)
 
-// WebSocket cleanup functions
 const cleanupFns: (() => void)[] = []
 const subscribedWorkspaceIds: string[] = []
 
-function setupSocketListeners(): void {
+function subscribeConversationWorkspaces(): void {
   for (const wsId of conversationStore.uniqueWorkspaceIds) {
+    if (subscribedWorkspaceIds.includes(wsId)) continue
     subscribeToWorkspace(wsId)
     subscribedWorkspaceIds.push(wsId)
   }
+}
+
+function setupSocketListeners(): void {
+  subscribeConversationWorkspaces()
 
   cleanupFns.push(
-    onEvent('session:output_chunk', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.RUNNING,
-      )
+    onEvent('harness.session_status', (data) => {
+      conversationStore.updateSessionStatus(data.session_id, data.status)
     }),
   )
 
   cleanupFns.push(
-    onEvent('session:completed', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.COMPLETED,
-      )
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('session:failed', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.FAILED,
-      )
+    onEvent('harness.part_updated', (data) => {
+      conversationStore.touchConversation(data.session_id)
     }),
   )
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
-      conversationStore.updateWorkspaceStatus(data.workspace_id, data.status as WorkspaceStatus)
-      workspaceStore.updateWorkspaceStatus(data.workspace_id, data.status as WorkspaceStatus)
+      workspaceStore.updateWorkspaceStatus(
+        data.workspace_id,
+        data.status as WorkspaceStatus,
+        data.credentials_present,
+      )
     }),
   )
 
@@ -129,6 +114,7 @@ function cleanupSocket(): void {
 onMounted(async () => {
   startRunnerPolling()
   startWorkspacePolling()
+  await workspaceStore.fetchWorkspaces()
   await conversationStore.fetchConversations()
   startConvPolling()
   setupSocketListeners()
@@ -138,15 +124,20 @@ onUnmounted(() => {
   cleanupSocket()
 })
 
-// View mode — persisted across sessions; default kanban on first visit
+watch(
+  () => conversationStore.uniqueWorkspaceIds,
+  () => {
+    subscribeConversationWorkspaces()
+  },
+)
+
 const VIEW_MODE_KEY = 'opencuria:dashboard-view'
 const savedViewMode = localStorage.getItem(VIEW_MODE_KEY)
 const viewMode = ref<'list' | 'kanban'>(
   savedViewMode === 'list' || savedViewMode === 'kanban' ? savedViewMode : 'kanban',
 )
-watch(viewMode, (v) => localStorage.setItem(VIEW_MODE_KEY, v))
+watch(viewMode, (value) => localStorage.setItem(VIEW_MODE_KEY, value))
 
-// Stats for the compact header bar
 const onlineRunnersCount = computed(() => runnerStore.onlineRunners.length)
 const totalRunnersCount = computed(() => runnerStore.runners.length)
 const activeWorkspacesCount = computed(
@@ -157,46 +148,17 @@ const activeWorkspacesCount = computed(
     ).length,
 )
 
-// ---------------------------------------------------------------------------
-// Kanban columns
-// ---------------------------------------------------------------------------
-
-/** Column 1 – Available: no active session, or completed/failed and already read */
 const idleConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => isConversationIdle(conv)),
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationAvailable(conv)),
 )
 
-/** Column 2 – Working: session is pending or running */
 const workingConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => isConversationRunning(conv)),
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationRunning(conv)),
 )
 
-/** Column 3 – Done/unread: session completed or failed, not yet opened */
 const doneConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => {
-    const status = conv.last_session?.status
-    return Boolean(status && !isSessionActive(status) && !conv.is_read)
-  }),
+  conversationStore.filteredConversations.filter((conv) => isHarnessConversationDoneUnread(conv)),
 )
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function workspaceStatusVariant(
-  status: WorkspaceStatus,
-): 'success' | 'warning' | 'error' | 'muted' {
-  switch (status) {
-    case WorkspaceStatus.RUNNING:
-      return 'success'
-    case WorkspaceStatus.CREATING:
-      return 'warning'
-    case WorkspaceStatus.FAILED:
-      return 'error'
-    default:
-      return 'muted'
-  }
-}
 
 function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime()
@@ -210,38 +172,32 @@ function formatTimeAgo(isoString: string): string {
   return `${days}d ago`
 }
 
-function navigateToConversation(conv: {
-  workspace_id: string
-  chat_id: string | null
-  last_session: { id: string } | null
-}): void {
-  if (conv.last_session) {
-    conversationStore.markAsRead(conv.workspace_id, conv.chat_id, conv.last_session.id)
-  }
-  router.push({
+function navigateToConversation(conv: HarnessConversation): void {
+  void conversationStore.markAsRead(conv.session_id)
+  void router.push({
     path: `/workspaces/${conv.workspace_id}`,
-    query: conv.chat_id ? { chatId: conv.chat_id } : {},
+    query: { session: conv.session_id },
   })
 }
 </script>
 
 <template>
-  <div class="flex flex-col h-full -m-6 lg:-m-8">
-    <!-- Compact stats bar -->
-    <div class="border-b border-border bg-surface px-4 py-3 lg:px-6 shrink-0">
+  <div class="flex h-full min-h-0 flex-col">
+    <div class="border-b border-border bg-header px-4 py-3 lg:px-6 shrink-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">
-          <!-- Runners online -->
           <div class="flex items-center gap-1.5 text-sm">
-            <Wifi :size="14" :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-fg'" />
-            <span class="text-fg font-medium">{{ onlineRunnersCount }}</span>
-            <span class="text-muted-fg">/ {{ totalRunnersCount }} runners online</span>
+            <Wifi
+              :size="14"
+              :class="onlineRunnersCount > 0 ? 'text-success' : 'text-muted-foreground'"
+            />
+            <span class="text-foreground font-medium">{{ onlineRunnersCount }}</span>
+            <span class="text-muted-foreground">/ {{ totalRunnersCount }} runners online</span>
           </div>
-          <!-- Active workspaces -->
           <div class="flex items-center gap-1.5 text-sm">
             <Container :size="14" class="text-success" />
-            <span class="text-fg font-medium">{{ activeWorkspacesCount }}</span>
-            <span class="text-muted-fg">active</span>
+            <span class="text-foreground font-medium">{{ activeWorkspacesCount }}</span>
+            <span class="text-muted-foreground">active</span>
           </div>
         </div>
         <div class="hidden sm:block">
@@ -250,23 +206,25 @@ function navigateToConversation(conv: {
       </div>
     </div>
 
-    <!-- Search bar + view toggle -->
-    <div class="border-b border-border bg-surface px-4 py-2 lg:px-6 shrink-0">
+    <div class="border-b border-border bg-header px-4 py-2 lg:px-6 shrink-0">
       <div class="flex items-center gap-2">
         <div class="relative flex-1">
-          <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-fg" />
-          <UiInput
+          <Search
+            :size="14"
+            class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
             v-model="conversationStore.searchQuery"
             placeholder="Search conversations..."
             class="pl-8 h-8 text-sm"
           />
         </div>
-        <!-- View toggle: only on lg+ -->
         <div class="hidden lg:flex items-center gap-0.5 rounded-md border border-border p-0.5">
           <button
+            type="button"
             :class="[
               'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'list' ? 'bg-surface-hover text-fg' : 'text-muted-fg hover:text-fg',
+              viewMode === 'list' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
             ]"
             title="List view"
             @click="viewMode = 'list'"
@@ -274,9 +232,10 @@ function navigateToConversation(conv: {
             <LayoutList :size="14" />
           </button>
           <button
+            type="button"
             :class="[
               'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'kanban' ? 'bg-surface-hover text-fg' : 'text-muted-fg hover:text-fg',
+              viewMode === 'kanban' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
             ]"
             title="Kanban view"
             @click="viewMode = 'kanban'"
@@ -287,26 +246,22 @@ function navigateToConversation(conv: {
       </div>
     </div>
 
-    <!-- List view — always visible on mobile; hidden on lg+ when kanban -->
-    <div :class="viewMode === 'kanban' ? 'lg:hidden' : ''">
-      <ConversationListView
+    <div :class="viewMode === 'kanban' ? 'lg:hidden flex flex-col flex-1 min-h-0' : 'flex flex-col flex-1 min-h-0'">
+      <HarnessConversationListView
         :conversations="conversationStore.filteredConversations"
         :loading="conversationStore.loading"
         :search-query="conversationStore.searchQuery"
         :format-time-ago="formatTimeAgo"
-        :workspace-status-variant="workspaceStatusVariant"
         @conversation-click="navigateToConversation"
       />
     </div>
 
-    <!-- Kanban view — lg+ only, rendered only when viewMode === 'kanban' -->
-    <ConversationKanbanView
+    <HarnessConversationKanbanView
       v-if="viewMode === 'kanban'"
       :idle-convs="idleConvs"
       :working-convs="workingConvs"
       :done-convs="doneConvs"
       :format-time-ago="formatTimeAgo"
-      :workspace-status-variant="workspaceStatusVariant"
       @conversation-click="navigateToConversation"
     />
   </div>

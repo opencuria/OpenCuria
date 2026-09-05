@@ -1,9 +1,9 @@
 """Central business logic for workspace management.
 
-The runner is a "dumb executor" — it receives structured commands
-from the backend and runs them inside workspace environments.  All agent
-knowledge (configure commands, run command templates) lives in the
-backend database.
+The runner is a "dumb executor" — it runs lifecycle, terminal, file,
+and harness exec operations requested by the backend.  All agentic
+knowledge (providers, tools, permissions, prompts) lives in the
+backend harness.
 
 The runner has no local database — all workspace state is derived from
 the runtime backends (Docker, QEMU/KVM) and cached in memory.
@@ -24,11 +24,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
 from .config import RunnerSettings
-from .models import DesktopSession, WorkspaceInfo
+from .models import DesktopReleaseResult, DesktopSession, WorkspaceInfo
 from .runtime.base import ImageArtifactInfo, PtyHandle, RuntimeBackend, WorkspaceConfig
 
 logger = structlog.get_logger(__name__)
@@ -36,6 +37,18 @@ logger = structlog.get_logger(__name__)
 FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+FIND_FILES_DEFAULT_LIMIT = 50
+FIND_FILES_PRUNE_NAMES = (
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    ".next",
+)
+_FIND_FILES_QUERY_RE = re.compile(r"^[A-Za-z0-9_/:.+-]*$")
+_FIND_FILES_SUCCESS_EXIT_CODES = {0, 1, 141}
 _SHELL_OPERATOR_TOKENS = {
     "|",
     "||",
@@ -54,53 +67,50 @@ _SHELL_OPERATOR_TOKENS = {
     "&>",
     "&>>",
 }
-_REDIRECTION_RE = re.compile(
-    r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$"
+_REDIRECTION_RE = re.compile(r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$")
+
+WORKSPACE_CREDENTIAL_DIR = "/root/.opencuria-credentials"
+WORKSPACE_CREDENTIAL_MANIFEST = "/root/.opencuria-credentials/manifest"
+WORKSPACE_CREDENTIAL_ENV_FILE = "/root/.opencuria-env.sh"
+WORKSPACE_CREDENTIAL_PROFILE_D = "/etc/profile.d/opencuria-env.sh"
+WORKSPACE_CREDENTIAL_BASHRC = "/root/.bashrc"
+WORKSPACE_CREDENTIAL_BASHRC_LINE = (
+    "test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh"
 )
+WORKSPACE_CREDENTIAL_ENVIRONMENT = "/etc/environment"
+WORKSPACE_CREDENTIAL_ENVIRONMENT_START = "# OPENCURIA_CREDENTIALS_START"
+WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
 
-
-@dataclass(frozen=True)
-class OperationCredentialContext:
-    """Per-operation credential material prepared inside a workspace."""
-
-    directory: str
-    bootstrap_script: str
-    cleanup_script: str
-    environment: dict[str, str]
-
-    def build_bootstrap_snippet(
-        self,
-        extra_env: dict[str, str] | None = None,
-    ) -> str:
-        """Return a shell snippet which activates this credential context."""
-
-        exports = [
-            f"export OPENCURIA_CREDENTIAL_CONTEXT_DIR={shlex.quote(self.directory)}",
-            f". {shlex.quote(self.bootstrap_script)}",
-        ]
-        for key, value in (extra_env or {}).items():
-            exports.append(f"export {key}={shlex.quote(str(value))}")
-        return "; ".join(exports)
+DESKTOP_DISPLAY = ":1"
+DESKTOP_HOME = "/root"
+DEFAULT_DESKTOP_WIDTH = 1920
+DEFAULT_DESKTOP_HEIGHT = 1080
+COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
+_RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+DESKTOP_HOLDER_VIEWER = "viewer"
+DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
+_SCROLL_BUTTONS = {
+    "up": 4,
+    "down": 5,
+    "left": 6,
+    "right": 7,
+}
+_CLICK_BUTTONS = {
+    "left": 1,
+    "middle": 2,
+    "right": 3,
+    1: 1,
+    2: 2,
+    3: 3,
+}
 
 
 @dataclass
 class TerminalSession:
-    """Runtime PTY handle plus optional credential context."""
+    """Runtime PTY handle for an interactive terminal session."""
 
     handle: PtyHandle
     runtime: RuntimeBackend
-    credential_context: OperationCredentialContext | None = None
-
-
-@dataclass
-class PreparedOperation:
-    """Resolved workspace target plus reusable credential context."""
-
-    workspace_id: uuid.UUID
-    instance_id: str
-    runtime: RuntimeBackend
-    log: Any
-    credential_context: OperationCredentialContext | None = None
 
 
 class WorkspaceService:
@@ -128,6 +138,7 @@ class WorkspaceService:
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._terminals: dict[str, TerminalSession] = {}
         self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
+        self._desktop_recordings: dict[tuple[uuid.UUID, str], tuple[int, str]] = {}
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
@@ -168,9 +179,7 @@ class WorkspaceService:
                     status=info.status,
                     runtime_type=runtime_type,
                     created_at=(
-                        existing.created_at
-                        if existing
-                        else datetime.now(timezone.utc)
+                        existing.created_at if existing else datetime.now(timezone.utc)
                     ),
                 )
 
@@ -238,10 +247,15 @@ class WorkspaceService:
             return ["bash", "-lc", raw_args]
 
         args = [str(arg) for arg in raw_args]
-        if len(args) >= 2 and args[0] in {"bash", "sh"} and args[1] in {
-            "-c",
-            "-lc",
-        }:
+        if (
+            len(args) >= 2
+            and args[0] in {"bash", "sh"}
+            and args[1]
+            in {
+                "-c",
+                "-lc",
+            }
+        ):
             return args
 
         if not any(
@@ -263,7 +277,6 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         command: dict,
-        credential_context: OperationCredentialContext | None = None,
     ) -> tuple[int, str]:
         """Execute a structured command dict inside a workspace.
 
@@ -276,10 +289,7 @@ class WorkspaceService:
         Returns:
             Tuple of (exit_code, output).
         """
-        wrapped_command = self._wrap_command_with_context(
-            command,
-            credential_context,
-        )
+        wrapped_command = self._wrap_command_with_persistent_env(command)
         command_args = self._normalise_command_args(wrapped_command["args"])
         return await runtime.exec_command_wait(
             instance_id,
@@ -293,7 +303,6 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         command: dict,
-        credential_context: OperationCredentialContext | None = None,
     ) -> AsyncIterator[str]:
         """Execute a structured command dict and stream output lines.
 
@@ -306,10 +315,7 @@ class WorkspaceService:
         Yields:
             Raw output lines from the command.
         """
-        wrapped_command = self._wrap_command_with_context(
-            command,
-            credential_context,
-        )
+        wrapped_command = self._wrap_command_with_persistent_env(command)
         command_args = self._normalise_command_args(wrapped_command["args"])
         async for line in runtime.exec_command(
             instance_id,
@@ -319,7 +325,7 @@ class WorkspaceService:
         ):
             yield line
 
-    # -- operation-scoped credentials -----------------------------------------
+    # -- persistent workspace credentials -------------------------------------
 
     @staticmethod
     def _build_tar_entries(
@@ -335,36 +341,11 @@ class WorkspaceService:
                 tar.addfile(info, io.BytesIO(content))
         return buffer.getvalue()
 
-    async def _create_operation_credential_context(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        env_vars: dict[str, str] | None,
-        files: list[dict[str, Any]] | None,
-        ssh_keys: list[str] | None,
-        log,
-    ) -> OperationCredentialContext | None:
-        """Create a temporary credential context for a single operation."""
+    @staticmethod
+    def _credential_path_helpers() -> list[str]:
+        """Return shell helper functions used by inject and remove scripts."""
 
-        env_vars = env_vars or {}
-        credential_files = files or []
-        ssh_keys = ssh_keys or []
-        if not env_vars and not credential_files and not ssh_keys:
-            return None
-
-        context_id = str(uuid.uuid4())
-        context_dir = f"/tmp/opencuria-op-{context_id}"
-        ssh_dir = f"{context_dir}/ssh"
-        bin_dir = f"{context_dir}/bin"
-        bootstrap_path = f"{context_dir}/bootstrap.sh"
-        cleanup_path = f"{context_dir}/cleanup.sh"
-        files_dir = f"{context_dir}/files"
-        archive_files: list[tuple[str, bytes, int]] = []
-        operation_env = {
-            "OPENCURIA_CREDENTIAL_CONTEXT_DIR": context_dir,
-        }
-
-        helper_lines = [
+        return [
             'opencuria_credential_home="${HOME:-/root}"',
             "opencuria_resolve_credential_path() {",
             '  raw_path="$1"',
@@ -372,259 +353,293 @@ class WorkspaceService:
             "  home_prefix='${HOME}/'",
             '  if [ "$raw_path" = "~" ] || [ "$raw_path" = "${HOME}" ] || [ "$raw_path" = "${opencuria_credential_home}" ]; then',
             '    printf "%s\\n" "$opencuria_credential_home"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#"$tilde_prefix"}" != "$raw_path" ]; then',
             '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$tilde_prefix"}"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#"$home_prefix"}" != "$raw_path" ]; then',
             '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$home_prefix"}"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#/}" != "$raw_path" ]; then',
             '    printf "%s\\n" "$raw_path"',
-            '    return',
+            "    return",
             "  fi",
             '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
             "}",
+            "opencuria_strip_environment_block() {",
+            f"  env_file={shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
+            '  if [ ! -f "$env_file" ]; then',
+            "    return",
+            "  fi",
+            "  tmp_env=$(mktemp)",
+            f"  awk '/{WORKSPACE_CREDENTIAL_ENVIRONMENT_START}/{{skip=1}} "
+            f"/{WORKSPACE_CREDENTIAL_ENVIRONMENT_END}/{{skip=0; next}} !skip' "
+            '"$env_file" > "$tmp_env" || true',
+            '  cat "$tmp_env" > "$env_file"',
+            '  rm -f "$tmp_env"',
+            "}",
         ]
-        bootstrap_lines = [
-            "#!/bin/sh",
-            "set -eu",
-            'export PATH="/root/.local/bin:$PATH"',
-            *helper_lines,
-        ]
-        operation_env["PATH"] = (
-            "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
-        cleanup_lines = [
-            "#!/bin/sh",
-            "set -eu",
-            *helper_lines,
-        ]
-        for key, value in env_vars.items():
-            bootstrap_lines.append(
-                f"export {key}={shlex.quote(str(value))}"
-            )
-            operation_env[key] = str(value)
 
-        if credential_files:
-            for index, credential_file in enumerate(credential_files, start=1):
-                source_relpath = f"files/credential_{index}"
-                source_abspath = f"{files_dir}/credential_{index}"
-                target_path = str(credential_file["target_path"])
-                mode = int(credential_file.get("mode", 0o600))
-                content = str(credential_file.get("content", ""))
-                archive_files.append(
-                    (
-                        source_relpath,
-                        content.encode("utf-8"),
-                        0o600,
-                    )
-                )
-                bootstrap_lines.extend(
-                    [
-                        f'target_path=$(opencuria_resolve_credential_path {shlex.quote(target_path)})',
-                        'mkdir -p "$(dirname "$target_path")"',
-                        f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
-                    ]
-                )
-                cleanup_lines.append(
-                    f'rm -f "$(opencuria_resolve_credential_path {shlex.quote(target_path)})"'
-                )
-
-        if ssh_keys:
-            known_hosts_path = f"{ssh_dir}/known_hosts"
-            config_path = f"{ssh_dir}/config"
-            config_lines = [
-                "Host *",
-                "    StrictHostKeyChecking accept-new",
-                f"    UserKnownHostsFile {known_hosts_path}",
-                "    IdentitiesOnly yes",
-            ]
-            for index, key_pem in enumerate(ssh_keys):
-                key_name = "id_ed25519" if index == 0 else f"id_ed25519_{index + 1}"
-                key_relpath = f"ssh/{key_name}"
-                key_abspath = f"{ssh_dir}/{key_name}"
-                config_lines.append(f"    IdentityFile {key_abspath}")
-                archive_files.append(
-                    (key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600)
-                )
-
-            archive_files.append(("ssh/known_hosts", b"", 0o600))
-            archive_files.append(
-                ("ssh/config", ("\n".join(config_lines) + "\n").encode("utf-8"), 0o600)
-            )
-
-            ssh_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/ssh -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            scp_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/scp -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            sftp_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/sftp -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            archive_files.extend(
-                [
-                    ("bin/ssh", ssh_wrapper, 0o755),
-                    ("bin/scp", scp_wrapper, 0o755),
-                    ("bin/sftp", sftp_wrapper, 0o755),
-                ]
-            )
-            bootstrap_lines.extend(
-                [
-                    f'export PATH={shlex.quote(bin_dir)}:"$PATH"',
-                    f"export GIT_SSH_COMMAND={shlex.quote(f'{bin_dir}/ssh')}",
-                    "export GIT_SSH_VARIANT=ssh",
-                ]
-            )
-            operation_env.update(
-                {
-                    "PATH": (
-                        f"{bin_dir}:/root/.local/bin:/usr/local/sbin:"
-                        "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                    ),
-                    "GIT_SSH_COMMAND": f"{bin_dir}/ssh",
-                    "GIT_SSH_VARIANT": "ssh",
-                }
-            )
-
-        bootstrap_content = ("\n".join(bootstrap_lines) + "\n").encode("utf-8")
-        cleanup_content = ("\n".join(cleanup_lines) + "\n").encode("utf-8")
-        archive_files.extend(
-            [
-                ("bootstrap.sh", bootstrap_content, 0o700),
-                ("cleanup.sh", cleanup_content, 0o700),
-            ]
-        )
-
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["mkdir", "-p", context_dir],
-            workdir="/tmp",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to create credential context: {output}")
-
-        archive_data = self._build_tar_entries(archive_files)
-        await runtime.put_archive(instance_id, context_dir, archive_data)
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", f". {shlex.quote(bootstrap_path)} >/dev/null"],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to materialize credential context: {output}")
-        log.info(
-            "operation_credential_context_created",
-            has_env=bool(env_vars),
-            file_count=len(credential_files),
-            ssh_key_count=len(ssh_keys),
-            context_dir=context_dir,
-        )
-        return OperationCredentialContext(
-            directory=context_dir,
-            bootstrap_script=bootstrap_path,
-            cleanup_script=cleanup_path,
-            environment=operation_env,
-        )
-
-    async def _cleanup_operation_credential_context(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        context: OperationCredentialContext | None,
-        log,
-    ) -> None:
-        """Best-effort cleanup of a temporary operation credential context."""
-
-        if context is None:
-            return
-
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=[
-                "sh",
-                "-lc",
-                f". {shlex.quote(context.cleanup_script)} >/dev/null 2>&1 || true; "
-                f"rm -rf {shlex.quote(context.directory)}",
-            ],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            log.warning(
-                "operation_credential_context_cleanup_failed",
-                context_dir=context.directory,
-                output=output,
-            )
-            return
-
-        log.info(
-            "operation_credential_context_removed",
-            context_dir=context.directory,
-        )
-
-    async def _cleanup_legacy_workspace_credentials(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        log,
-    ) -> None:
-        """Remove legacy persistent credential files left by older runners."""
-
-        cleanup_script = """
-rm -f /root/.opencuria-env.sh /etc/profile.d/opencuria-env.sh
-if [ -f /root/.bashrc ]; then
-  tmp_bashrc=$(mktemp)
-  grep -vxF 'test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh' /root/.bashrc > "$tmp_bashrc" || true
-  cat "$tmp_bashrc" > /root/.bashrc
-  rm -f "$tmp_bashrc"
-fi
-rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*
-rm -f /root/.ssh/config /root/.ssh/known_hosts
-find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-data.txt.i' -o -name 'cloud-config.txt' -o -path '*/scripts/runcmd' \\) -delete 2>/dev/null || true
-"""
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", cleanup_script],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            log.warning("legacy_credential_cleanup_failed", output=output)
-            return
-        log.info("legacy_credential_cleanup_complete")
-
-    def _wrap_command_with_context(
-        self,
-        command: dict,
-        credential_context: OperationCredentialContext | None,
-    ) -> dict:
-        """Wrap command execution so the credential context is sourced first."""
-
-        if credential_context is None:
-            return command
+    def _wrap_command_with_persistent_env(self, command: dict) -> dict:
+        """Source persistent workspace credentials before running a command."""
 
         normalised_args = self._normalise_command_args(command["args"])
-        wrapper = (
-            f"{credential_context.build_bootstrap_snippet(command.get('env') or {})}; "
-            "exec \"$@\""
+        extra_env = command.get("env") or {}
+        extra_exports = "; ".join(
+            f"export {key}={shlex.quote(str(value))}"
+            for key, value in extra_env.items()
         )
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi"
+        )
+        if extra_exports:
+            source = f"{source}; {extra_exports}"
+        wrapper = f'{source}; exec "$@"'
         return {
             **command,
             "args": [
                 "bash",
                 "-lc",
                 wrapper,
-                "opencuria-operation",
+                "opencuria-exec",
                 *normalised_args,
             ],
             "env": {},
         }
+
+    async def remove_workspace_credentials(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        log,
+    ) -> None:
+        """Idempotently remove persisted credential material from a workspace."""
+
+        cleanup_script = "\n".join(
+            [
+                "#!/bin/sh",
+                "set -eu",
+                *self._credential_path_helpers(),
+                f"manifest={shlex.quote(WORKSPACE_CREDENTIAL_MANIFEST)}",
+                'if [ -f "$manifest" ]; then',
+                '  while IFS= read -r file_path || [ -n "$file_path" ]; do',
+                '    [ -z "$file_path" ] && continue',
+                '    rm -f "$(opencuria_resolve_credential_path "$file_path")"',
+                '  done < "$manifest"',
+                "fi",
+                "opencuria_strip_environment_block",
+                f"rm -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
+                f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
+                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} ]; then",
+                "  tmp_bashrc=$(mktemp)",
+                f"  grep -vxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f'{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} > "$tmp_bashrc" || true',
+                f'  cat "$tmp_bashrc" > {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}',
+                '  rm -f "$tmp_bashrc"',
+                "fi",
+                "rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*",
+                "rm -f /root/.ssh/config /root/.ssh/known_hosts",
+                f"rm -rf {shlex.quote(WORKSPACE_CREDENTIAL_DIR)}",
+                "rm -rf /tmp/opencuria-op-*",
+                "find /var/lib/cloud/instances -type f "
+                "\\( -name 'user-data.txt' -o -name 'user-data.txt.i' "
+                "-o -name 'cloud-config.txt' -o -path '*/scripts/runcmd' \\) "
+                "-delete 2>/dev/null || true",
+            ]
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", cleanup_script],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to remove workspace credentials: {output}")
+        log.info("workspace_credentials_removed")
+
+    async def inject_workspace_credentials(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        env_vars: dict[str, str] | None,
+        files: list[dict[str, Any]] | None,
+        ssh_keys: list[str] | None,
+        log,
+    ) -> bool:
+        """Persist credentials on the workspace disk, replacing any previous set.
+
+        Returns True when credential material was written, False when the
+        workspace has no attached secrets after a clean remove.
+        """
+
+        await self.remove_workspace_credentials(runtime, instance_id, log)
+
+        env_vars = env_vars or {}
+        credential_files = files or []
+        ssh_keys = ssh_keys or []
+        if not env_vars and not credential_files and not ssh_keys:
+            return False
+
+        staging_dir = WORKSPACE_CREDENTIAL_DIR
+        files_dir = f"{staging_dir}/files"
+        ssh_dir = f"{staging_dir}/ssh"
+        install_path = f"{staging_dir}/install.sh"
+        archive_files: list[tuple[str, bytes, int]] = []
+        installed_paths: list[str] = [
+            WORKSPACE_CREDENTIAL_ENV_FILE,
+            WORKSPACE_CREDENTIAL_PROFILE_D,
+            WORKSPACE_CREDENTIAL_MANIFEST,
+        ]
+        helper_lines = self._credential_path_helpers()
+        install_lines = [
+            "#!/bin/sh",
+            "set -eu",
+            *helper_lines,
+            f"mkdir -p {shlex.quote(WORKSPACE_CREDENTIAL_DIR)} /root/.ssh /etc/profile.d",
+            f"install -m 600 {shlex.quote(staging_dir + '/env.sh')} "
+            f"{shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}",
+            f"install -m 644 {shlex.quote(staging_dir + '/profile.d.sh')} "
+            f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
+            "opencuria_strip_environment_block",
+            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_START)} "
+            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
+        ]
+
+        env_export_lines = [
+            "#!/bin/sh",
+            'export PATH="/root/.local/bin:$PATH"',
+        ]
+        for key, value in env_vars.items():
+            env_export_lines.append(f"export {key}={shlex.quote(str(value))}")
+            install_lines.append(
+                "printf '%s\\n' "
+                f"{shlex.quote(f'{key}={value}')} "
+                f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
+            )
+        install_lines.append(
+            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_END)} "
+            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
+        )
+        archive_files.append(
+            ("env.sh", ("\n".join(env_export_lines) + "\n").encode("utf-8"), 0o600)
+        )
+        archive_files.append(
+            (
+                "profile.d.sh",
+                (f"{WORKSPACE_CREDENTIAL_BASHRC_LINE}\n").encode("utf-8"),
+                0o644,
+            )
+        )
+
+        install_lines.extend(
+            [
+                f"touch {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                f"if ! grep -qxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f"{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}; then",
+                f"  printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f">> {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                "fi",
+            ]
+        )
+
+        for index, credential_file in enumerate(credential_files, start=1):
+            source_relpath = f"files/credential_{index}"
+            source_abspath = f"{files_dir}/credential_{index}"
+            target_path = str(credential_file["target_path"])
+            mode = int(credential_file.get("mode", 0o600))
+            content = str(credential_file.get("content", ""))
+            archive_files.append((source_relpath, content.encode("utf-8"), 0o600))
+            install_lines.extend(
+                [
+                    "target_path=$(opencuria_resolve_credential_path "
+                    f"{shlex.quote(target_path)})",
+                    'mkdir -p "$(dirname "$target_path")"',
+                    f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
+                ]
+            )
+            installed_paths.append(target_path)
+
+        if ssh_keys:
+            config_lines = [
+                "Host *",
+                "    StrictHostKeyChecking accept-new",
+                "    UserKnownHostsFile /root/.ssh/known_hosts",
+                "    IdentitiesOnly yes",
+            ]
+            for index, key_pem in enumerate(ssh_keys):
+                key_name = "id_ed25519" if index == 0 else f"id_ed25519_{index + 1}"
+                archive_files.append(
+                    (
+                        f"ssh/{key_name}",
+                        key_pem.rstrip().encode("utf-8") + b"\n",
+                        0o600,
+                    )
+                )
+                install_lines.append(
+                    f"install -m 600 {shlex.quote(ssh_dir + '/' + key_name)} "
+                    f"{shlex.quote('/root/.ssh/' + key_name)}"
+                )
+                config_lines.append(f"    IdentityFile /root/.ssh/{key_name}")
+                installed_paths.append(f"/root/.ssh/{key_name}")
+            archive_files.append(("ssh/known_hosts", b"", 0o600))
+            archive_files.append(
+                (
+                    "ssh/config",
+                    ("\n".join(config_lines) + "\n").encode("utf-8"),
+                    0o600,
+                )
+            )
+            install_lines.extend(
+                [
+                    f"install -m 600 {shlex.quote(ssh_dir + '/config')} /root/.ssh/config",
+                    f"install -m 600 {shlex.quote(ssh_dir + '/known_hosts')} "
+                    "/root/.ssh/known_hosts",
+                ]
+            )
+            installed_paths.extend(["/root/.ssh/config", "/root/.ssh/known_hosts"])
+
+        manifest = "".join(f"{path}\n" for path in installed_paths)
+        archive_files.append(("manifest", manifest.encode("utf-8"), 0o600))
+        archive_files.append(
+            ("install.sh", ("\n".join(install_lines) + "\n").encode("utf-8"), 0o700)
+        )
+
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=[
+                "mkdir",
+                "-p",
+                staging_dir,
+                f"{staging_dir}/files",
+                f"{staging_dir}/ssh",
+            ],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Failed to create credential staging directory: {output}"
+            )
+
+        archive_data = self._build_tar_entries(archive_files)
+        await runtime.put_archive(instance_id, staging_dir, archive_data)
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", f". {shlex.quote(install_path)}"],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to inject workspace credentials: {output}")
+
+        log.info(
+            "workspace_credentials_injected",
+            has_env=bool(env_vars),
+            file_count=len(credential_files),
+            ssh_key_count=len(ssh_keys),
+        )
+        return True
 
     # -- workspace lifecycle ---------------------------------------------------
 
@@ -634,7 +649,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
-        configure_commands: list[dict] | None = None,
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
@@ -642,24 +656,21 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         runtime_type: str = "docker",
         image_tag: str | None = None,
         base_image_path: str | None = None,
-    ) -> uuid.UUID:
-        """Create a new workspace, clone repos, run configure commands.
+    ) -> tuple[uuid.UUID, bool]:
+        """Create a new workspace, inject credentials, and clone repos.
 
         Args:
             repos: Git repository URLs to clone into the workspace.
-            configure_commands: List of structured command dicts from the
-                backend, each with ``args``, ``workdir``, ``env``,
-                ``description`` keys.
-            env_vars: Optional environment variables available during initial
-                repository clone/configure steps.
-            files: Optional credential files available during initial
-                repository clone/configure steps.
-            ssh_keys: Optional SSH private keys available during initial
-                repository clone/configure steps.
+            env_vars: Environment variables persisted in the workspace
+                until a controlled stop.
+            files: Credential files persisted in the workspace until a
+                controlled stop.
+            ssh_keys: SSH private keys persisted in the workspace until a
+                controlled stop.
             workspace_id: Workspace ID assigned by the backend.
             runtime_type: Which runtime to use (``"docker"`` or ``"qemu"``).
 
-        Returns the workspace UUID.
+        Returns the workspace UUID and whether credentials were injected.
         """
         if workspace_id is None:
             workspace_id = uuid.uuid4()
@@ -727,13 +738,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime_type=runtime_type,
         )
 
-        await self._cleanup_legacy_workspace_credentials(
-            runtime,
-            instance_id,
-            log,
-        )
-
-        credential_context = await self._create_operation_credential_context(
+        credentials_present = await self.inject_workspace_credentials(
             runtime,
             instance_id,
             env_vars,
@@ -742,288 +747,35 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             log,
         )
 
-        try:
-            # Clone repositories
-            for repo_url in repos:
-                log.info("cloning_repo", repo=repo_url)
-                exit_code, output = await self._exec_command(
-                    runtime,
-                    instance_id,
-                    {
-                        "args": ["git", "clone", repo_url],
-                        "workdir": "/workspace",
-                        "env": {},
-                        "description": f"Clone repository: {repo_url}",
-                    },
-                    credential_context=credential_context,
-                )
-                if exit_code != 0:
-                    log.warning("repo_clone_failed", repo=repo_url, output=output)
-                else:
-                    log.info("repo_cloned", repo=repo_url)
-
-            # Run configure commands from the backend
-            for cmd in configure_commands or []:
-                log.info("configure_step", description=cmd.get("description", ""))
-                exit_code, output = await self._exec_command(
-                    runtime,
-                    instance_id,
-                    cmd,
-                    credential_context=credential_context,
-                )
-                if exit_code != 0:
-                    log.warning(
-                        "configure_step_failed",
-                        description=cmd.get("description", ""),
-                        output=output,
-                    )
-        finally:
-            await self._cleanup_operation_credential_context(
+        for repo_url in repos:
+            log.info("cloning_repo", repo=repo_url)
+            exit_code, output = await self._exec_command(
                 runtime,
                 instance_id,
-                credential_context,
-                log,
+                {
+                    "args": ["git", "clone", repo_url],
+                    "workdir": "/workspace",
+                    "env": {},
+                    "description": f"Clone repository: {repo_url}",
+                },
             )
+            if exit_code != 0:
+                log.warning("repo_clone_failed", repo=repo_url, output=output)
+            else:
+                log.info("repo_cloned", repo=repo_url)
 
-        # Update cache status
         self._cache[workspace_id].status = "running"
 
-        log.info("workspace_ready")
-        return workspace_id
+        log.info("workspace_ready", credentials_present=credentials_present)
+        return workspace_id, credentials_present
 
-    async def prepare_operation(
-        self,
-        workspace_id: uuid.UUID,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-    ) -> PreparedOperation:
-        """Resolve runtime target and create a reusable credential context."""
+    async def stop_workspace(self, workspace_id: uuid.UUID) -> bool:
+        """Remove credentials then stop a running workspace.
 
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if not await runtime.workspace_exists(info.instance_id):
-            self._cache.pop(workspace_id, None)
-            raise RuntimeError("Workspace instance no longer exists")
-
-        await self._cleanup_legacy_workspace_credentials(
-            runtime,
-            info.instance_id,
-            log,
-        )
-
-        credential_context = await self._create_operation_credential_context(
-            runtime,
-            info.instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
-        )
-        return PreparedOperation(
-            workspace_id=workspace_id,
-            instance_id=info.instance_id,
-            runtime=runtime,
-            log=log,
-            credential_context=credential_context,
-        )
-
-    async def cleanup_operation(self, prepared: PreparedOperation) -> None:
-        """Remove any temporary credential material for a prepared operation."""
-
-        await self._cleanup_operation_credential_context(
-            prepared.runtime,
-            prepared.instance_id,
-            prepared.credential_context,
-            prepared.log,
-        )
-
-    async def run_configure_commands(
-        self,
-        workspace_id: uuid.UUID,
-        configure_commands: list[dict],
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> None:
-        """Run configure commands in an existing workspace (agent first-time setup).
-
-        This is called before the first prompt of a new agent in a workspace,
-        allowing the agent to be installed/configured without a workspace restart.
-
-        Args:
-            workspace_id: Target workspace UUID.
-            configure_commands: List of structured command dicts from the backend.
+        Returns False because credentials are stripped before the instance
+        is stopped. Raises if credential removal fails so the workspace
+        stays running with secrets still present.
         """
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        try:
-            for cmd in configure_commands:
-                log.info("configure_step", description=cmd.get("description", ""))
-                exit_code, output = await self._exec_command(
-                    prepared.runtime,
-                    prepared.instance_id,
-                    cmd,
-                    credential_context=prepared.credential_context,
-                )
-                if exit_code != 0:
-                    log.warning(
-                        "configure_step_failed",
-                        description=cmd.get("description", ""),
-                        output=output,
-                    )
-            log.info("configure_commands_complete", count=len(configure_commands))
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def run_command(
-        self,
-        workspace_id: uuid.UUID,
-        command: dict,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command in a workspace and stream output lines."""
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        log.info(
-            "running_command",
-            description=command.get("description", ""),
-        )
-        try:
-            async for line in self._exec_command_stream(
-                prepared.runtime,
-                prepared.instance_id,
-                command,
-                credential_context=prepared.credential_context,
-            ):
-                yield line
-            log.info("command_completed")
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def run_command_wait(
-        self,
-        workspace_id: uuid.UUID,
-        command: dict,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> tuple[int, str]:
-        """Execute a command in a workspace and return exit code + output.
-
-        Args:
-            workspace_id: Target workspace UUID.
-            command: Structured command dict from the backend with
-                ``args``, ``workdir``, ``env``, ``description`` keys.
-        """
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        log.info(
-            "running_command",
-            description=command.get("description", ""),
-        )
-        try:
-            exit_code, output = await self._exec_command(
-                prepared.runtime,
-                prepared.instance_id,
-                command,
-                credential_context=prepared.credential_context,
-            )
-            log.info("command_completed", exit_code=exit_code)
-            return exit_code, output
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def terminate_prompt_process(
-        self,
-        workspace_id: uuid.UUID,
-        pid_file: str,
-    ) -> None:
-        """Terminate a tracked prompt process by PID file."""
-        kill_script = self._build_prompt_termination_script(pid_file)
-        await self.run_command_wait(
-            workspace_id,
-            {
-                "args": ["sh", "-lc", kill_script],
-                "description": "Terminate active prompt process",
-            },
-        )
-
-    @staticmethod
-    def _build_prompt_termination_script(pid_file: str) -> str:
-        """Return shell script that terminates a prompt PID and its process group."""
-
-        quoted_pid_file = shlex.quote(pid_file)
-        return (
-            f"pid_file={quoted_pid_file}; "
-            "if [ ! -f \"$pid_file\" ]; then exit 0; fi; "
-            "pid=$(tr -d '[:space:]' < \"$pid_file\" 2>/dev/null || true); "
-            "if [ -z \"$pid\" ]; then rm -f \"$pid_file\"; exit 0; fi; "
-            "pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d '[:space:]' || true); "
-            "if [ -n \"$pgid\" ]; then "
-            "/bin/kill -TERM -- \"-$pgid\" 2>/dev/null || true; "
-            "pkill -TERM -g \"$pgid\" 2>/dev/null || true; "
-            "fi; "
-            "/bin/kill -TERM \"$pid\" 2>/dev/null || true; "
-            "sleep 1; "
-            "if [ -n \"$pgid\" ]; then "
-            "/bin/kill -KILL -- \"-$pgid\" 2>/dev/null || true; "
-            "pkill -KILL -g \"$pgid\" 2>/dev/null || true; "
-            "fi; "
-            "/bin/kill -KILL \"$pid\" 2>/dev/null || true; "
-            "rm -f \"$pid_file\""
-        )
-
-    async def cleanup_prompt_process_tracking(
-        self,
-        workspace_id: uuid.UUID,
-        pid_file: str,
-    ) -> None:
-        """Remove prompt PID tracking file if it still exists."""
-        cleanup_script = f"rm -f '{pid_file}'"
-        await self.run_command_wait(
-            workspace_id,
-            {
-                "args": ["sh", "-lc", cleanup_script],
-                "description": "Cleanup prompt PID tracking",
-            },
-        )
-
-    async def stop_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Stop a running workspace."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -1031,9 +783,14 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
 
+        await self.remove_workspace_credentials(runtime, info.instance_id, log)
+        await self.release_desktop(
+            workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
+        )
         await runtime.stop_workspace(info.instance_id)
         info.status = "exited"
         log.info("workspace_stopped")
+        return False
 
     async def resume_workspace(
         self,
@@ -1041,8 +798,11 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
-    ) -> None:
-        """Resume (start) a previously stopped workspace."""
+        env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        ssh_keys: list[str] | None = None,
+    ) -> bool:
+        """Resume a stopped workspace and re-inject persistent credentials."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -1051,7 +811,11 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             raise RuntimeError("Workspace has no instance assigned")
 
         if info.runtime_type == "qemu":
-            if qemu_vcpus is None or qemu_memory_mb is None or qemu_disk_size_gb is None:
+            if (
+                qemu_vcpus is None
+                or qemu_memory_mb is None
+                or qemu_disk_size_gb is None
+            ):
                 raise RuntimeError("Missing QEMU resource settings for resume")
             await runtime.reconfigure_workspace(
                 info.instance_id,
@@ -1063,7 +827,38 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
         await runtime.start_workspace(info.instance_id)
         info.status = "running"
-        log.info("workspace_resumed")
+        credentials_present = await self.inject_workspace_credentials(
+            runtime,
+            info.instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
+        log.info("workspace_resumed", credentials_present=credentials_present)
+        return credentials_present
+
+    async def inject_credentials(
+        self,
+        workspace_id: uuid.UUID,
+        env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        ssh_keys: list[str] | None = None,
+    ) -> bool:
+        """Replace persistent credentials on a running workspace."""
+        log = logger.bind(workspace_id=str(workspace_id))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        return await self.inject_workspace_credentials(
+            runtime,
+            info.instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
 
     async def update_workspace_resources(
         self,
@@ -1076,7 +871,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         """Reconfigure resources for an existing QEMU workspace."""
         info = self._get_cached(workspace_id)
         if info.runtime_type != "qemu":
-            raise RuntimeError("Workspace runtime does not support resource reconfiguration")
+            raise RuntimeError(
+                "Workspace runtime does not support resource reconfiguration"
+            )
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
@@ -1093,6 +890,12 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         """Remove a workspace and clean up resources."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._cache.pop(workspace_id, None)
+        self._desktop_sessions.pop(workspace_id, None)
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
 
         if info and info.instance_id:
             runtime = self._runtimes.get(info.runtime_type)
@@ -1196,7 +999,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                         continue
 
                     # Workspace is unreachable.
-                    first_failure = self._unreachable_since.setdefault(ws_id, time.monotonic())
+                    first_failure = self._unreachable_since.setdefault(
+                        ws_id, time.monotonic()
+                    )
                     unreachable_for = time.monotonic() - first_failure
 
                     log.warning(
@@ -1249,9 +1054,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         # Refresh status from runtime
         if info.instance_id:
             try:
-                status = await runtime.get_workspace_status(
-                    info.instance_id
-                )
+                status = await runtime.get_workspace_status(info.instance_id)
                 info.status = status.status
             except Exception:
                 info.status = "unknown"
@@ -1284,10 +1087,10 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 "-lc",
                 (
                     "if command -v python3 >/dev/null 2>&1; then "
-                    "python3 -c \"import socket,sys; "
+                    'python3 -c "import socket,sys; '
                     "sock=socket.socket(); sock.settimeout(1); "
                     "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
-                    "sys.exit(0 if rc == 0 else 1)\"; "
+                    'sys.exit(0 if rc == 0 else 1)"; '
                     "else "
                     "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
                     "fi"
@@ -1312,11 +1115,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             if session is not None:
                 try:
                     if await self._is_desktop_session_live(workspace_id):
-                        item["desktop"] = {
-                            "port": session.port,
-                            "container_ip": self.get_desktop_container_ip(workspace_id),
-                            "network_name": self.get_desktop_network_name(workspace_id),
-                        }
+                        item["desktop"] = self._desktop_heartbeat_payload(
+                            workspace_id, session
+                        )
                     else:
                         self._desktop_sessions.pop(workspace_id, None)
                         item["desktop"] = None
@@ -1398,54 +1199,44 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
     ) -> str:
         """Open an interactive PTY shell in the workspace.
 
         Returns a ``terminal_id`` that identifies this PTY session.
+        Persistent workspace credentials are sourced via a login shell.
         """
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-        terminal_command = ["/bin/bash", "-l"]
-        if prepared.credential_context is not None:
-            terminal_command = [
-                "/bin/bash",
-                "-lc",
-                (
-                    f". {shlex.quote(prepared.credential_context.bootstrap_script)} "
-                    ">/dev/null 2>&1; exec /bin/bash -l"
-                ),
-            ]
+        log = logger.bind(workspace_id=str(workspace_id))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if not await runtime.workspace_exists(info.instance_id):
+            self._cache.pop(workspace_id, None)
+            raise RuntimeError("Workspace instance no longer exists")
 
-        handle = await prepared.runtime.exec_pty(
-            prepared.instance_id,
+        terminal_command = [
+            "/bin/bash",
+            "-lc",
+            (
+                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+                f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
+                ">/dev/null 2>&1; fi; exec /bin/bash -l"
+            ),
+        ]
+
+        handle = await runtime.exec_pty(
+            info.instance_id,
             cols=cols,
             rows=rows,
             workdir="/workspace",
-            env={
-                "TERM": "xterm-256color",
-                **(
-                    prepared.credential_context.environment
-                    if prepared.credential_context
-                    else {}
-                ),
-            },
+            env={"TERM": "xterm-256color"},
             command=terminal_command,
         )
 
         terminal_id = str(uuid.uuid4())
         self._terminals[terminal_id] = TerminalSession(
             handle=handle,
-            runtime=prepared.runtime,
-            credential_context=prepared.credential_context,
+            runtime=runtime,
         )
         log.info("terminal_started", terminal_id=terminal_id)
         return terminal_id
@@ -1476,9 +1267,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         runtime = entry.runtime
         await runtime.pty_write(handle, data)
 
-    async def resize_terminal(
-        self, terminal_id: str, cols: int, rows: int
-    ) -> None:
+    async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
         """Resize the PTY window."""
         entry = self._terminals.get(terminal_id)
         if entry is None:
@@ -1493,25 +1282,76 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         if entry is None:
             return
         await entry.runtime.pty_close(entry.handle)
-        await self._cleanup_operation_credential_context(
-            entry.runtime,
-            entry.handle.instance_id,
-            entry.credential_context,
-            logger.bind(terminal_id=terminal_id),
-        )
         logger.info("terminal_closed", terminal_id=terminal_id)
 
     # -- desktop session (KasmVNC) -----------------------------------------
 
-    async def start_desktop(
+    def _desktop_heartbeat_payload(
+        self,
+        workspace_id: uuid.UUID,
+        session: DesktopSession,
+    ) -> dict[str, Any]:
+        """Return heartbeat fields for a live desktop session."""
+        return {
+            "port": session.port,
+            "container_ip": self.get_desktop_container_ip(workspace_id),
+            "network_name": self.get_desktop_network_name(workspace_id),
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+        }
+
+    @staticmethod
+    def _parse_desktop_holder(holder: str) -> str:
+        """Validate a desktop lease holder kind."""
+        value = (holder or "").strip().lower()
+        if value not in {DESKTOP_HOLDER_VIEWER, DESKTOP_HOLDER_COMPUTERUSE}:
+            raise ValueError(f"Invalid desktop holder: {holder}")
+        return value
+
+    def _empty_desktop_release_result(self) -> DesktopReleaseResult:
+        """Return a release result when no desktop process is tracked."""
+        return DesktopReleaseResult(
+            stopped=False,
+            process_alive=False,
+            viewer_held=False,
+            computer_use_active=False,
+        )
+
+    def _desktop_release_result(
+        self,
+        session: DesktopSession | None,
+        *,
+        stopped: bool,
+    ) -> DesktopReleaseResult:
+        """Build a release result from the current session cache."""
+        if session is None:
+            return DesktopReleaseResult(
+                stopped=stopped,
+                process_alive=not stopped,
+                viewer_held=False,
+                computer_use_active=False,
+            )
+        return DesktopReleaseResult(
+            stopped=stopped,
+            process_alive=not stopped,
+            viewer_held=session.viewer_held,
+            computer_use_active=bool(session.computeruse_run_ids),
+        )
+
+    async def ensure_desktop_process(
         self,
         workspace_id: uuid.UUID,
     ) -> DesktopSession:
-        """Start a KasmVNC desktop session inside the workspace container.
+        """Start the shared KasmVNC process without acquiring a lease.
 
-        Idempotent: if a session is already running, returns the existing one.
+        Idempotent: a live cached or recovered session is reused. Leases on a
+        stale cache entry are copied onto the restarted session.
         """
         existing = self._desktop_sessions.get(workspace_id)
+        preserved_viewer = existing.viewer_held if existing is not None else False
+        preserved_runs = (
+            set(existing.computeruse_run_ids) if existing is not None else set()
+        )
         if existing is not None:
             if await self._is_desktop_session_live(workspace_id):
                 logger.info("desktop_already_running", workspace_id=str(workspace_id))
@@ -1526,6 +1366,8 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             recovered = DesktopSession(
                 workspace_id=workspace_id,
                 instance_id=self._get_cached(workspace_id).instance_id,
+                viewer_held=preserved_viewer,
+                computeruse_run_ids=preserved_runs,
             )
             self._desktop_sessions[workspace_id] = recovered
             logger.info(
@@ -1539,7 +1381,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
         log = logger.bind(workspace_id=str(workspace_id))
 
-        # Execute the start script inside the container
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
             ["/usr/local/bin/opencuria-desktop-start"],
@@ -1552,18 +1393,158 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         session = DesktopSession(
             workspace_id=workspace_id,
             instance_id=info.instance_id,
+            viewer_held=preserved_viewer,
+            computeruse_run_ids=preserved_runs,
         )
         self._desktop_sessions[workspace_id] = session
         log.info("desktop_started", port=session.port)
         return session
 
-    async def stop_desktop(self, workspace_id: uuid.UUID) -> None:
-        """Stop a running desktop session."""
-        session = self._desktop_sessions.pop(workspace_id, None)
-        if session is None:
-            return
+    async def acquire_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+    ) -> DesktopSession:
+        """Ensure the desktop process and acquire a viewer or computer-use lease."""
+        kind = self._parse_desktop_holder(holder)
+        session = await self.ensure_desktop_process(workspace_id)
+        if kind == DESKTOP_HOLDER_VIEWER:
+            session.viewer_held = True
+        else:
+            session.computeruse_run_ids.add(self._sanitize_run_id(str(run_id or "")))
+        logger.info(
+            "desktop_lease_acquired",
+            workspace_id=str(workspace_id),
+            holder=kind,
+            run_id=run_id,
+            viewer=session.viewer_held,
+            computer_use=bool(session.computeruse_run_ids),
+        )
+        return session
 
+    async def release_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+        force: bool = False,
+    ) -> DesktopReleaseResult:
+        """Drop a desktop lease and stop Xvnc when no holders remain.
+
+        ``force=True`` ignores remaining leases, interrupts recordings, and
+        stops the process. Used for workspace stop/remove.
+        """
+        if force:
+            session = self._desktop_sessions.get(workspace_id)
+            has_recordings = any(
+                key[0] == workspace_id for key in self._desktop_recordings
+            )
+            if session is None and not has_recordings:
+                return DesktopReleaseResult(
+                    stopped=True,
+                    process_alive=False,
+                    viewer_held=False,
+                    computer_use_active=False,
+                )
+            await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
+            return DesktopReleaseResult(
+                stopped=True,
+                process_alive=False,
+                viewer_held=False,
+                computer_use_active=False,
+            )
+
+        kind = self._parse_desktop_holder(holder)
+        session = self._desktop_sessions.get(workspace_id)
+        if session is None:
+            return self._empty_desktop_release_result()
+
+        if kind == DESKTOP_HOLDER_VIEWER:
+            session.viewer_held = False
+        else:
+            session.computeruse_run_ids.discard(
+                self._sanitize_run_id(str(run_id or ""))
+            )
+
+        logger.info(
+            "desktop_lease_released",
+            workspace_id=str(workspace_id),
+            holder=kind,
+            run_id=run_id,
+            viewer=session.viewer_held,
+            computer_use=bool(session.computeruse_run_ids),
+        )
+        if session.viewer_held or session.computeruse_run_ids:
+            return self._desktop_release_result(session, stopped=False)
+
+        await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
+        return DesktopReleaseResult(
+            stopped=True,
+            process_alive=False,
+            viewer_held=False,
+            computer_use_active=False,
+        )
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> DesktopSession:
+        """Acquire the viewer lease and ensure the desktop process is running."""
+        return await self.acquire_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+
+    async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
+        """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
+        return await self.release_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+
+    async def _interrupt_desktop_recordings(self, workspace_id: uuid.UUID) -> None:
+        """Send SIGINT/SIGTERM to ffmpeg recordings for *workspace_id*."""
+        recordings = [
+            (run_id, pid, path)
+            for (ws_id, run_id), (pid, path) in self._desktop_recordings.items()
+            if ws_id == workspace_id
+        ]
+        if not recordings:
+            return
+        try:
+            for run_id, pid, _path in recordings:
+                stop_cmd = (
+                    f"kill -INT {pid} 2>/dev/null || true; "
+                    "sleep 0.5; "
+                    f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
+                )
+                await self._exec_desktop_shell(workspace_id, stop_cmd)
+                logger.info(
+                    "desktop_recording_interrupted",
+                    workspace_id=str(workspace_id),
+                    run_id=run_id,
+                    pid=pid,
+                )
+        except Exception:
+            logger.exception(
+                "desktop_recording_interrupt_failed",
+                workspace_id=str(workspace_id),
+            )
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
+
+    async def _stop_desktop_process(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        interrupt_recordings: bool,
+    ) -> None:
+        """Kill Xvnc and drop the cached desktop session."""
         log = logger.bind(workspace_id=str(workspace_id))
+        if interrupt_recordings:
+            await self._interrupt_desktop_recordings(workspace_id)
+
+        self._desktop_sessions.pop(workspace_id, None)
         try:
             runtime = self._get_runtime(workspace_id)
             info = self._get_cached(workspace_id)
@@ -1576,7 +1557,352 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         except Exception:
             log.exception("desktop_stop_failed")
 
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
         log.info("desktop_stopped")
+
+    @staticmethod
+    def _desktop_env() -> dict[str, str]:
+        """Return environment variables for desktop X11 commands."""
+        return {"HOME": DESKTOP_HOME, "DISPLAY": DESKTOP_DISPLAY}
+
+    @staticmethod
+    def _sanitize_run_id(run_id: str) -> str:
+        """Validate a computer-use recording run identifier."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise ValueError(f"Invalid run_id: {run_id}")
+        return run_id
+
+    async def _require_desktop_live(self, workspace_id: uuid.UUID) -> None:
+        """Raise when the workspace desktop session is not accepting input."""
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+    async def _exec_desktop_shell(
+        self,
+        workspace_id: uuid.UUID,
+        command: str,
+    ) -> tuple[int, str]:
+        """Execute a shell command inside the workspace desktop environment."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        return await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env=self._desktop_env(),
+        )
+
+    async def _get_desktop_geometry(
+        self,
+        workspace_id: uuid.UUID,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """Return desktop width and height, optionally overriding query results."""
+        if width is not None and height is not None:
+            return width, height
+
+        exit_code, output = await self._exec_desktop_shell(
+            workspace_id,
+            "xdotool getdisplaygeometry 2>/dev/null || echo '1920 1080'",
+        )
+        if exit_code == 0:
+            parts = output.strip().split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+
+        return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+
+    async def desktop_action(
+        self,
+        workspace_id: uuid.UUID,
+        action: str,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a desktop I/O action inside the workspace display."""
+        payload = args or {}
+        log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
+
+        if action == "ensure":
+            session = await self.ensure_desktop_process(workspace_id)
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "port": session.port,
+            }
+
+        if action == "hold":
+            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
+            session = await self.acquire_desktop(
+                workspace_id,
+                holder=holder,
+                run_id=payload.get("run_id"),
+            )
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "port": session.port,
+                "viewer": session.viewer_held,
+                "computer_use": bool(session.computeruse_run_ids),
+            }
+
+        if action == "release":
+            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
+            result = await self.release_desktop(
+                workspace_id,
+                holder=holder,
+                run_id=payload.get("run_id"),
+            )
+            return {
+                "ok": True,
+                "stopped": result.stopped,
+                "process_alive": result.process_alive,
+                "viewer_held": result.viewer_held,
+                "computer_use_active": result.computer_use_active,
+            }
+
+        if action not in {"ensure", "hold", "release"}:
+            await self._require_desktop_live(workspace_id)
+
+        if action == "display_info":
+            width, height = await self._get_desktop_geometry(workspace_id)
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "width": width,
+                "height": height,
+            }
+
+        if action == "screenshot":
+            width, height = await self._get_desktop_geometry(
+                workspace_id,
+                width=payload.get("width"),
+                height=payload.get("height"),
+            )
+            crop_w = payload.get("crop_w")
+            crop_h = payload.get("crop_h")
+            crop_x = payload.get("crop_x")
+            crop_y = payload.get("crop_y")
+            crop_filter = ""
+            result_width = width
+            result_height = height
+            if (
+                crop_w is not None
+                and crop_h is not None
+                and crop_x is not None
+                and crop_y is not None
+            ):
+                crop_w_int = int(crop_w)
+                crop_h_int = int(crop_h)
+                crop_x_int = int(crop_x)
+                crop_y_int = int(crop_y)
+                if (
+                    crop_w_int < 1
+                    or crop_h_int < 1
+                    or crop_x_int < 0
+                    or crop_y_int < 0
+                    or crop_x_int + crop_w_int > width
+                    or crop_y_int + crop_h_int > height
+                ):
+                    raise ValueError("Invalid screenshot crop bounds")
+                crop_filter = (
+                    f"-vf crop={crop_w_int}:{crop_h_int}:{crop_x_int}:{crop_y_int} "
+                )
+                result_width = crop_w_int
+                result_height = crop_h_int
+            ffmpeg_cmd = (
+                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
+                f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -frames:v 1 "
+                f"{crop_filter}"
+                "-f image2 -vcodec mjpeg pipe:1 2>/dev/null | base64 -w0"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
+            if exit_code != 0 or not output.strip():
+                log.error("desktop_screenshot_failed", exit_code=exit_code)
+                raise RuntimeError("Failed to capture desktop screenshot")
+            return {
+                "ok": True,
+                "image_b64": output.strip(),
+                "mime": "image/jpeg",
+                "width": result_width,
+                "height": result_height,
+                "text": "",
+            }
+
+        if action == "move":
+            x = int(payload["x"])
+            y = int(payload["y"])
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool mousemove --sync {x} {y}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to move mouse: {output}")
+            return {"ok": True}
+
+        if action == "click":
+            button = _CLICK_BUTTONS.get(payload.get("button", "left"))
+            if button is None:
+                raise ValueError(f"Invalid mouse button: {payload.get('button')}")
+            x = payload.get("x")
+            y = payload.get("y")
+            parts: list[str] = []
+            if x is not None and y is not None:
+                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
+            repeat = " --repeat 2" if payload.get("double") else ""
+            parts.append(f"xdotool click{repeat} {button}")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, " && ".join(parts)
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to click mouse: {output}")
+            return {"ok": True}
+
+        if action == "drag":
+            start_x = int(payload["start_x"])
+            start_y = int(payload["start_y"])
+            end_x = int(payload["end_x"])
+            end_y = int(payload["end_y"])
+            command = (
+                f"xdotool mousemove --sync {start_x} {start_y} mousedown 1 "
+                f"mousemove --sync {end_x} {end_y} mouseup 1"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to drag mouse: {output}")
+            return {"ok": True}
+
+        if action == "scroll":
+            direction = str(payload.get("direction", "")).lower()
+            button = _SCROLL_BUTTONS.get(direction)
+            if button is None:
+                raise ValueError(f"Invalid scroll direction: {direction}")
+            amount = int(payload.get("amount", 1))
+            if amount < 1 or amount > 20:
+                raise ValueError("Scroll amount must be between 1 and 20")
+            x = payload.get("x")
+            y = payload.get("y")
+            parts = []
+            if x is not None and y is not None:
+                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
+            parts.append(f"xdotool click --repeat {amount} {button}")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, " && ".join(parts)
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to scroll: {output}")
+            return {"ok": True}
+
+        if action == "type":
+            text = str(payload.get("text", ""))
+            if not text:
+                raise ValueError("text must not be empty")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool type --delay 0 -- {shlex.quote(text)}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to type text: {output}")
+            return {"ok": True}
+
+        if action == "key":
+            key = str(payload.get("key", "")).strip()
+            if not key:
+                raise ValueError("key must not be empty")
+            modifiers = payload.get("modifiers") or []
+            if not isinstance(modifiers, list):
+                raise ValueError("modifiers must be a list")
+            combo = "+".join([*modifiers, key])
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool key -- {shlex.quote(combo)}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to send key: {output}")
+            return {"ok": True}
+
+        if action == "open_url":
+            url = str(payload.get("url", "")).strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("url must use http or https")
+            quoted_url = shlex.quote(url)
+            command = (
+                "for browser in google-chrome-stable google-chrome chromium "
+                "chromium-browser; do "
+                f'if command -v "$browser" >/dev/null 2>&1; then '
+                f'"$browser" --no-sandbox --disable-gpu --disable-dev-shm-usage '
+                f"--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; "
+                "done; "
+                f"xdg-open {quoted_url}"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to open url: {output}")
+            return {"ok": True}
+
+        if action == "record_start":
+            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
+            record_key = (workspace_id, run_id)
+            existing = self._desktop_recordings.get(record_key)
+            if existing is not None:
+                return {"ok": True, "path": existing[1], "run_id": run_id}
+
+            raw_path = payload.get("path")
+            if raw_path:
+                record_path = self._sanitize_path(str(raw_path))
+            else:
+                record_path = f"{COMPUTER_USE_RECORD_DIR}/{run_id}/session.mp4"
+            width, height = await self._get_desktop_geometry(workspace_id)
+            parent_dir = os.path.dirname(record_path)
+            ffmpeg_cmd = (
+                f"mkdir -p {shlex.quote(parent_dir)} && "
+                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
+                f"-framerate 10 -draw_mouse 1 -i {DESKTOP_DISPLAY} "
+                "-c:v libx264 -preset ultrafast -pix_fmt yuv420p "
+                f"{shlex.quote(record_path)} </dev/null "
+                f">>{shlex.quote(record_path + '.log')} 2>&1 & echo $!"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to start desktop recording: {output}")
+            pid_text = output.strip().splitlines()[-1].strip()
+            try:
+                pid = int(pid_text)
+            except ValueError:
+                raise RuntimeError(
+                    f"Failed to start desktop recording: invalid pid {pid_text!r}"
+                )
+            self._desktop_recordings[record_key] = (pid, record_path)
+            log.info("desktop_recording_started", run_id=run_id, pid=pid)
+            return {"ok": True, "path": record_path, "run_id": run_id}
+
+        if action == "record_stop":
+            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
+            record_key = (workspace_id, run_id)
+            recording = self._desktop_recordings.get(record_key)
+            if recording is None:
+                raise RuntimeError(f"No active recording for run_id: {run_id}")
+            pid, record_path = recording
+            stop_cmd = (
+                f"kill -INT {pid} 2>/dev/null || true; "
+                "sleep 0.5; "
+                f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, stop_cmd)
+            self._desktop_recordings.pop(record_key, None)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to stop desktop recording: {output}")
+            log.info("desktop_recording_stopped", run_id=run_id, pid=pid)
+            return {"ok": True, "path": record_path}
+
+        raise ValueError(f"Unknown desktop action: {action}")
 
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
         """Write plain text into the desktop clipboard inside the workspace VM/container."""
@@ -1738,9 +2064,14 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
             command=[
-                "find", safe_path,
-                "-maxdepth", "1", "-mindepth", "1",
-                "-printf", r"%y\t%s\t%p\n",
+                "find",
+                safe_path,
+                "-maxdepth",
+                "1",
+                "-mindepth",
+                "1",
+                "-printf",
+                r"%y\t%s\t%p\n",
             ],
             workdir="/workspace",
         )
@@ -1753,16 +2084,98 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             if len(parts) != 3:
                 continue
             file_type_char, size_str, file_path = parts
-            entries.append({
-                "name": os.path.basename(file_path),
-                "path": file_path,
-                "type": "directory" if file_type_char == "d" else "file",
-                "size": int(size_str) if size_str.isdigit() else 0,
-            })
+            entries.append(
+                {
+                    "name": os.path.basename(file_path),
+                    "path": file_path,
+                    "type": "directory" if file_type_char == "d" else "file",
+                    "size": int(size_str) if size_str.isdigit() else 0,
+                }
+            )
 
         # Sort: directories first, then alphabetically
         entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
         return entries
+
+    @staticmethod
+    def sanitize_find_query(query: str) -> str:
+        """Return a safe ``find -ipath`` query fragment.
+
+        Only characters that the chat ``@`` mention regex allows are accepted.
+        ``..`` is rejected even though ``.`` is otherwise valid.
+        """
+        cleaned = (query or "").strip()
+        if ".." in cleaned or not _FIND_FILES_QUERY_RE.fullmatch(cleaned):
+            raise ValueError("Invalid find query")
+        return cleaned
+
+    @classmethod
+    def build_find_files_command(cls, query: str, limit: int) -> list[str]:
+        """Build ``bash -lc`` argv that finds workspace files up to *limit*.
+
+        Prunes common junk directories. An empty *query* lists shallower paths
+        first; a non-empty query uses case-insensitive ``-ipath``.
+        """
+        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
+        prune = " -o ".join(
+            f"-name {shlex.quote(name)}" for name in FIND_FILES_PRUNE_NAMES
+        )
+        match = ""
+        if query:
+            match = f"-ipath {shlex.quote(f'*{query}*')} "
+        pipeline = (
+            f"find {shlex.quote('/workspace')} \\( {prune} \\) -prune "
+            f"-o -type f {match}-printf '%d\\t%p\\n' "
+            f"| sort -n | head -n {capped + 1}"
+        )
+        return ["bash", "-lc", pipeline]
+
+    async def find_files(
+        self,
+        workspace_id: uuid.UUID,
+        query: str = "",
+        limit: int = FIND_FILES_DEFAULT_LIMIT,
+    ) -> dict:
+        """Search workspace files for mention autocomplete.
+
+        Returns ``{"paths": [{"path", "name"}], "truncated": bool}``. Results
+        are capped at ``FIND_FILES_DEFAULT_LIMIT``.
+        """
+        safe_query = self.sanitize_find_query(query)
+        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+
+        command = self.build_find_files_command(safe_query, capped)
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=command,
+            workdir="/workspace",
+        )
+        if exit_code not in _FIND_FILES_SUCCESS_EXIT_CODES:
+            raise RuntimeError(f"Failed to find files: {output}")
+
+        paths: list[dict] = []
+        for line in output.strip().splitlines():
+            parts = line.split("\t", 1)
+            file_path = parts[-1].strip()
+            if not file_path:
+                continue
+            if file_path != "/workspace" and not file_path.startswith(
+                "/workspace/"
+            ):
+                continue
+            paths.append(
+                {
+                    "name": os.path.basename(file_path),
+                    "path": file_path,
+                }
+            )
+
+        truncated = len(paths) > capped
+        return {"paths": paths[:capped], "truncated": truncated}
 
     async def read_file(
         self,
@@ -1819,9 +2232,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 f"test -f '{safe_path}' || exit 1; "
                 f"SZ=$(stat -c '%s' '{safe_path}'); "
                 f"MT=$(file --mime-type -b '{safe_path}' 2>/dev/null || echo 'application/octet-stream'); "
-                f"echo \"$SZ\"; "
-                f"echo \"$MT\"; "
-                f"if [ \"$SZ\" -le {read_limit} ]; then "
+                f'echo "$SZ"; '
+                f'echo "$MT"; '
+                f'if [ "$SZ" -le {read_limit} ]; then '
                 f"  base64 '{safe_path}'; "
                 f"else "
                 f"  head -c {read_limit} '{safe_path}' | base64; "
@@ -1941,7 +2354,8 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=[
-                    "sh", "-c",
+                    "sh",
+                    "-c",
                     f"tar czf - -C '{os.path.dirname(safe_path)}' "
                     f"'{os.path.basename(safe_path)}' | base64",
                 ],
@@ -1965,6 +2379,235 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             "is_archive": is_dir,
         }
 
+    async def stat_path(
+        self,
+        workspace_id: uuid.UUID,
+        path: str,
+    ) -> dict:
+        """Stat a path inside the workspace container.
+
+        Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
+        """
+        safe_path = self._sanitize_path(path)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+
+        shell_cmd = (
+            f"if [ -e '{safe_path}' ]; then "
+            f"if [ -d '{safe_path}' ]; then echo 'dir'; "
+            f"du -sb '{safe_path}' | cut -f1; "
+            f"echo 'inode/directory'; "
+            f"else stat -c '%s' '{safe_path}'; "
+            f"file --mime-type -b '{safe_path}' 2>/dev/null "
+            "|| echo 'application/octet-stream'; "
+            f"fi; else echo 'missing'; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["sh", "-c", shell_cmd],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to stat path: {output}")
+        lines = output.strip().splitlines()
+        if not lines or lines[0].strip() == "missing":
+            raise FileNotFoundError(f"No such file or directory: {path}")
+        is_dir = lines[0].strip() == "dir"
+        size = int(lines[1].strip()) if len(lines) > 1 else 0
+        mime_type = lines[2].strip() if len(lines) > 2 else "application/octet-stream"
+        return {
+            "path": safe_path,
+            "is_dir": is_dir,
+            "size": size,
+            "mime_type": mime_type,
+        }
+
+    async def write_file_content(
+        self,
+        workspace_id: uuid.UUID,
+        path: str,
+        content_b64: str,
+        mode: int = 0o644,
+    ) -> None:
+        """Write file content atomically inside the workspace container.
+
+        Args:
+            workspace_id: Target workspace.
+            path: Absolute path under ``/workspace``.
+            content_b64: Base64-encoded file content.
+            mode: File permission bits applied after the write.
+        """
+        safe_path = self._sanitize_path(path)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        try:
+            decoded = base64.b64decode(content_b64, validate=True)
+        except Exception as exc:
+            raise ValueError("Invalid base64 file payload") from exc
+        if mode < 0 or mode > 0o777:
+            raise ValueError(f"Invalid file mode: {mode!r}")
+
+        archive = self._build_single_file_tar(os.path.basename(safe_path), decoded)
+        await runtime.put_archive(
+            info.instance_id,
+            os.path.dirname(safe_path) or "/workspace",
+            archive,
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["chmod", format(mode, "o"), safe_path],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to set file mode: {output}")
+        logger.info(
+            "file_written",
+            workspace_id=str(workspace_id),
+            path=safe_path,
+        )
+
+    async def exec_harness_command(
+        self,
+        workspace_id: uuid.UUID,
+        command: list[str] | str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        """Execute a harness command with separated stdout and stderr.
+
+        Runs the command via a shell wrapper that multiplexes the two
+        streams into tagged base64 frames, then decodes them back into
+        separate buffers. Returns ``(exit_code, stdout, stderr)``.
+        """
+        safe_workdir = self._sanitize_path(workdir)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if isinstance(command, str):
+            argv: list[str] = ["bash", "-lc", command]
+        else:
+            argv = [str(arg) for arg in command]
+            if not argv:
+                raise ValueError("command must not be empty")
+        marker_out = "OPENCURIA_STDOUT"
+        marker_err = "OPENCURIA_STDERR"
+        inner = " ".join(shlex.quote(arg) for arg in argv)
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
+        )
+        wrapper = (
+            f"{source}"
+            f"__oc_out=$(mktemp); __oc_err=$(mktemp); "
+            f'sh -c {shlex.quote(inner)} >"$__oc_out" 2>"$__oc_err"; '
+            f"__oc_code=$?; "
+            f'echo {marker_out}; base64 "$__oc_out"; '
+            f'echo {marker_err}; base64 "$__oc_err"; '
+            f'echo "EXIT:$__oc_code"; rm -f "$__oc_out" "$__oc_err"; '
+            f"exit $__oc_code"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["sh", "-lc", wrapper],
+            workdir=safe_workdir,
+            env=env,
+        )
+        stdout, stderr = self._parse_harness_exec_output(output)
+        return exit_code, stdout, stderr
+
+    async def exec_harness_command_stream(
+        self,
+        workspace_id: uuid.UUID,
+        command: list[str] | str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+    ):
+        """Execute a harness command and yield ``(stream, data)`` chunks.
+
+        Yields ``("stdout", text)`` / ``("stderr", text)`` tuples while the
+        command runs, then a final ``("exit", str(exit_code))`` tuple.
+        """
+        safe_workdir = self._sanitize_path(workdir)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if isinstance(command, str):
+            argv: list[str] = ["bash", "-lc", command]
+        else:
+            argv = [str(arg) for arg in command]
+            if not argv:
+                raise ValueError("command must not be empty")
+        marker_out = "OPENCURIA_LINE_STDOUT:"
+        marker_err = "OPENCURIA_LINE_STDERR:"
+        inner = " ".join(shlex.quote(arg) for arg in argv)
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
+        )
+        # Portable fifo-based streaming wrapper: multiplexes the child
+        # stdout/stderr into tagged lines on the combined output stream,
+        # then reports the exit code on the last line.
+        portable = (
+            f"{source}"
+            "__oc_dir=$(mktemp -d); "
+            "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
+            'mkfifo "$__oc_o" "$__oc_e"; '
+            f"(sh -c {shlex.quote(inner)} "
+            '>"$__oc_o" 2>"$__oc_e"; echo $? >"$__oc_dir/code") & '
+            "__oc_pid=$!; "
+            "(while IFS= read -r __oc_l; do "
+            f"printf '{marker_out}%s\\n' \"$__oc_l\"; "
+            'done <"$__oc_o" & '
+            "while IFS= read -r __oc_m; do "
+            f"printf '{marker_err}%s\\n' \"$__oc_m\"; "
+            'done <"$__oc_e" & wait); '
+            'wait $__oc_pid; __oc_code=$(cat "$__oc_dir/code"); '
+            'rm -rf "$__oc_dir"; '
+            'echo "OPENCURIA_EXIT:$__oc_code"'
+        )
+        exit_code = 0
+        async for line in runtime.exec_command(
+            info.instance_id,
+            command=["sh", "-lc", portable],
+            workdir=safe_workdir,
+            env=env,
+        ):
+            if line.startswith(marker_out):
+                yield ("stdout", line[len(marker_out) :])
+            elif line.startswith(marker_err):
+                yield ("stderr", line[len(marker_err) :])
+            elif line.startswith("OPENCURIA_EXIT:"):
+                exit_code = int(line.split(":", 1)[1].strip() or 0)
+                yield ("exit", str(exit_code))
+            else:
+                yield ("stdout", line)
+
+    @staticmethod
+    def _parse_harness_exec_output(output: str) -> tuple[str, str]:
+        """Split tagged exec wrapper output into (stdout, stderr)."""
+        marker_out = "OPENCURIA_STDOUT"
+        marker_err = "OPENCURIA_STDERR"
+        if marker_out not in output or marker_err not in output:
+            return output, ""
+        stdout_b64 = output.split(marker_out, 1)[1].split(marker_err, 1)[0]
+        remainder = output.split(marker_err, 1)[1]
+        stderr_b64 = remainder.split("EXIT:", 1)[0]
+        import base64 as _b64
+
+        def _decode(payload: str) -> str:
+            cleaned = "".join(payload.split())
+            if not cleaned:
+                return ""
+            return _b64.b64decode(cleaned).decode("utf-8", errors="replace")
+
+        return _decode(stdout_b64), _decode(stderr_b64)
+
     # ── Image artifact operations ─────────────────────────────────────
 
     async def build_image(
@@ -1985,7 +2628,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         """
         if runtime_type == "docker":
             if not dockerfile_content.strip():
-                raise RuntimeError("dockerfile_content is required for docker image builds")
+                raise RuntimeError(
+                    "dockerfile_content is required for docker image builds"
+                )
             if not image_tag.strip():
                 raise RuntimeError("image_tag is required for docker image builds")
             try:
@@ -2114,7 +2759,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
             client = docker.from_env()
             try:
-                await asyncio.to_thread(client.images.remove, image=image_ref, force=True)
+                await asyncio.to_thread(
+                    client.images.remove, image=image_ref, force=True
+                )
                 logger.info("docker_image_deleted", image_ref=image_ref)
                 return "deleted"
             except ImageNotFound:
@@ -2133,7 +2780,9 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 logger.info("qemu_image_already_absent", image_ref=image_ref)
                 return "already_absent"
 
-        raise RuntimeError(f"Unsupported runtime_type for image deletion: {runtime_type}")
+        raise RuntimeError(
+            f"Unsupported runtime_type for image deletion: {runtime_type}"
+        )
 
     async def create_workspace_from_image_artifact(
         self,
@@ -2146,10 +2795,10 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
-    ) -> uuid.UUID:
-        """Create a workspace from an image artifact.
+    ) -> tuple[uuid.UUID, bool]:
+        """Create a workspace from an image artifact and inject credentials.
 
-        Creates a new workspace backed by the artifact's disk state.
+        Credentials remain on disk until a controlled stop.
         """
         runtime = self._get_runtime_by_type(runtime_type)
         if not runtime.supports_image_artifacts:
@@ -2172,31 +2821,19 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime_type=runtime_type,
         )
 
-        logger.info(
-            "workspace_created_from_image_artifact",
+        log = logger.bind(
             workspace_id=str(new_workspace_id),
             image_artifact_id=image_artifact_id,
             runtime_type=runtime_type,
         )
+        log.info("workspace_created_from_image_artifact")
 
-        if env_vars or files or ssh_keys:
-            log = logger.bind(
-                workspace_id=str(new_workspace_id),
-                image_artifact_id=image_artifact_id,
-                runtime_type=runtime_type,
-            )
-            credential_context = await self._create_operation_credential_context(
-                runtime,
-                instance_id,
-                env_vars,
-                files,
-                ssh_keys,
-                log,
-            )
-            await self._cleanup_operation_credential_context(
-                runtime,
-                instance_id,
-                credential_context,
-                log,
-            )
-        return new_workspace_id
+        credentials_present = await self.inject_workspace_credentials(
+            runtime,
+            instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
+        return new_workspace_id, credentials_present

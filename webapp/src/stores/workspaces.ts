@@ -1,7 +1,8 @@
 /**
  * Workspace Pinia store.
  *
- * Manages workspace state, sessions, and real-time output streaming.
+ * Manages workspace lifecycle state. Agent conversations live in the
+ * harness store (`stores/harness.ts`) as HarnessSessions.
  */
 
 import { defineStore } from 'pinia'
@@ -12,23 +13,14 @@ import type {
   WorkspaceDetail,
   WorkspaceCreateIn,
   WorkspaceUpdateIn,
-  Session,
-  SessionSkill,
-  Skill,
-  Chat,
   ImageArtifact,
   ImageArtifactCreateIn,
   ImageArtifactCloneIn,
 } from '@/types'
-import { WorkspaceOperation, WorkspaceStatus, SessionStatus } from '@/types'
+import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
-import { isSessionActive } from '@/lib/sessionState'
 import { useNotificationStore } from './notifications'
 import { useImageStore } from './images'
-import { useSkillStore } from './skills'
-
-/** Sentinel ID used for chats that have not yet been persisted to the backend. */
-export const PENDING_CHAT_ID = '__pending__'
 
 type PendingWorkspaceOperationType = 'create' | 'start' | 'stop' | 'remove'
 
@@ -41,12 +33,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   // --- State ---
   const workspaces = ref<Workspace[]>([])
   const activeWorkspace = ref<WorkspaceDetail | null>(null)
-  const activeSessions = ref<Session[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const chats = ref<Chat[]>([])
-  const activeChatId = ref<string | null>(null)
-  const supportsMultiChat = ref(false)
   const imageArtifacts = ref<ImageArtifact[]>([])
   const pendingWorkspaceOperations = ref<Record<string, PendingWorkspaceOperation>>({})
 
@@ -66,17 +54,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
     delete_failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETE_FAILED),
   }))
-
-  /** Sessions filtered to the active chat. Returns empty array if no active chat is selected. */
-  const activeChatSessions = computed<Session[]>(() => {
-    if (!activeChatId.value) return []
-    return activeSessions.value
-  })
-
-  /** The currently selected chat object. */
-  const activeChat = computed(() =>
-    chats.value.find((c) => c.id === activeChatId.value) ?? null,
-  )
 
   // --- Actions ---
 
@@ -272,59 +249,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
-  function mergeSessions(freshSessions: Session[]): void {
-    const existingMap = new Map(activeSessions.value.map((session) => [session.id, session]))
-    const merged: Session[] = []
-
-    for (const freshSession of freshSessions) {
-      const existing = existingMap.get(freshSession.id)
-      if (existing) {
-        if (existing.prompt !== freshSession.prompt) existing.prompt = freshSession.prompt
-        if (existing.output !== freshSession.output) existing.output = freshSession.output
-        if (existing.error_message !== freshSession.error_message) {
-          existing.error_message = freshSession.error_message
-        }
-        if (existing.status !== freshSession.status) existing.status = freshSession.status
-        if (existing.read_at !== freshSession.read_at) existing.read_at = freshSession.read_at
-        if (existing.completed_at !== freshSession.completed_at) {
-          existing.completed_at = freshSession.completed_at
-        }
-        if (existing.agent_model !== freshSession.agent_model) {
-          existing.agent_model = freshSession.agent_model
-        }
-        if (existing.chat_id !== freshSession.chat_id) existing.chat_id = freshSession.chat_id
-        if (existing.agent_options !== freshSession.agent_options) {
-          existing.agent_options = freshSession.agent_options
-        }
-        if (existing.skills !== freshSession.skills) existing.skills = freshSession.skills
-        merged.push(existing)
-      } else {
-        merged.push(freshSession)
-      }
-    }
-
-    activeSessions.value = merged
-  }
-
-  async function fetchChatSessions(workspaceId: string, chatId: string): Promise<void> {
-    loading.value = true
-    error.value = null
-    try {
-      const freshSessions = await workspacesApi.getChatSessions(workspaceId, chatId)
-      mergeSessions(
-        freshSessions.map((session) => ({
-          ...session,
-          workspace_id: workspaceId,
-        })),
-      )
-    } catch (e: unknown) {
-      activeSessions.value = []
-      error.value = e instanceof Error ? e.message : 'Failed to load chat sessions'
-    } finally {
-      loading.value = false
-    }
-  }
-
   async function createWorkspace(data: WorkspaceCreateIn): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
@@ -347,6 +271,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       updated_at: string
       active_operation: WorkspaceOperation | null
       credential_ids: string[]
+      credentials_present: boolean
       qemu_vcpus: number | null
       qemu_memory_mb: number | null
       qemu_disk_size_gb: number | null
@@ -358,6 +283,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ws.updated_at = updated.updated_at
       ws.active_operation = updated.active_operation
       ws.credential_ids = updated.credential_ids
+      ws.credentials_present = updated.credentials_present
       ws.qemu_vcpus = updated.qemu_vcpus
       ws.qemu_memory_mb = updated.qemu_memory_mb
       ws.qemu_disk_size_gb = updated.qemu_disk_size_gb
@@ -368,6 +294,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       activeWorkspace.value.updated_at = updated.updated_at
       activeWorkspace.value.active_operation = updated.active_operation
       activeWorkspace.value.credential_ids = updated.credential_ids
+      activeWorkspace.value.credentials_present = updated.credentials_present
       activeWorkspace.value.qemu_vcpus = updated.qemu_vcpus
       activeWorkspace.value.qemu_memory_mb = updated.qemu_memory_mb
       activeWorkspace.value.qemu_disk_size_gb = updated.qemu_disk_size_gb
@@ -395,6 +322,19 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       applyWorkspaceUpdate(id, updated)
       if (updated.active_operation === WorkspaceOperation.RESTARTING) {
         notifications.info('Workspace restarting', `${getWorkspaceName(id)} is restarting to apply the new resources.`)
+      } else if (data.credential_ids !== undefined) {
+        const ws = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
+        if (ws?.status === WorkspaceStatus.RUNNING) {
+          notifications.success(
+            'Credentials updated',
+            'Secrets were applied to the running workspace.',
+          )
+        } else {
+          notifications.success(
+            'Workspace updated',
+            'Credentials will be applied the next time the workspace starts.',
+          )
+        }
       } else {
         notifications.success('Workspace updated', 'The workspace settings were saved.')
       }
@@ -465,263 +405,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
-  async function sendPrompt(
-    workspaceId: string,
-    prompt: string,
-    agentOptions?: Record<string, string>,
-    chatId?: string,
-    skillIds?: string[],
-  ): Promise<string | null> {
-    const notifications = useNotificationStore()
-    const skillStore = useSkillStore()
-    try {
-      // If the active chat is still a pending (draft) chat, persist it to the
-      // backend now — before sending the first prompt.
-      const effectiveChatId = chatId || activeChatId.value
-      if (effectiveChatId === PENDING_CHAT_ID) {
-        const pendingChat = chats.value.find((c) => c.is_pending)
-        const chatName = prompt.slice(0, 50) + (prompt.length > 50 ? '…' : '')
-        // Update the local pending chat name immediately so the sidebar shows it
-        if (pendingChat) pendingChat.name = chatName
-        const realChat = await _persistPendingChat(workspaceId, {
-          name: chatName,
-          agent_definition_id: pendingChat?.agent_definition_id || undefined,
-        })
-        if (!realChat) return null // creation failed — error already notified
-      }
-
-      const result = await workspacesApi.promptWorkspace(workspaceId, {
-        prompt,
-        agent_options: agentOptions && Object.keys(agentOptions).length ? agentOptions : undefined,
-        chat_id: chatId || activeChatId.value || undefined,
-        skill_ids: skillIds?.length ? skillIds : undefined,
-      })
-
-      // Mark the workspace as busy immediately (optimistic update)
-      const busyWs = workspaces.value.find((w) => w.id === workspaceId)
-      if (busyWs) busyWs.has_active_session = true
-      if (activeWorkspace.value?.id === workspaceId) {
-        activeWorkspace.value.has_active_session = true
-      }
-
-      // Add a pending session to the active workspace immediately
-      if (activeWorkspace.value && activeWorkspace.value.id === workspaceId) {
-        const optimisticSkills: SessionSkill[] = (skillIds ?? [])
-          .map((id) => skillStore.skills.find((s: Skill) => s.id === id))
-          .filter((s): s is Skill => s !== undefined)
-          .map((s: Skill) => ({
-            id: s.id,
-            skill_id: s.id,
-            name: s.name,
-            body: s.body,
-            created_at: new Date().toISOString(),
-          }))
-        const newSession: Session = {
-          id: result.session_id,
-          workspace_id: workspaceId,
-          chat_id: result.chat_id || null,
-          prompt,
-          agent_model: agentOptions?.['model'] || '',
-          agent_options: agentOptions ?? {},
-          output: '',
-          error_message: null,
-          status: SessionStatus.PENDING,
-          read_at: null,
-          status_detail: 'Preparing agent execution…',
-          created_at: new Date().toISOString(),
-          completed_at: null,
-          skills: optimisticSkills,
-        }
-        activeSessions.value.push(newSession)
-
-        // If this created/used a chat, make sure it's the active one
-        if (result.chat_id && result.chat_id !== activeChatId.value) {
-          activeChatId.value = result.chat_id
-          // Refresh chats to pick up new chat
-          await fetchChats(workspaceId)
-        }
-      }
-
-      return result.session_id
-    } catch (e: unknown) {
-      notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
-      return null
-    }
-  }
-
-  async function cancelActivePrompt(workspaceId: string): Promise<void> {
-    const notifications = useNotificationStore()
-    if (!activeWorkspace.value || activeWorkspace.value.id !== workspaceId) {
-      notifications.error('Cancel failed', 'Workspace details are not loaded.')
-      return
-    }
-
-    const activeSession = [...activeSessions.value]
-      .reverse()
-      .find(
-        (session) => isSessionActive(session.status),
-      )
-
-    if (!activeSession) {
-      notifications.info('No active session', 'There is no running completion to stop.')
-      return
-    }
-
-    try {
-      await workspacesApi.cancelSessionPrompt(workspaceId, activeSession.id)
-      activeSession.status_detail = 'Cancellation requested…'
-      notifications.info('Stopping completion', 'The running agent process is being stopped…')
-    } catch (e: unknown) {
-      notifications.error('Cancel failed', e instanceof Error ? e.message : 'Unknown error')
-    }
-  }
-
-  // --- Chat actions ---
-
-  async function fetchChats(workspaceId: string): Promise<void> {
-    try {
-      const fetched = await workspacesApi.listChats(workspaceId)
-      // Preserve any pending (not-yet-saved) chat at the top of the list
-      const pending = chats.value.find((c) => c.is_pending)
-      chats.value = pending ? [pending, ...fetched] : fetched
-      const activeChatExists = activeChatId.value
-        ? chats.value.some((chat) => chat.id === activeChatId.value)
-        : false
-      if (!activeChatExists) {
-        setActiveChat(chats.value[0]?.id ?? null)
-      }
-    } catch {
-      chats.value = []
-      activeChatId.value = null
-      activeSessions.value = []
-    }
-  }
-
-  function setActiveChat(chatId: string | null): void {
-    // Discard any pending chat when the user navigates to a real chat
-    if (chatId !== PENDING_CHAT_ID) {
-      chats.value = chats.value.filter((c) => !c.is_pending)
-    }
-    if (activeChatId.value !== chatId) {
-      activeSessions.value = []
-    }
-    activeChatId.value = chatId
-  }
-
-  /**
-   * Creates a local draft chat (not yet persisted to the backend).
-   * The chat will be created on the backend when the first message is sent.
-   */
-  function createChat(
-    workspaceId: string,
-    options?: { name?: string; agent_definition_id?: string; agent_type?: string },
-  ): Chat {
-    // Discard any existing pending chat first
-    chats.value = chats.value.filter((c) => !c.is_pending)
-
-    const now = new Date().toISOString()
-    const pendingChat: Chat = {
-      id: PENDING_CHAT_ID,
-      workspace_id: workspaceId,
-      name: options?.name ?? 'New Chat',
-      agent_definition_id: options?.agent_definition_id ?? null,
-      agent_type: options?.agent_type ?? '',
-      created_at: now,
-      updated_at: now,
-      session_count: 0,
-      is_pending: true,
-    }
-    chats.value.unshift(pendingChat)
-    activeChatId.value = PENDING_CHAT_ID
-    return pendingChat
-  }
-
-  /**
-   * Persist a pending chat to the backend immediately.
-   * Called internally when the first message is sent.
-   */
-  async function _persistPendingChat(
-    workspaceId: string,
-    options?: { name?: string; agent_definition_id?: string },
-  ): Promise<Chat | null> {
-    const notifications = useNotificationStore()
-    try {
-      const chat = await workspacesApi.createChat(workspaceId, options)
-      // Replace the pending placeholder with the real chat
-      const idx = chats.value.findIndex((c) => c.is_pending)
-      if (idx !== -1) {
-        chats.value[idx] = chat
-      } else {
-        chats.value.unshift(chat)
-      }
-      activeChatId.value = chat.id
-      return chat
-    } catch (e: unknown) {
-      notifications.error('Chat creation failed', e instanceof Error ? e.message : 'Unknown error')
-      return null
-    }
-  }
-
-  async function renameChatAction(
-    workspaceId: string,
-    chatId: string,
-    name: string,
-  ): Promise<boolean> {
-    // Pending chats haven't been persisted yet — just update locally
-    if (chatId === PENDING_CHAT_ID) {
-      const idx = chats.value.findIndex((c) => c.is_pending)
-      if (idx !== -1) chats.value[idx]!.name = name
-      return true
-    }
-
-    const notifications = useNotificationStore()
-    try {
-      const updated = await workspacesApi.renameChat(workspaceId, chatId, { name })
-      const idx = chats.value.findIndex((c) => c.id === chatId)
-      if (idx !== -1) {
-        chats.value[idx] = updated
-      }
-      return true
-    } catch (e: unknown) {
-      notifications.error('Rename failed', e instanceof Error ? e.message : 'Unknown error')
-      return false
-    }
-  }
-
-  async function deleteChatAction(workspaceId: string, chatId: string): Promise<boolean> {
-    const notifications = useNotificationStore()
-
-    // Pending chats only exist locally — no backend call needed
-    if (chatId === PENDING_CHAT_ID) {
-      chats.value = chats.value.filter((c) => c.id !== chatId)
-      if (activeChatId.value === chatId) {
-        activeChatId.value = chats.value[0]?.id || null
-      }
-      return true
-    }
-
-    try {
-      await workspacesApi.deleteChat(workspaceId, chatId)
-      chats.value = chats.value.filter((c) => c.id !== chatId)
-
-      if (activeChatId.value === chatId) activeSessions.value = []
-
-      // Switch to another chat if the active one was deleted
-      if (activeChatId.value === chatId) {
-        activeChatId.value = chats.value[0]?.id || null
-      }
-
-      notifications.success('Chat deleted', 'The chat was removed.')
-      return true
-    } catch (e: unknown) {
-      notifications.error('Delete failed', e instanceof Error ? e.message : 'Unknown error')
-      return false
-    }
-  }
-
-  function setSupportsMultiChat(value: boolean): void {
-    supportsMultiChat.value = value
-  }
 
   // --- Image capture actions ---
 
@@ -795,7 +478,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   // --- Real-time handlers ---
 
-  function updateWorkspaceStatus(workspaceId: string, status: WorkspaceStatus): void {
+  function updateWorkspaceStatus(
+    workspaceId: string,
+    status: WorkspaceStatus,
+    credentialsPresent?: boolean,
+  ): void {
     // Update in list
     const ws = workspaces.value.find((w) => w.id === workspaceId)
     const previousStatus = ws?.status ?? (activeWorkspace.value?.id === workspaceId
@@ -803,6 +490,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       : undefined)
     if (ws) {
       ws.status = status
+      if (credentialsPresent !== undefined) {
+        ws.credentials_present = credentialsPresent
+      }
       if (status === WorkspaceStatus.STOPPED) {
         ws.auto_stop_at = null
       }
@@ -811,6 +501,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // Update active workspace
     if (activeWorkspace.value?.id === workspaceId) {
       activeWorkspace.value.status = status
+      if (credentialsPresent !== undefined) {
+        activeWorkspace.value.credentials_present = credentialsPresent
+      }
       if (status === WorkspaceStatus.STOPPED) {
         activeWorkspace.value.auto_stop_at = null
       }
@@ -844,63 +537,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
-  function appendOutputChunk(sessionId: string, chunk: string): void {
-    const session = activeSessions.value.find((s) => s.id === sessionId)
-    if (session) {
-      // Mirror the backend's append_output logic: join chunks with "\n"
-      // so the live-streamed output matches what is stored in the database.
-      if (session.output) {
-        session.output += '\n' + chunk
-      } else {
-        session.output = chunk
-      }
-      if (session.status === SessionStatus.PENDING) {
-        session.status = SessionStatus.RUNNING
-      }
-    }
-  }
-
-  function setSessionStatusDetail(sessionId: string, detail: string): void {
-    const session = activeSessions.value.find((s) => s.id === sessionId)
-    if (!session) return
-    session.status_detail = detail
-  }
-
-  function _refreshActiveSessionFlag(): void {
-    if (!activeWorkspace.value) return
-    const workspaceId = activeWorkspace.value.id
-    const stillActive = activeSessions.value.some(
-      (s) => isSessionActive(s.status),
-    )
-    const ws = workspaces.value.find((w) => w.id === workspaceId)
-    if (ws) ws.has_active_session = stillActive
-    activeWorkspace.value.has_active_session = stillActive
-  }
-
-  function markSessionComplete(sessionId: string): void {
-    const session = activeSessions.value.find((s) => s.id === sessionId)
-    if (session) {
-      session.status = SessionStatus.COMPLETED
-      session.read_at = null
-      session.status_detail = undefined
-      session.error_message = null
-      session.completed_at = new Date().toISOString()
-    }
-    _refreshActiveSessionFlag()
-  }
-
-  function markSessionFailed(sessionId: string, errorMsg?: string): void {
-    const session = activeSessions.value.find((s) => s.id === sessionId)
-    if (session) {
-      session.status = SessionStatus.FAILED
-      session.read_at = null
-      session.status_detail = undefined
-      session.error_message = errorMsg?.trim() || 'The last agent response or command execution failed.'
-      if (errorMsg) session.output += `\n[Error] ${errorMsg}`
-    }
-    _refreshActiveSessionFlag()
-  }
-
   function handleWorkspaceError(workspaceId: string, errorMsg: string): void {
     const notifications = useNotificationStore()
     const workspaceName = getWorkspaceName(workspaceId)
@@ -913,38 +549,22 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // State
     workspaces,
     activeWorkspace,
-    activeSessions,
     loading,
     error,
-    chats,
-    activeChatId,
-    supportsMultiChat,
     imageArtifacts,
     pendingWorkspaceOperations,
     // Getters
     runningWorkspaces,
     workspacesByStatus,
-    activeChatSessions,
-    activeChat,
     // Actions
     fetchWorkspaces,
     fetchWorkspaceDetail,
-    fetchChatSessions,
     createWorkspace,
     updateWorkspace,
     renameWorkspace,
     stopWorkspace,
     resumeWorkspace,
     removeWorkspace,
-    sendPrompt,
-    cancelActivePrompt,
-    // Chat actions
-    fetchChats,
-    setActiveChat,
-    createChat,
-    renameChatAction,
-    deleteChatAction,
-    setSupportsMultiChat,
     // Image artifact actions
     fetchImageArtifacts,
     createImageArtifact,
@@ -956,10 +576,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     updateWorkspaceStatus,
     updateWorkspaceOperation,
     updateWorkspaceRunnerOnline,
-    appendOutputChunk,
-    setSessionStatusDetail,
-    markSessionComplete,
-    markSessionFailed,
     handleWorkspaceError,
   }
 })

@@ -7,7 +7,7 @@ import CreateCredentialDialog from '@/components/credentials/CreateCredentialDia
 import EditCredentialDialog from '@/components/credentials/EditCredentialDialog.vue'
 import DeleteCredentialDialog from '@/components/credentials/DeleteCredentialDialog.vue'
 import PublicKeyDialog from '@/components/credentials/PublicKeyDialog.vue'
-import { UiSpinner } from '@/components/ui'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import type { Credential } from '@/types'
 
 const credentialStore = useCredentialStore()
@@ -51,8 +51,8 @@ function onPublicKeyClose(): void {
   <div class="space-y-6">
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold text-fg">Credentials</h2>
-        <p class="text-sm text-muted-fg mt-1">
+        <h2 class="text-xl font-semibold text-foreground">Credentials</h2>
+        <p class="text-sm text-muted-foreground mt-1">
           Manage credentials injected into workspaces. Personal credentials are yours across all
           organizations; organization credentials are shared with all members.
         </p>
@@ -61,12 +61,12 @@ function onPublicKeyClose(): void {
     </div>
 
     <div v-if="credentialStore.loading && !credentialStore.credentials.length" class="flex justify-center py-12">
-      <UiSpinner :size="24" />
+      <LoadingSpinner :size="24" />
     </div>
 
     <div
       v-else-if="credentialStore.error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
     >
       {{ credentialStore.error }}
     </div>

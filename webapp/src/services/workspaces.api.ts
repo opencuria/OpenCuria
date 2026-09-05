@@ -9,13 +9,7 @@ import type {
   WorkspaceCreateOut,
   WorkspaceUpdateIn,
   WorkspaceUpdateOut,
-  Session,
-  PromptIn,
-  PromptOut,
   Task,
-  Chat,
-  ChatCreateIn,
-  ChatRenameIn,
   ImageArtifact,
   ImageArtifactCreateIn,
   ImageArtifactCreateOut,
@@ -50,24 +44,12 @@ export function deleteWorkspace(id: string): Promise<Task> {
   return del<Task>(`/workspaces/${id}/`)
 }
 
-export function promptWorkspace(id: string, data: PromptIn): Promise<PromptOut> {
-  return post<PromptOut>(`/workspaces/${id}/prompt/`, data)
-}
-
-export function cancelSessionPrompt(workspaceId: string, sessionId: string): Promise<Task> {
-  return post<Task>(`/workspaces/${workspaceId}/sessions/${sessionId}/cancel/`)
-}
-
 export function stopWorkspace(id: string): Promise<Task> {
   return post<Task>(`/workspaces/${id}/stop/`)
 }
 
 export function resumeWorkspace(id: string): Promise<Task> {
   return post<Task>(`/workspaces/${id}/resume/`)
-}
-
-export function getWorkspaceSessions(id: string): Promise<Session[]> {
-  return get<Session[]>(`/workspaces/${id}/sessions/`)
 }
 
 // --- Terminal API ---
@@ -92,9 +74,25 @@ export function stopDesktop(id: string): Promise<{ task_id: string }> {
 
 export function getDesktopStatus(
   id: string,
-): Promise<{ active: boolean; proxy_url: string | null }> {
-  return get<{ active: boolean; proxy_url: string | null }>(
-    `/workspaces/${id}/desktop/status/`,
+): Promise<{
+  active: boolean
+  proxy_url: string | null
+  viewer_held: boolean
+  computer_use_active: boolean
+}> {
+  return get<{
+    active: boolean
+    proxy_url: string | null
+    viewer_held: boolean
+    computer_use_active: boolean
+  }>(`/workspaces/${id}/desktop/status/`)
+}
+
+export function takeDesktopControl(
+  id: string,
+): Promise<{ aborted_session_ids: string[] }> {
+  return post<{ aborted_session_ids: string[] }>(
+    `/workspaces/${id}/desktop/take-control/`,
   )
 }
 
@@ -112,28 +110,6 @@ export function readDesktopClipboard(id: string): Promise<{ text: string }> {
   return post<{ text: string }>(
     `/workspaces/${id}/desktop/clipboard/read/`,
   )
-}
-
-// --- Chat API ---
-
-export function listChats(workspaceId: string): Promise<Chat[]> {
-  return get<Chat[]>(`/workspaces/${workspaceId}/chats/`)
-}
-
-export function createChat(workspaceId: string, data?: ChatCreateIn): Promise<Chat> {
-  return post<Chat>(`/workspaces/${workspaceId}/chats/`, data || {})
-}
-
-export function renameChat(workspaceId: string, chatId: string, data: ChatRenameIn): Promise<Chat> {
-  return patch<Chat>(`/workspaces/${workspaceId}/chats/${chatId}/`, data)
-}
-
-export function deleteChat(workspaceId: string, chatId: string): Promise<void> {
-  return del<void>(`/workspaces/${workspaceId}/chats/${chatId}/`)
-}
-
-export function getChatSessions(workspaceId: string, chatId: string): Promise<Session[]> {
-  return get<Session[]>(`/workspaces/${workspaceId}/chats/${chatId}/sessions/`)
 }
 
 // --- Workspace image artifact API ---

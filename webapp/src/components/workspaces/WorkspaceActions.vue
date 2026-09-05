@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 import { WorkspaceStatus, RuntimeType } from '@/types'
 import type { Workspace } from '@/types'
-import { UiButton } from '@/components/ui'
-import { Square, Play, Trash2, Camera, Loader2 } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import { Square, Play, Trash2, Camera, Loader2 } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 
@@ -43,7 +43,16 @@ const canCaptureImage = computed(
   () =>
     !isRunnerOfflineState.value &&
     props.workspace.runtime_type === RuntimeType.QEMU &&
-    props.workspace.status === WorkspaceStatus.RUNNING,
+    (props.workspace.status === WorkspaceStatus.RUNNING ||
+      props.workspace.status === WorkspaceStatus.STOPPED),
+)
+const captureBlockedByCredentials = computed(
+  () => canCaptureImage.value && props.workspace.credentials_present,
+)
+const captureTitle = computed(() =>
+  captureBlockedByCredentials.value
+    ? 'Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.'
+    : 'Capture image',
 )
 const areActionsDisabled = computed(() => isTransitioning.value || isRunnerOfflineState.value)
 
@@ -75,7 +84,7 @@ function handleCaptureImage(e: Event): void {
 <template>
   <div class="flex items-center gap-1">
     <EditWorkspaceDialog :workspace="workspace" :size="size" :disabled="areActionsDisabled" />
-    <UiButton
+    <Button
       v-if="isTransitioning"
       variant="ghost"
       :size="btnSize"
@@ -83,18 +92,18 @@ function handleCaptureImage(e: Event): void {
       disabled
     >
       <Loader2 :size="14" class="animate-spin" />
-    </UiButton>
-    <UiButton
+    </Button>
+    <Button
       v-if="canCaptureImage"
       variant="ghost"
       :size="btnSize"
-      title="Capture image"
-      :disabled="areActionsDisabled"
+      :title="captureTitle"
+      :disabled="areActionsDisabled || captureBlockedByCredentials"
       @click="handleCaptureImage"
     >
       <Camera :size="14" />
-    </UiButton>
-    <UiButton
+    </Button>
+    <Button
       v-if="canStop && !hideDestructive"
       variant="ghost"
       :size="btnSize"
@@ -103,8 +112,8 @@ function handleCaptureImage(e: Event): void {
       @click="handleStop"
     >
       <Square :size="14" />
-    </UiButton>
-    <UiButton
+    </Button>
+    <Button
       v-if="canResume"
       variant="ghost"
       :size="btnSize"
@@ -113,17 +122,17 @@ function handleCaptureImage(e: Event): void {
       @click="handleResume"
     >
       <Play :size="14" />
-    </UiButton>
-    <UiButton
+    </Button>
+    <Button
       v-if="canRemove && !hideDestructive"
       variant="ghost"
       :size="btnSize"
       title="Remove workspace"
-      class="text-error hover:text-error"
+      class="text-destructive hover:text-destructive"
       :disabled="areActionsDisabled"
       @click="handleRemove"
     >
       <Trash2 :size="14" />
-    </UiButton>
+    </Button>
   </div>
 </template>

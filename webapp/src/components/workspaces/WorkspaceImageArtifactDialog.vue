@@ -4,7 +4,15 @@
  * Used when the camera icon is clicked in WorkspaceActions.
  */
 import { ref, computed } from 'vue'
-import { UiDialog, UiInput, UiButton } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
 
@@ -41,27 +49,36 @@ function handleClose(): void {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="Capture Image"
-    description="Save the current state of this workspace as an image. Credentials are selected separately when creating a workspace from the image."
     @update:open="(v) => (!v ? handleClose() : undefined)"
   >
-    <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Image name</label>
-        <UiInput v-model="name" placeholder="e.g. before-refactor" />
-        <p class="text-xs text-muted-fg mt-1">
-          Workspace: <span class="font-mono">{{ workspace.name }}</span>
-        </p>
-      </div>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Capture Image</DialogTitle>
+        <DialogDescription>
+          Save the current state of this workspace as an image. Credentials must
+          be off disk first — stop the workspace to strip them, then capture.
+          If it was stopped externally, resume and stop it again.
+        </DialogDescription>
+      </DialogHeader>
 
-      <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="!isValid || submitting">
-          {{ submitting ? 'Capturing…' : 'Capture Image' }}
-        </UiButton>
-      </div>
-    </form>
-  </UiDialog>
+      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
+          <Input v-model="name" placeholder="e.g. before-refactor" />
+          <p class="text-xs text-muted-foreground mt-1">
+            Workspace: <span class="font-mono">{{ workspace.name }}</span>
+          </p>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-2">
+          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+          <Button type="submit" :disabled="!isValid || submitting">
+            {{ submitting ? 'Capturing…' : 'Capture Image' }}
+          </Button>
+        </div>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>

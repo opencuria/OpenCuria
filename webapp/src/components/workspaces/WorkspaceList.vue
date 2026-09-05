@@ -1,43 +1,37 @@
 <script setup lang="ts">
 import type { Workspace } from '@/types'
 import WorkspaceCard from './WorkspaceCard.vue'
-import { UiEmptyState } from '@/components/ui'
-import { Container } from 'lucide-vue-next'
-import { useRouter } from 'vue-router'
+import { Container } from '@lucide/vue'
 
 defineProps<{
   workspaces: Workspace[]
-  storageBytesByWorkspaceId?: Record<string, number | null>
-  warningWorkspaceIds?: Record<string, boolean>
 }>()
 
-const router = useRouter()
-
-function openWorkspace(id: string): void {
-  router.push(`/workspaces/${id}`)
-}
+const emit = defineEmits<{
+  select: [workspace: Workspace]
+}>()
 </script>
 
 <template>
   <div v-if="workspaces.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-    <WorkspaceCard
-      v-for="ws in workspaces"
-      :key="ws.id"
-      :workspace="ws"
-      :storage-bytes="storageBytesByWorkspaceId?.[ws.id]"
-      :show-resource-warning="Boolean(warningWorkspaceIds?.[ws.id])"
-      clickable
-      @click="openWorkspace(ws.id)"
-    />
+    <div v-for="workspace in workspaces" :key="workspace.id" class="flex flex-col gap-2">
+      <WorkspaceCard :workspace="workspace" @click="emit('select', workspace)" />
+      <div v-if="$slots.actions" class="flex justify-end">
+        <slot name="actions" :workspace="workspace" />
+      </div>
+    </div>
   </div>
 
-  <UiEmptyState
+  <div
     v-else
-    title="No workspaces"
-    description="Create a workspace to start running AI coding agents on your repositories."
+    class="flex flex-col items-center justify-center py-12 px-6 text-center"
   >
-    <template #icon>
+    <div class="mb-4 text-muted-foreground">
       <Container :size="40" />
-    </template>
-  </UiEmptyState>
+    </div>
+    <h3 class="text-lg font-medium text-foreground mb-1">No workspaces</h3>
+    <p class="text-sm text-muted-foreground max-w-sm">
+      Create a workspace to start running AI coding agents on your repositories.
+    </p>
+  </div>
 </template>

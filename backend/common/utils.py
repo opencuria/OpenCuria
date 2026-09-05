@@ -36,20 +36,19 @@ def verify_token(token: str, token_hash: str) -> bool:
 # Credential encryption (Fernet)
 # ---------------------------------------------------------------------------
 
-def _get_fernet() -> Fernet:
-    """Return a Fernet instance using the configured encryption key.
+_FERNET_KEY_GENERATION_HINT = (
+    'Generate one with: python -c "from cryptography.fernet import Fernet; '
+    'print(Fernet.generate_key().decode())"'
+)
 
-    The key is read from the ``CREDENTIAL_ENCRYPTION_KEY`` environment
-    variable. If not set, a deterministic key is derived from
-    ``DJANGO_SECRET_KEY`` for development convenience (NOT recommended
-    for production).
-    """
-    key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
-    if key:
-        return Fernet(key.encode())
 
-    # Fallback for development: derive a Fernet-compatible key from the
-    # Django secret key via SHA-256 → base64url (32 bytes).
+def _is_placeholder_encryption_key(key: str) -> bool:
+    """Return whether *key* is an unconfigured template value."""
+    return key.startswith("CHANGE_ME")
+
+
+def _fernet_from_secret_key() -> Fernet:
+    """Derive a Fernet instance from ``DJANGO_SECRET_KEY``."""
     import base64
 
     from django.conf import settings
@@ -57,6 +56,27 @@ def _get_fernet() -> Fernet:
     digest = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
     fernet_key = base64.urlsafe_b64encode(digest)
     return Fernet(fernet_key)
+
+
+def _get_fernet() -> Fernet:
+    """Return a Fernet instance using the configured encryption key.
+
+    The key is read from the ``CREDENTIAL_ENCRYPTION_KEY`` environment
+    variable. Placeholder values (``CHANGE_ME*``) and unset values fall
+    back to a deterministic key derived from ``DJANGO_SECRET_KEY`` for
+    development convenience (NOT recommended for production).
+    """
+    key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
+    if key and not _is_placeholder_encryption_key(key):
+        try:
+            return Fernet(key.encode())
+        except ValueError as exc:
+            raise ValueError(
+                "CREDENTIAL_ENCRYPTION_KEY is set but is not a valid "
+                f"Fernet key. {_FERNET_KEY_GENERATION_HINT}"
+            ) from exc
+
+    return _fernet_from_secret_key()
 
 
 def encrypt_value(plaintext: str) -> str:

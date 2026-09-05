@@ -1,10 +1,7 @@
-import { type ClassValue, clsx } from 'clsx'
+import type { ClassValue } from 'clsx'
+import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 
-/**
- * Merge Tailwind CSS classes with clsx for conditional class application.
- * This is the standard shadcn-vue utility pattern.
- */
 export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs))
 }

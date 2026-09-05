@@ -1,7 +1,9 @@
-import { shallowMount } from '@vue/test-utils'
+import { defineComponent } from 'vue'
+import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppSidebar from './AppSidebar.vue'
+import { SidebarProvider } from '@/components/ui/sidebar'
 
 const authStore = {
   organizations: [
@@ -47,62 +49,42 @@ vi.mock('@/services/socket', () => ({
   isConnected: { value: true },
 }))
 
+const SidebarTestWrapper = defineComponent({
+  components: { SidebarProvider, AppSidebar },
+  template: '<SidebarProvider><AppSidebar /></SidebarProvider>',
+})
+
+function mountSidebar() {
+  return mount(SidebarTestWrapper, {
+    global: {
+      stubs: {
+        OpenCuriaLogo: true,
+        Tooltip: { template: '<div><slot /></div>' },
+        TooltipContent: true,
+        TooltipTrigger: { template: '<div><slot /></div>' },
+        TooltipProvider: { template: '<div><slot /></div>' },
+      },
+    },
+  })
+}
+
 describe('AppSidebar organization switcher', () => {
   beforeEach(() => {
     authStore.setActiveOrganization.mockClear()
     authStore.logout.mockClear()
   })
 
-  it('uses the dedicated border token for the light-theme organization switcher', async () => {
-    const wrapper = shallowMount(AppSidebar, {
-      props: {
-        mobileOpen: false,
-      },
-      global: {
-        stubs: {
-          OpenCuriaLogo: true,
-        },
-      },
-    })
+  it('renders the active organization name', () => {
+    const wrapper = mountSidebar()
 
-    const toggleButton = wrapper.findAll('button').find((node) =>
-      node.attributes('style')?.includes('--sidebar-org-switcher-border'),
-    )
-
-    expect(toggleButton).toBeDefined()
-    expect(toggleButton?.attributes('style')).toContain(
-      'border: 1px solid var(--sidebar-org-switcher-border)',
-    )
-
-    await toggleButton?.trigger('click')
-
-    expect(wrapper.html()).toContain(
-      'border: 1px solid var(--sidebar-org-switcher-border)',
-    )
-    expect(wrapper.html()).toContain(
-      'border-top: 1px solid var(--sidebar-org-switcher-border)',
-    )
+    expect(wrapper.text()).toContain('Acme')
   })
 
-  it('uses the dedicated divider token for the sidebar edge', () => {
-    const wrapper = shallowMount(AppSidebar, {
-      props: {
-        mobileOpen: false,
-      },
-      global: {
-        stubs: {
-          OpenCuriaLogo: true,
-        },
-      },
-    })
+  it('renders navigation sections', () => {
+    const wrapper = mountSidebar()
 
-    const sidebar = wrapper.find('aside')
-
-    expect(sidebar.attributes('style')).toContain(
-      'border-right: 1px solid var(--sidebar-divider-color)',
-    )
-    expect(sidebar.attributes('style')).toContain(
-      'box-shadow: var(--glass-shadow-sm)',
-    )
+    expect(wrapper.text()).toContain('Dashboard')
+    expect(wrapper.text()).toContain('Workspaces')
+    expect(wrapper.text()).toContain('Runners')
   })
 })

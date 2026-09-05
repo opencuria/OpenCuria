@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Upload, Loader2 } from 'lucide-vue-next'
+import { Upload, Loader2 } from '@lucide/vue'
 import { sendFilesUpload } from '@/services/socket'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 
@@ -119,7 +119,7 @@ async function onDrop(e: DragEvent): Promise<void> {
     <!-- Uploading overlay -->
     <div
       v-if="isUploading"
-      class="absolute inset-0 z-40 bg-surface/70 rounded-lg flex items-center justify-center"
+      class="absolute inset-0 z-40 bg-card/70 rounded-lg flex items-center justify-center"
     >
       <div class="flex flex-col items-center gap-2 text-primary">
         <Loader2 :size="24" class="animate-spin" />

@@ -1,18 +1,25 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { usePolling } from '@/composables/usePolling'
 import { WorkspaceStatus } from '@/types'
-import type { VmSystemMetrics } from '@/types'
+import type { VmSystemMetrics, Workspace } from '@/types'
 import WorkspaceList from '@/components/workspaces/WorkspaceList.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
-import { UiSpinner, UiInput } from '@/components/ui'
-import { Search, Filter } from 'lucide-vue-next'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { Input } from '@/components/ui/input'
+import { Search, Filter } from '@lucide/vue'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
+const router = useRouter()
+
+function openWorkspace(workspace: Workspace): void {
+  void router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+}
 
 const searchQuery = ref('')
 const showDeleted = ref(false)
@@ -102,8 +109,8 @@ onMounted(async () => {
     <!-- Page header -->
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold text-fg">Workspaces</h2>
-        <p class="text-sm text-muted-fg mt-1">
+        <h2 class="text-xl font-semibold text-foreground">Workspaces</h2>
+        <p class="text-sm text-muted-foreground mt-1">
           Manage workspaces running AI coding agents on your repositories.
         </p>
       </div>
@@ -116,9 +123,9 @@ onMounted(async () => {
       <div class="relative flex-1 w-full">
         <Search
           :size="18"
-          class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-fg pointer-events-none"
+          class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
         />
-        <UiInput
+        <Input
           v-model="searchQuery"
           placeholder="Search by name or ID..."
           class="pl-10"
@@ -127,7 +134,7 @@ onMounted(async () => {
 
       <!-- Filter: Show Removed -->
       <div
-        class="flex items-center gap-3 px-4 py-2.5 rounded-[var(--radius-md)] border border-border bg-bg-subtle hover:bg-bg-muted transition-colors cursor-pointer select-none"
+        class="flex items-center gap-3 px-4 py-2.5 rounded-md border border-border bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer select-none"
         @click="showDeleted = !showDeleted"
       >
         <div
@@ -135,7 +142,7 @@ onMounted(async () => {
             'w-5 h-5 rounded border-2 flex items-center justify-center transition-all',
             showDeleted
               ? 'bg-primary border-primary'
-              : 'bg-bg border-border',
+              : 'bg-background border-border',
           ]"
         >
           <svg
@@ -149,26 +156,26 @@ onMounted(async () => {
           </svg>
         </div>
         <div class="flex items-center gap-2">
-          <Filter :size="16" class="text-muted-fg" />
-          <span class="text-sm font-medium text-fg">Show deleted workspaces</span>
+          <Filter :size="16" class="text-muted-foreground" />
+          <span class="text-sm font-medium text-foreground">Show deleted workspaces</span>
         </div>
       </div>
     </div>
 
     <!-- Results Count -->
-    <div v-if="workspaceStore.workspaces.length" class="text-sm text-muted-fg">
+    <div v-if="workspaceStore.workspaces.length" class="text-sm text-muted-foreground">
       Showing {{ filteredWorkspaces.length }} of {{ workspaceStore.workspaces.length }} workspaces
     </div>
 
     <!-- Loading -->
     <div v-if="workspaceStore.loading && !workspaceStore.workspaces.length" class="flex justify-center py-12">
-      <UiSpinner :size="24" />
+      <LoadingSpinner :size="24" />
     </div>
 
     <!-- Error -->
     <div
       v-else-if="workspaceStore.error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
     >
       {{ workspaceStore.error }}
     </div>
@@ -177,8 +184,7 @@ onMounted(async () => {
     <WorkspaceList
       v-else
       :workspaces="filteredWorkspaces"
-      :storage-bytes-by-workspace-id="storageBytesByWorkspaceId"
-      :warning-workspace-ids="warningWorkspaceIds"
+      @select="openWorkspace"
     />
   </div>
 </template>

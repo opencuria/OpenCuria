@@ -1,14 +1,15 @@
 import io
-import os
-import shutil
-import subprocess
 import tarfile
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from src.config import RunnerSettings
-from src.service import OperationCredentialContext, PreparedOperation, WorkspaceService
+from src.service import (
+    WORKSPACE_CREDENTIAL_DIR,
+    WORKSPACE_CREDENTIAL_ENV_FILE,
+    WorkspaceService,
+)
 
 
 @pytest.mark.parametrize("link_type", ["sym", "hard"])
@@ -26,60 +27,43 @@ def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_workspace_uses_operation_credentials_for_clone_and_configure() -> None:
+async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
     class DummyRuntime:
         async def create_workspace(self, config):  # noqa: ANN001
             return "instance-1"
 
     runtime = DummyRuntime()
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service._cleanup_legacy_workspace_credentials = AsyncMock()
-    credential_context = object()
-    service._create_operation_credential_context = AsyncMock(
-        return_value=credential_context
-    )
-    service._cleanup_operation_credential_context = AsyncMock()
-    service._exec_command = AsyncMock(side_effect=[(0, ""), (0, "")])
+    service.remove_workspace_credentials = AsyncMock()
+    service.inject_workspace_credentials = AsyncMock(return_value=True)
+    service._exec_command = AsyncMock(side_effect=[(0, "")])
 
-    await service.create_workspace(
+    workspace_id, credentials_present = await service.create_workspace(
         repos=["git@github.com:example/private-repo.git"],
-        configure_commands=[
-            {
-                "args": ["echo", "configured"],
-                "workdir": "/workspace",
-                "env": {},
-                "description": "configure",
-            }
-        ],
         env_vars={"GITHUB_TOKEN": "secret"},
         ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
         runtime_type="docker",
         image_tag="opencuria/workspace:test",
     )
 
-    create_ctx_args = service._create_operation_credential_context.await_args.args
-    assert create_ctx_args[0] is runtime
-    assert create_ctx_args[1] == "instance-1"
-    assert create_ctx_args[2] == {"GITHUB_TOKEN": "secret"}
-    assert create_ctx_args[3] is None
-    assert create_ctx_args[4] == [
-        "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
-    ]
-    assert service._exec_command.await_count == 2
+    assert credentials_present is True
+    inject_args = service.inject_workspace_credentials.await_args.args
+    assert inject_args[0] is runtime
+    assert inject_args[1] == "instance-1"
+    assert inject_args[2] == {"GITHUB_TOKEN": "secret"}
+    assert service._exec_command.await_count == 1
     clone_call = service._exec_command.await_args_list[0]
-    assert clone_call.kwargs["credential_context"] is credential_context
+    assert "credential_context" not in clone_call.kwargs
     assert clone_call.args[2]["args"] == [
         "git",
         "clone",
         "git@github.com:example/private-repo.git",
     ]
-    configure_call = service._exec_command.await_args_list[1]
-    assert configure_call.kwargs["credential_context"] is credential_context
-    service._cleanup_operation_credential_context.assert_awaited_once()
+    assert str(workspace_id)
 
 
 @pytest.mark.asyncio
-async def test_create_operation_credential_context_materializes_and_cleans_file_credentials() -> None:
+async def test_inject_workspace_credentials_materializes_file_credentials() -> None:
     class DummyRuntime:
         def __init__(self) -> None:
             self.archives: list[tuple[str, str, bytes]] = []
@@ -94,8 +78,9 @@ async def test_create_operation_credential_context_materializes_and_cleans_file_
 
     runtime = DummyRuntime()
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service.remove_workspace_credentials = AsyncMock()
 
-    context = await service._create_operation_credential_context(
+    present = await service.inject_workspace_credentials(
         runtime,
         "instance-1",
         {},
@@ -110,86 +95,102 @@ async def test_create_operation_credential_context_materializes_and_cleans_file_
         log=Mock(),
     )
 
-    assert context is not None
+    assert present is True
     assert runtime.archives
-    assert runtime.commands[0] == ["mkdir", "-p", context.directory]
-    assert runtime.commands[1][:2] == ["sh", "-lc"]
-    assert "bootstrap.sh" in runtime.commands[1][2]
-
+    assert runtime.archives[0][1] == WORKSPACE_CREDENTIAL_DIR
     archive = runtime.archives[0][2]
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
         assert tar.extractfile("files/credential_1").read() == b'{"access_token":"abc"}'
-        bootstrap = tar.extractfile("bootstrap.sh").read().decode("utf-8")
-        cleanup = tar.extractfile("cleanup.sh").read().decode("utf-8")
+        install = tar.extractfile("install.sh").read().decode("utf-8")
+        env_file = tar.extractfile("env.sh").read().decode("utf-8")
+        manifest = tar.extractfile("manifest").read().decode("utf-8")
 
-    assert "~/.codex/auth.json" in bootstrap
-    assert "install -m 600" in bootstrap
-    assert "~/.codex/auth.json" in cleanup
-
-    home_dir = "/tmp/opencuria-test-home"
-    shutil.rmtree(context.directory, ignore_errors=True)
-    shutil.rmtree(home_dir, ignore_errors=True)
-    os.makedirs(context.directory, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
-        tar.extractall(context.directory, filter="data")
-
-    result = subprocess.run(
-        [
-            "sh",
-            "-lc",
-            f"HOME={home_dir} . {context.bootstrap_script} && cat {home_dir}/.codex/auth.json",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == '{"access_token":"abc"}'
-
-    await service._cleanup_operation_credential_context(
-        runtime,
-        "instance-1",
-        context,
-        log=Mock(),
-    )
-    assert "cleanup.sh" in runtime.commands[2][2]
-    shutil.rmtree(context.directory, ignore_errors=True)
-    shutil.rmtree(home_dir, ignore_errors=True)
+    assert "~/.codex/auth.json" in install
+    assert "install -m 600" in install
+    assert WORKSPACE_CREDENTIAL_ENV_FILE.split("/")[-1] in env_file or "PATH=" in env_file
+    assert "~/.codex/auth.json" in manifest
+    assert any("install.sh" in " ".join(cmd) for cmd in runtime.commands)
 
 
 @pytest.mark.asyncio
-async def test_start_terminal_bootstraps_credential_context_before_login_shell() -> None:
+async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
+    runtime = Mock()
+    runtime.exec_command_wait = AsyncMock(return_value=(0, ""))
+    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service.remove_workspace_credentials = AsyncMock()
+
+    present = await service.inject_workspace_credentials(
+        runtime,
+        "instance-1",
+        {},
+        [],
+        [],
+        log=Mock(),
+    )
+
+    assert present is False
+    service.remove_workspace_credentials.assert_awaited_once()
+    runtime.exec_command_wait.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_workspace_removes_credentials_before_runtime_stop() -> None:
+    runtime = Mock()
+    runtime.stop_workspace = AsyncMock()
+    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service.remove_workspace_credentials = AsyncMock()
+    workspace_id = __import__("uuid").uuid4()
+    from src.models import WorkspaceInfo
+
+    service._cache[workspace_id] = WorkspaceInfo(
+        workspace_id=workspace_id,
+        instance_id="instance-1",
+        status="running",
+        runtime_type="docker",
+    )
+
+    present = await service.stop_workspace(workspace_id)
+
+    assert present is False
+    service.remove_workspace_credentials.assert_awaited_once()
+    runtime.stop_workspace.assert_awaited_once_with("instance-1")
+    assert service.remove_workspace_credentials.await_args.args[1] == "instance-1"
+
+
+@pytest.mark.asyncio
+async def test_start_terminal_sources_persistent_env() -> None:
     runtime = Mock()
     runtime.exec_pty = AsyncMock(return_value=Mock())
+    runtime.workspace_exists = AsyncMock(return_value=True)
 
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    credential_context = OperationCredentialContext(
-        directory="/tmp/opencuria-op-test",
-        bootstrap_script="/tmp/opencuria-op-test/bootstrap.sh",
-        cleanup_script="/tmp/opencuria-op-test/cleanup.sh",
-        environment={"OPENCURIA_CREDENTIAL_CONTEXT_DIR": "/tmp/opencuria-op-test"},
-    )
-    prepared = PreparedOperation(
-        workspace_id=Mock(),
+    workspace_id = __import__("uuid").uuid4()
+    from src.models import WorkspaceInfo
+
+    service._cache[workspace_id] = WorkspaceInfo(
+        workspace_id=workspace_id,
         instance_id="instance-1",
-        runtime=runtime,
-        log=Mock(),
-        credential_context=credential_context,
+        status="running",
+        runtime_type="docker",
     )
 
-    await service.start_terminal(
-        workspace_id=prepared.workspace_id,
-        prepared=prepared,
-    )
+    await service.start_terminal(workspace_id=workspace_id)
 
     runtime.exec_pty.assert_awaited_once()
     call = runtime.exec_pty.await_args
     assert call.args[0] == "instance-1"
-    assert call.kwargs["command"] == [
-        "/bin/bash",
-        "-lc",
-        ". /tmp/opencuria-op-test/bootstrap.sh >/dev/null 2>&1; exec /bin/bash -l",
-    ]
-    assert call.kwargs["env"]["OPENCURIA_CREDENTIAL_CONTEXT_DIR"] == (
-        "/tmp/opencuria-op-test"
+    command = call.kwargs["command"]
+    assert command[0] == "/bin/bash"
+    assert WORKSPACE_CREDENTIAL_ENV_FILE in command[2]
+    assert "TERM" in call.kwargs["env"]
+
+
+def test_wrap_command_sources_persistent_env() -> None:
+    service = WorkspaceService({}, RunnerSettings())
+    wrapped = service._wrap_command_with_persistent_env(
+        {"args": ["git", "clone", "repo"], "env": {"EXTRA": "1"}}
     )
+    assert wrapped["args"][0] == "bash"
+    snippet = wrapped["args"][2]
+    assert WORKSPACE_CREDENTIAL_ENV_FILE in snippet
+    assert "EXTRA" in snippet

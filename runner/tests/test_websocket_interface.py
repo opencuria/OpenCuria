@@ -1,199 +1,68 @@
-import asyncio
 import unittest
 import uuid
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
-from src.runtime.base import CommandExecutionError
-
-
-async def _empty_output():
-    if False:
-        yield ""
 
 
 class DummyService:
     def __init__(self) -> None:
         self.supported_runtimes = []
-        self.run_configure_commands = AsyncMock()
-        self.terminate_prompt_process = AsyncMock()
-        self.cleanup_prompt_process_tracking = AsyncMock()
         self.sync_from_runtime = AsyncMock()
         self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
-        self.prepared_operation = object()
-        self.run_command_calls = []
-        self.run_command_side_effects: list[object] = []
         self.create_workspace_calls = []
-        self.start_desktop = AsyncMock()
+        self.start_desktop = AsyncMock(
+            return_value=type(
+                "Session",
+                (),
+                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
+            )()
+        )
+        self.stop_desktop = AsyncMock(
+            return_value=type(
+                "Release",
+                (),
+                {
+                    "stopped": True,
+                    "process_alive": False,
+                    "viewer_held": False,
+                    "computer_use_active": False,
+                },
+            )()
+        )
         self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
         self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
-    def _normalise_command_args(self, command_args):
-        return command_args
-
-    async def run_command(self, workspace_id, command, prepared=None):
-        self.run_command_calls.append((workspace_id, command, prepared))
-        effect = self.run_command_side_effects.pop(0)
-        if isinstance(effect, Exception):
-            raise effect
-        async for line in _empty_output():
-            yield line
-
-    async def prepare_operation(
-        self,
-        workspace_id,
-        env_vars=None,
-        files=None,
-        ssh_keys=None,
-    ):
-        return self.prepared_operation
-
-    async def cleanup_operation(self, prepared):
-        return None
-
     async def create_workspace_from_image_artifact(self, **kwargs):
-        return kwargs["new_workspace_id"]
+        return kwargs["new_workspace_id"], bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
+        )
 
     async def create_workspace(self, **kwargs):
         self.create_workspace_calls.append(kwargs)
-        return kwargs.get("workspace_id") or uuid.uuid4()
-
-
-class WebSocketRunPromptTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retries_after_missing_command_exit_code(self) -> None:
-        service = DummyService()
-        service.run_command_side_effects = [
-            CommandExecutionError(127),
-            None,
-        ]
-
-        interface = WebSocketInterface(service, RunnerSettings())
-        interface._sio.emit = AsyncMock()
-
-        workspace_id = uuid.uuid4()
-        task_id = "task-123"
-        payload = {
-            "task_id": task_id,
-            "workspace_id": str(workspace_id),
-            "command": {
-                "args": ["claude", "--print", "hello"],
-                "workdir": "/workspace",
-                "env": {},
-                "description": "Run prompt with Claude Code",
-            },
-            "fallback_configure_commands": [
-                {
-                    "args": [
-                        "bash",
-                        "-lc",
-                        "npm install -g @anthropic-ai/claude-code",
-                    ],
-                    "description": "Install Claude Code CLI",
-                }
-            ],
-        }
-
-        handler = interface._sio.handlers["/"]["task:run_prompt"]
-        await handler(payload)
-        await interface._running_tasks[task_id]
-
-        service.run_configure_commands.assert_awaited_once_with(
-            workspace_id,
-            payload["fallback_configure_commands"],
-            prepared=service.prepared_operation,
+        return kwargs.get("workspace_id") or uuid.uuid4(), bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
-        self.assertEqual(len(service.run_command_calls), 2)
-        service.cleanup_prompt_process_tracking.assert_awaited_once()
 
-    async def test_does_not_retry_for_non_missing_command_exit_code(self) -> None:
-        service = DummyService()
-        service.run_command_side_effects = [CommandExecutionError(1)]
-
-        interface = WebSocketInterface(service, RunnerSettings())
-        interface._sio.emit = AsyncMock()
-
-        workspace_id = uuid.uuid4()
-        task_id = "task-456"
-        payload = {
-            "task_id": task_id,
-            "workspace_id": str(workspace_id),
-            "command": {
-                "args": ["claude", "--print", "hello"],
-                "workdir": "/workspace",
-                "env": {},
-                "description": "Run prompt with Claude Code",
-            },
-            "fallback_configure_commands": [
-                {
-                    "args": [
-                        "bash",
-                        "-lc",
-                        "npm install -g @anthropic-ai/claude-code",
-                    ],
-                    "description": "Install Claude Code CLI",
-                }
-            ],
-        }
-
-        handler = interface._sio.handlers["/"]["task:run_prompt"]
-        await handler(payload)
-        await interface._running_tasks[task_id]
-
-        service.run_configure_commands.assert_not_awaited()
-        self.assertEqual(len(service.run_command_calls), 1)
-        service.cleanup_prompt_process_tracking.assert_awaited_once()
-        self.assertIs(service.run_command_calls[0][2], service.prepared_operation)
-
-    async def test_cancelling_task_maps_sigterm_exit_to_user_cancelled(self) -> None:
-        service = DummyService()
-        release_command = asyncio.Event()
-
-        async def _run_command(workspace_id, command, prepared=None):  # noqa: ANN001
-            service.run_command_calls.append((workspace_id, command, prepared))
-            yield "start"
-            await release_command.wait()
-            raise CommandExecutionError(143)
-            yield ""  # pragma: no cover
-
-        service.run_command = _run_command
-
-        interface = WebSocketInterface(service, RunnerSettings())
-        interface._sio.emit = AsyncMock()
-
-        workspace_id = uuid.uuid4()
-        run_task_id = "run-task-1"
-        run_payload = {
-            "task_id": run_task_id,
-            "workspace_id": str(workspace_id),
-            "command": {
-                "args": ["bash", "-lc", "echo start; sleep 120; echo end"],
-                "workdir": "/workspace",
-                "env": {},
-                "description": "Deterministic long-running test command",
-            },
-        }
-
-        run_handler = interface._sio.handlers["/"]["task:run_prompt"]
-        await run_handler(run_payload)
-        interface._cancelling_task_ids.add(run_task_id)
-        release_command.set()
-        await interface._running_tasks[run_task_id]
-
-        emitted = [call.args for call in interface._sio.emit.await_args_list]
-        self.assertIn(
-            (
-                "output:error",
-                {
-                    "task_id": run_task_id,
-                    "workspace_id": str(workspace_id),
-                    "error": "Prompt execution cancelled by user",
-                },
-            ),
-            emitted,
+    async def inject_credentials(self, workspace_id, **kwargs):
+        return bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
+
+
+class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_prompt_handler_is_gone(self) -> None:
+        """Negative test: task:run_prompt no longer exists on the runner."""
+        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        assert "task:run_prompt" not in interface._sio.handlers["/"]
+
+    async def test_cancel_prompt_handler_is_gone(self) -> None:
+        """Negative test: task:cancel_prompt no longer exists on the runner."""
+        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        assert "task:cancel_prompt" not in interface._sio.handlers["/"]
 
 
 class WebSocketMetricsPathTests(unittest.TestCase):
@@ -251,18 +120,26 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         service.sync_from_runtime.assert_awaited_once()
         service.recover_desktop_sessions_from_runtime.assert_awaited_once()
         interface._sio.emit.assert_any_await(
-            "desktop:started",
+            "desktop:process",
             {
                 "workspace_id": service.get_workspace_heartbeat_statuses.return_value[0]["workspace_id"],
                 "port": 6901,
                 "container_ip": "127.0.0.1",
                 "network_name": "workspace-net",
+                "viewer": False,
+                "computer_use": False,
             },
         )
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
-        service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())
+        service.start_desktop = AsyncMock(
+            return_value=type(
+                "Session",
+                (),
+                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
+            )()
+        )
         service.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
         service.get_desktop_network_name = lambda workspace_id: ""
 
@@ -284,6 +161,60 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "port": 6901,
                 "container_ip": "10.100.0.2",
                 "network_name": "",
+                "viewer": True,
+                "computer_use": False,
+            },
+        )
+
+    async def test_stop_desktop_emits_stopped_when_process_ends(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "desktop-stop-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:stop_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        service.stop_desktop.assert_awaited_once_with(workspace_id)
+        interface._sio.emit.assert_awaited_with(
+            "desktop:stopped",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+            },
+        )
+
+    async def test_stop_desktop_emits_viewer_released_when_computer_use_holds(
+        self,
+    ) -> None:
+        service = DummyService()
+        service.stop_desktop = AsyncMock(
+            return_value=type(
+                "Release",
+                (),
+                {
+                    "stopped": False,
+                    "process_alive": True,
+                    "viewer_held": False,
+                    "computer_use_active": True,
+                },
+            )()
+        )
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "desktop-stop-2"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:stop_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        interface._sio.emit.assert_awaited_with(
+            "desktop:viewer_released",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "computer_use_active": True,
             },
         )
 
@@ -426,6 +357,55 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         forwarded = service.create_workspace_calls[0]
         self.assertEqual(forwarded["env_vars"], payload["env_vars"])
         self.assertEqual(forwarded["ssh_keys"], payload["ssh_keys"])
+
+
+class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inject_credentials_acks_presence_and_emits_event(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "inject-task-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:inject_credentials"]
+        result = await handler(
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "env_vars": {"GITHUB_TOKEN": "secret"},
+                "files": [],
+                "ssh_keys": [],
+            }
+        )
+
+        self.assertEqual(result, {"ok": True, "credentials_present": True})
+        interface._sio.emit.assert_awaited_with(
+            "workspace:credentials_injected",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "credentials_present": True,
+            },
+        )
+
+    async def test_inject_credentials_empty_set_acks_absent(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:inject_credentials"]
+        result = await handler(
+            {
+                "task_id": "inject-task-empty",
+                "workspace_id": str(workspace_id),
+                "env_vars": {},
+                "files": [],
+                "ssh_keys": [],
+            }
+        )
+
+        self.assertEqual(result, {"ok": True, "credentials_present": False})
 
 
 if __name__ == "__main__":

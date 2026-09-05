@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Runner } from '@/types'
-import { UiButton, UiDialog } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
 import { useRunnerStore } from '@/stores/runners'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
@@ -199,97 +207,103 @@ watch(open, (value) => {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="QEMU Runner Limits"
-    description="Configure per-workspace defaults/min/max and optional active totals for this runner."
     @update:open="(value) => (open = value)"
   >
-    <template #trigger>
-      <UiButton variant="outline" size="sm" :disabled="!supportsQemu">QEMU Limits</UiButton>
-    </template>
+    <DialogTrigger as-child>
+      <Button variant="outline" size="sm" :disabled="!supportsQemu">QEMU Limits</Button>
+    </DialogTrigger>
 
-    <form class="grid grid-cols-1 gap-4" @submit.prevent="handleSubmit">
-      <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
-        <p class="text-sm font-medium text-fg mb-3">Per-workspace limits</p>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>QEMU Runner Limits</DialogTitle>
+        <DialogDescription>
+          Configure per-workspace defaults/min/max and optional active totals for this runner.
+        </DialogDescription>
+      </DialogHeader>
+
+      <form class="grid grid-cols-1 gap-4" @submit.prevent="handleSubmit">
+      <div class="rounded-md border border-border bg-muted/50 p-3">
+        <p class="text-sm font-medium text-foreground mb-3">Per-workspace limits</p>
 
         <div class="space-y-4">
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
-            <p class="text-sm font-medium text-fg mb-2">vCPU</p>
+          <div class="rounded-sm border border-border bg-background p-3">
+            <p class="text-sm font-medium text-foreground mb-2">vCPU</p>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <p class="text-xs text-muted-fg mb-1">Min</p>
+                <p class="text-xs text-muted-foreground mb-1">Min</p>
                 <input v-model.number="minVcpus" type="range" class="w-full accent-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
-                <input v-model.number="minVcpus" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
+                <input v-model.number="minVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Default</p>
+                <p class="text-xs text-muted-foreground mb-1">Default</p>
                 <input v-model.number="defaultVcpus" type="range" class="w-full accent-primary" :min="minVcpus" :max="maxVcpus" step="1" />
-                <input v-model.number="defaultVcpus" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="minVcpus" :max="maxVcpus" step="1" />
+                <input v-model.number="defaultVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minVcpus" :max="maxVcpus" step="1" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Max</p>
+                <p class="text-xs text-muted-foreground mb-1">Max</p>
                 <input v-model.number="maxVcpus" type="range" class="w-full accent-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
-                <input v-model.number="maxVcpus" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
+                <input v-model.number="maxVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
               </div>
             </div>
           </div>
 
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
-            <p class="text-sm font-medium text-fg mb-2">RAM (MiB)</p>
+          <div class="rounded-sm border border-border bg-background p-3">
+            <p class="text-sm font-medium text-foreground mb-2">RAM (MiB)</p>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <p class="text-xs text-muted-fg mb-1">Min</p>
+                <p class="text-xs text-muted-foreground mb-1">Min</p>
                 <input v-model.number="minMemoryMb" type="range" class="w-full accent-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
-                <input v-model.number="minMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
+                <input v-model.number="minMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Default</p>
+                <p class="text-xs text-muted-foreground mb-1">Default</p>
                 <input v-model.number="defaultMemoryMb" type="range" class="w-full accent-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
-                <input v-model.number="defaultMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
+                <input v-model.number="defaultMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Max</p>
+                <p class="text-xs text-muted-foreground mb-1">Max</p>
                 <input v-model.number="maxMemoryMb" type="range" class="w-full accent-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
-                <input v-model.number="maxMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
+                <input v-model.number="maxMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
               </div>
             </div>
           </div>
 
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
-            <p class="text-sm font-medium text-fg mb-2">Storage (GiB)</p>
+          <div class="rounded-sm border border-border bg-background p-3">
+            <p class="text-sm font-medium text-foreground mb-2">Storage (GiB)</p>
             <div class="grid grid-cols-3 gap-3">
               <div>
-                <p class="text-xs text-muted-fg mb-1">Min</p>
+                <p class="text-xs text-muted-foreground mb-1">Min</p>
                 <input v-model.number="minDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
-                <input v-model.number="minDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
+                <input v-model.number="minDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Default</p>
+                <p class="text-xs text-muted-foreground mb-1">Default</p>
                 <input v-model.number="defaultDiskSizeGb" type="range" class="w-full accent-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
-                <input v-model.number="defaultDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
+                <input v-model.number="defaultDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
               </div>
               <div>
-                <p class="text-xs text-muted-fg mb-1">Max</p>
+                <p class="text-xs text-muted-foreground mb-1">Max</p>
                 <input v-model.number="maxDiskSizeGb" type="range" class="w-full accent-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
-                <input v-model.number="maxDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
+                <input v-model.number="maxDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
+      <div class="rounded-md border border-border bg-muted/50 p-3">
         <div class="flex items-center justify-between mb-2">
-          <p class="text-sm font-medium text-fg">Active totals</p>
-          <p class="text-xs text-muted-fg">optional cap, can exceed host marker</p>
+          <p class="text-sm font-medium text-foreground">Active totals</p>
+          <p class="text-xs text-muted-foreground">optional cap, can exceed host marker</p>
         </div>
 
         <div class="space-y-4">
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
+          <div class="rounded-sm border border-border bg-background p-3">
             <div class="flex items-center justify-between mb-1">
-              <p class="text-sm text-fg">Total active vCPU</p>
-              <label class="text-xs text-muted-fg flex items-center gap-2">
+              <p class="text-sm text-foreground">Total active vCPU</p>
+              <label class="text-xs text-muted-foreground flex items-center gap-2">
                 <input v-model="unlimitedActiveVcpus" type="checkbox" class="accent-primary" />
                 Unlimited
               </label>
@@ -300,18 +314,18 @@ watch(open, (value) => {
                 <div v-if="hostVcpus" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostVcpus, activeVcpusSliderMax) }" />
               </div>
               <div class="flex justify-between text-[11px] mt-1">
-                <span class="text-muted-fg">1</span>
+                <span class="text-muted-foreground">1</span>
                 <span class="text-primary" v-if="hostVcpus">host {{ hostVcpus }}</span>
-                <span class="text-muted-fg">{{ activeVcpusSliderMax }}</span>
+                <span class="text-muted-foreground">{{ activeVcpusSliderMax }}</span>
               </div>
-              <input v-model.number="maxActiveVcpus" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" min="1" :max="activeVcpusSliderMax" step="1" />
+              <input v-model.number="maxActiveVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="activeVcpusSliderMax" step="1" />
             </div>
           </div>
 
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
+          <div class="rounded-sm border border-border bg-background p-3">
             <div class="flex items-center justify-between mb-1">
-              <p class="text-sm text-fg">Total active RAM (MiB)</p>
-              <label class="text-xs text-muted-fg flex items-center gap-2">
+              <p class="text-sm text-foreground">Total active RAM (MiB)</p>
+              <label class="text-xs text-muted-foreground flex items-center gap-2">
                 <input v-model="unlimitedActiveMemoryMb" type="checkbox" class="accent-primary" />
                 Unlimited
               </label>
@@ -322,18 +336,18 @@ watch(open, (value) => {
                 <div v-if="hostMemoryMb" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostMemoryMb, activeMemorySliderMax) }" />
               </div>
               <div class="flex justify-between text-[11px] mt-1">
-                <span class="text-muted-fg">{{ RAM_STEP }}</span>
+                <span class="text-muted-foreground">{{ RAM_STEP }}</span>
                 <span class="text-primary" v-if="hostMemoryMb">host {{ hostMemoryMb }}</span>
-                <span class="text-muted-fg">{{ activeMemorySliderMax }}</span>
+                <span class="text-muted-foreground">{{ activeMemorySliderMax }}</span>
               </div>
-              <input v-model.number="maxActiveMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
+              <input v-model.number="maxActiveMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
             </div>
           </div>
 
-          <div class="rounded-[var(--radius-sm)] border border-border bg-bg p-3">
+          <div class="rounded-sm border border-border bg-background p-3">
             <div class="flex items-center justify-between mb-1">
-              <p class="text-sm text-fg">Total active disk (GiB)</p>
-              <label class="text-xs text-muted-fg flex items-center gap-2">
+              <p class="text-sm text-foreground">Total active disk (GiB)</p>
+              <label class="text-xs text-muted-foreground flex items-center gap-2">
                 <input v-model="unlimitedActiveDiskSizeGb" type="checkbox" class="accent-primary" />
                 Unlimited
               </label>
@@ -344,24 +358,25 @@ watch(open, (value) => {
                 <div v-if="hostDiskSizeGb" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostDiskSizeGb, activeDiskSliderMax) }" />
               </div>
               <div class="flex justify-between text-[11px] mt-1">
-                <span class="text-muted-fg">{{ DISK_STEP }}</span>
+                <span class="text-muted-foreground">{{ DISK_STEP }}</span>
                 <span class="text-primary" v-if="hostDiskSizeGb">host {{ hostDiskSizeGb }}</span>
-                <span class="text-muted-fg">{{ activeDiskSliderMax }}</span>
+                <span class="text-muted-foreground">{{ activeDiskSliderMax }}</span>
               </div>
-              <input v-model.number="maxActiveDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
+              <input v-model.number="maxActiveDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
             </div>
           </div>
         </div>
 
-        <p class="text-xs text-muted-fg mt-2" v-if="loadingMetrics">Loading host limits…</p>
+        <p class="text-xs text-muted-foreground mt-2" v-if="loadingMetrics">Loading host limits…</p>
       </div>
 
       <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="open = false">Cancel</UiButton>
-        <UiButton type="submit" :disabled="submitting || !isValid">
+        <Button variant="outline" type="button" @click="open = false">Cancel</Button>
+        <Button type="submit" :disabled="submitting || !isValid">
           {{ submitting ? 'Saving…' : 'Save' }}
-        </UiButton>
+        </Button>
       </div>
     </form>
-  </UiDialog>
+    </DialogContent>
+  </Dialog>
 </template>

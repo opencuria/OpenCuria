@@ -15,7 +15,7 @@ from apps.organizations.models import Organization
 from common.utils import generate_api_token, hash_token
 
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import Runner, Session, Workspace
+from apps.runners.models import Runner, Workspace
 
 # Allow sync ORM calls from async test functions (Django safety check).
 # In production code, we use sync_to_async / async-safe patterns.
@@ -94,13 +94,3 @@ def stopped_workspace(runner: Runner, user) -> Workspace:
     )
 
 
-@pytest.fixture
-def session(workspace: Workspace) -> Session:
-    """A completed session in the database."""
-    chat = Chat.objects.create(workspace=workspace, name="Fixture Chat")
-    return Session.objects.create(
-        chat=chat,
-        prompt="Hello, world!",
-        output="Response from agent",
-        status="completed",
-    )

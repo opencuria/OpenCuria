@@ -9,7 +9,7 @@ import uuid
 
 from django.db.models import Q, QuerySet
 
-from .models import SessionSkill, Skill
+from .models import Skill
 
 
 class SkillRepository:
@@ -71,21 +71,3 @@ class SkillRepository:
     def delete(skill_id: uuid.UUID) -> None:
         """Delete a skill by ID."""
         Skill.objects.filter(id=skill_id).delete()
-
-
-class SessionSkillRepository:
-    """Data access for SessionSkill snapshot records."""
-
-    @staticmethod
-    def create_snapshots(session, skills: list[Skill]) -> list[SessionSkill]:
-        """Bulk-create SessionSkill snapshots for all supplied skills."""
-        snapshots = [
-            SessionSkill(
-                session=session,
-                skill=skill,
-                name=skill.name,
-                body=skill.body,
-            )
-            for skill in skills
-        ]
-        return SessionSkill.objects.bulk_create(snapshots)

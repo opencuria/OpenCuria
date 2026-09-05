@@ -1,15 +1,33 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { UiDialog, UiInput, UiButton, UiSelect } from '@/components/ui'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { useCredentialStore } from '@/stores/credentials'
 import { useImageStore } from '@/stores/images'
 import { RuntimeType } from '@/types'
 import { filterRunnersByRuntime, runnerSupportsRuntime } from '@/lib/runtimeSupport'
+import { isDefinitionSelectableForWorkspace } from '@/components/images/imageDefinitionLifecycle'
 import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
-import { X, Check, Key, Camera } from 'lucide-vue-next'
+import { X, Check, Key, Camera } from '@lucide/vue'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
 type SelectableImageKind = 'definition' | 'captured'
@@ -48,7 +66,7 @@ const selectedImageValue = ref('')
 const imageOptions = computed(() => {
   const definitionOptions: SelectableImageOption[] = []
   for (const definition of imageStore.imageDefinitions) {
-    if (!definition.is_active) continue
+    if (!isDefinitionSelectableForWorkspace(definition)) continue
     const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || [])
       .filter((build) => {
         if (build.status !== 'active' || !build.image_artifact_id) return false
@@ -412,36 +430,42 @@ const isValid = computed(
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="Create Workspace"
-    description="Provision a new workspace container. You'll choose an AI agent when starting a chat."
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
-    <template #trigger>
-      <UiButton @click="open = true">Create Workspace</UiButton>
-    </template>
+    <DialogTrigger as-child>
+      <Button @click="open = true">Create Workspace</Button>
+    </DialogTrigger>
 
-    <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-1">
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Create Workspace</DialogTitle>
+        <DialogDescription>
+          Provision a new workspace container. Start a harness session to run the agent.
+        </DialogDescription>
+      </DialogHeader>
+
+      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <div class="rounded-md border border-border bg-muted/50 p-1">
         <div class="grid grid-cols-2 gap-1">
-          <UiButton type="button" size="sm" :variant="activeTab === 'basic' ? 'secondary' : 'ghost'" @click="activeTab = 'basic'">
+          <Button type="button" size="sm" :variant="activeTab === 'basic' ? 'secondary' : 'ghost'" @click="activeTab = 'basic'">
             Basic
-          </UiButton>
-          <UiButton type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
+          </Button>
+          <Button type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
             Advanced settings
-          </UiButton>
+          </Button>
         </div>
       </div>
 
-      <p v-if="activeTab === 'basic'" class="text-xs text-muted-fg -mt-1">
+      <p v-if="activeTab === 'basic'" class="text-xs text-muted-foreground -mt-1">
         In most cases you can create directly from this tab. Advanced settings are optional.
       </p>
 
       <!-- Workspace name -->
       <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Name</label>
-        <UiInput
+        <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+        <Input
           v-model="name"
           placeholder="My workspace"
         />
@@ -449,51 +473,61 @@ const isValid = computed(
 
       <!-- Image selection -->
       <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">
+        <label class="text-sm font-medium text-foreground mb-1.5 block">
           Select image
-          <span class="text-muted-fg font-normal">(required)</span>
+          <span class="text-muted-foreground font-normal">(required)</span>
         </label>
-        <UiSelect v-model="selectedImageValue" :options="imageOptions" />
-        <p v-if="!selectedImageOption" class="text-xs text-error mt-1">
+        <Select v-model="selectedImageValue">
+          <SelectTrigger>
+            <SelectValue placeholder="Select image" />
+          </SelectTrigger>
+          <SelectContent>
+            <template v-for="opt in imageOptions" :key="opt.value">
+              <SelectLabel v-if="opt.value.startsWith('__group_')">{{ opt.label }}</SelectLabel>
+              <SelectItem v-else :value="opt.value">{{ opt.label }}</SelectItem>
+            </template>
+          </SelectContent>
+        </Select>
+        <p v-if="!selectedImageOption" class="text-xs text-destructive mt-1">
           No active organization or captured images are available.
         </p>
-        <p v-if="isFromImage" class="text-xs text-muted-fg mt-1 flex items-center gap-1">
+        <p v-if="isFromImage" class="text-xs text-muted-foreground mt-1 flex items-center gap-1">
           <Camera :size="12" />
           Runtime is locked by the selected image. An image selection is required to create a workspace.
         </p>
       </div>
 
       <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Credentials <span class="text-muted-fg font-normal">(optional)</span></label>
+        <label class="text-sm font-medium text-foreground mb-1.5 block">Credentials <span class="text-muted-foreground font-normal">(optional)</span></label>
         <div v-if="credentialStore.credentials.length" class="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
           <button
             v-for="cred in credentialStore.credentials"
             :key="cred.id"
             type="button"
-            class="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-sm)] border text-left text-sm transition-colors cursor-pointer"
+            class="flex items-center gap-2 px-3 py-2 rounded-sm border text-left text-sm transition-colors cursor-pointer"
             :class="selectedCredentialIds.includes(cred.id)
-              ? 'border-primary bg-primary/5 text-fg'
-              : 'border-border bg-bg text-muted-fg hover:bg-surface-hover'"
+              ? 'border-primary bg-primary/5 text-foreground'
+              : 'border-border bg-background text-muted-foreground hover:bg-muted'"
             @click="toggleCredential(cred.id)"
           >
             <div
               class="flex items-center justify-center w-4 h-4 rounded-sm border"
               :class="selectedCredentialIds.includes(cred.id)
-                ? 'border-primary bg-primary text-primary-fg'
+                ? 'border-primary bg-primary text-primary-foreground'
                 : 'border-border'"
             >
               <Check v-if="selectedCredentialIds.includes(cred.id)" :size="10" />
             </div>
             <span class="flex-1 truncate">{{ cred.name }}</span>
-            <span v-if="cred.credential_type === 'ssh_key'" class="inline-flex items-center gap-1 text-xs text-muted-fg">
+            <span v-if="cred.credential_type === 'ssh_key'" class="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <Key :size="10" />
               SSH Key
             </span>
-            <span v-else-if="cred.target_path" class="text-xs text-muted-fg">{{ cred.target_path }}</span>
-            <span v-else-if="cred.env_var_name" class="text-xs text-muted-fg">{{ cred.env_var_name }}</span>
+            <span v-else-if="cred.target_path" class="text-xs text-muted-foreground">{{ cred.target_path }}</span>
+            <span v-else-if="cred.env_var_name" class="text-xs text-muted-foreground">{{ cred.env_var_name }}</span>
           </button>
         </div>
-        <p v-else class="text-xs text-muted-fg">
+        <p v-else class="text-xs text-muted-foreground">
           No credentials available.
           <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
           first.
@@ -501,26 +535,26 @@ const isValid = computed(
       </div>
 
       <div v-if="!isCapturedClone">
-        <label class="text-sm font-medium text-fg mb-1.5 block">Repositories <span class="text-muted-fg font-normal">(optional)</span></label>
+        <label class="text-sm font-medium text-foreground mb-1.5 block">Repositories <span class="text-muted-foreground font-normal">(optional)</span></label>
         <div class="flex gap-2">
-          <UiInput
+          <Input
             v-model="repoInput"
             placeholder="https://github.com/owner/repo"
             class="flex-1"
             @keydown="handleRepoKeydown"
           />
-          <UiButton type="button" variant="outline" @click="addRepo">Add</UiButton>
+          <Button type="button" variant="outline" @click="addRepo">Add</Button>
         </div>
         <div v-if="repos.length" class="flex flex-wrap gap-2 mt-2">
           <span
             v-for="(repo, i) in repos"
             :key="repo"
-            class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-[var(--radius-sm)] bg-muted text-fg"
+            class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-sm bg-muted text-foreground"
           >
             {{ repo.split('/').slice(-1)[0] || repo }}
             <button
               type="button"
-              class="text-muted-fg hover:text-fg cursor-pointer"
+              class="text-muted-foreground hover:text-foreground cursor-pointer"
               @click="removeRepo(i)"
             >
               <X :size="12" />
@@ -530,53 +564,65 @@ const isValid = computed(
       </div>
 
       <div v-if="activeTab === 'advanced'">
-        <div v-if="isCapturedClone" class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3 text-sm text-muted-fg">
+        <div v-if="isCapturedClone" class="rounded-md border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
           Captured image clones keep runner, runtime and resources from the image. Advanced options are disabled.
         </div>
 
         <div v-else class="space-y-4">
-          <div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
-            <label class="text-sm font-medium text-fg mb-1.5 block">Runner</label>
-            <UiSelect
+          <div class="rounded-md border border-border bg-muted/50 p-3">
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Runner</label>
+            <Select
               v-model="runnerId"
-              :options="advancedRunnerOptions"
               :disabled="advancedRunnerOptions.length <= 1"
-            />
-            <p class="text-xs text-muted-fg mt-1">
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select runner" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="opt in advancedRunnerOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground mt-1">
               {{ isFromImage
                 ? 'Only runners that have the selected image and support its runtime are available.'
                 : 'Only online runners that support the selected runtime are available.' }}
             </p>
           </div>
 
-          <div v-if="runtimeType === RuntimeType.QEMU" class="space-y-3 rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3">
-            <p class="text-sm font-medium text-fg">QEMU resources</p>
+          <div v-if="runtimeType === RuntimeType.QEMU" class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
+            <p class="text-sm font-medium text-foreground">QEMU resources</p>
 
             <div>
-              <label class="text-sm font-medium text-muted-fg mb-1 block">vCPU</label>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
               <input v-model.number="qemuVcpus" type="range" class="w-full accent-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-              <input v-model.number="qemuVcpus" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-              <div class="flex justify-between text-xs text-muted-fg mt-1">
+              <input v-model.number="qemuVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
+              <div class="flex justify-between text-xs text-muted-foreground mt-1">
                 <span>{{ qemuLimits.minVcpus }}</span>
                 <span>{{ qemuLimits.maxVcpus }}</span>
               </div>
             </div>
 
             <div>
-              <label class="text-sm font-medium text-muted-fg mb-1 block">RAM (MiB)</label>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
               <input v-model.number="qemuMemoryMb" type="range" class="w-full accent-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-              <input v-model.number="qemuMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-              <div class="flex justify-between text-xs text-muted-fg mt-1">
+              <input v-model.number="qemuMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
+              <div class="flex justify-between text-xs text-muted-foreground mt-1">
                 <span>{{ qemuLimits.minMemoryMb }}</span>
                 <span>{{ qemuLimits.maxMemoryMb }}</span>
               </div>
             </div>
 
             <div>
-              <label class="text-sm font-medium text-muted-fg mb-1 block">Storage (GiB)</label>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">Storage (GiB)</label>
               <input v-model.number="qemuDiskSizeGb" type="range" class="w-full accent-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-              <input v-model.number="qemuDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-              <div class="flex justify-between text-xs text-muted-fg mt-1">
+              <input v-model.number="qemuDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
+              <div class="flex justify-between text-xs text-muted-foreground mt-1">
                 <span>{{ qemuLimits.minDiskSizeGb }}</span>
                 <span>{{ qemuLimits.maxDiskSizeGb }}</span>
               </div>
@@ -587,15 +633,16 @@ const isValid = computed(
 
       <!-- Actions -->
       <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="!isValid || submitting">
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" :disabled="!isValid || submitting">
           {{
             submitting
               ? (selectedImageOption?.kind === 'captured' ? 'Cloning…' : 'Creating…')
               : (selectedImageOption?.kind === 'captured' ? 'Clone from Image' : 'Create')
           }}
-        </UiButton>
+        </Button>
       </div>
     </form>
-  </UiDialog>
+    </DialogContent>
+  </Dialog>
 </template>

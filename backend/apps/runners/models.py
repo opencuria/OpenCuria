@@ -2,7 +2,8 @@
 Database models for the runners app.
 
 These models represent the backend's source-of-truth for runners,
-workspaces, sessions, and task correlation.
+workspaces, and task correlation. Agent conversations live in the
+harness app (``HarnessSession``/``HarnessMessage``/``HarnessPart``).
 """
 
 from __future__ import annotations
@@ -14,10 +15,8 @@ from django.db import models
 from django.utils import timezone
 
 from .enums import (
-    AgentCommandPhase,
     RunnerStatus,
     RuntimeType,
-    SessionStatus,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -163,6 +162,14 @@ class Workspace(models.Model):
             "SSH keys into the workspace runtime."
         ),
     )
+    credentials_present = models.BooleanField(
+        default=False,
+        help_text=(
+            "True if credential material is currently on the workspace disk. "
+            "Set after a successful inject; cleared only after a controlled stop "
+            "removes the secrets. External stops leave this true."
+        ),
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -188,107 +195,14 @@ class Workspace(models.Model):
         return f"Workspace({self.name}, {self.status})"
 
 
-class Chat(models.Model):
-    """
-    A conversation thread within a workspace.
-
-    Groups related sessions (prompt/response pairs) together.
-    Agents that support multi-chat allow users to create and switch
-    between multiple chats within one workspace.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    workspace = models.ForeignKey(
-        Workspace,
-        on_delete=models.CASCADE,
-        related_name="chats",
-    )
-    name = models.CharField(
-        max_length=255,
-        blank=True,
-        default="",
-        help_text="Display name for the chat (auto-set from first prompt if empty).",
-    )
-    agent_definition = models.ForeignKey(
-        "runners.AgentDefinition",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="chats",
-        help_text="The selected agent definition for this chat.",
-    )
-    agent_type = models.CharField(
-        max_length=64,
-        blank=True,
-        default="",
-        help_text="Display snapshot of the selected agent name.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "runners_chat"
-        ordering = ["-created_at"]
-
-    def __str__(self) -> str:
-        label = self.name or str(self.id)[:8]
-        return f"Chat({label})"
-
-
-class Session(models.Model):
-    """
-    A prompt/response session within a chat.
-
-    Tracks the prompt text, streaming output, and completion status.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    chat = models.ForeignKey(
-        Chat,
-        on_delete=models.CASCADE,
-        related_name="sessions",
-    )
-    prompt = models.TextField()
-    agent_model = models.CharField(max_length=128, blank=True, default="")
-    agent_options = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text=(
-            "Selected agent options for this session as a key/value dict. "
-            "Example: {\"model\": \"claude-opus-4.6\", \"permission_mode\": \"plan\"}"
-        ),
-    )
-    output = models.TextField(blank=True, default="")
-    error_message = models.TextField(null=True, blank=True, default=None)
-    status = models.CharField(
-        max_length=20,
-        choices=SessionStatus.choices,
-        default=SessionStatus.PENDING,
-    )
-    read_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="When the user opened this completed/failed session.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "runners_session"
-        ordering = ["-created_at"]
-
-    def __str__(self) -> str:
-        preview = self.prompt[:40] + "..." if len(self.prompt) > 40 else self.prompt
-        return f"Session({str(self.id)[:8]}, {preview})"
-
-
 class Task(models.Model):
     """
     Correlates a backend command with a runner response.
 
-    Every operation dispatched to a runner (create workspace, run prompt, etc.)
-    creates a Task record. The runner references the task_id in its response
-    events so the backend can match results to requests.
+    Every operation dispatched to a runner (create workspace, lifecycle,
+    terminal, harness RPC, etc.) creates a Task record. The runner
+    references the task_id in its response events so the backend can
+    match results to requests.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -299,13 +213,6 @@ class Task(models.Model):
     )
     workspace = models.ForeignKey(
         Workspace,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="tasks",
-    )
-    session = models.ForeignKey(
-        Session,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
@@ -327,323 +234,6 @@ class Task(models.Model):
 
     def __str__(self) -> str:
         return f"Task({str(self.id)[:8]}, {self.type}, {self.status})"
-
-
-class AgentDefinition(models.Model):
-    """
-    DB-managed definition of a coding agent.
-
-    Each record describes a coding tool (e.g. GitHub Copilot CLI) and its
-    associated commands for workspace configuration and prompt execution.
-
-    Standard definitions have ``organization=None`` and are read-only.
-    Organization-specific definitions are owned by an org and can be modified
-    by org admins.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    organization = models.ForeignKey(
-        "organizations.Organization",
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="agent_definitions",
-        help_text=(
-            "The organization that owns this agent definition. "
-            "Null means this is a standard/global definition."
-        ),
-    )
-    name = models.CharField(
-        max_length=64,
-        help_text="Short identifier (e.g. 'copilot'). Unique globally for standard definitions, unique per org for org-specific ones.",
-    )
-    description = models.TextField(
-        blank=True,
-        default="",
-        help_text="Human-readable description of the agent.",
-    )
-    available_options = models.JSONField(
-        default=list,
-        blank=True,
-        help_text=(
-            "List of selectable options for this agent. Each entry is a dict with "
-            "'key', 'label', 'choices' (list of strings), and 'default' (string). "
-            "Example: [{\"key\": \"permission_mode\", \"label\": \"Permission Mode\", "
-            "\"choices\": [\"default\", \"plan\"], \"default\": \"default\"}]"
-        ),
-    )
-    default_env = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text=(
-            "Environment variables injected into every run command for this agent. "
-            "Defined as a key/value dict. Example: {\"ANTHROPIC_API_KEY\": \"sk-...\"}. "
-            "Per-command env vars in AgentCommand.env take precedence over these defaults."
-        ),
-    )
-    supports_multi_chat = models.BooleanField(
-        default=False,
-        help_text=(
-            "Whether this agent supports multiple chat threads per workspace. "
-            "When True, a {chat_id} placeholder in run command args is resolved."
-        ),
-    )
-    required_credential_services = models.ManyToManyField(
-        "credentials.CredentialService",
-        blank=True,
-        related_name="agents",
-        help_text=(
-            "Credential services required to use this agent. "
-            "Agents can only be selected for workspaces that already include all "
-            "of these credential services."
-        ),
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "runners_agent_definition"
-        ordering = ["name"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["name"],
-                condition=models.Q(organization__isnull=True),
-                name="unique_standard_agent_name",
-            ),
-            models.UniqueConstraint(
-                fields=["name", "organization"],
-                condition=models.Q(organization__isnull=False),
-                name="unique_org_agent_name",
-            ),
-        ]
-
-    @property
-    def is_standard(self) -> bool:
-        """Return True when this is a global/standard definition."""
-        return self.organization_id is None
-
-    def __str__(self) -> str:
-        if self.organization_id:
-            return f"AgentDefinition({self.name}, org={self.organization_id})"
-        return f"AgentDefinition({self.name})"
-
-
-
-class OrgAgentDefinitionActivation(models.Model):
-    """
-    Controls which agent definitions are active for an organization.
-
-    Both standard (organization=None) and org-specific agent definitions
-    can be activated or deactivated per organization. When a new organization
-    is created, all existing standard definitions are activated by default.
-
-    Later this model can be extended to activate agents for specific groups
-    or roles within the organization.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    organization = models.ForeignKey(
-        "organizations.Organization",
-        on_delete=models.CASCADE,
-        related_name="agent_activations",
-    )
-    agent_definition = models.ForeignKey(
-        AgentDefinition,
-        on_delete=models.CASCADE,
-        related_name="org_activations",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = "runners_org_agent_activation"
-        ordering = ["-created_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["organization", "agent_definition"],
-                name="unique_org_agent_activation",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"OrgAgentActivation(org={self.organization_id}, agent={self.agent_definition_id})"
-
-
-class AgentCommand(models.Model):
-    """
-    A command associated with an agent definition.
-
-    Commands belong to one of two phases:
-    - ``configure``: Run once after workspace creation (may have many).
-    - ``run``: Template for executing a prompt (exactly one per agent).
-
-    Template variables in ``args`` and ``workdir`` fields:
-    - ``{prompt}`` — replaced with the user's prompt text.
-    - ``{workdir}`` — replaced with the workspace working directory.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    agent = models.ForeignKey(
-        AgentDefinition,
-        on_delete=models.CASCADE,
-        related_name="commands",
-    )
-    phase = models.CharField(
-        max_length=20,
-        choices=AgentCommandPhase.choices,
-        help_text="When this command is executed: 'configure' or 'run'.",
-    )
-    args = models.JSONField(
-        help_text=(
-            "Command arguments as a list of strings. "
-            "May contain {prompt} and {workdir} placeholders."
-        ),
-    )
-    workdir = models.CharField(
-        max_length=512,
-        blank=True,
-        null=True,
-        help_text="Working directory. May contain {workdir} placeholder.",
-    )
-    env = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text="Extra environment variables for this command.",
-    )
-    description = models.CharField(
-        max_length=255,
-        blank=True,
-        default="",
-        help_text="Human-readable description of what this command does.",
-    )
-    order = models.PositiveIntegerField(
-        default=0,
-        help_text="Execution order within the same phase.",
-    )
-
-    class Meta:
-        db_table = "runners_agent_command"
-        ordering = ["agent", "phase", "order"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["agent", "phase"],
-                condition=models.Q(phase="run"),
-                name="unique_run_command_per_agent",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return f"AgentCommand({self.agent.name}, {self.phase}, order={self.order})"
-
-
-class AgentDefinitionCredentialRelation(models.Model):
-    """
-    Links a CredentialService to an AgentDefinition with optional defaults.
-
-    When a workspace is created with a credential belonging to this service,
-    the ``default_env`` and ``commands`` defined here are applied in addition
-    to (and before) those on the AgentDefinition itself.
-
-    This allows credential-specific setup steps (e.g. authenticating a CLI
-    tool with the injected token) to be encapsulated here so that users only
-    need to attach the credential service — everything else is automatic.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    agent_definition = models.ForeignKey(
-        AgentDefinition,
-        on_delete=models.CASCADE,
-        related_name="credential_relations",
-    )
-    credential_service = models.ForeignKey(
-        "credentials.CredentialService",
-        on_delete=models.CASCADE,
-        related_name="agent_relations",
-    )
-    default_env = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text=(
-            "Environment variables to inject when this credential service is present. "
-            "Applied before the AgentDefinition's own default_env."
-        ),
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "runners_agent_credential_relation"
-        ordering = ["agent_definition", "credential_service"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["agent_definition", "credential_service"],
-                name="unique_agent_credential_relation",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        return (
-            f"AgentDefinitionCredentialRelation("
-            f"agent={self.agent_definition_id}, "
-            f"service={self.credential_service_id})"
-        )
-
-
-class AgentCredentialRelationCommand(models.Model):
-    """
-    A command associated with an AgentDefinitionCredentialRelation.
-
-    Executed when the linked credential service is present in the workspace,
-    before the AgentDefinition's own commands for the same phase.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    relation = models.ForeignKey(
-        AgentDefinitionCredentialRelation,
-        on_delete=models.CASCADE,
-        related_name="commands",
-    )
-    phase = models.CharField(
-        max_length=20,
-        choices=AgentCommandPhase.choices,
-        help_text="When this command is executed: 'configure' or 'run'.",
-    )
-    args = models.JSONField(
-        help_text=(
-            "Command arguments as a list of strings. "
-            "May contain {prompt} and {workdir} placeholders."
-        ),
-    )
-    workdir = models.CharField(
-        max_length=512,
-        blank=True,
-        null=True,
-        help_text="Working directory. May contain {workdir} placeholder.",
-    )
-    env = models.JSONField(
-        default=dict,
-        blank=True,
-        help_text="Extra environment variables for this command.",
-    )
-    description = models.CharField(
-        max_length=255,
-        blank=True,
-        default="",
-        help_text="Human-readable description of what this command does.",
-    )
-    order = models.PositiveIntegerField(
-        default=0,
-        help_text="Execution order within the same phase.",
-    )
-
-    class Meta:
-        db_table = "runners_agent_credential_relation_command"
-        ordering = ["relation", "phase", "order"]
-
-    def __str__(self) -> str:
-        return (
-            f"AgentCredentialRelationCommand("
-            f"relation={self.relation_id}, {self.phase}, order={self.order})"
-        )
 
 
 class RunnerSystemMetrics(models.Model):
@@ -980,15 +570,6 @@ class ImageInstance(models.Model):
     delete_attempt_count = models.PositiveIntegerField(
         default=0,
         help_text="Number of deletion attempts.",
-    )
-    credentials = models.ManyToManyField(
-        "credentials.Credential",
-        blank=True,
-        related_name="image_instances",
-        help_text=(
-            "Credentials associated with this image instance. "
-            "Workspace cloning must still supply credentials explicitly."
-        ),
     )
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -36,15 +36,11 @@ export function useTheme(): {
 
     isDark.value = resolved === 'dark'
 
-    // Toggle class on <html> for Tailwind dark mode (class strategy)
-    // and data attribute for CSS variable theming
     const root = document.documentElement
     if (resolved === 'dark') {
       root.classList.add('dark')
-      root.setAttribute('data-theme', 'dark')
     } else {
       root.classList.remove('dark')
-      root.setAttribute('data-theme', 'light')
     }
   })
 

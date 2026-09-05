@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Pencil, Check, Key } from 'lucide-vue-next'
-
-import { UiButton, UiDialog, UiInput } from '@/components/ui'
+import { Pencil, Check, Key } from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import type { Workspace, WorkspaceUpdateIn } from '@/types'
 import { RuntimeType } from '@/types'
 import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
@@ -148,14 +156,12 @@ async function navigateToCredentials(): Promise<void> {
 </script>
 
 <template>
-  <UiDialog
+  <Dialog
     :open="open"
-    title="Edit Workspace"
-    description="Update the workspace name and attached credentials."
     @update:open="(value) => (value ? handleOpen() : handleClose())"
   >
-    <template #trigger>
-      <UiButton
+    <DialogTrigger as-child>
+      <Button
         variant="ghost"
         :size="btnSize"
         title="Edit workspace"
@@ -163,96 +169,103 @@ async function navigateToCredentials(): Promise<void> {
         @click.stop="handleOpen"
       >
         <Pencil :size="14" />
-      </UiButton>
-    </template>
+      </Button>
+    </DialogTrigger>
 
-    <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">Name</label>
-        <UiInput v-model="name" :disabled="submitting || props.disabled" placeholder="Workspace name" />
-      </div>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Edit Workspace</DialogTitle>
+        <DialogDescription>Update the workspace name and attached credentials.</DialogDescription>
+      </DialogHeader>
 
-      <div>
-        <label class="text-sm font-medium text-fg mb-1.5 block">
-          Credentials
-          <span class="text-muted-fg font-normal">(optional)</span>
-        </label>
+      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+          <Input v-model="name" :disabled="submitting || props.disabled" placeholder="Workspace name" />
+        </div>
 
-        <div
-          v-if="credentialStore.credentials.length"
-          class="flex flex-col gap-1.5 max-h-56 overflow-y-auto"
-        >
-          <button
-            v-for="cred in credentialStore.credentials"
-            :key="cred.id"
-            type="button"
-            class="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-sm)] border text-left text-sm transition-colors cursor-pointer"
-            :disabled="submitting || props.disabled"
-            :class="selectedCredentialIds.includes(cred.id)
-              ? 'border-primary bg-primary/5 text-fg'
-              : 'border-border bg-bg text-muted-fg hover:bg-surface-hover'"
-            @click="toggleCredential(cred.id)"
+        <div>
+          <label class="text-sm font-medium text-foreground mb-1.5 block">
+            Credentials
+            <span class="text-muted-foreground font-normal">(optional)</span>
+          </label>
+
+          <div
+            v-if="credentialStore.credentials.length"
+            class="flex flex-col gap-1.5 max-h-56 overflow-y-auto"
           >
-            <div
-              class="flex items-center justify-center w-4 h-4 rounded-sm border"
+            <button
+              v-for="cred in credentialStore.credentials"
+              :key="cred.id"
+              type="button"
+              class="flex items-center gap-2 px-3 py-2 rounded-sm border text-left text-sm transition-colors cursor-pointer"
+              :disabled="submitting || props.disabled"
               :class="selectedCredentialIds.includes(cred.id)
-                ? 'border-primary bg-primary text-primary-fg'
-                : 'border-border'"
+                ? 'border-primary bg-primary/5 text-foreground'
+                : 'border-border bg-background text-muted-foreground hover:bg-muted'"
+              @click="toggleCredential(cred.id)"
             >
-              <Check v-if="selectedCredentialIds.includes(cred.id)" :size="10" />
-            </div>
-            <span class="flex-1 truncate">{{ cred.name }}</span>
-            <span
-              v-if="cred.credential_type === 'ssh_key'"
-              class="inline-flex items-center gap-1 text-xs text-muted-fg"
-            >
-              <Key :size="10" />
-              SSH Key
-            </span>
-            <span v-else-if="cred.target_path" class="text-xs text-muted-fg">
-              {{ cred.target_path }}
-            </span>
-            <span v-else-if="cred.env_var_name" class="text-xs text-muted-fg">
-              {{ cred.env_var_name }}
-            </span>
-          </button>
+              <div
+                class="flex items-center justify-center w-4 h-4 rounded-sm border"
+                :class="selectedCredentialIds.includes(cred.id)
+                  ? 'border-primary bg-primary text-primary-foreground'
+                  : 'border-border'"
+              >
+                <Check v-if="selectedCredentialIds.includes(cred.id)" :size="10" />
+              </div>
+              <span class="flex-1 truncate">{{ cred.name }}</span>
+              <span
+                v-if="cred.credential_type === 'ssh_key'"
+                class="inline-flex items-center gap-1 text-xs text-muted-foreground"
+              >
+                <Key :size="10" />
+                SSH Key
+              </span>
+              <span v-else-if="cred.target_path" class="text-xs text-muted-foreground">
+                {{ cred.target_path }}
+              </span>
+              <span v-else-if="cred.env_var_name" class="text-xs text-muted-foreground">
+                {{ cred.env_var_name }}
+              </span>
+            </button>
+          </div>
+
+          <p v-else class="text-xs text-muted-foreground">
+            No credentials available.
+            <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
+            first.
+          </p>
         </div>
 
-        <p v-else class="text-xs text-muted-fg">
-          No credentials available.
-          <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
-          first.
-        </p>
-      </div>
+        <div v-if="workspace.runtime_type === RuntimeType.QEMU" class="space-y-3">
+          <label class="text-sm font-medium text-foreground block">QEMU resources</label>
 
-      <div v-if="workspace.runtime_type === RuntimeType.QEMU" class="space-y-3">
-        <label class="text-sm font-medium text-fg block">QEMU resources</label>
+          <div>
+            <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
+            <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
+            <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
+          </div>
 
-        <div>
-          <label class="text-sm font-medium text-muted-fg mb-1 block">vCPU</label>
-          <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-          <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
+          <div>
+            <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
+            <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
+            <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
+          </div>
+
+          <div>
+            <label class="text-sm font-medium text-muted-foreground mb-1 block">Storage (GiB)</label>
+            <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
+            <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
+          </div>
         </div>
 
-        <div>
-          <label class="text-sm font-medium text-muted-fg mb-1 block">RAM (MiB)</label>
-          <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-          <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
+        <div class="flex justify-end gap-2 pt-2">
+          <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
+          <Button type="submit" :disabled="submitting || props.disabled || !name.trim()">
+            {{ submitting ? 'Saving…' : 'Save Changes' }}
+          </Button>
         </div>
-
-        <div>
-          <label class="text-sm font-medium text-muted-fg mb-1 block">Storage (GiB)</label>
-          <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-          <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-bg px-1.5 py-0.5 text-xs font-mono text-fg focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 pt-2">
-        <UiButton variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</UiButton>
-        <UiButton type="submit" :disabled="submitting || props.disabled || !name.trim()">
-          {{ submitting ? 'Saving…' : 'Save Changes' }}
-        </UiButton>
-      </div>
-    </form>
-  </UiDialog>
+      </form>
+    </DialogContent>
+  </Dialog>
 </template>

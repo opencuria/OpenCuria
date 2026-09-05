@@ -6,8 +6,16 @@ import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
-import { UiButton, UiSelect, UiSpinner } from '@/components/ui'
-import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -17,6 +25,7 @@ const desktopStore = useDesktopStore()
 const notifications = useNotificationStore()
 const error = ref<string | null>(null)
 const clipboardBusy = ref(false)
+const takeControlBusy = ref(false)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
 const cleanupFns: (() => void)[] = []
 const viewportHostRef = ref<HTMLElement | null>(null)
@@ -108,16 +117,14 @@ async function startDesktop(): Promise<void> {
 
   try {
     const status = await workspacesApi.getDesktopStatus(props.workspaceId)
-    if (status.active && status.proxy_url) {
-      desktopStore.setConnected(props.workspaceId, status.proxy_url)
-      return
-    }
+    desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
     await workspacesApi.startDesktop(props.workspaceId)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
       try {
         const status = await workspacesApi.getDesktopStatus(props.workspaceId)
+        desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
         if (status.active && status.proxy_url) {
           desktopStore.setConnected(props.workspaceId, status.proxy_url)
           return
@@ -162,6 +169,20 @@ function handleMinimize(): void {
 function handleReconnect(): void {
   desktopStore.setDisconnected()
   startDesktop()
+}
+
+async function takeControl(): Promise<void> {
+  if (takeControlBusy.value) return
+  takeControlBusy.value = true
+  desktopStore.setComputerUseActive(false)
+  try {
+    await workspacesApi.takeDesktopControl(props.workspaceId)
+  } catch (err: unknown) {
+    desktopStore.setComputerUseActive(true)
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    takeControlBusy.value = false
+  }
 }
 
 function toggleRotatePreset(): void {
@@ -346,10 +367,31 @@ onMounted(() => {
     onEvent('desktop:started', (data) => {
       if (data.workspace_id !== props.workspaceId) return
       desktopStore.setConnected(props.workspaceId, data.proxy_url)
+      if (data.computer_use_active) desktopStore.setComputerUseActive(true)
     }),
     onEvent('desktop:stopped', (data) => {
       if (data.workspace_id !== props.workspaceId) return
       desktopStore.setDisconnected()
+      desktopStore.setComputerUseActive(false)
+    }),
+    onEvent('desktop:viewer_released', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      desktopStore.setDisconnected()
+      desktopStore.setComputerUseActive(Boolean(data.computer_use_active))
+    }),
+    onEvent('harness.subtask_started', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      if ((data.agent || '').toLowerCase() !== 'computeruse') return
+      desktopStore.markComputerUseStarted(
+        data.child_session_id || data.subtask_id,
+      )
+    }),
+    onEvent('harness.subtask_finished', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      if ((data.agent || '').toLowerCase() !== 'computeruse') return
+      desktopStore.markComputerUseFinished(
+        data.child_session_id || data.subtask_id,
+      )
     }),
     onEvent('workspace:error', (data) => {
       if (data.workspace_id !== props.workspaceId) return
@@ -423,37 +465,37 @@ watch(
 </script>
 
 <template>
-  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] bg-surface">
-    <div class="flex h-full flex-col bg-surface sm:flex-row">
+  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] bg-card">
+    <div class="flex h-full flex-col bg-card sm:flex-row">
       <div ref="viewportHostRef" class="order-2 min-h-0 flex-1 sm:order-1 relative">
         <div
           v-if="desktopStore.isConnecting"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
         >
-          <UiSpinner :size="24" />
-          <span class="text-sm text-muted-fg">Starting desktop session…</span>
+          <LoadingSpinner :size="24" />
+          <span class="text-sm text-muted-foreground">Starting desktop session…</span>
         </div>
 
         <div
           v-else-if="error"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface px-4"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card px-4"
         >
-          <p class="text-sm text-error text-center">{{ error }}</p>
-          <UiButton size="sm" @click="startDesktop">
+          <p class="text-sm text-destructive text-center">{{ error }}</p>
+          <Button size="sm" @click="startDesktop">
             Retry
-          </UiButton>
+          </Button>
         </div>
 
         <div
           v-else-if="!desktopStore.isConnected && !desktopStore.isConnecting"
-          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
         >
-          <Monitor :size="32" class="text-muted-fg" />
-          <p class="text-sm text-muted-fg">Desktop session not active</p>
-          <UiButton size="sm" @click="startDesktop">
+          <Monitor :size="32" class="text-muted-foreground" />
+          <p class="text-sm text-muted-foreground">Desktop session not active</p>
+          <Button size="sm" @click="startDesktop">
             <Monitor :size="14" class="mr-1" />
             Start Desktop
-          </UiButton>
+          </Button>
         </div>
 
         <div
@@ -474,7 +516,7 @@ watch(
             class="flex h-full w-full items-center justify-center overflow-hidden p-2 sm:p-3"
           >
             <div
-              class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-[var(--glass-shadow-sm)]"
+              class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
               :style="scaledFrameStyle"
             >
               <iframe
@@ -488,16 +530,35 @@ watch(
               />
             </div>
           </div>
+          <div
+            v-if="desktopStore.computerUseActive"
+            class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
+            tabindex="0"
+            @keydown.prevent
+          >
+            <MousePointerClick :size="28" class="text-white" />
+            <p class="max-w-md text-sm text-white">
+              Computer-use is controlling this desktop. Watching is read-only.
+              Taking control aborts the computer-use agent.
+            </p>
+            <Button
+              size="sm"
+              :disabled="takeControlBusy"
+              @click="takeControl"
+            >
+              Take control
+            </Button>
+          </div>
         </div>
       </div>
 
       <div
-        class="order-1 flex shrink-0 flex-col gap-2 border-b border-border bg-surface px-3 py-1.5 sm:order-2 sm:w-80 sm:border-b-0 sm:border-l sm:py-2 min-h-0"
+        class="order-1 flex shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-1.5 sm:order-2 sm:w-80 sm:border-b-0 sm:border-l sm:py-2 min-h-0"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">
-            <Monitor :size="14" class="shrink-0 text-muted-fg" />
-            <span class="text-xs font-medium text-fg">Desktop</span>
+            <Monitor :size="14" class="shrink-0 text-muted-foreground" />
+            <span class="text-xs font-medium text-foreground">Desktop</span>
             <span
               v-if="desktopStore.isConnected"
               class="inline-block h-1.5 w-1.5 rounded-full bg-success"
@@ -510,27 +571,27 @@ watch(
             />
           </div>
           <div class="flex items-center gap-1">
-            <UiButton
+            <Button
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy"
+              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
               title="Copy VM clipboard to local clipboard"
               @click="copyFromVmClipboard"
             >
               <Copy :size="11" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy"
+              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
               title="Paste local clipboard into VM clipboard"
               @click="pasteToVmClipboard"
             >
               <ClipboardPaste :size="11" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               v-if="desktopStore.isConnected"
               variant="ghost"
               size="icon-sm"
@@ -538,33 +599,42 @@ watch(
               @click="handleReconnect"
             >
               <RefreshCw :size="12" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               title="Minimize desktop panel"
               @click="handleMinimize"
             >
               <Minus :size="12" />
-            </UiButton>
-            <UiButton
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               title="Close desktop panel"
               @click="handleClose"
             >
               <X :size="12" />
-            </UiButton>
+            </Button>
           </div>
         </div>
 
-        <div class="text-[11px] text-muted-fg">Screen size</div>
-        <UiSelect
-          v-model="viewportPreset"
-          :options="viewportPresetOptions"
-          class="h-8 py-1 text-xs sm:h-9"
-        />
-        <UiButton
+        <div class="text-[11px] text-muted-foreground">Screen size</div>
+        <Select v-model="viewportPreset">
+          <SelectTrigger class="h-8 py-1 text-xs sm:h-9">
+            <SelectValue placeholder="Screen size" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem
+              v-for="opt in viewportPresetOptions"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Button
           variant="outline"
           size="sm"
           :disabled="!isCustomPreset"
@@ -573,7 +643,7 @@ watch(
         >
           <RotateCw :size="12" class="mr-1" />
           Rotate
-        </UiButton>
+        </Button>
 
         <div class="hidden min-h-0 flex-1 overflow-hidden pt-2 lg:flex">
           <slot name="sidebar-content" />

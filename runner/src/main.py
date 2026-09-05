@@ -1,8 +1,8 @@
 """Runner entry point — WebSocket daemon that connects to the backend.
 
 Usage:
-    python -m src serve          # connect to backend via WebSocket
-    python -m src serve --api-token <token>  # with explicit token
+    python -m src                # connect to backend via WebSocket
+    python -m src --api-token <token>  # with explicit token
 """
 
 from __future__ import annotations

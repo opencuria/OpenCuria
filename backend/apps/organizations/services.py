@@ -43,8 +43,8 @@ class OrganizationService:
             role=MembershipRole.ADMIN,
         )
 
-        # Seed activations: activate all standard agent definitions and
-        # all credential services for the new organization.
+        # Seed activations: activate all credential services for the new
+        # organization.
         self._seed_activations(org)
 
         logger.info(
@@ -57,18 +57,8 @@ class OrganizationService:
 
     @staticmethod
     def _seed_activations(org) -> None:
-        """Activate all standard agent definitions and credential services for a new org."""
-        from apps.runners.models import AgentDefinition, OrgAgentDefinitionActivation
+        """Activate all credential services for a new org."""
         from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
-
-        standard_agents = AgentDefinition.objects.filter(organization__isnull=True)
-        agent_activations = [
-            OrgAgentDefinitionActivation(organization=org, agent_definition=agent)
-            for agent in standard_agents
-        ]
-        OrgAgentDefinitionActivation.objects.bulk_create(
-            agent_activations, ignore_conflicts=True
-        )
 
         all_services = CredentialService.objects.all()
         svc_activations = [
