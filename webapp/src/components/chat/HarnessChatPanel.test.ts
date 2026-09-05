@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
+import { useHarnessStore } from '@/stores/harness'
+import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
   subscribeToWorkspace: vi.fn(),
@@ -17,6 +19,8 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     listHarnessSessions: vi.fn().mockResolvedValue([]),
+    listHarnessParts: vi.fn().mockResolvedValue({ session: {}, messages: [] }),
+    listHarnessTodos: vi.fn().mockResolvedValue([]),
     getProviderConfig: vi.fn().mockResolvedValue({
       base_url: '',
       default_model: 'model-big',
@@ -38,6 +42,22 @@ const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template: '<div data-testid="harness-chat-input" />',
   props: ['disabled', 'workspaceId', 'sessionId'],
+}
+
+function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
+  return {
+    id: 'session-root',
+    workspace_id: 'ws-1',
+    parent_id: null,
+    title: 'root',
+    mode: 'build',
+    agent_name: 'build',
+    model: 'm',
+    status: 'idle',
+    cost: 0,
+    tokens: {},
+    ...overrides,
+  }
 }
 
 describe('HarnessChatPanel', () => {
@@ -97,5 +117,69 @@ describe('HarnessChatPanel', () => {
     expect(titles).toContain('Open file explorer')
     expect(titles).toContain('Open terminal')
     expect(titles).toContain('Open desktop')
+  })
+
+  it('hides the input and workspace toolbar when viewing a subagent session', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+        showWorkspaceToolbar: true,
+      },
+      global: {
+        plugins: [router],
+        stubs: {
+          HarnessChatContainer: true,
+          HarnessChatInput: HarnessChatInputStub,
+          HarnessPermissionDialog: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'subtask',
+        agent_name: 'explore',
+      }),
+    ]
+    store.setActiveSession('session-child')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(false)
+    const titles = wrapper.findAll('button[title]').map((button) => button.attributes('title'))
+    expect(titles).not.toContain('Open file explorer')
+    expect(titles).not.toContain('Open terminal')
+    expect(titles).not.toContain('Open desktop')
+  })
+
+  it('keeps the input when viewing a root session', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+        showWorkspaceToolbar: true,
+      },
+      global: {
+        plugins: [router],
+        stubs: {
+          HarnessChatContainer: true,
+          HarnessChatInput: HarnessChatInputStub,
+          HarnessPermissionDialog: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(true)
   })
 })

@@ -1531,6 +1531,7 @@ def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]
 
     async def _send():
         current = service.get_session(session.id)
+        service.ensure_user_promptable(current)
         if not service.is_running(current.id):
             if args.get("mode"):
                 current = service.set_mode(current.id, args["mode"])

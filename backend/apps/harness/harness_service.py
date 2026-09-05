@@ -152,6 +152,16 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
+    def ensure_user_promptable(self, session: HarnessSession) -> None:
+        """Raise when users must not send follow-up prompts to *session*.
+
+        Subagent child sessions (``parent_id`` set) are launched internally
+        and are not a user-addressable chat. ``start_run`` itself stays
+        allowed so the task tool can start the child run.
+        """
+        if session.parent_id is not None:
+            raise ValueError("Cannot send messages to a subagent session")
+
     def get_session_for_workspace(
         self,
         session_id: uuid.UUID,

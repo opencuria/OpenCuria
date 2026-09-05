@@ -406,6 +406,7 @@ async def send_harness_message(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        await sync_to_async(service.ensure_user_promptable)(session)
         if not service.is_running(session.id):
             if payload.mode and payload.mode.strip():
                 session = await sync_to_async(service.set_mode)(

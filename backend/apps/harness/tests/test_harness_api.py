@@ -504,6 +504,34 @@ def test_followup_message_with_mode_plan(harness_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_followup_message_to_subagent_is_400(harness_setup, fake_harness_service):
+    """Users cannot send follow-up prompts to a subagent child session."""
+    parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="parent",
+    )
+    child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="child",
+        parent_id=parent.id,
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{child.id}/message",
+        data=json.dumps({"prompt": "hello subagent"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "validation_error"
+    assert "subagent" in body["detail"].lower()
+
+
+@pytest.mark.django_db(transaction=True)
 def test_permission_resolve_needs_permission_key(harness_setup, fake_harness_service):
     """Resolving without harness:permissions is 403."""
     run_client = _client(

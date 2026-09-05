@@ -462,6 +462,59 @@ async def test_build_history_includes_tool_calls(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None:
+    """Users cannot prompt subagent child sessions; root sessions stay open."""
+    service, _, _ = _service()
+    parent = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="parent",
+    )
+    child = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="child",
+        parent_id=parent.id,
+    )
+    service.ensure_user_promptable(parent)
+    with pytest.raises(ValueError, match="subagent"):
+        service.ensure_user_promptable(child)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_on_child_session_still_works(harness_workspace) -> None:
+    """Internal subagent launch may still call start_run on a child session."""
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    service, _, _ = _service()
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    child = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="child",
+        agent_name="general",
+        mode="build",
+        model="fake-model",
+        parent_id=parent.id,
+    )
+    assistant = await service.start_run(
+        child,
+        "look around",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(child.id)]
+    assistant.refresh_from_db()
+    assert assistant.content == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_plan_mode_aligns_agent_name(harness_workspace) -> None:
     """create_session with mode=plan sets agent_name=plan (ignores default build)."""
     service, _, _ = _service()

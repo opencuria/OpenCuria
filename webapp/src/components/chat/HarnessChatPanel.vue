@@ -74,6 +74,8 @@ const childSessionIds = computed<Record<string, string>>(() => {
 const activeRequest = computed(() => harness.activePermissionRequests[0] ?? null)
 const activeQuestion = computed(() => harness.activeQuestionRequests[0] ?? null)
 
+const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
+
 const inputDisabled = computed(
   () => !props.canPrompt || (activeSession.value?.status === 'busy'),
 )
@@ -265,6 +267,7 @@ async function handleSend(
   model: string,
   skillIds: string[],
 ): Promise<void> {
+  if (isSubagentSession.value) return
   sending.value = true
   try {
     if (!harness.activeSessionId) {
@@ -387,7 +390,10 @@ const desktopButtonTitle = computed(() => {
       @submit="handleQuestionSubmit"
       @reject="handleQuestionReject"
     />
-    <div class="flex min-w-0 items-center gap-0 overflow-x-hidden">
+    <div
+      v-if="!isSubagentSession"
+      class="flex min-w-0 items-center gap-0 overflow-x-hidden"
+    >
       <HarnessChatInput
         class="min-w-0 flex-1"
         :disabled="inputDisabled"
