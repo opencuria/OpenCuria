@@ -6,18 +6,15 @@ import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
 import { useDesktopStore } from '@/stores/desktop'
 import { useTerminalStore } from '@/stores/terminal'
-import {
-  onEvent,
-  subscribeToWorkspace,
-  unsubscribeFromWorkspace,
-} from '@/services/socket'
+import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
+import type { MentionCandidate } from '@/lib/harnessMentions'
+import { buildComposerSheets } from '@/lib/composerSheets'
 import { Button } from '@/components/ui/button'
 import { FolderTree, Monitor, TerminalSquare } from '@lucide/vue'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
-import HarnessPermissionDialog from '@/components/chat/HarnessPermissionDialog.vue'
-import HarnessQuestionForm from '@/components/chat/HarnessQuestionForm.vue'
+import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -71,20 +68,58 @@ const childSessionIds = computed<Record<string, string>>(() => {
   return map
 })
 
-const activeRequest = computed(() => harness.activePermissionRequests[0] ?? null)
-const activeQuestion = computed(() => harness.activeQuestionRequests[0] ?? null)
+const activeRequests = computed(() => harness.activePermissionRequests)
+const activeQuestions = computed(() => harness.activeQuestionRequests)
+
+/** `@` mention mirror from the chat input (renders as the topmost stack sheet). */
+const mentionActive = ref(false)
+const mentionActiveIndex = ref(0)
+const mentionCandidates = ref<MentionCandidate[]>([])
+
+const composerSheets = computed(() =>
+  buildComposerSheets({
+    mention:
+      mentionActive.value && mentionCandidates.value.length > 0
+        ? { candidates: mentionCandidates.value, activeIndex: mentionActiveIndex.value }
+        : null,
+    questions: activeQuestions.value,
+    permissions: activeRequests.value,
+    todos: harness.activeTodos,
+  }),
+)
+
+const chatInputRef = ref<{ chooseMention: (candidate: MentionCandidate) => void } | null>(null)
+
+function handleMentionMirror(
+  open: boolean,
+  query: string,
+  candidates: MentionCandidate[],
+  index: number,
+): void {
+  void query
+  mentionCandidates.value = open ? candidates : []
+  mentionActiveIndex.value = open ? index : 0
+  mentionActive.value = open && candidates.length > 0
+}
+
+function handleMentionSelect(candidate: MentionCandidate): void {
+  chatInputRef.value?.chooseMention(candidate)
+}
+
+function handleMentionHover(index: number): void {
+  mentionActiveIndex.value = index
+}
 
 const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
 
-const inputDisabled = computed(
-  () => !props.canPrompt || (activeSession.value?.status === 'busy'),
-)
-const inputStoppable = computed(
-  () => Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
+const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
+const inputStoppable = computed(() =>
+  Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
 )
 const busyMessage = computed(() => {
   if (!props.canPrompt) return 'Workspace is not ready for prompts.'
-  if (activeSession.value?.status === 'busy') return 'Agent is running — stop or wait to send another message.'
+  if (activeSession.value?.status === 'busy')
+    return 'Agent is running — stop or wait to send another message.'
   return undefined
 })
 
@@ -290,7 +325,7 @@ async function handleStop(): Promise<void> {
 }
 
 async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<void> {
-  const request = activeRequest.value
+  const request = activeRequests.value[0]
   if (!request) return
   resolving.value = true
   try {
@@ -300,8 +335,8 @@ async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<vo
   }
 }
 
-async function handleQuestionSubmit(answers: string[]): Promise<void> {
-  const request = activeQuestion.value
+async function handleQuestionSubmit(requestId: string, answers: string[]): Promise<void> {
+  const request = activeQuestions.value.find((item) => item.request_id === requestId)
   if (!request) return
   answeringQuestion.value = true
   try {
@@ -311,8 +346,8 @@ async function handleQuestionSubmit(answers: string[]): Promise<void> {
   }
 }
 
-async function handleQuestionReject(): Promise<void> {
-  const request = activeQuestion.value
+async function handleQuestionSkip(requestId: string): Promise<void> {
+  const request = activeQuestions.value.find((item) => item.request_id === requestId)
   if (!request) return
   answeringQuestion.value = true
   try {
@@ -377,25 +412,31 @@ const desktopButtonTitle = computed(() => {
   <div class="flex h-full min-h-0 w-full flex-col overflow-x-hidden">
     <HarnessChatContainer
       :messages="harness.activeMessages"
-      :todos="harness.activeTodos"
       :loading="harness.loading"
       :streaming-session-id="streamingSessionId"
       :child-session-ids="childSessionIds"
       class="min-h-0 flex-1"
       @open-subtask="handleOpenSubtask"
     />
-    <HarnessQuestionForm
-      :request="activeQuestion"
-      :submitting="answeringQuestion"
-      @submit="handleQuestionSubmit"
-      @reject="handleQuestionReject"
+    <HarnessSheetStack
+      v-if="!isSubagentSession"
+      :sheets="composerSheets"
+      :question-submitting="answeringQuestion"
+      :permission-resolving="resolving"
+      @mention-select="handleMentionSelect"
+      @mention-hover="handleMentionHover"
+      @question-submit="handleQuestionSubmit"
+      @question-skip="handleQuestionSkip"
+      @resolve="handleResolve"
     />
     <div
       v-if="!isSubagentSession"
-      class="flex min-w-0 shrink-0 items-center gap-0 overflow-x-hidden"
+      class="relative z-10 flex min-w-0 shrink-0 items-center gap-0 overflow-x-hidden"
     >
       <HarnessChatInput
+        ref="chatInputRef"
         class="min-w-0 flex-1"
+        :attached="composerSheets.length > 0"
         :disabled="inputDisabled"
         :sending="sending"
         :stoppable="inputStoppable"
@@ -406,10 +447,16 @@ const desktopButtonTitle = computed(() => {
         :session-id="harness.activeSessionId"
         :files="fileExplorer.tree"
         :skill-options="skillStore.skills"
+        mention-controlled
+        :mention-active-index="mentionActiveIndex"
         @update:mode="composerMode = $event"
         @update:model="harness.modelInput = $event"
         @send="handleSend"
         @stop="handleStop"
+        @mention-change="
+          (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
+        "
+        @mention-select="handleMentionSelect"
       />
       <template v-if="showWorkspaceToolbar">
         <Button
@@ -458,11 +505,5 @@ const desktopButtonTitle = computed(() => {
         </Button>
       </template>
     </div>
-    <HarnessPermissionDialog
-      :request="activeRequest"
-      :resolving="resolving"
-      @resolve="handleResolve"
-      @close="() => {}"
-    />
   </div>
 </template>

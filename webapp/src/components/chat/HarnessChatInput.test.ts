@@ -103,7 +103,10 @@ describe('HarnessChatInput', () => {
     const wrapper = mountInput({ mode: 'plan' })
     const textarea = wrapper.find('textarea')
     await textarea.setValue('hello world')
-    await wrapper.find('button[class*="bg-primary"], button:not([role="tab"])').trigger('click').catch(() => {})
+    await wrapper
+      .find('button[class*="bg-primary"], button:not([role="tab"])')
+      .trigger('click')
+      .catch(() => {})
     // Fall back to direct emit check: at least the send payload shape is preserved.
     const sends = wrapper.emitted('send') ?? []
     if (sends.length > 0) {
@@ -138,10 +141,14 @@ describe('HarnessChatInput', () => {
       expect(getProviderConfigMock).toHaveBeenCalled()
     })
 
-    const skillsButton = wrapper.findAll('button').find((button) => button.text().includes('Skills'))
+    const skillsButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('Skills'))
     expect(skillsButton).toBeTruthy()
     await skillsButton!.trigger('click')
-    const skillOption = wrapper.findAll('button').find((button) => button.text().includes('Lint rules'))
+    const skillOption = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('Lint rules'))
     expect(skillOption).toBeTruthy()
     await skillOption!.trigger('mousedown')
 
@@ -152,5 +159,40 @@ describe('HarnessChatInput', () => {
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
     expect(sends[0]![3]).toEqual(['skill-1'])
+  })
+
+  it('mirrors mention state to the parent sheet stack in controlled mode', async () => {
+    const wrapper = mountInput({
+      mentionControlled: true,
+      files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
+    })
+    const textarea = wrapper.find('textarea')
+    await textarea.setValue('@a')
+    textarea.element.setSelectionRange(2, 2)
+    await textarea.trigger('input')
+
+    const changes = wrapper.emitted('mention-change') ?? []
+    expect(changes.length).toBeGreaterThan(0)
+    const last = changes[changes.length - 1]!
+    expect(last[0]).toBe(true)
+    expect(Array.isArray(last[2])).toBe(true)
+    expect((last[2] as Array<{ label: string }>).length).toBeGreaterThan(0)
+    // Controlled mode renders no local popup; the sheet stack owns the UI.
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
+  })
+
+  it('emits mention-select instead of inserting in controlled mode', async () => {
+    const wrapper = mountInput({
+      mentionControlled: true,
+      files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
+    })
+    const textarea = wrapper.find('textarea')
+    await textarea.setValue('@a')
+    textarea.element.setSelectionRange(2, 2)
+    await textarea.trigger('input')
+    await textarea.trigger('keydown', { key: 'Enter' })
+
+    expect(wrapper.emitted('mention-select')?.length).toBeGreaterThan(0)
+    expect((wrapper.emitted('send') ?? []).length).toBe(0)
   })
 })

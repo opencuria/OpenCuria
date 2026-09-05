@@ -2,13 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Skeleton } from '@/components/ui/skeleton'
 import { MessageSquare } from '@lucide/vue'
-import type { HarnessMessage, HarnessTodo } from '@/types/harness'
+import type { HarnessMessage } from '@/types/harness'
 import HarnessMessageView from './HarnessMessageView.vue'
-import HarnessTodoList from './HarnessTodoList.vue'
 
 const props = defineProps<{
   messages: HarnessMessage[]
-  todos?: HarnessTodo[]
   loading?: boolean
   streamingSessionId?: string | null
   childSessionIds?: Record<string, string>
@@ -102,7 +100,6 @@ watch(
       <Skeleton class="h-12 w-2/3" />
     </div>
     <div v-else-if="sortedMessages.length" class="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <HarnessTodoList v-if="todos && todos.length" :todos="todos" />
       <HarnessMessageView
         v-for="message in sortedMessages"
         :key="message.id"

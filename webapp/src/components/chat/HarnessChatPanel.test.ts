@@ -44,6 +44,12 @@ const HarnessChatInputStub = {
   props: ['disabled', 'workspaceId', 'sessionId'],
 }
 
+const stubs = {
+  HarnessChatContainer: true,
+  HarnessChatInput: HarnessChatInputStub,
+  HarnessSheetStack: true,
+}
+
 function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
   return {
     id: 'session-root',
@@ -82,11 +88,7 @@ describe('HarnessChatPanel', () => {
       },
       global: {
         plugins: [router],
-        stubs: {
-          HarnessChatContainer: true,
-          HarnessChatInput: HarnessChatInputStub,
-          HarnessPermissionDialog: true,
-        },
+        stubs,
       },
     })
 
@@ -104,11 +106,7 @@ describe('HarnessChatPanel', () => {
       },
       global: {
         plugins: [router],
-        stubs: {
-          HarnessChatContainer: true,
-          HarnessChatInput: HarnessChatInputStub,
-          HarnessPermissionDialog: true,
-        },
+        stubs,
       },
     })
 
@@ -128,11 +126,7 @@ describe('HarnessChatPanel', () => {
       },
       global: {
         plugins: [router],
-        stubs: {
-          HarnessChatContainer: true,
-          HarnessChatInput: HarnessChatInputStub,
-          HarnessPermissionDialog: true,
-        },
+        stubs,
       },
     })
     await flushPromises()
@@ -166,11 +160,7 @@ describe('HarnessChatPanel', () => {
       },
       global: {
         plugins: [router],
-        stubs: {
-          HarnessChatContainer: true,
-          HarnessChatInput: HarnessChatInputStub,
-          HarnessPermissionDialog: true,
-        },
+        stubs,
       },
     })
     await flushPromises()
@@ -181,5 +171,41 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(true)
+  })
+
+  it('renders the composer sheet stack above the input', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+        showWorkspaceToolbar: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    store.todosBySession['session-root'] = [
+      { id: 't1', content: 'Write tests', status: 'in_progress', priority: 'high', order: 0 },
+    ]
+    store.handlePermissionRequired({
+      request_id: 'req-1',
+      session_id: 'session-root',
+      workspace_id: 'ws-1',
+      tool: 'bash',
+      pattern: 'ls',
+      title: 'Run ls',
+    })
+    await wrapper.vm.$nextTick()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    expect(stack.exists()).toBe(true)
+    const sheets = stack.props('sheets') as Array<{ kind: string }>
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['permission', 'todos'])
   })
 })

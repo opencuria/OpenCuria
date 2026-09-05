@@ -37,6 +37,18 @@ const props = defineProps<{
   model?: string
   mode?: HarnessSessionMode
   skillOptions?: Skill[]
+  /**
+   * External mention navigation state mirrored from the parent sheet stack.
+   * When `mentionControlled` is true the input renders no popup itself and
+   * emits `mention-select` instead of inserting candidates directly.
+   */
+  mentionControlled?: boolean
+  mentionActiveIndex?: number
+  /**
+   * True when a composer sheet is rendered directly above the input. Removes
+   * the wrapper top padding so the sheet sits flush on the input card.
+   */
+  attached?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -44,6 +56,10 @@ const emit = defineEmits<{
   stop: []
   'update:model': [value: string]
   'update:mode': [value: HarnessSessionMode]
+  /** Emitted on every textarea change so the parent can mirror `@` state into the sheet stack. */
+  'mention-change': [open: boolean, query: string, candidates: MentionCandidate[], index: number]
+  /** Emitted when the user picks a mention candidate from the sheet stack. */
+  'mention-select': [candidate: MentionCandidate]
 }>()
 
 const prompt = ref('')
@@ -85,9 +101,7 @@ const selectedSkills = computed(() =>
   (props.skillOptions ?? []).filter((skill) => selectedSkillIds.value.includes(skill.id)),
 )
 
-const canSend = computed(
-  () => prompt.value.trim().length > 0 && !props.disabled && !props.sending,
-)
+const canSend = computed(() => prompt.value.trim().length > 0 && !props.disabled && !props.sending)
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
 const canManageFiles = computed(
   () => !props.disabled && !props.sending && Boolean(props.workspaceId),
@@ -215,17 +229,62 @@ function clearInput(): void {
   clearCache()
 }
 
-defineExpose({ clearInput })
-
 const mentionOpen = ref(false)
 const mentionIndex = ref(0)
 const mentionQuery = ref('')
 
+/**
+ * Locally filtered mention candidates. In controlled (sheet-stack) mode the
+ * parent mirrors this list into the topmost stack sheet.
+ */
 const mentionCandidates = computed<MentionCandidate[]>(() =>
   mentionOpen.value
     ? filterMentionCandidates(mentionQuery.value, flattenFilePaths(props.files ?? []))
     : [],
 )
+
+const mentionPopupCandidates = computed<MentionCandidate[]>(() =>
+  props.mentionControlled ? [] : mentionCandidates.value,
+)
+
+watch(
+  [mentionOpen, mentionQuery, mentionCandidates, mentionIndex],
+  ([open, query, candidates, index]) => {
+    if (props.mentionControlled) emit('mention-change', open, query, candidates, index)
+  },
+)
+
+watch(
+  () => props.mentionActiveIndex,
+  (index) => {
+    if (props.mentionControlled && typeof index === 'number') {
+      mentionIndex.value = index
+    }
+  },
+)
+
+watch(
+  () => props.mentionControlled,
+  (controlled) => {
+    if (controlled) {
+      emit(
+        'mention-change',
+        mentionOpen.value,
+        mentionQuery.value,
+        mentionCandidates.value,
+        mentionIndex.value,
+      )
+    }
+  },
+)
+
+function requestMentionSelect(candidate: MentionCandidate): void {
+  if (props.mentionControlled) {
+    emit('mention-select', candidate)
+    return
+  }
+  chooseMention(candidate)
+}
 
 function textareaEl(): HTMLTextAreaElement | null {
   const root = textareaRef.value
@@ -266,6 +325,8 @@ function chooseMention(candidate: MentionCandidate): void {
   })
 }
 
+defineExpose({ clearInput, chooseMention })
+
 function onPromptInput(): void {
   refreshMention()
 }
@@ -283,7 +344,7 @@ function onPromptKeydown(e: KeyboardEvent): void {
       const candidate = mentionCandidates.value[mentionIndex.value]
       if (candidate) {
         e.preventDefault()
-        chooseMention(candidate)
+        requestMentionSelect(candidate)
         return
       }
     }
@@ -313,8 +374,14 @@ watch(filePickerOpen, (open) => {
 </script>
 
 <template>
-  <div class="min-w-0 w-full bg-transparent px-3 pb-2 pt-3 sm:px-4 sm:pt-4">
-    <div class="flex flex-col rounded-xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary">
+  <div
+    class="min-w-0 w-full bg-transparent px-3 pb-2 sm:px-4"
+    :class="attached ? 'pt-0' : 'pt-3 sm:pt-4'"
+  >
+    <div
+      class="flex flex-col border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary"
+      :class="attached ? 'rounded-b-xl rounded-t-none border-t-0' : 'rounded-xl'"
+    >
       <div class="flex flex-wrap items-center gap-2 px-4 pt-3">
         <RouterLink
           v-if="providerMissing"
@@ -329,7 +396,11 @@ watch(filePickerOpen, (open) => {
             role="tab"
             :aria-selected="localMode === 'plan'"
             class="rounded-md px-3 py-1 text-xs font-medium transition-colors"
-            :class="localMode === 'plan' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+            :class="
+              localMode === 'plan'
+                ? 'bg-card text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            "
             @click="setMode('plan')"
           >
             Plan
@@ -339,7 +410,11 @@ watch(filePickerOpen, (open) => {
             role="tab"
             :aria-selected="localMode === 'build'"
             class="rounded-md px-3 py-1 text-xs font-medium transition-colors"
-            :class="localMode === 'build' ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+            :class="
+              localMode === 'build'
+                ? 'bg-card text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            "
             @click="setMode('build')"
           >
             Build
@@ -379,7 +454,9 @@ watch(filePickerOpen, (open) => {
           >
             <BookText :size="14" />
             Skills
-            <span v-if="selectedSkillIds.length" class="text-primary">({{ selectedSkillIds.length }})</span>
+            <span v-if="selectedSkillIds.length" class="text-primary"
+              >({{ selectedSkillIds.length }})</span
+            >
           </Button>
           <div
             v-if="skillDropdownOpen && skillOptions?.length"
@@ -390,7 +467,11 @@ watch(filePickerOpen, (open) => {
               :key="skill.id"
               type="button"
               class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
-              :class="selectedSkillIds.includes(skill.id) ? 'bg-primary/10 text-primary' : 'text-foreground'"
+              :class="
+                selectedSkillIds.includes(skill.id)
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-foreground'
+              "
               @mousedown.prevent="toggleSkill(skill.id)"
             >
               <BookText :size="12" />
@@ -431,7 +512,11 @@ watch(filePickerOpen, (open) => {
         >
           <BookText :size="10" />
           {{ skill.name }}
-          <button type="button" class="transition-opacity hover:opacity-70" @click="removeSkill(skill.id)">
+          <button
+            type="button"
+            class="transition-opacity hover:opacity-70"
+            @click="removeSkill(skill.id)"
+          >
             <X :size="11" />
           </button>
         </span>
@@ -449,25 +534,33 @@ watch(filePickerOpen, (open) => {
           @input="onPromptInput"
         />
         <div
-          v-if="mentionOpen && mentionCandidates.length > 0"
+          v-if="mentionPopupCandidates.length > 0"
           class="absolute bottom-full left-4 right-4 z-10 mb-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-md"
           role="listbox"
           aria-label="Mention suggestions"
         >
           <button
-            v-for="(candidate, idx) in mentionCandidates"
+            v-for="(candidate, idx) in mentionPopupCandidates"
             :key="`${candidate.kind}:${candidate.insert}`"
             type="button"
             role="option"
             :aria-selected="idx === mentionIndex"
             class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
-            :class="idx === mentionIndex ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
-            @mousedown.prevent="chooseMention(candidate)"
+            :class="
+              idx === mentionIndex
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            "
+            @mousedown.prevent="requestMentionSelect(candidate)"
             @mousemove="mentionIndex = idx"
           >
             <span
               class="rounded px-1 py-0.5 text-[10px] font-medium"
-              :class="candidate.kind === 'agent' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'"
+              :class="
+                candidate.kind === 'agent'
+                  ? 'bg-primary/10 text-primary'
+                  : 'bg-muted text-muted-foreground'
+              "
             >
               {{ candidate.kind }}
             </span>
@@ -481,7 +574,11 @@ watch(filePickerOpen, (open) => {
           :disabled="!canStop"
           size="icon"
           class="h-9 w-9 shrink-0 rounded-full transition-all"
-          :class="canStop ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90' : 'bg-muted text-muted-foreground'"
+          :class="
+            canStop
+              ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+              : 'bg-muted text-muted-foreground'
+          "
           title="Stop current run"
           @click="emit('stop')"
         >
@@ -492,7 +589,11 @@ watch(filePickerOpen, (open) => {
           :disabled="!canSend"
           size="icon"
           class="h-9 w-9 shrink-0 rounded-full transition-all"
-          :class="canSend ? 'bg-primary text-primary-foreground hover:bg-primary/90' : 'bg-muted text-muted-foreground'"
+          :class="
+            canSend
+              ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+              : 'bg-muted text-muted-foreground'
+          "
           @click="handleSend"
         >
           <Send :size="18" />

@@ -47,12 +47,13 @@ describe('HarnessChatContainer', () => {
       global: {
         stubs: {
           HarnessMessageView: HarnessMessageViewStub,
-          HarnessTodoList: true,
         },
       },
     })
 
-    const ids = wrapper.findAll('[data-message-id]').map((node) => node.attributes('data-message-id'))
+    const ids = wrapper
+      .findAll('[data-message-id]')
+      .map((node) => node.attributes('data-message-id'))
     expect(ids).toEqual(['older-user', 'older-assistant', 'local-user'])
   })
 
@@ -88,7 +89,6 @@ describe('HarnessChatContainer', () => {
       global: {
         stubs: {
           HarnessMessageView: HarnessMessageViewStub,
-          HarnessTodoList: true,
         },
       },
     })
