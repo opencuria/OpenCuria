@@ -420,48 +420,49 @@ const desktopButtonTitle = computed(() => {
       class="min-h-0 flex-1"
       @open-subtask="handleOpenSubtask"
     />
-    <HarnessSheetStack
-      v-if="!isSubagentSession"
-      :sheets="composerSheets"
-      :question-submitting="answeringQuestion"
-      :permission-resolving="resolving"
-      @mention-select="handleMentionSelect"
-      @mention-hover="handleMentionHover"
-      @question-submit="handleQuestionSubmit"
-      @question-skip="handleQuestionSkip"
-      @resolve="handleResolve"
-    />
     <div
       v-if="!isSubagentSession"
-      class="relative z-10 flex min-w-0 shrink-0 items-center gap-0 overflow-x-hidden"
+      class="relative z-10 flex min-w-0 shrink-0 items-end gap-0 overflow-x-hidden"
     >
-      <HarnessChatInput
-        ref="chatInputRef"
-        class="min-w-0 flex-1"
-        :attached="composerSheets.length > 0"
-        :disabled="inputDisabled"
-        :sending="sending"
-        :stoppable="inputStoppable"
-        :busy-message="busyMessage"
-        :mode="composerMode"
-        :model="harness.modelInput"
-        :effort="harness.effortInput"
-        :workspace-id="props.workspaceId"
-        :session-id="harness.activeSessionId"
-        :files="fileExplorer.tree"
-        :skill-options="skillStore.skills"
-        mention-controlled
-        :mention-active-index="mentionActiveIndex"
-        @update:mode="composerMode = $event"
-        @update:model="harness.modelInput = $event"
-        @update:effort="harness.effortInput = $event"
-        @send="handleSend"
-        @stop="handleStop"
-        @mention-change="
-          (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
-        "
-        @mention-select="handleMentionSelect"
-      />
+      <div class="flex min-w-0 flex-1 flex-col">
+        <HarnessSheetStack
+          :sheets="composerSheets"
+          :question-submitting="answeringQuestion"
+          :permission-resolving="resolving"
+          @mention-select="handleMentionSelect"
+          @mention-hover="handleMentionHover"
+          @question-submit="handleQuestionSubmit"
+          @question-skip="handleQuestionSkip"
+          @resolve="handleResolve"
+        />
+        <HarnessChatInput
+          ref="chatInputRef"
+          class="min-w-0"
+          :attached="composerSheets.length > 0"
+          :disabled="inputDisabled"
+          :sending="sending"
+          :stoppable="inputStoppable"
+          :busy-message="busyMessage"
+          :mode="composerMode"
+          :model="harness.modelInput"
+          :effort="harness.effortInput"
+          :workspace-id="props.workspaceId"
+          :session-id="harness.activeSessionId"
+          :files="fileExplorer.tree"
+          :skill-options="skillStore.skills"
+          mention-controlled
+          :mention-active-index="mentionActiveIndex"
+          @update:mode="composerMode = $event"
+          @update:model="harness.modelInput = $event"
+          @update:effort="harness.effortInput = $event"
+          @send="handleSend"
+          @stop="handleStop"
+          @mention-change="
+            (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
+          "
+          @mention-select="handleMentionSelect"
+        />
+      </div>
       <template v-if="showWorkspaceToolbar">
         <Button
           variant="ghost"

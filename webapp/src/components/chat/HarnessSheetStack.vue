@@ -40,7 +40,7 @@ function peekOffset(index: number): number {
 <template>
   <div
     v-if="sheets.length > 0"
-    class="-mb-px mx-auto w-[calc(100%-2rem)] max-w-3xl shrink-0 sm:w-[calc(100%-3rem)]"
+    class="-mb-px mx-6 shrink-0 sm:mx-7"
     data-testid="composer-sheet-stack"
   >
     <div class="relative">

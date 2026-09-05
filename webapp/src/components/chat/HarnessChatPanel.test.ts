@@ -205,7 +205,10 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const input = wrapper.findComponent(HarnessChatInputStub)
     expect(stack.exists()).toBe(true)
+    expect(input.exists()).toBe(true)
+    expect(stack.element.parentElement).toBe(input.element.parentElement)
     const sheets = stack.props('sheets') as Array<{ kind: string }>
     expect(sheets.map((sheet) => sheet.kind)).toEqual(['permission', 'todos'])
   })

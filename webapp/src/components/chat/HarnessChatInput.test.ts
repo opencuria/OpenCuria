@@ -213,4 +213,14 @@ describe('HarnessChatInput', () => {
     expect(wrapper.emitted('mention-select')?.length).toBeGreaterThan(0)
     expect((wrapper.emitted('send') ?? []).length).toBe(0)
   })
+
+  it('keeps rounded corners and an accent focus ring when a sheet is attached', () => {
+    const wrapper = mountInput({ attached: true })
+    const card = wrapper.find('[data-testid="composer-card"]')
+    expect(card.exists()).toBe(true)
+    expect(card.classes()).toContain('rounded-xl')
+    expect(card.classes()).toContain('focus-within:border-primary')
+    expect(card.classes()).not.toContain('rounded-t-none')
+    expect(card.classes()).not.toContain('border-t-0')
+  })
 })

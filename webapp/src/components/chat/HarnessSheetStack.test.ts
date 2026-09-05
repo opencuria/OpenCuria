@@ -84,6 +84,16 @@ describe('HarnessSheetStack', () => {
     expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
   })
 
+  it('insets the stack so it docks inside the input card corners', () => {
+    const wrapper = mount(HarnessSheetStack, { props: { sheets: makeSheets() } })
+    const stack = wrapper.find('[data-testid="composer-sheet-stack"]')
+    expect(stack.classes()).toContain('mx-6')
+    expect(stack.classes()).toContain('sm:mx-7')
+    expect(stack.classes()).toContain('-mb-px')
+    expect(stack.classes()).not.toContain('max-w-3xl')
+    expect(stack.classes()).not.toContain('mx-auto')
+  })
+
   it('renders the topmost sheet interactively and lower sheets as peek edges', () => {
     const wrapper = mount(HarnessSheetStack, { props: { sheets: makeSheets() } })
 

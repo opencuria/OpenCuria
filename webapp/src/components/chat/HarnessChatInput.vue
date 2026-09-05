@@ -411,13 +411,13 @@ function onComposerKeydown(e: KeyboardEvent): void {
 
 <template>
   <div
-    class="min-w-0 w-full bg-transparent px-3 pb-2 sm:px-4"
+    class="relative min-w-0 w-full bg-transparent px-3 pb-2 sm:px-4"
     :class="attached ? 'pt-0' : 'pt-3 sm:pt-4'"
     @keydown="onComposerKeydown"
   >
     <div
-      class="flex flex-col border border-border bg-card shadow-sm transition-all duration-200 group-focus-within/composer:border-primary"
-      :class="attached ? 'rounded-b-xl rounded-t-none border-t-0' : 'rounded-xl'"
+      class="flex flex-col rounded-xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary"
+      data-testid="composer-card"
     >
       <RouterLink
         v-if="providerMissing"
