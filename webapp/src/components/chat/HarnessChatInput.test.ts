@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
 import * as harnessApi from '@/services/harness.api'
+import type { ProviderModel } from '@/lib/harnessModels'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -11,27 +12,49 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     getProviderConfig: vi.fn(),
+    listProviderModels: vi.fn(),
   }
 })
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
+const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
+
+const catalog: ProviderModel[] = [
+  {
+    id: 'model-big',
+    name: 'Big',
+    reasoning_efforts: ['low', 'high'],
+    default_effort: 'high',
+    supports_tools: true,
+  },
+  {
+    id: 'model-small',
+    name: 'Small',
+    reasoning_efforts: [],
+    default_effort: '',
+    supports_tools: true,
+  },
+]
+
+const dropdownStubs = {
+  RouterLink: {
+    template: '<a :href="to"><slot /></a>',
+    props: ['to'],
+  },
+  DropdownMenu: { template: '<div><slot /></div>' },
+  DropdownMenuTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
+  DropdownMenuSub: { template: '<div><slot /></div>' },
+  DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuSubContent: { template: '<div><slot /></div>' },
+  DropdownMenuSeparator: { template: '<hr />' },
+}
 
 function mountInput(props: Record<string, unknown> = {}) {
   return mount(HarnessChatInput, {
     props: { workspaceId: 'ws-1', ...props },
-    global: {
-      stubs: {
-        RouterLink: {
-          template: '<a :href="to"><slot /></a>',
-          props: ['to'],
-        },
-        Select: { template: '<div><slot /></div>' },
-        SelectContent: { template: '<div><slot /></div>' },
-        SelectItem: { template: '<div><slot /></div>' },
-        SelectTrigger: { template: '<div><slot /></div>' },
-        SelectValue: { template: '<div><slot /></div>' },
-      },
-    },
+    global: { stubs: dropdownStubs },
   })
 }
 
@@ -46,19 +69,31 @@ describe('HarnessChatInput', () => {
       has_api_key: true,
       api_key_hint: '',
     })
+    listProviderModelsMock.mockResolvedValue(catalog)
   })
 
-  it('loads default/small models from the org provider config as picker options', async () => {
+  it('loads the OpenRouter catalog into the model picker', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
+      expect(listProviderModelsMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
     const html = wrapper.html()
-    expect(html).toContain('model-big')
-    expect(html).toContain('model-small')
-    expect(wrapper.text()).not.toContain('No ProviderConfig endpoint exists in M6')
+    expect(html).toContain('Auto')
+    expect(html).toContain('Big')
+    expect(html).toContain('Small')
+    expect(wrapper.text()).not.toContain('Skills')
+    expect(wrapper.text()).not.toContain('Fast')
+  })
+
+  it('renders mode pill, paperclip, and send arrow', async () => {
+    const wrapper = mountInput()
+    expect(wrapper.find('[data-testid="composer-mode-trigger"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-attach"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-textarea"]').attributes('placeholder')).toContain(
+      '/ for skills',
+    )
   })
 
   it('shows org settings CTA when provider config is missing', async () => {
@@ -87,43 +122,32 @@ describe('HarnessChatInput', () => {
     })
     await wrapper.vm.$nextTick()
     expect(wrapper.find('a[href="/org-settings?tab=provider"]').exists()).toBe(true)
+    expect(listProviderModelsMock).not.toHaveBeenCalled()
   })
 
-  it('falls back to free-text input when the provider config is missing', async () => {
-    getProviderConfigMock.mockRejectedValue(new Error('not found'))
-    const wrapper = mountInput()
-    await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
-    })
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('input[placeholder*="org default"]').exists()).toBe(true)
+  it('toggles plan/build with Shift+Tab', async () => {
+    const wrapper = mountInput({ mode: 'build' })
+    await wrapper.trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(wrapper.emitted('update:mode')?.[0]).toEqual(['plan'])
+    await wrapper.trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(wrapper.emitted('update:mode')?.[1]).toEqual(['build'])
   })
 
-  it('keeps the handleSend(prompt, mode, model) signature with org-default model', async () => {
+  it('sends prompt, mode, model, skill ids, and effort', async () => {
     const wrapper = mountInput({ mode: 'plan' })
     const textarea = wrapper.find('textarea')
     await textarea.setValue('hello world')
-    await wrapper
-      .find('button[class*="bg-primary"], button:not([role="tab"])')
-      .trigger('click')
-      .catch(() => {})
-    // Fall back to direct emit check: at least the send payload shape is preserved.
+    await textarea.trigger('keydown', { key: 'Enter' })
     const sends = wrapper.emitted('send') ?? []
-    if (sends.length > 0) {
-      expect(sends[0]![1]).toBe('plan')
-      expect(typeof sends[0]![2]).toBe('string')
-    } else {
-      // No prompt typed through stubbed textarea: send explicitly via keyboard.
-      await textarea.trigger('keydown', { key: 'Enter' })
-      const retried = wrapper.emitted('send') ?? []
-      expect(retried.length).toBeGreaterThan(0)
-      expect(retried[0]![0]).toBe('hello world')
-      expect(retried[0]![1]).toBe('plan')
-      expect(retried[0]![2]).toBe('')
-    }
+    expect(sends.length).toBeGreaterThan(0)
+    expect(sends[0]![0]).toBe('hello world')
+    expect(sends[0]![1]).toBe('plan')
+    expect(typeof sends[0]![2]).toBe('string')
+    expect(sends[0]![3]).toEqual([])
+    expect(typeof sends[0]![4]).toBe('string')
   })
 
-  it('includes selected skill ids in the send payload', async () => {
+  it('attaches a skill from the slash picker and includes it on send', async () => {
     const wrapper = mountInput({
       skillOptions: [
         {
@@ -141,21 +165,16 @@ describe('HarnessChatInput', () => {
       expect(getProviderConfigMock).toHaveBeenCalled()
     })
 
-    const skillsButton = wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('Skills'))
-    expect(skillsButton).toBeTruthy()
-    await skillsButton!.trigger('click')
-    const skillOption = wrapper
-      .findAll('button')
-      .find((button) => button.text().includes('Lint rules'))
-    expect(skillOption).toBeTruthy()
-    await skillOption!.trigger('mousedown')
-
     const textarea = wrapper.find('textarea')
+    await textarea.setValue('/Lin')
+    textarea.element.setSelectionRange(4, 4)
+    await textarea.trigger('input')
+    expect(wrapper.find('[role="listbox"]').text()).toContain('Lint rules')
+    await textarea.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.text()).toContain('Lint rules')
+
     await textarea.setValue('use skills')
     await textarea.trigger('keydown', { key: 'Enter' })
-
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
     expect(sends[0]![3]).toEqual(['skill-1'])
@@ -177,7 +196,6 @@ describe('HarnessChatInput', () => {
     expect(last[0]).toBe(true)
     expect(Array.isArray(last[2])).toBe(true)
     expect((last[2] as Array<{ label: string }>).length).toBeGreaterThan(0)
-    // Controlled mode renders no local popup; the sheet stack owns the UI.
     expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
   })
 

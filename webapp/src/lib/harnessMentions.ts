@@ -7,10 +7,10 @@ import type { FileNode } from '@/types'
 export const HARNESS_AGENT_NAMES = ['build', 'plan', 'general', 'explore'] as const
 
 export interface MentionCandidate {
-  kind: 'file' | 'agent'
+  kind: 'file' | 'agent' | 'skill'
   /** Display label (rendered in the suggestion list). */
   label: string
-  /** Token inserted after `@` (e.g. `file:/workspace/a.ts`, `agent:plan`). */
+  /** Token inserted after `@`, or skill id for `kind: 'skill'`. */
   insert: string
 }
 
@@ -76,5 +76,39 @@ export function applyMentionCandidate(
   const rewritten = text
     .slice(0, cursor)
     .replace(/(^|\s)@[a-zA-Z0-9_/:.+-]*$/, `$1@${candidate.insert} `)
+  return { text: `${rewritten}${text.slice(cursor)}`, cursor: rewritten.length }
+}
+
+/** Extract the `/` skill query directly before *cursor*, or null when absent. */
+export function detectSlashQuery(text: string, cursor: number): string | null {
+  const match = /(^|\s)\/([a-zA-Z0-9_.+-]*)$/.exec(text.slice(0, cursor))
+  return match ? (match[2] ?? '') : null
+}
+
+/**
+ * Filter skill candidates for the current `/` query.
+ *
+ * `query` is the raw text after `/` (may be empty).
+ */
+export function filterSkillCandidates(
+  query: string,
+  skills: Array<{ id: string; name: string }>,
+): MentionCandidate[] {
+  const q = query.toLowerCase()
+  return skills
+    .filter(
+      (skill) =>
+        skill.name.toLowerCase().includes(q) || skill.id.toLowerCase().includes(q),
+    )
+    .slice(0, 10)
+    .map((skill) => ({ kind: 'skill' as const, label: skill.name, insert: skill.id }))
+}
+
+/** Remove the active `/query` before *cursor* without inserting a token. */
+export function consumeSlashQuery(
+  text: string,
+  cursor: number,
+): { text: string; cursor: number } {
+  const rewritten = text.slice(0, cursor).replace(/(^|\s)\/[a-zA-Z0-9_.+-]*$/, '$1')
   return { text: `${rewritten}${text.slice(cursor)}`, cursor: rewritten.length }
 }

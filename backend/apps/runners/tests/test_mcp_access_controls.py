@@ -112,6 +112,7 @@ def test_mcp_harness_tools_require_permissions():
     assert (
         _TOOL_PERMISSIONS["list_harness_conversations"] == APIKeyPermission.HARNESS_READ
     )
+    assert _TOOL_PERMISSIONS["list_provider_models"] == APIKeyPermission.HARNESS_READ
 
 
 @pytest.mark.django_db

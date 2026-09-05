@@ -2,25 +2,38 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Textarea } from '@/components/ui/textarea'
-import { BookText, FolderTree, Send, Square, X } from '@lucide/vue'
+import {
+  BookText,
+  Check,
+  ChevronDown,
+  Hammer,
+  ListTodo,
+  Paperclip,
+  Send,
+  Square,
+  X,
+} from '@lucide/vue'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
-import { getProviderConfig } from '@/services/harness.api'
+import { getProviderConfig, listProviderModels } from '@/services/harness.api'
+import type { ProviderModel } from '@/lib/harnessModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
+import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
 import {
   applyMentionCandidate,
+  consumeSlashQuery,
   detectMentionQuery,
+  detectSlashQuery,
   filterMentionCandidates,
+  filterSkillCandidates,
   flattenFilePaths,
   type MentionCandidate,
 } from '@/lib/harnessMentions'
@@ -35,6 +48,7 @@ const props = defineProps<{
   sessionId?: string | null
   files?: FileNode[]
   model?: string
+  effort?: string
   mode?: HarnessSessionMode
   skillOptions?: Skill[]
   /**
@@ -52,11 +66,12 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  send: [prompt: string, mode: HarnessSessionMode, model: string, skillIds: string[]]
+  send: [prompt: string, mode: HarnessSessionMode, model: string, skillIds: string[], effort: string]
   stop: []
   'update:model': [value: string]
+  'update:effort': [value: string]
   'update:mode': [value: HarnessSessionMode]
-  /** Emitted on every textarea change so the parent can mirror `@` state into the sheet stack. */
+  /** Emitted on every textarea change so the parent can mirror `@`/`/` state into the sheet stack. */
   'mention-change': [open: boolean, query: string, candidates: MentionCandidate[], index: number]
   /** Emitted when the user picks a mention candidate from the sheet stack. */
   'mention-select': [candidate: MentionCandidate]
@@ -66,35 +81,17 @@ const prompt = ref('')
 const textareaRef = ref<{ $el?: unknown } | null>(null)
 const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
 const localModel = ref(props.model ?? '')
-const modelOptions = ref<string[]>([])
+const localEffort = ref(props.effort ?? '')
+const catalog = ref<ProviderModel[]>([])
+const orgDefaultModel = ref('')
 const modelLoading = ref(false)
 const providerMissing = ref(false)
 const selectedSkillIds = ref<string[]>([])
-const skillDropdownOpen = ref(false)
 const filePickerOpen = ref(false)
-const skillButtonRef = ref<HTMLElement | null>(null)
-const fileButtonRef = ref<HTMLElement | null>(null)
-
-const ORG_DEFAULT = '__org_default__'
-const CUSTOM_VALUE = '__custom__'
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
   () => props.sessionId,
-)
-
-const selectValue = computed(() =>
-  localModel.value === ''
-    ? ORG_DEFAULT
-    : modelOptions.value.includes(localModel.value)
-      ? localModel.value
-      : CUSTOM_VALUE,
-)
-
-const modelSelectTitle = computed(() =>
-  modelOptions.value.length > 0
-    ? 'Model from the org provider config (empty = org default)'
-    : 'No provider config found — enter a model manually or leave empty for the backend default',
 )
 
 const selectedSkills = computed(() =>
@@ -107,23 +104,24 @@ const canManageFiles = computed(
   () => !props.disabled && !props.sending && Boolean(props.workspaceId),
 )
 
-async function loadProviderConfig(): Promise<void> {
+const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
+const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
+
+async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
   try {
     const config = await getProviderConfig()
+    orgDefaultModel.value = config.default_model || ''
     if (!config.has_api_key) {
       providerMissing.value = true
-      modelOptions.value = []
+      catalog.value = []
       return
     }
-    const models = [config.default_model, config.small_model].filter(
-      (m): m is string => typeof m === 'string' && m.trim().length > 0,
-    )
-    modelOptions.value = [...new Set(models)]
+    catalog.value = await listProviderModels()
   } catch {
     providerMissing.value = true
-    modelOptions.value = []
+    catalog.value = []
   } finally {
     modelLoading.value = false
   }
@@ -132,7 +130,7 @@ async function loadProviderConfig(): Promise<void> {
 onMounted(() => {
   const cached = loadFromCache()
   if (cached) prompt.value = cached
-  void loadProviderConfig()
+  void loadProviderModels()
 })
 
 onBeforeUnmount(() => {
@@ -145,7 +143,7 @@ watch(
     localModel.value = ''
     emit('update:model', '')
     prompt.value = loadFromCache()
-    void loadProviderConfig()
+    void loadProviderModels()
   },
 )
 
@@ -164,6 +162,13 @@ watch(
 )
 
 watch(
+  () => props.effort,
+  (next) => {
+    if (typeof next === 'string' && next !== localEffort.value) localEffort.value = next
+  },
+)
+
+watch(
   () => props.mode,
   (next) => {
     if (next) localMode.value = next
@@ -178,11 +183,11 @@ function handleSend(): void {
   if (!canSend.value) return
   emit('send', prompt.value.trim(), localMode.value, localModel.value.trim(), [
     ...selectedSkillIds.value,
-  ])
+  ], localEffort.value.trim())
   prompt.value = ''
   selectedSkillIds.value = []
   clearCache()
-  closeMention()
+  closeComposerQuery()
 }
 
 function setMode(mode: HarnessSessionMode): void {
@@ -190,23 +195,22 @@ function setMode(mode: HarnessSessionMode): void {
   emit('update:mode', mode)
 }
 
-function setModel(value: unknown): void {
-  const next =
-    value === ORG_DEFAULT ? '' : value === CUSTOM_VALUE ? localModel.value : String(value ?? '')
-  localModel.value = next
-  emit('update:model', next)
+function toggleMode(): void {
+  setMode(localMode.value === 'build' ? 'plan' : 'build')
 }
 
-function onCustomModelInput(e: Event): void {
-  const value = (e.target as HTMLInputElement).value
+function setModel(value: string): void {
   localModel.value = value
   emit('update:model', value)
 }
 
-function toggleSkill(id: string): void {
-  if (selectedSkillIds.value.includes(id)) {
-    selectedSkillIds.value = selectedSkillIds.value.filter((skillId) => skillId !== id)
-  } else {
+function setEffort(value: string): void {
+  localEffort.value = value
+  emit('update:effort', value)
+}
+
+function addSkill(id: string): void {
+  if (!selectedSkillIds.value.includes(id)) {
     selectedSkillIds.value = [...selectedSkillIds.value, id]
   }
 }
@@ -232,16 +236,19 @@ function clearInput(): void {
 const mentionOpen = ref(false)
 const mentionIndex = ref(0)
 const mentionQuery = ref('')
+const composerKind = ref<'mention' | 'skill' | null>(null)
 
 /**
- * Locally filtered mention candidates. In controlled (sheet-stack) mode the
+ * Locally filtered mention/skill candidates. In controlled (sheet-stack) mode the
  * parent mirrors this list into the topmost stack sheet.
  */
-const mentionCandidates = computed<MentionCandidate[]>(() =>
-  mentionOpen.value
-    ? filterMentionCandidates(mentionQuery.value, flattenFilePaths(props.files ?? []))
-    : [],
-)
+const mentionCandidates = computed<MentionCandidate[]>(() => {
+  if (!mentionOpen.value) return []
+  if (composerKind.value === 'skill') {
+    return filterSkillCandidates(mentionQuery.value, props.skillOptions ?? [])
+  }
+  return filterMentionCandidates(mentionQuery.value, flattenFilePaths(props.files ?? []))
+})
 
 const mentionPopupCandidates = computed<MentionCandidate[]>(() =>
   props.mentionControlled ? [] : mentionCandidates.value,
@@ -293,32 +300,54 @@ function textareaEl(): HTMLTextAreaElement | null {
   return el instanceof HTMLTextAreaElement ? el : null
 }
 
-function closeMention(): void {
+function closeComposerQuery(): void {
   mentionOpen.value = false
   mentionIndex.value = 0
   mentionQuery.value = ''
+  composerKind.value = null
 }
 
-function refreshMention(): void {
+function refreshComposerQuery(): void {
   const el = textareaEl()
   if (!el) return
-  const query = detectMentionQuery(el.value, el.selectionStart ?? el.value.length)
-  if (query === null) {
-    closeMention()
+  const cursor = el.selectionStart ?? el.value.length
+  const mention = detectMentionQuery(el.value, cursor)
+  if (mention !== null) {
+    composerKind.value = 'mention'
+    mentionQuery.value = mention
+    mentionIndex.value = 0
+    mentionOpen.value = true
     return
   }
-  mentionQuery.value = query
-  mentionIndex.value = 0
-  mentionOpen.value = true
+  const slash = detectSlashQuery(el.value, cursor)
+  if (slash !== null) {
+    composerKind.value = 'skill'
+    mentionQuery.value = slash
+    mentionIndex.value = 0
+    mentionOpen.value = true
+    return
+  }
+  closeComposerQuery()
 }
 
 function chooseMention(candidate: MentionCandidate): void {
   const el = textareaEl()
   if (!el) return
   const cursor = el.selectionStart ?? el.value.length
+  if (candidate.kind === 'skill') {
+    addSkill(candidate.insert)
+    const next = consumeSlashQuery(el.value, cursor)
+    prompt.value = next.text
+    closeComposerQuery()
+    void nextTick(() => {
+      el.focus()
+      el.setSelectionRange(next.cursor, next.cursor)
+    })
+    return
+  }
   const next = applyMentionCandidate(el.value, cursor, candidate)
   prompt.value = next.text
-  closeMention()
+  closeComposerQuery()
   void nextTick(() => {
     el.focus()
     el.setSelectionRange(next.cursor, next.cursor)
@@ -328,7 +357,7 @@ function chooseMention(candidate: MentionCandidate): void {
 defineExpose({ clearInput, chooseMention })
 
 function onPromptInput(): void {
-  refreshMention()
+  refreshComposerQuery()
 }
 
 function onPromptKeydown(e: KeyboardEvent): void {
@@ -340,7 +369,15 @@ function onPromptKeydown(e: KeyboardEvent): void {
       mentionIndex.value = (mentionIndex.value + delta + count) % count
       return
     }
-    if (e.key === 'Tab' || e.key === 'Enter') {
+    if (e.key === 'Tab' && !e.shiftKey) {
+      const candidate = mentionCandidates.value[mentionIndex.value]
+      if (candidate) {
+        e.preventDefault()
+        requestMentionSelect(candidate)
+        return
+      }
+    }
+    if (e.key === 'Enter') {
       const candidate = mentionCandidates.value[mentionIndex.value]
       if (candidate) {
         e.preventDefault()
@@ -350,7 +387,7 @@ function onPromptKeydown(e: KeyboardEvent): void {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
-      closeMention()
+      closeComposerQuery()
       return
     }
   }
@@ -364,147 +401,33 @@ function handleKeydown(e: KeyboardEvent): void {
   onPromptKeydown(e)
 }
 
-watch(skillDropdownOpen, (open) => {
-  if (open) filePickerOpen.value = false
-})
-
-watch(filePickerOpen, (open) => {
-  if (open) skillDropdownOpen.value = false
-})
+function onComposerKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Tab' && e.shiftKey) {
+    e.preventDefault()
+    toggleMode()
+  }
+}
 </script>
 
 <template>
   <div
     class="min-w-0 w-full bg-transparent px-3 pb-2 sm:px-4"
     :class="attached ? 'pt-0' : 'pt-3 sm:pt-4'"
+    @keydown="onComposerKeydown"
   >
     <div
-      class="flex flex-col border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary"
+      class="flex flex-col border border-border bg-card shadow-sm transition-all duration-200 group-focus-within/composer:border-primary"
       :class="attached ? 'rounded-b-xl rounded-t-none border-t-0' : 'rounded-xl'"
     >
-      <div class="flex flex-wrap items-center gap-2 px-4 pt-3">
-        <RouterLink
-          v-if="providerMissing"
-          to="/org-settings?tab=provider"
-          class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
-        >
-          Configure OpenRouter in Org Settings
-        </RouterLink>
-        <div class="flex rounded-lg bg-muted p-0.5" role="tablist" aria-label="Agent mode">
-          <button
-            type="button"
-            role="tab"
-            :aria-selected="localMode === 'plan'"
-            class="rounded-md px-3 py-1 text-xs font-medium transition-colors"
-            :class="
-              localMode === 'plan'
-                ? 'bg-card text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            "
-            @click="setMode('plan')"
-          >
-            Plan
-          </button>
-          <button
-            type="button"
-            role="tab"
-            :aria-selected="localMode === 'build'"
-            class="rounded-md px-3 py-1 text-xs font-medium transition-colors"
-            :class="
-              localMode === 'build'
-                ? 'bg-card text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            "
-            @click="setMode('build')"
-          >
-            Build
-          </button>
-        </div>
-        <Select :model-value="selectValue" @update:model-value="setModel">
-          <SelectTrigger class="h-8 max-w-64 text-xs" :title="modelSelectTitle">
-            <SelectValue placeholder="Model (org default)" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem :value="ORG_DEFAULT">Org default</SelectItem>
-            <SelectItem v-for="name in modelOptions" :key="name" :value="name">
-              {{ name }}
-            </SelectItem>
-            <SelectItem :value="CUSTOM_VALUE">Custom…</SelectItem>
-          </SelectContent>
-        </Select>
-        <Input
-          v-if="selectValue === CUSTOM_VALUE || modelOptions.length === 0"
-          :value="localModel"
-          placeholder="Model (empty = org default)"
-          class="h-8 max-w-64 text-xs"
-          :title="modelSelectTitle"
-          @input="onCustomModelInput"
-        />
-        <span v-if="modelLoading" class="text-xs text-muted-foreground">Loading models…</span>
+      <RouterLink
+        v-if="providerMissing"
+        to="/org-settings?tab=provider"
+        class="mx-4 mt-3 w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+      >
+        Configure OpenRouter in Org Settings
+      </RouterLink>
 
-        <div class="relative">
-          <Button
-            ref="skillButtonRef"
-            type="button"
-            variant="outline"
-            size="sm"
-            class="h-8 gap-1 text-xs"
-            :disabled="!skillOptions?.length"
-            @click="skillDropdownOpen = !skillDropdownOpen"
-          >
-            <BookText :size="14" />
-            Skills
-            <span v-if="selectedSkillIds.length" class="text-primary"
-              >({{ selectedSkillIds.length }})</span
-            >
-          </Button>
-          <div
-            v-if="skillDropdownOpen && skillOptions?.length"
-            class="absolute bottom-full left-0 z-20 mb-1 w-64 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-md"
-          >
-            <button
-              v-for="skill in skillOptions"
-              :key="skill.id"
-              type="button"
-              class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted"
-              :class="
-                selectedSkillIds.includes(skill.id)
-                  ? 'bg-primary/10 text-primary'
-                  : 'text-foreground'
-              "
-              @mousedown.prevent="toggleSkill(skill.id)"
-            >
-              <BookText :size="12" />
-              <span class="truncate">{{ skill.name }}</span>
-            </button>
-          </div>
-        </div>
-
-        <div v-if="workspaceId" class="relative">
-          <Button
-            ref="fileButtonRef"
-            type="button"
-            variant="outline"
-            size="sm"
-            class="h-8 gap-1 text-xs"
-            :disabled="!canManageFiles"
-            @click="filePickerOpen = !filePickerOpen"
-          >
-            <FolderTree :size="14" />
-            Files
-          </Button>
-          <div v-if="filePickerOpen" class="absolute bottom-full left-0 z-20 mb-1">
-            <WorkspaceFilePicker
-              :workspace-id="workspaceId"
-              :disabled="!canManageFiles"
-              @select="handleFileSelected"
-              @close="filePickerOpen = false"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pb-0 pt-2">
+      <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">
         <span
           v-for="skill in selectedSkills"
           :key="skill.id"
@@ -528,8 +451,9 @@ watch(filePickerOpen, (open) => {
           v-model="prompt"
           :disabled="disabled"
           :rows="1"
-          placeholder="Send a prompt to the agent… (@file, @agent)"
+          placeholder="Plan, Build, / for skills, @ for context"
           class="min-h-[50px] max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-3 text-base !shadow-none !outline-none !ring-0 focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0"
+          data-testid="composer-textarea"
           @keydown="handleKeydown"
           @input="onPromptInput"
         />
@@ -537,7 +461,7 @@ watch(filePickerOpen, (open) => {
           v-if="mentionPopupCandidates.length > 0"
           class="absolute bottom-full left-4 right-4 z-10 mb-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-md"
           role="listbox"
-          aria-label="Mention suggestions"
+          :aria-label="composerKind === 'skill' ? 'Skill suggestions' : 'Mention suggestions'"
         >
           <button
             v-for="(candidate, idx) in mentionPopupCandidates"
@@ -557,7 +481,7 @@ watch(filePickerOpen, (open) => {
             <span
               class="rounded px-1 py-0.5 text-[10px] font-medium"
               :class="
-                candidate.kind === 'agent'
+                candidate.kind === 'agent' || candidate.kind === 'skill'
                   ? 'bg-primary/10 text-primary'
                   : 'bg-muted text-muted-foreground'
               "
@@ -568,36 +492,104 @@ watch(filePickerOpen, (open) => {
           </button>
         </div>
       </div>
-      <div class="flex items-center justify-end gap-2 p-2 pl-3 pb-3">
-        <Button
-          v-if="stoppable"
-          :disabled="!canStop"
-          size="icon"
-          class="h-9 w-9 shrink-0 rounded-full transition-all"
-          :class="
-            canStop
-              ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
-              : 'bg-muted text-muted-foreground'
-          "
-          title="Stop current run"
-          @click="emit('stop')"
-        >
-          <Square :size="16" />
-        </Button>
-        <Button
-          v-else
-          :disabled="!canSend"
-          size="icon"
-          class="h-9 w-9 shrink-0 rounded-full transition-all"
-          :class="
-            canSend
-              ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-              : 'bg-muted text-muted-foreground'
-          "
-          @click="handleSend"
-        >
-          <Send :size="18" />
-        </Button>
+
+      <div class="flex items-center gap-1 p-2 pl-2 pb-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              class="h-8 gap-1.5 rounded-full px-2.5 text-xs font-medium"
+              data-testid="composer-mode-trigger"
+              :disabled="disabled"
+            >
+              <component :is="modeIcon" :size="14" />
+              {{ modeLabel }}
+              <ChevronDown :size="12" class="opacity-70" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" class="min-w-36">
+            <DropdownMenuItem class="text-xs" data-testid="composer-mode-build" @click="setMode('build')">
+              <Hammer :size="14" />
+              Build
+              <Check v-if="localMode === 'build'" class="ml-auto size-3.5" />
+            </DropdownMenuItem>
+            <DropdownMenuItem class="text-xs" data-testid="composer-mode-plan" @click="setMode('plan')">
+              <ListTodo :size="14" />
+              Plan
+              <Check v-if="localMode === 'plan'" class="ml-auto size-3.5" />
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <HarnessModelPicker
+          :model="localModel"
+          :effort="localEffort"
+          :models="catalog"
+          :loading="modelLoading"
+          :default-model="orgDefaultModel"
+          :disabled="disabled"
+          @update:model="setModel"
+          @update:effort="setEffort"
+        />
+
+        <div class="ml-auto flex items-center gap-1">
+          <div v-if="workspaceId" class="relative">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8 text-muted-foreground hover:text-foreground"
+              :disabled="!canManageFiles"
+              title="Attach a workspace file"
+              data-testid="composer-attach"
+              @click="filePickerOpen = !filePickerOpen"
+            >
+              <Paperclip :size="16" />
+            </Button>
+            <div v-if="filePickerOpen" class="absolute bottom-full right-0 z-20 mb-1">
+              <WorkspaceFilePicker
+                :workspace-id="workspaceId"
+                :disabled="!canManageFiles"
+                @select="handleFileSelected"
+                @close="filePickerOpen = false"
+              />
+            </div>
+          </div>
+          <Button
+            v-if="stoppable"
+            :disabled="!canStop"
+            size="icon"
+            class="h-8 w-8 shrink-0 rounded-full transition-all"
+            :class="
+              canStop
+                ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                : 'bg-muted text-muted-foreground'
+            "
+            title="Stop current run"
+            data-testid="composer-stop"
+            @click="emit('stop')"
+          >
+            <Square :size="14" />
+          </Button>
+          <Button
+            v-else
+            :disabled="!canSend"
+            size="icon"
+            class="h-8 w-8 shrink-0 rounded-full transition-all"
+            :class="
+              canSend
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                : 'bg-muted text-muted-foreground'
+            "
+            title="Send"
+            data-testid="composer-send"
+            @click="handleSend"
+          >
+            <Send :size="16" />
+          </Button>
+        </div>
       </div>
     </div>
     <p v-if="busyMessage" class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400">
@@ -605,7 +597,8 @@ watch(filePickerOpen, (open) => {
     </p>
     <p v-else class="mt-2 hidden text-center text-xs text-muted-foreground sm:block">
       Press <kbd class="font-mono font-medium text-foreground">Enter</kbd> to send,
-      <kbd class="font-mono font-medium text-foreground">Shift+Enter</kbd> for newline
+      <kbd class="font-mono font-medium text-foreground">Shift+Enter</kbd> for newline,
+      <kbd class="font-mono font-medium text-foreground">Shift+Tab</kbd> to switch mode
     </p>
   </div>
 </template>

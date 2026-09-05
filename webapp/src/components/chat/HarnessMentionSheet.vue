@@ -39,7 +39,7 @@ const emit = defineEmits<{
         <span
           class="rounded px-1 py-0.5 text-[10px] font-medium"
           :class="
-            candidate.kind === 'agent'
+            candidate.kind === 'agent' || candidate.kind === 'skill'
               ? 'bg-primary/10 text-primary'
               : 'bg-muted text-muted-foreground'
           "

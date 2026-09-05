@@ -99,6 +99,7 @@ class HarnessSessionRepository:
         mode: str = "build",
         agent_name: str = "build",
         model: str = "",
+        reasoning_effort: str = "",
         parent_id: uuid.UUID | None = None,
         skill_ids: list[str] | None = None,
     ) -> HarnessSession:
@@ -110,6 +111,7 @@ class HarnessSessionRepository:
             mode=mode,
             agent_name=agent_name,
             model=model or "",
+            reasoning_effort=reasoning_effort or "",
             parent_id=parent_id,
             skill_ids=list(skill_ids or []),
         )
@@ -201,6 +203,15 @@ class HarnessSessionRepository:
         """Persist the session model override for subsequent runs."""
         session.model = (model or "").strip()
         session.save(update_fields=["model", "updated_at"])
+        return session
+
+    @staticmethod
+    def set_reasoning_effort(
+        session: HarnessSession, reasoning_effort: str
+    ) -> HarnessSession:
+        """Persist the OpenRouter reasoning effort for subsequent runs."""
+        session.reasoning_effort = (reasoning_effort or "").strip()
+        session.save(update_fields=["reasoning_effort", "updated_at"])
         return session
 
     @staticmethod

@@ -71,6 +71,7 @@ export interface HarnessSession {
   mode: HarnessSessionMode
   agent_name: string
   model: string
+  reasoning_effort?: string
   status: HarnessSessionStatus
   skill_ids?: string[]
   cost: number
@@ -133,6 +134,7 @@ export interface HarnessSessionCreateIn {
   agent_name?: string
   mode?: HarnessSessionMode
   model?: string
+  reasoning_effort?: string
   skill_ids?: string[]
 }
 
@@ -144,6 +146,7 @@ export interface HarnessMessageIn {
   prompt: string
   mode?: HarnessSessionMode | ''
   model?: string
+  reasoning_effort?: string
   skill_ids?: string[]
 }
 

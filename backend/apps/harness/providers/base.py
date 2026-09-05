@@ -104,6 +104,7 @@ class ChatOptions:
     temperature: float | None = None
     max_tokens: int | None = None
     timeout_seconds: float = 60.0
+    reasoning_effort: str | None = None
 
 
 class ProviderAdapter(abc.ABC):

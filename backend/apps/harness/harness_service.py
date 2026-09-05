@@ -42,7 +42,8 @@ from .models import (
     HarnessSessionStatus,
 )
 from .permissions.service import PermissionService
-from .providers.base import LLMMessage, ProviderAdapter, Usage
+from .providers.base import ChatOptions, LLMMessage, ProviderAdapter, Usage
+from .providers.models_catalog import normalize_reasoning_effort
 from .repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
@@ -111,6 +112,7 @@ class HarnessService:
         agent_name: str = "build",
         mode: str = "build",
         model: str = "",
+        reasoning_effort: str = "",
         title: str = "",
         parent_id: uuid.UUID | None = None,
         skill_ids: list[str] | None = None,
@@ -139,6 +141,7 @@ class HarnessService:
             mode=normalized_mode,
             agent_name=resolved_agent,
             model=(model or "").strip(),
+            reasoning_effort=normalize_reasoning_effort(reasoning_effort),
             parent_id=parent_id,
             skill_ids=normalized_skills,
         )
@@ -185,6 +188,15 @@ class HarnessService:
         """Persist a model override for subsequent runs."""
         session = self.get_session(session_id)
         return self.sessions.set_model(session, (model or "").strip())
+
+    def set_reasoning_effort(
+        self, session_id: uuid.UUID, reasoning_effort: str
+    ) -> HarnessSession:
+        """Persist a reasoning-effort override for subsequent runs."""
+        session = self.get_session(session_id)
+        return self.sessions.set_reasoning_effort(
+            session, normalize_reasoning_effort(reasoning_effort)
+        )
 
     def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
         """Rename a session (title only)."""
@@ -687,11 +699,13 @@ class HarnessService:
                 emit=lambda event: self._on_runner_event(session, assistant, event),
             )
         else:
+            effort = (session.reasoning_effort or "").strip() or None
             loop_runner = HarnessRunner(
                 provider=active_provider,
                 tools=tools,
                 accessor=accessor,
                 emit=lambda event: self._on_runner_event(session, assistant, event),
+                chat_options=ChatOptions(reasoning_effort=effort),
             )
         opts = RunOptions(
             history=history,

@@ -28,6 +28,7 @@ vi.mock('@/services/harness.api', async () => {
       has_api_key: true,
       api_key_hint: '',
     }),
+    listProviderModels: vi.fn().mockResolvedValue([]),
   }
 })
 

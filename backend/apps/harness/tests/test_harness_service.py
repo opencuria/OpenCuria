@@ -651,6 +651,22 @@ def test_create_session_plan_mode_aligns_agent_name(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
+    """create_session persists a valid reasoning_effort token."""
+    service, _, _ = _service()
+    session = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="think hard",
+        mode="build",
+        reasoning_effort="high",
+    )
+    assert session.reasoning_effort == "high"
+    updated = service.set_reasoning_effort(session.id, "low")
+    assert updated.reasoning_effort == "low"
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
     """set_mode(plan) also sets agent_name to plan."""
     service, _, _ = _service()

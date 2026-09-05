@@ -129,6 +129,12 @@ class HarnessSession(models.Model):
     )
     agent_name = models.CharField(max_length=64, default="build")
     model = models.CharField(max_length=255, blank=True, default="")
+    reasoning_effort = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        help_text="OpenRouter reasoning effort (low|medium|high|xhigh|max).",
+    )
     status = models.CharField(
         max_length=16,
         choices=HarnessSessionStatus.choices,

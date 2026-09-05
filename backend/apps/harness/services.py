@@ -16,6 +16,11 @@ from common.utils import decrypt_value, encrypt_value
 
 from .models import ProviderConfig
 from .providers.base import ProviderAdapter
+from .providers.models_catalog import (
+    ProviderModel,
+    clear_models_cache,
+    list_cached_provider_models,
+)
 from .providers.openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
 from .providers.registry import ProviderRegistry, default_registry
 from .repositories import ProviderConfigRepository
@@ -66,6 +71,7 @@ class ProviderConfigService:
                 default_model=default_model.strip(),
                 small_model=small_model.strip(),
             )
+            clear_models_cache(str(organization_id))
             log.info("provider_config_created", organization_id=str(organization_id))
             return config
 
@@ -81,6 +87,7 @@ class ProviderConfigService:
             default_model=default_model.strip(),
             small_model=small_model.strip(),
         )
+        clear_models_cache(str(organization_id))
         log.info("provider_config_updated", organization_id=str(organization_id))
         return config
 
@@ -101,6 +108,7 @@ class ProviderConfigService:
         deleted = self.repository.delete_by_org(organization_id)
         if deleted == 0:
             raise NotFoundError("ProviderConfig", str(organization_id))
+        clear_models_cache(str(organization_id))
         log.info("provider_config_deleted", organization_id=str(organization_id))
 
     def adapter_from_config(
@@ -140,4 +148,22 @@ class ProviderConfigService:
         """
         return self.adapter_from_config(
             self.get_config(organization_id), provider_name=provider_name
+        )
+
+    def list_models(self, organization_id: uuid.UUID) -> list[ProviderModel]:
+        """Return the OpenRouter catalog for *organization_id*.
+
+        Raises:
+            NotFoundError: If no config exists or the API key is empty.
+        """
+        config = self.get_config(organization_id)
+        if not config.api_key_encrypted:
+            raise NotFoundError("ProviderConfig", str(organization_id))
+        api_key = decrypt_value(config.api_key_encrypted)
+        if not api_key.strip():
+            raise NotFoundError("ProviderConfig", str(organization_id))
+        return list_cached_provider_models(
+            cache_key=str(organization_id),
+            api_key=api_key,
+            base_url=config.base_url or DEFAULT_BASE_URL,
         )

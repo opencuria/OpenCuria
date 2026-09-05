@@ -158,3 +158,22 @@ def test_adapter_requires_api_key() -> None:
     """Empty API key is rejected eagerly."""
     with pytest.raises(ValueError):
         OpenRouterAdapter(api_key="")
+
+
+def test_build_payload_includes_reasoning_effort() -> None:
+    """Reasoning effort is sent as OpenRouter reasoning.effort."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [],
+        [],
+        ChatOptions(reasoning_effort="high"),
+    )
+    assert payload["reasoning"] == {"effort": "high"}
+
+
+def test_build_payload_omits_reasoning_when_unset() -> None:
+    """No reasoning object is sent when effort is empty."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload("m", [], [], ChatOptions())
+    assert "reasoning" not in payload

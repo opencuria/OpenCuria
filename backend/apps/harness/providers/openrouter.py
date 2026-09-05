@@ -158,6 +158,9 @@ class OpenRouterAdapter(ProviderAdapter):
             payload["temperature"] = opts.temperature
         if opts.max_tokens is not None:
             payload["max_tokens"] = opts.max_tokens
+        effort = (opts.reasoning_effort or "").strip()
+        if effort:
+            payload["reasoning"] = {"effort": effort}
         return payload
 
     @staticmethod

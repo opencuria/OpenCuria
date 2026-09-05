@@ -18,6 +18,7 @@ import type {
   HarnessSessionPatchIn,
   HarnessTodo,
 } from '@/types/harness'
+import type { ProviderModel } from '@/lib/harnessModels'
 import { get, post, put, del, patch } from './api'
 
 export interface HarnessProviderConfig {
@@ -61,6 +62,7 @@ export function createHarnessSession(
     agent_name: data.agent_name ?? 'build',
     mode: data.mode ?? 'build',
     model: data.model ?? '',
+    reasoning_effort: data.reasoning_effort ?? '',
     skill_ids: data.skill_ids ?? [],
   })
 }
@@ -76,6 +78,7 @@ export function sendHarnessMessage(
           prompt: data.prompt,
           mode: data.mode ?? '',
           model: data.model ?? '',
+          reasoning_effort: data.reasoning_effort ?? '',
           skill_ids: data.skill_ids ?? [],
         }
   return post<HarnessSession>(`/harness/sessions/${sessionId}/message`, body)
@@ -132,6 +135,10 @@ export function resolveHarnessQuestion(
     `/harness/sessions/${sessionId}/questions/${requestId}`,
     { answers, reject },
   )
+}
+
+export function listProviderModels(): Promise<ProviderModel[]> {
+  return get<ProviderModel[]>('/provider-config/models/')
 }
 
 export function getProviderConfig(): Promise<HarnessProviderConfig> {

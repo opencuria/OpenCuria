@@ -29,6 +29,7 @@ Tools and their required permissions
 - get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
 - get_provider_config → harness:read
+- list_provider_models → harness:read
 - save_provider_config → harness:run
 - delete_provider_config → harness:run
 - list_harness_sessions → harness:read
@@ -329,6 +330,11 @@ _TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
+        name="list_provider_models",
+        description="List models available from the org OpenRouter provider.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
         name="save_provider_config",
         description="Save (upsert) the org-wide harness provider config.",
         inputSchema={
@@ -368,6 +374,7 @@ _TOOLS: list[Tool] = [
                 "agent_name": {"type": "string"},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
                 "skill_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -386,6 +393,7 @@ _TOOLS: list[Tool] = [
                 "prompt": {"type": "string"},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
                 "skill_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -543,6 +551,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
     "get_provider_config": APIKeyPermission.HARNESS_READ,
+    "list_provider_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
     "list_harness_sessions": APIKeyPermission.HARNESS_READ,
@@ -1375,6 +1384,7 @@ def _session_dict(session) -> dict:
         "mode": session.mode,
         "agent_name": session.agent_name,
         "model": session.model or "",
+        "reasoning_effort": getattr(session, "reasoning_effort", "") or "",
         "status": session.status,
         "cost": float(session.cost or 0.0),
         "tokens": dict(session.tokens or {}),
@@ -1415,6 +1425,16 @@ def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     return _text(_fetch_org_provider_config(org_id).model_dump(mode="json"))
+
+
+def _call_list_provider_models(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _list_org_provider_models
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    models = _list_org_provider_models(org_id)
+    return _text([model.model_dump(mode="json") for model in models])
 
 
 def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1491,6 +1511,7 @@ async def _call_create_harness_session(
             agent_name=args.get("agent_name") or "build",
             mode=args.get("mode") or "build",
             model=args.get("model") or "",
+            reasoning_effort=args.get("reasoning_effort") or "",
             skill_ids=list(args.get("skill_ids") or []),
             user_id=api_key.user.id,
         )
@@ -1543,6 +1564,10 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
             if args.get("model"):
                 current = await sync_to_async(service.set_model)(
                     current.id, args["model"]
+                )
+            if args.get("reasoning_effort"):
+                current = await sync_to_async(service.set_reasoning_effort)(
+                    current.id, args["reasoning_effort"]
                 )
         await service.start_run(
             current,
@@ -1968,6 +1993,7 @@ _TOOL_HANDLERS = {
     "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
     "get_provider_config": _call_get_provider_config,
+    "list_provider_models": _call_list_provider_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
     "list_harness_sessions": _call_list_harness_sessions,

@@ -94,6 +94,7 @@ class HarnessSessionCreateIn(Schema):
     agent_name: str = "build"
     mode: str = "build"
     model: str = ""
+    reasoning_effort: str = ""
     skill_ids: list[str] = []
 
 
@@ -123,6 +124,7 @@ class HarnessMessageIn(Schema):
     prompt: str
     mode: str = ""
     model: str = ""
+    reasoning_effort: str = ""
     skill_ids: list[str] = []
 
 
@@ -162,6 +164,7 @@ class HarnessSessionOut(Schema):
     mode: str
     agent_name: str
     model: str
+    reasoning_effort: str = ""
     status: str
     cost: float
     tokens: dict = {}
@@ -235,6 +238,16 @@ class ProviderConfigOut(Schema):
     api_key_hint: str
 
 
+class ProviderModelOut(Schema):
+    """One model from the org provider catalog."""
+
+    id: str
+    name: str
+    reasoning_efforts: list[str] = []
+    default_effort: str = ""
+    supports_tools: bool = False
+
+
 def _api_key_hint(config) -> str:  # type: ignore[no-untyped-def]
     """Return a masked hint (last four chars) when a key is stored."""
     if not config.api_key_encrypted:
@@ -264,6 +277,23 @@ def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
 
     config = ProviderConfigService().get_config(org_id)
     return _provider_config_to_out(config)
+
+
+def _list_org_provider_models(org_id: uuid.UUID) -> list[ProviderModelOut]:
+    """Fetch the OpenRouter catalog for an organization."""
+    from apps.harness.services import ProviderConfigService
+
+    models = ProviderConfigService().list_models(org_id)
+    return [
+        ProviderModelOut(
+            id=model.id,
+            name=model.name,
+            reasoning_efforts=list(model.reasoning_efforts),
+            default_effort=model.default_effort,
+            supports_tools=model.supports_tools,
+        )
+        for model in models
+    ]
 
 
 def _save_org_provider_config(
@@ -299,6 +329,7 @@ def _session_to_out(session) -> HarnessSessionOut:  # type: ignore[no-untyped-de
         mode=session.mode,
         agent_name=session.agent_name,
         model=session.model or "",
+        reasoning_effort=session.reasoning_effort or "",
         status=session.status,
         cost=float(session.cost or 0.0),
         tokens=dict(session.tokens or {}),
@@ -365,6 +396,7 @@ async def create_harness_session(
             agent_name=payload.agent_name or "build",
             mode=payload.mode or "build",
             model=payload.model or "",
+            reasoning_effort=payload.reasoning_effort or "",
             skill_ids=payload.skill_ids or [],
             user_id=request.user.id,
         )
@@ -415,6 +447,10 @@ async def send_harness_message(
             if payload.model and payload.model.strip():
                 session = await sync_to_async(service.set_model)(
                     session.id, payload.model
+                )
+            if payload.reasoning_effort and payload.reasoning_effort.strip():
+                session = await sync_to_async(service.set_reasoning_effort)(
+                    session.id, payload.reasoning_effort
                 )
         await service.start_run(
             session,
@@ -795,6 +831,37 @@ def get_org_provider_config(request: HttpRequest):
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.get(
+    "/provider-config/models/",
+    response={200: list[ProviderModelOut], 401: dict, 403: dict, 404: dict, 502: dict},
+    summary="List models from the org OpenRouter provider",
+)
+def list_org_provider_models(request: HttpRequest):
+    """Proxy OpenRouter GET /models for the org provider config."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        return 200, _list_org_provider_models(org_id)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except Exception as exc:
+        from apps.harness.providers.base import (
+            ProviderAuthError,
+            ProviderResponseError,
+            ProviderTimeoutError,
+        )
+
+        if isinstance(
+            exc, (ProviderAuthError, ProviderResponseError, ProviderTimeoutError)
+        ):
+            return 502, {"detail": str(exc), "code": "provider_error"}
+        raise
 
 
 @harness_router.put(

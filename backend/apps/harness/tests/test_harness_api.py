@@ -190,6 +190,42 @@ def test_create_session_plan_mode_sets_agent_name(harness_setup, fake_harness_se
 
 
 @pytest.mark.django_db(transaction=True)
+def test_create_session_persists_reasoning_effort(harness_setup, fake_harness_service):
+    """POST create stores reasoning_effort on the session."""
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {"prompt": "hello", "mode": "build", "reasoning_effort": "high"}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    body = response.json()
+    assert body["reasoning_effort"] == "high"
+    row = HarnessSession.objects.get(id=body["id"])
+    assert row.reasoning_effort == "high"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_session_invalid_reasoning_effort_is_400(
+    harness_setup, fake_harness_service
+):
+    """Unknown reasoning_effort is a validation error."""
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "reasoning_effort": "turbo"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_invalid_mode_is_400(harness_setup, fake_harness_service):
     """Unknown mode/agent is a validation error, not a 500."""
     client = _client(

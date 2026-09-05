@@ -335,3 +335,58 @@ def test_save_config_service_keeps_key_when_omitted(organization) -> None:
     assert second.api_key_encrypted == encrypted_before
     assert service.get_decrypted_api_key(organization.id) == "sk-service-keep"
     assert decrypt_value(second.api_key_encrypted) == "sk-service-keep"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
+    """GET /provider-config/models/ returns the normalized OpenRouter catalog."""
+    from apps.harness.providers.models_catalog import ProviderModel
+
+    ProviderConfigService().save_config(
+        organization_id=provider_setup["org"].id,
+        api_key="sk-models-key",
+        default_model="acme/fast",
+    )
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        assert organization_id == provider_setup["org"].id
+        return [
+            ProviderModel(
+                id="acme/fast",
+                name="Fast",
+                reasoning_efforts=("high",),
+                default_effort="high",
+                supports_tools=True,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
+    )
+    response = client.get("/api/v1/provider-config/models/")
+    assert response.status_code == 200, response.content[:500]
+    body = response.json()
+    assert body[0]["id"] == "acme/fast"
+    assert body[0]["reasoning_efforts"] == ["high"]
+    assert body[0]["supports_tools"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_org_provider_models_missing_config_is_404(provider_setup):
+    """GET models without a stored config yields 404."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
+    )
+    response = client.get("/api/v1/provider-config/models/")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_org_provider_models_requires_harness_read(provider_setup):
+    """GET models is denied without harness:read."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=RUN
+    )
+    response = client.get("/api/v1/provider-config/models/")
+    assert response.status_code == 403

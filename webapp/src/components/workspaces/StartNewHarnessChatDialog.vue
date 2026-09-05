@@ -7,6 +7,7 @@ import type { Workspace } from '@/types'
 import { WorkspaceStatus } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
+import { useSkillStore } from '@/stores/skills'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -22,6 +23,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
 const harnessStore = useHarnessStore()
+const skillStore = useSkillStore()
 
 const open = ref(false)
 const step = ref<'workspace' | 'prompt'>('workspace')
@@ -40,6 +42,7 @@ onMounted(async () => {
   if (workspaceStore.workspaces.length === 0) {
     await workspaceStore.fetchWorkspaces()
   }
+  void skillStore.fetchSkills()
 })
 
 function resetDialog(): void {
@@ -64,6 +67,7 @@ async function handleCreateSession(
   mode: HarnessSessionMode,
   model: string,
   skillIds: string[],
+  effort: string,
 ): Promise<void> {
   const workspace = selectedWorkspace.value
   if (!workspace || creating.value) return
@@ -75,6 +79,7 @@ async function handleCreateSession(
       mode,
       model,
       skillIds,
+      effort,
     )
     if (session) {
       open.value = false
@@ -139,9 +144,12 @@ async function handleCreateSession(
           :workspace-id="selectedWorkspace.id"
           :mode="composerMode"
           :model="harnessStore.modelInput"
+          :effort="harnessStore.effortInput"
+          :skill-options="skillStore.skills"
           :disabled="creating"
           @update:mode="composerMode = $event"
           @update:model="harnessStore.modelInput = $event"
+          @update:effort="harnessStore.effortInput = $event"
           @send="handleCreateSession"
         />
       </div>

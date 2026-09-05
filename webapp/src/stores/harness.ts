@@ -58,6 +58,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const error = ref<string | null>(null)
   /** Model picker value; empty string means "org default". */
   const modelInput = ref('')
+  /** Reasoning effort for the next run; empty uses the model default. */
+  const effortInput = ref('')
 
   // --- Getters ---
   const activeSession = computed(
@@ -172,6 +174,7 @@ export const useHarnessStore = defineStore('harness', () => {
     mode: HarnessSessionMode,
     model: string,
     skillIds: string[] = [],
+    reasoningEffort = '',
   ): Promise<HarnessSession | null> {
     const notifications = useNotificationStore()
     try {
@@ -181,6 +184,7 @@ export const useHarnessStore = defineStore('harness', () => {
         model,
         agent_name: mode,
         skill_ids: skillIds,
+        reasoning_effort: reasoningEffort,
       })
       sessions.value.unshift(session)
       activeSessionId.value = session.id
@@ -209,6 +213,7 @@ export const useHarnessStore = defineStore('harness', () => {
       mode?: HarnessSessionMode
       model?: string
       skillIds?: string[]
+      reasoningEffort?: string
     } = {},
   ): Promise<void> {
     const notifications = useNotificationStore()
@@ -218,6 +223,7 @@ export const useHarnessStore = defineStore('harness', () => {
         mode: options.mode,
         model: options.model,
         skill_ids: options.skillIds,
+        reasoning_effort: options.reasoningEffort,
       })
       upsertSession(session)
       messagesFor(sessionId).push({
@@ -432,6 +438,7 @@ export const useHarnessStore = defineStore('harness', () => {
     loading,
     error,
     modelInput,
+    effortInput,
     // Getters
     activeSession,
     activeMessages,

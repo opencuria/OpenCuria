@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   HARNESS_AGENT_NAMES,
   applyMentionCandidate,
+  consumeSlashQuery,
   detectMentionQuery,
+  detectSlashQuery,
   filterMentionCandidates,
+  filterSkillCandidates,
   flattenFilePaths,
 } from './harnessMentions'
 import type { FileNode } from '@/types'
@@ -56,5 +59,23 @@ describe('harnessMentions', () => {
     })
     expect(result.text).toBe('fix @agent:plan ')
     expect(result.cursor).toBe(result.text.length)
+  })
+
+  it('detects a slash skill query but ignores absolute paths', () => {
+    expect(detectSlashQuery('/lint', 5)).toBe('lint')
+    expect(detectSlashQuery('hello /rev', 10)).toBe('rev')
+    expect(detectSlashQuery('/workspace/foo', 14)).toBeNull()
+    expect(detectSlashQuery('no slash', 8)).toBeNull()
+  })
+
+  it('filters skills by name and consumes the slash query', () => {
+    const skills = [
+      { id: 's1', name: 'Lint rules' },
+      { id: 's2', name: 'Review' },
+    ]
+    const hits = filterSkillCandidates('lin', skills)
+    expect(hits).toEqual([{ kind: 'skill', label: 'Lint rules', insert: 's1' }])
+    const consumed = consumeSlashQuery('hello /lin', 10)
+    expect(consumed.text).toBe('hello ')
   })
 })

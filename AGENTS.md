@@ -358,7 +358,7 @@ Six separate routers:
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
 | `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
-| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/` |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/`, `GET /provider-config/models/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 

@@ -301,17 +301,19 @@ async function handleSend(
   mode: HarnessSessionMode,
   model: string,
   skillIds: string[],
+  effort: string,
 ): Promise<void> {
   if (isSubagentSession.value) return
   sending.value = true
   try {
     if (!harness.activeSessionId) {
-      await harness.createSession(props.workspaceId, prompt, mode, model, skillIds)
+      await harness.createSession(props.workspaceId, prompt, mode, model, skillIds, effort)
     } else {
       await harness.sendMessage(harness.activeSessionId, prompt, {
         mode,
         model,
         skillIds,
+        reasoningEffort: effort,
       })
     }
   } finally {
@@ -443,6 +445,7 @@ const desktopButtonTitle = computed(() => {
         :busy-message="busyMessage"
         :mode="composerMode"
         :model="harness.modelInput"
+        :effort="harness.effortInput"
         :workspace-id="props.workspaceId"
         :session-id="harness.activeSessionId"
         :files="fileExplorer.tree"
@@ -451,6 +454,7 @@ const desktopButtonTitle = computed(() => {
         :mention-active-index="mentionActiveIndex"
         @update:mode="composerMode = $event"
         @update:model="harness.modelInput = $event"
+        @update:effort="harness.effortInput = $event"
         @send="handleSend"
         @stop="handleStop"
         @mention-change="
