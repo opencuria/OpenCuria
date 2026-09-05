@@ -18,6 +18,26 @@ import type {
   FilesUploadResultEvent,
   FilesDownloadResultEvent,
 } from '@/types'
+import type {
+  HarnessPartUpdatedEvent,
+  HarnessPermissionRequiredEvent,
+  HarnessPermissionResolvedEvent,
+  HarnessSessionStatusEvent,
+  HarnessSubtaskFinishedEvent,
+  HarnessSubtaskStartedEvent,
+  HarnessTodoUpdatedEvent,
+} from '@/types/harness'
+
+// Re-exported for socket listeners in harness views (avoids a second import).
+export type {
+  HarnessPartUpdatedEvent,
+  HarnessPermissionRequiredEvent,
+  HarnessPermissionResolvedEvent,
+  HarnessSessionStatusEvent,
+  HarnessSubtaskFinishedEvent,
+  HarnessSubtaskStartedEvent,
+  HarnessTodoUpdatedEvent,
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -150,6 +170,12 @@ type EventMap = {
   'session:status': SessionStatusEvent
   'session:completed': SessionCompleteEvent
   'session:failed': SessionFailedEvent
+  'harness.part_updated': HarnessPartUpdatedEvent
+  'harness.permission_required': HarnessPermissionRequiredEvent
+  'harness.session_status': HarnessSessionStatusEvent
+  'harness.todo_updated': HarnessTodoUpdatedEvent
+  'harness.subtask_started': HarnessSubtaskStartedEvent
+  'harness.subtask_finished': HarnessSubtaskFinishedEvent
   'terminal:started': TerminalStartedEvent
   'terminal:output': TerminalOutputEvent
   'terminal:closed': TerminalClosedEvent
