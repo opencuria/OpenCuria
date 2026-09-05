@@ -25,8 +25,7 @@ from apps.organizations.models import Organization
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
 TINY_JPEG = (
-    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-    b"\xff\xd9"
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
 )
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
@@ -117,6 +116,22 @@ class FakeAccessor(WorkspaceAccessor):
             )
         if action == "ensure":
             return {"ok": True, "display": ":1", "port": 5900}
+        if action == "hold":
+            return {
+                "ok": True,
+                "display": ":1",
+                "port": 5900,
+                "viewer": False,
+                "computer_use": True,
+            }
+        if action == "release":
+            return {
+                "ok": True,
+                "stopped": True,
+                "process_alive": False,
+                "viewer_held": False,
+                "computer_use_active": False,
+            }
         if action == "record_start":
             run_id = str((args or {}).get("run_id") or "run")
             path = f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"

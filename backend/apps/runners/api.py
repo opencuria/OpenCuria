@@ -61,6 +61,7 @@ from .schemas import (
     DesktopStartOut,
     DesktopStopOut,
     DesktopStatusOut,
+    DesktopTakeControlOut,
     DesktopClipboardWriteIn,
     DesktopClipboardReadOut,
     WorkspaceCreateIn,
@@ -106,6 +107,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         runner_online = bool(workspace.runner_is_online)
     elif hasattr(workspace, "runner") and workspace.runner is not None:
         from .enums import RunnerStatus as RS
+
         runner_online = workspace.runner.status == RS.ONLINE
 
     auto_stop_timeout_minutes = None
@@ -148,7 +150,9 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         delete_attempt_count=getattr(workspace, "delete_attempt_count", 0) or 0,
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
-        has_active_session=bool(getattr(workspace, "has_active_harness_session", False)),
+        has_active_session=bool(
+            getattr(workspace, "has_active_harness_session", False)
+        ),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
         credentials_present=bool(getattr(workspace, "credentials_present", False)),
@@ -187,19 +191,25 @@ def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
         base = base[:255]
 
     candidate = base
-    if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+    if not ImageDefinition.objects.filter(
+        organization_id=org_id, name=candidate
+    ).exists():
         return candidate
 
     suffix = " (Copy)"
     candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-    if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+    if not ImageDefinition.objects.filter(
+        organization_id=org_id, name=candidate
+    ).exists():
         return candidate
 
     index = 2
     while True:
         suffix = f" (Copy {index})"
         candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-        if not ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
+        if not ImageDefinition.objects.filter(
+            organization_id=org_id, name=candidate
+        ).exists():
             return candidate
         index += 1
 
@@ -226,7 +236,9 @@ async def _get_org_admin_flag_async(request: HttpRequest, org_id: uuid.UUID) -> 
     return role == "admin"
 
 
-async def _require_org_membership_async(request: HttpRequest, org_id: uuid.UUID) -> None:
+async def _require_org_membership_async(
+    request: HttpRequest, org_id: uuid.UUID
+) -> None:
     """Validate organization membership for async endpoints."""
     org_service = _get_org_service()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
@@ -239,7 +251,9 @@ def _is_org_admin(user, org_id: uuid.UUID) -> bool:
     return org_service.get_user_role(user, org_id) == "admin"
 
 
-def _get_owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):
+def _get_owned_workspace(
+    request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
+):
     """Return a workspace only when it belongs to the active org and owner."""
     service = _get_service()
     try:
@@ -284,9 +298,11 @@ def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
     """Return a visible image definition for an organization."""
     from .models import ImageDefinition
 
-    return ImageDefinition.objects.filter(id=definition_id).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id)
-    ).first()
+    return (
+        ImageDefinition.objects.filter(id=definition_id)
+        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+        .first()
+    )
 
 
 def _get_build_job_for_org(
@@ -319,7 +335,9 @@ def _get_build_job_for_org(
 runner_router = Router(tags=["runners"])
 
 
-@runner_router.get("/", response={200: list[RunnerOut], 403: ErrorOut}, summary="List runners")
+@runner_router.get(
+    "/", response={200: list[RunnerOut], 403: ErrorOut}, summary="List runners"
+)
 def list_runners(request: HttpRequest):
     """Return all runners for the user's active organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
@@ -367,7 +385,9 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     )
 
 
-@runner_router.get("/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut})
+@runner_router.get(
+    "/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut}
+)
 def get_runner(request: HttpRequest, runner_id: uuid.UUID):
     """Return a runner by ID. User must be a member of the runner's organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
@@ -389,7 +409,13 @@ def get_runner(request: HttpRequest, runner_id: uuid.UUID):
 
 @runner_router.patch(
     "/{runner_id}/",
-    response={200: RunnerOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: RunnerOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Update runner QEMU settings",
 )
 def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpdateIn):
@@ -455,7 +481,9 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     response={200: list[RunnerSystemMetricsOut], 404: ErrorOut},
     summary="Get system metrics history for a runner",
 )
-def get_runner_metrics_history(request: HttpRequest, runner_id: uuid.UUID, hours: int = 24):
+def get_runner_metrics_history(
+    request: HttpRequest, runner_id: uuid.UUID, hours: int = 24
+):
     """Return historical system metrics for a runner (default: last 24h)."""
     org_id = _get_org_id(request)
     org_service = _get_org_service()
@@ -478,7 +506,8 @@ def get_runner_metrics_history(request: HttpRequest, runner_id: uuid.UUID, hours
             disk_used_bytes=m.disk_used_bytes,
             disk_total_bytes=m.disk_total_bytes,
             vm_metrics=m.vm_metrics,
-        ) for m in metrics
+        )
+        for m in metrics
     ]
 
 
@@ -580,6 +609,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
         from .enums import RunnerStatus as RS
+
         return 200, WorkspaceOut(
             id=workspace.id,
             runner_id=workspace.runner_id,
@@ -687,7 +717,7 @@ async def stop_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
 ):
-    """Stop the desktop session in a workspace container."""
+    """Release the viewer lease. The display stays up if computer-use holds it."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
@@ -707,6 +737,42 @@ async def stop_desktop(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/take-control/",
+    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Take desktop control from computer-use",
+)
+async def take_desktop_control(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Abort busy computer-use sessions so the viewer can drive the desktop."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    org_id = _get_org_id(request)
+    is_admin = await _get_org_admin_flag_async(request, org_id)
+
+    service = _get_service()
+    try:
+        workspace = await sync_to_async(service.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != org_id:
+            raise NotFoundError("Workspace", str(workspace_id))
+        if not is_admin and workspace.created_by_id != request.user.id:
+            raise NotFoundError("Workspace", str(workspace_id))
+
+        from apps.harness.harness_service import get_harness_service
+
+        harness = get_harness_service()
+        aborted = await harness.abort_busy_computeruse_for_workspace(workspace_id)
+        return 200, DesktopTakeControlOut(
+            aborted_session_ids=[session.id for session in aborted]
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.get(
@@ -735,14 +801,27 @@ async def desktop_status(
         desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
         is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
-        return 200, DesktopStatusOut(active=is_active, proxy_url=proxy_url)
+        viewer_held = bool((desktop_info or {}).get("viewer"))
+        computer_use_active = bool((desktop_info or {}).get("computer_use"))
+        return 200, DesktopStatusOut(
+            active=is_active,
+            proxy_url=proxy_url,
+            viewer_held=viewer_held,
+            computer_use_active=computer_use_active,
+        )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.post(
     "/{workspace_id}/desktop/clipboard/write/",
-    response={200: DesktopClipboardReadOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: DesktopClipboardReadOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Write text into desktop clipboard",
 )
 async def desktop_clipboard_write(
@@ -777,7 +856,12 @@ async def desktop_clipboard_write(
 
 @workspace_router.post(
     "/{workspace_id}/desktop/clipboard/read/",
-    response={200: DesktopClipboardReadOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: DesktopClipboardReadOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Read text from desktop clipboard",
 )
 async def desktop_clipboard_read(
@@ -808,10 +892,18 @@ async def desktop_clipboard_read(
 
 @workspace_router.patch(
     "/{workspace_id}/",
-    response={200: WorkspaceUpdateOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    response={
+        200: WorkspaceUpdateOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Update a workspace",
 )
-async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceUpdateIn):
+async def update_workspace(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceUpdateIn
+):
     """Update mutable workspace metadata."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
@@ -825,7 +917,9 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
         resolved_credentials = None
         if payload.credential_ids is not None:
             credential_svc = CredentialSvc()
-            resolved_credentials = await sync_to_async(credential_svc.resolve_credentials)(
+            resolved_credentials = await sync_to_async(
+                credential_svc.resolve_credentials
+            )(
                 payload.credential_ids,
                 org_id=org_id,
                 user=request.user,
@@ -834,7 +928,11 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
         workspace = await service.update_workspace(
             workspace_id,
             name=payload.name,
-            credentials=(resolved_credentials.credentials if resolved_credentials is not None else None),
+            credentials=(
+                resolved_credentials.credentials
+                if resolved_credentials is not None
+                else None
+            ),
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
@@ -1091,7 +1189,9 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(
+            image_artifact_id
+        )
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1130,7 +1230,9 @@ async def create_workspace_from_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+        artifact = await sync_to_async(service.image_instances.get_by_id)(
+            image_artifact_id
+        )
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1380,7 +1482,9 @@ def list_image_definitions(request: HttpRequest):
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     service = _get_service()
-    return 200, [_image_definition_to_out(d) for d in service.list_image_definitions(org_id)]
+    return 200, [
+        _image_definition_to_out(d) for d in service.list_image_definitions(org_id)
+    ]
 
 
 @image_definition_router.post(
@@ -1439,9 +1543,11 @@ def duplicate_image_definition(
 
     from .models import ImageDefinition
 
-    source = ImageDefinition.objects.filter(id=definition_id).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id)
-    ).first()
+    source = (
+        ImageDefinition.objects.filter(id=definition_id)
+        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+        .first()
+    )
     if source is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
@@ -1513,7 +1619,13 @@ def update_image_definition(
 
 @image_definition_router.delete(
     "/{definition_id}/",
-    response={202: ImageDefinitionOut, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
+    response={
+        202: ImageDefinitionOut,
+        204: None,
+        404: ErrorOut,
+        403: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Delete image definition (orchestrated)",
 )
 async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
@@ -1527,14 +1639,18 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             return 204, None
         return 202, await sync_to_async(_image_definition_to_out)(definition)
@@ -1557,14 +1673,18 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -1583,14 +1703,18 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
     try:
         await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(service.image_definitions.get_by_id)(
+            definition_id
+        )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -1611,8 +1735,7 @@ def list_image_definition_runner_builds(request: HttpRequest, definition_id: uui
     if _get_image_definition_for_org(org_id, definition_id) is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     return 200, [
-        _build_job_to_out(b)
-        for b in service.list_build_jobs(definition_id, org_id)
+        _build_job_to_out(b) for b in service.list_build_jobs(definition_id, org_id)
     ]
 
 
@@ -1631,7 +1754,9 @@ async def create_image_definition_runner_build(
     org_id = _get_org_id(request)
     if not await _get_org_admin_flag_async(request, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    definition = await sync_to_async(_get_image_definition_for_org)(org_id, definition_id)
+    definition = await sync_to_async(_get_image_definition_for_org)(
+        org_id, definition_id
+    )
     if definition is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     runner = await sync_to_async(RunnerRepository.get_by_id)(payload.runner_id)
@@ -1689,7 +1814,9 @@ async def update_image_definition_runner_build(
             return 409, ErrorOut(detail=e.message, code=e.code)
         build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
-        await sync_to_async(build.save)(update_fields=["status", "deactivated_at", "updated_at"])
+        await sync_to_async(build.save)(
+            update_fields=["status", "deactivated_at", "updated_at"]
+        )
         return 200, _build_job_to_out(build)
 
     if action not in {"activate", "rebuild"}:
@@ -1734,7 +1861,9 @@ async def delete_image_definition_runner_build(
     if not await sync_to_async(_is_org_admin)(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    build = await sync_to_async(_get_build_job_for_org)(org_id, definition_id, runner_id)
+    build = await sync_to_async(_get_build_job_for_org)(
+        org_id, definition_id, runner_id
+    )
     if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
 

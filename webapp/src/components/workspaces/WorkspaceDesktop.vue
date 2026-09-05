@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste } from '@lucide/vue'
+import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -25,6 +25,7 @@ const desktopStore = useDesktopStore()
 const notifications = useNotificationStore()
 const error = ref<string | null>(null)
 const clipboardBusy = ref(false)
+const takeControlBusy = ref(false)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
 const cleanupFns: (() => void)[] = []
 const viewportHostRef = ref<HTMLElement | null>(null)
@@ -116,16 +117,14 @@ async function startDesktop(): Promise<void> {
 
   try {
     const status = await workspacesApi.getDesktopStatus(props.workspaceId)
-    if (status.active && status.proxy_url) {
-      desktopStore.setConnected(props.workspaceId, status.proxy_url)
-      return
-    }
+    desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
     await workspacesApi.startDesktop(props.workspaceId)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
       try {
         const status = await workspacesApi.getDesktopStatus(props.workspaceId)
+        desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
         if (status.active && status.proxy_url) {
           desktopStore.setConnected(props.workspaceId, status.proxy_url)
           return
@@ -170,6 +169,20 @@ function handleMinimize(): void {
 function handleReconnect(): void {
   desktopStore.setDisconnected()
   startDesktop()
+}
+
+async function takeControl(): Promise<void> {
+  if (takeControlBusy.value) return
+  takeControlBusy.value = true
+  desktopStore.setComputerUseActive(false)
+  try {
+    await workspacesApi.takeDesktopControl(props.workspaceId)
+  } catch (err: unknown) {
+    desktopStore.setComputerUseActive(true)
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    takeControlBusy.value = false
+  }
 }
 
 function toggleRotatePreset(): void {
@@ -354,10 +367,31 @@ onMounted(() => {
     onEvent('desktop:started', (data) => {
       if (data.workspace_id !== props.workspaceId) return
       desktopStore.setConnected(props.workspaceId, data.proxy_url)
+      if (data.computer_use_active) desktopStore.setComputerUseActive(true)
     }),
     onEvent('desktop:stopped', (data) => {
       if (data.workspace_id !== props.workspaceId) return
       desktopStore.setDisconnected()
+      desktopStore.setComputerUseActive(false)
+    }),
+    onEvent('desktop:viewer_released', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      desktopStore.setDisconnected()
+      desktopStore.setComputerUseActive(Boolean(data.computer_use_active))
+    }),
+    onEvent('harness.subtask_started', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      if ((data.agent || '').toLowerCase() !== 'computeruse') return
+      desktopStore.markComputerUseStarted(
+        data.child_session_id || data.subtask_id,
+      )
+    }),
+    onEvent('harness.subtask_finished', (data) => {
+      if (data.workspace_id !== props.workspaceId) return
+      if ((data.agent || '').toLowerCase() !== 'computeruse') return
+      desktopStore.markComputerUseFinished(
+        data.child_session_id || data.subtask_id,
+      )
     }),
     onEvent('workspace:error', (data) => {
       if (data.workspace_id !== props.workspaceId) return
@@ -496,6 +530,25 @@ watch(
               />
             </div>
           </div>
+          <div
+            v-if="desktopStore.computerUseActive"
+            class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
+            tabindex="0"
+            @keydown.prevent
+          >
+            <MousePointerClick :size="28" class="text-white" />
+            <p class="max-w-md text-sm text-white">
+              Computer-use is controlling this desktop. Watching is read-only.
+              Taking control aborts the computer-use agent.
+            </p>
+            <Button
+              size="sm"
+              :disabled="takeControlBusy"
+              @click="takeControl"
+            >
+              Take control
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -522,7 +575,7 @@ watch(
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy"
+              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
               title="Copy VM clipboard to local clipboard"
               @click="copyFromVmClipboard"
             >
@@ -532,7 +585,7 @@ watch(
               variant="ghost"
               size="icon-sm"
               class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy"
+              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
               title="Paste local clipboard into VM clipboard"
               @click="pasteToVmClipboard"
             >

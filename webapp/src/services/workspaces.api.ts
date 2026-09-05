@@ -74,9 +74,25 @@ export function stopDesktop(id: string): Promise<{ task_id: string }> {
 
 export function getDesktopStatus(
   id: string,
-): Promise<{ active: boolean; proxy_url: string | null }> {
-  return get<{ active: boolean; proxy_url: string | null }>(
-    `/workspaces/${id}/desktop/status/`,
+): Promise<{
+  active: boolean
+  proxy_url: string | null
+  viewer_held: boolean
+  computer_use_active: boolean
+}> {
+  return get<{
+    active: boolean
+    proxy_url: string | null
+    viewer_held: boolean
+    computer_use_active: boolean
+  }>(`/workspaces/${id}/desktop/status/`)
+}
+
+export function takeDesktopControl(
+  id: string,
+): Promise<{ aborted_session_ids: string[] }> {
+  return post<{ aborted_session_ids: string[] }>(
+    `/workspaces/${id}/desktop/take-control/`,
   )
 }
 

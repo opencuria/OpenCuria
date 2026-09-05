@@ -35,9 +35,7 @@ from .base import Interface
 logger = structlog.get_logger(__name__)
 
 
-async def _stream_with_timeout(
-    agen, timeout_s: float
-):
+async def _stream_with_timeout(agen, timeout_s: float):
     """Yield items from *agen* enforcing an overall timeout."""
     iterator = agen.__aiter__()
     loop = asyncio.get_running_loop()
@@ -65,9 +63,7 @@ class DesktopProxyTunnel:
 class WebSocketInterface(Interface):
     """python-socketio async client that bridges backend ↔ service."""
 
-    def __init__(
-        self, service: WorkspaceService, settings: RunnerSettings
-    ) -> None:
+    def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
         super().__init__(service)
         self._settings = settings
         self._sio = socketio.AsyncClient(
@@ -420,31 +416,30 @@ class WebSocketInterface(Interface):
                     "status": "ready",
                 },
             )
-            # Re-announce any live desktop sessions so the backend can
-            # reconstruct proxy state immediately after reconnects/restarts.
+            # Re-announce live desktop processes so the backend can
+            # reconstruct VNC proxy routing. Do not treat this as a
+            # viewer acquire — desktop:started is reserved for that.
             for workspace in await self._service.get_workspace_heartbeat_statuses():
                 desktop = workspace.get("desktop")
                 if not desktop:
                     continue
                 await sio.emit(
-                    "desktop:started",
+                    "desktop:process",
                     {
                         "workspace_id": workspace["workspace_id"],
                         "port": desktop["port"],
                         "container_ip": desktop["container_ip"],
                         "network_name": desktop["network_name"],
+                        "viewer": bool(desktop.get("viewer")),
+                        "computer_use": bool(desktop.get("computer_use")),
                     },
                 )
             # Start heartbeat
             if self._heartbeat_task is None or self._heartbeat_task.done():
-                self._heartbeat_task = asyncio.create_task(
-                    self._heartbeat_loop()
-                )
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
-                self._metrics_task = asyncio.create_task(
-                    self._metrics_loop()
-                )
+                self._metrics_task = asyncio.create_task(self._metrics_loop())
             # Start SSH health check loop (self-healing)
             if self._health_check_task is None or self._health_check_task.done():
                 self._health_check_task = asyncio.create_task(
@@ -528,6 +523,7 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, build_job_id=build_job_id)
             log.info("task_received", task="build_image", runtime_type=runtime_type)
             try:
+
                 async def _progress(line: str) -> None:
                     await sio.emit(
                         "image:build_progress",
@@ -572,9 +568,7 @@ class WebSocketInterface(Interface):
         async def on_stop_workspace(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 credentials_present = await self._service.stop_workspace(workspace_id)
                 await sio.emit(
@@ -597,9 +591,7 @@ class WebSocketInterface(Interface):
         async def on_resume_workspace(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 credentials_present = await self._service.resume_workspace(
                     workspace_id,
@@ -660,9 +652,7 @@ class WebSocketInterface(Interface):
         async def on_inject_credentials(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 credentials_present = await self._service.inject_credentials(
                     workspace_id,
@@ -693,9 +683,7 @@ class WebSocketInterface(Interface):
         async def on_remove_workspace(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 # Check if workspace exists in cache before removal
                 already_absent = workspace_id not in self._service._cache
@@ -723,9 +711,7 @@ class WebSocketInterface(Interface):
             log = logger.bind(workspace_id=raw_workspace_id)
             try:
                 workspace_id = uuid.UUID(raw_workspace_id)
-                cleaned = await self._service.cleanup_unknown_workspace(
-                    workspace_id
-                )
+                cleaned = await self._service.cleanup_unknown_workspace(workspace_id)
                 await sio.emit(
                     "workspace:cleanup_unknown_done",
                     {
@@ -752,9 +738,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             log.info("task_received", task="start_terminal")
 
             try:
@@ -775,17 +759,13 @@ class WebSocketInterface(Interface):
                 # Start background reader task
                 async def _read_pty() -> None:
                     try:
-                        async for chunk in self._service.read_terminal(
-                            terminal_id
-                        ):
+                        async for chunk in self._service.read_terminal(terminal_id):
                             await sio.emit(
                                 "terminal:output",
                                 {
                                     "workspace_id": str(workspace_id),
                                     "terminal_id": terminal_id,
-                                    "data": base64.b64encode(chunk).decode(
-                                        "ascii"
-                                    ),
+                                    "data": base64.b64encode(chunk).decode("ascii"),
                                 },
                             )
                     except Exception:
@@ -802,9 +782,7 @@ class WebSocketInterface(Interface):
                                 "terminal_id": terminal_id,
                             },
                         )
-                        self._running_tasks.pop(
-                            f"terminal:{terminal_id}", None
-                        )
+                        self._running_tasks.pop(f"terminal:{terminal_id}", None)
 
                 reader = asyncio.create_task(_read_pty())
                 self._running_tasks[f"terminal:{terminal_id}"] = reader
@@ -824,9 +802,7 @@ class WebSocketInterface(Interface):
             try:
                 await self._service.write_terminal(terminal_id, raw)
             except Exception:
-                logger.exception(
-                    "terminal_write_failed", terminal_id=terminal_id
-                )
+                logger.exception("terminal_write_failed", terminal_id=terminal_id)
 
         @sio.on("terminal:resize")
         async def on_terminal_resize(data: dict) -> None:
@@ -836,9 +812,7 @@ class WebSocketInterface(Interface):
             try:
                 await self._service.resize_terminal(terminal_id, cols, rows)
             except Exception:
-                logger.exception(
-                    "terminal_resize_failed", terminal_id=terminal_id
-                )
+                logger.exception("terminal_resize_failed", terminal_id=terminal_id)
 
         @sio.on("terminal:close")
         async def on_terminal_close(data: dict) -> None:
@@ -846,9 +820,7 @@ class WebSocketInterface(Interface):
             workspace_id = data.get("workspace_id", "")
             try:
                 # Cancel the reader task
-                reader = self._running_tasks.pop(
-                    f"terminal:{terminal_id}", None
-                )
+                reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
                 if reader:
                     reader.cancel()
                 await self._service.close_terminal(terminal_id)
@@ -860,9 +832,7 @@ class WebSocketInterface(Interface):
                     },
                 )
             except Exception:
-                logger.exception(
-                    "terminal_close_failed", terminal_id=terminal_id
-                )
+                logger.exception("terminal_close_failed", terminal_id=terminal_id)
 
         # -- desktop session events --------------------------------------------
 
@@ -888,9 +858,13 @@ class WebSocketInterface(Interface):
                         "port": session.port,
                         "container_ip": container_ip,
                         "network_name": network_name,
+                        "viewer": session.viewer_held,
+                        "computer_use": bool(session.computeruse_run_ids),
                     },
                 )
-                log.info("desktop_started", port=session.port, container_ip=container_ip)
+                log.info(
+                    "desktop_started", port=session.port, container_ip=container_ip
+                )
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -906,15 +880,29 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="stop_desktop")
 
             try:
-                await self._service.stop_desktop(workspace_id)
-                await sio.emit(
-                    "desktop:stopped",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                    },
-                )
-                log.info("desktop_stopped")
+                result = await self._service.stop_desktop(workspace_id)
+                if result.stopped or not result.process_alive:
+                    await sio.emit(
+                        "desktop:stopped",
+                        {
+                            "task_id": task_id,
+                            "workspace_id": str(workspace_id),
+                        },
+                    )
+                    log.info("desktop_stopped")
+                else:
+                    await sio.emit(
+                        "desktop:viewer_released",
+                        {
+                            "task_id": task_id,
+                            "workspace_id": str(workspace_id),
+                            "computer_use_active": result.computer_use_active,
+                        },
+                    )
+                    log.info(
+                        "desktop_viewer_released",
+                        computer_use_active=result.computer_use_active,
+                    )
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -991,17 +979,13 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             timeout = data.get("timeout")
-            log = logger.bind(
-                workspace_id=str(workspace_id), request_id=request_id
-            )
+            log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="exec_stream")
             task_key = f"harness:{request_id}"
 
             async def _run() -> None:
                 try:
-                    timeout_s = (
-                        float(timeout) if timeout is not None else None
-                    )
+                    timeout_s = float(timeout) if timeout is not None else None
                     coro = self._service.exec_harness_command_stream(
                         workspace_id,
                         data.get("command", []),
@@ -1009,9 +993,7 @@ class WebSocketInterface(Interface):
                         env=data.get("env", {}),
                     )
                     if timeout_s is not None:
-                        async for stream, text in _stream_with_timeout(
-                            coro, timeout_s
-                        ):
+                        async for stream, text in _stream_with_timeout(coro, timeout_s):
                             if stream == "exit":
                                 await _harness_result(
                                     "harness:exec_done",
@@ -1085,9 +1067,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             timeout = data.get("timeout")
-            log = logger.bind(
-                workspace_id=str(workspace_id), request_id=request_id
-            )
+            log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="exec_wait")
             try:
                 timeout_s = float(timeout) if timeout is not None else None
@@ -1098,9 +1078,7 @@ class WebSocketInterface(Interface):
                     env=data.get("env", {}),
                 )
                 if timeout_s is not None:
-                    exit_code, stdout, stderr = await asyncio.wait_for(
-                        coro, timeout_s
-                    )
+                    exit_code, stdout, stderr = await asyncio.wait_for(coro, timeout_s)
                 else:
                     exit_code, stdout, stderr = await coro
                 await _harness_result(
@@ -1203,9 +1181,7 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             path = data.get("path", "/workspace")
             try:
-                raw_entries = await self._service.list_files(
-                    workspace_id, path
-                )
+                raw_entries = await self._service.list_files(workspace_id, path)
                 entries = [
                     {
                         "name": entry.get("name", ""),
@@ -1271,9 +1247,7 @@ class WebSocketInterface(Interface):
             action = data.get("action", "")
             args = data.get("args") or {}
             try:
-                result = await self._service.desktop_action(
-                    workspace_id, action, args
-                )
+                result = await self._service.desktop_action(workspace_id, action, args)
                 await _harness_result(
                     "harness:desktop_action_result",
                     {
@@ -1441,14 +1415,10 @@ class WebSocketInterface(Interface):
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
             name = data["name"]
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             log.info("task_received", task="create_image_artifact")
             try:
-                artifact = await self._service.create_image_artifact(
-                    workspace_id, name
-                )
+                artifact = await self._service.create_image_artifact(workspace_id, name)
                 await sio.emit(
                     "image_artifact:created",
                     {
@@ -1480,9 +1450,7 @@ class WebSocketInterface(Interface):
         async def on_list_image_artifacts(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
+            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 artifacts = await self._service.list_image_artifacts(workspace_id)
                 await sio.emit(
@@ -1543,7 +1511,11 @@ class WebSocketInterface(Interface):
                         "already_absent": result == "already_absent",
                     },
                 )
-                log.info("image_artifact_deleted", image_artifact_id=image_artifact_id, result=result)
+                log.info(
+                    "image_artifact_deleted",
+                    image_artifact_id=image_artifact_id,
+                    result=result,
+                )
             except Exception as exc:
                 await sio.emit(
                     "image_artifact:delete_failed",
@@ -1556,14 +1528,15 @@ class WebSocketInterface(Interface):
             task_id = data.get("task_id", str(uuid.uuid4()))
             image_artifact_id = data["image_artifact_id"]
             raw_ws_id = data.get("workspace_id")
-            new_workspace_id = (
-                uuid.UUID(raw_ws_id) if raw_ws_id else uuid.uuid4()
-            )
+            new_workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else uuid.uuid4()
             runtime_type = data.get("runtime_type", "qemu")
             log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             log.info("task_received", task="create_workspace_from_image_artifact")
             try:
-                ws_id, credentials_present = await self._service.create_workspace_from_image_artifact(
+                (
+                    ws_id,
+                    credentials_present,
+                ) = await self._service.create_workspace_from_image_artifact(
                     image_artifact_id=image_artifact_id,
                     new_workspace_id=new_workspace_id,
                     runtime_type=runtime_type,

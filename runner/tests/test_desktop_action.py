@@ -54,6 +54,7 @@ async def test_ensure_calls_start_desktop(service: WorkspaceService) -> None:
     assert result["ok"] is True
     assert result["display"] == ":1"
     assert service._workspace_id in service._desktop_sessions
+    assert service._desktop_sessions[service._workspace_id].viewer_held is False
 
 
 @pytest.mark.asyncio
@@ -68,6 +69,33 @@ async def test_ensure_returns_existing_live_session(service: WorkspaceService) -
 
     assert result["ok"] is True
     assert service._runtime.exec_command_wait.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_hold_and_release_computer_use_lease(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, ""),
+    ]
+
+    held = await service.desktop_action(
+        service._workspace_id,
+        "hold",
+        {"kind": "computeruse", "run_id": "run-1"},
+    )
+    assert held["ok"] is True
+    assert held["computer_use"] is True
+    session = service._desktop_sessions[service._workspace_id]
+    assert "run-1" in session.computeruse_run_ids
+
+    released = await service.desktop_action(
+        service._workspace_id,
+        "release",
+        {"kind": "computeruse", "run_id": "run-1"},
+    )
+    assert released["ok"] is True
+    assert released["stopped"] is True
+    assert service._workspace_id not in service._desktop_sessions
 
 
 @pytest.mark.asyncio

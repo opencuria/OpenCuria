@@ -36,6 +36,7 @@ Tools and their required permissions
 - create_harness_session → harness:run
 - send_harness_message → harness:run
 - abort_harness_session → harness:run
+- take_desktop_control → harness:run (also requires terminal:access)
 - list_harness_parts → harness:read
 - list_harness_todos → harness:read
 - resolve_harness_permission → harness:permissions
@@ -101,8 +102,6 @@ _TOOLS: list[Tool] = [
             "required": ["workspace_id"],
         },
     ),
-
-
     Tool(
         name="create_workspace",
         description="Create a new workspace on a runner.",
@@ -110,7 +109,10 @@ _TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Workspace name."},
-                "runner_id": {"type": "string", "description": "Runner UUID to host the workspace."},
+                "runner_id": {
+                    "type": "string",
+                    "description": "Runner UUID to host the workspace.",
+                },
                 "repos": {
                     "type": "array",
                     "items": {
@@ -169,15 +171,11 @@ _TOOLS: list[Tool] = [
             "required": ["workspace_id"],
         },
     ),
-
-
     Tool(
         name="list_runners",
         description="List runners in the active organization.",
         inputSchema={"type": "object", "properties": {}},
     ),
-
-
     Tool(
         name="list_image_artifacts",
         description="List image artifacts owned by the current user.",
@@ -290,7 +288,10 @@ _TOOLS: list[Tool] = [
             "properties": {
                 "definition_id": {"type": "string"},
                 "runner_id": {"type": "string"},
-                "action": {"type": "string", "enum": ["deactivate", "activate", "rebuild"]},
+                "action": {
+                    "type": "string",
+                    "enum": ["deactivate", "activate", "rebuild"],
+                },
             },
             "required": ["definition_id", "runner_id", "action"],
         },
@@ -413,6 +414,18 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="take_desktop_control",
+        description=(
+            "Abort busy computer-use agents on a workspace so a human can "
+            "drive the shared desktop."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"workspace_id": {"type": "string"}},
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
         name="list_harness_parts",
         description="List messages and parts of a harness session.",
         inputSchema={
@@ -504,12 +517,6 @@ _TOOLS: list[Tool] = [
             "required": ["session_id", "question_id"],
         },
     ),
-
-
-
-
-
-
     Tool(
         name="list_org_credential_services",
         description="List all credential services with organization activation status (admin).",
@@ -559,6 +566,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "create_harness_session": APIKeyPermission.HARNESS_RUN,
     "send_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
+    "take_desktop_control": APIKeyPermission.HARNESS_RUN,
     "list_harness_parts": APIKeyPermission.HARNESS_READ,
     "list_harness_todos": APIKeyPermission.HARNESS_READ,
     "resolve_harness_permission": APIKeyPermission.HARNESS_PERMISSIONS,
@@ -576,6 +584,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
 # ---------------------------------------------------------------------------
 # Helper: serialise Django model instances to JSON-friendly dicts
 # ---------------------------------------------------------------------------
+
 
 def _serialise(obj) -> dict:
     """Convert a Django ORM-returned dict/object to a JSON-safe dict."""
@@ -595,7 +604,11 @@ def _serialise(obj) -> dict:
 
 def _text(data) -> list[TextContent]:
     """Wrap arbitrary data as a JSON text MCP response."""
-    return [TextContent(type="text", text=json.dumps(_serialise(data), indent=2, default=str))]
+    return [
+        TextContent(
+            type="text", text=json.dumps(_serialise(data), indent=2, default=str)
+        )
+    ]
 
 
 def _error(msg: str) -> list[TextContent]:
@@ -626,6 +639,7 @@ def _get_owned_workspace_or_error(api_key, org_id, workspace_id):
 # ---------------------------------------------------------------------------
 # Tool execution logic
 # ---------------------------------------------------------------------------
+
 
 def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.runners.sio_server import get_runner_service
@@ -739,12 +753,14 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         loop = asyncio.new_event_loop()
         workspace, task = loop.run_until_complete(_create())
         loop.close()
-        return _text({
-            "workspace_id": str(workspace.id),
-            "task_id": str(task.id),
-            "status": str(workspace.status),
-            "message": "Workspace creation started. Use get_workspace to check status.",
-        })
+        return _text(
+            {
+                "workspace_id": str(workspace.id),
+                "task_id": str(task.id),
+                "status": str(workspace.status),
+                "message": "Workspace creation started. Use get_workspace to check status.",
+            }
+        )
     except (NotFoundError, ConflictError) as e:
         return _error(str(e))
 
@@ -1029,9 +1045,11 @@ def _call_duplicate_image_definition(api_key, org_id, args: dict) -> list[TextCo
     if org_service.get_user_role(api_key.user, org_id) != "admin":
         return _error("Admin role required")
 
-    source = ImageDefinition.objects.filter(id=definition_id).filter(
-        Q(organization__isnull=True) | Q(organization_id=org_id)
-    ).first()
+    source = (
+        ImageDefinition.objects.filter(id=definition_id)
+        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+        .first()
+    )
     if source is None:
         return _error("Image definition not found")
 
@@ -1208,7 +1226,9 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
                 "runner_id": str(build.runner_id),
                 "status": build.status,
                 "build_log": build.build_log,
-                "build_task_id": str(build.build_task_id) if build.build_task_id else None,
+                "build_task_id": str(build.build_task_id)
+                if build.build_task_id
+                else None,
                 "built_at": build.built_at.isoformat() if build.built_at else None,
                 "deactivated_at": (
                     build.deactivated_at.isoformat() if build.deactivated_at else None
@@ -1668,6 +1688,41 @@ def _call_abort_harness_session(api_key, org_id, args: dict) -> list[TextContent
     return _text(_session_dict(updated))
 
 
+def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]:
+    """Abort busy computer-use sessions so a human can drive the desktop."""
+    import asyncio
+    import uuid as _uuid
+
+    from apps.accounts.models import APIKeyPermission
+
+    if not api_key.has_permission(APIKeyPermission.TERMINAL_ACCESS):
+        return _error(
+            f"Permission denied: {APIKeyPermission.TERMINAL_ACCESS.value} required"
+        )
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    async def _abort():
+        return await service.abort_busy_computeruse_for_workspace(workspace.id)
+
+    loop = asyncio.new_event_loop()
+    aborted = loop.run_until_complete(_abort())
+    loop.close()
+    return _text({"aborted_session_ids": [str(session.id) for session in aborted]})
+
+
 def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
     import uuid as _uuid
 
@@ -1950,8 +2005,13 @@ def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextCont
         return _error(str(exc))
 
 
-def _call_list_org_credential_services(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+def _call_list_org_credential_services(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    from apps.credentials.models import (
+        CredentialService,
+        OrgCredentialServiceActivation,
+    )
 
     try:
         _require_org_admin(api_key.user, org_id)
@@ -1959,9 +2019,9 @@ def _call_list_org_credential_services(api_key, org_id, args: dict) -> list[Text
         return _error(str(exc))
 
     activated_ids = set(
-        OrgCredentialServiceActivation.objects.filter(organization_id=org_id).values_list(
-            "credential_service_id", flat=True
-        )
+        OrgCredentialServiceActivation.objects.filter(
+            organization_id=org_id
+        ).values_list("credential_service_id", flat=True)
     )
     services = CredentialService.objects.all().order_by("name")
     return _text(
@@ -1981,8 +2041,13 @@ def _call_list_org_credential_services(api_key, org_id, args: dict) -> list[Text
     )
 
 
-def _call_toggle_org_credential_service_activation(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+def _call_toggle_org_credential_service_activation(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    from apps.credentials.models import (
+        CredentialService,
+        OrgCredentialServiceActivation,
+    )
 
     try:
         _require_org_admin(api_key.user, org_id)
@@ -2058,6 +2123,7 @@ _TOOL_HANDLERS = {
     "create_harness_session": _call_create_harness_session,
     "send_harness_message": _call_send_harness_message,
     "abort_harness_session": _call_abort_harness_session,
+    "take_desktop_control": _call_take_desktop_control,
     "list_harness_parts": _call_list_harness_parts,
     "list_harness_todos": _call_list_harness_todos,
     "resolve_harness_permission": _call_resolve_harness_permission,
@@ -2076,6 +2142,7 @@ _TOOL_HANDLERS = {
 # Build the MCP Server factory (called once per SSE connection)
 # ---------------------------------------------------------------------------
 
+
 def create_mcp_server(api_key) -> Server:
     """
     Create a per-connection MCP Server instance bound to the given API key.
@@ -2086,8 +2153,7 @@ def create_mcp_server(api_key) -> Server:
 
     # Filter tools to those permitted by this API key
     allowed_tools = [
-        tool for tool in _TOOLS
-        if api_key.has_permission(_TOOL_PERMISSIONS[tool.name])
+        tool for tool in _TOOLS if api_key.has_permission(_TOOL_PERMISSIONS[tool.name])
     ]
 
     @server.list_tools()
@@ -2110,11 +2176,13 @@ def create_mcp_server(api_key) -> Server:
 
         # Determine org_id from user's first org membership
         from apps.organizations.services import OrganizationService
+
         org_service = OrganizationService()
         orgs = await sync_to_async(org_service.list_user_organizations)(api_key.user)
         if not orgs:
             return _error("User is not a member of any organization")
         import uuid as _uuid
+
         org_id = _uuid.UUID(str(orgs[0]["id"]))
 
         try:
@@ -2228,7 +2296,9 @@ class _StreamableHTTPSessionManager:
             )
             return session
 
-    async def get_session(self, session_id: str | None) -> _StreamableHTTPSession | None:
+    async def get_session(
+        self, session_id: str | None
+    ) -> _StreamableHTTPSession | None:
         if not session_id:
             return None
         session = self._sessions.get(session_id)
@@ -2251,10 +2321,9 @@ class _StreamableHTTPSessionManager:
 
 
 async def _authenticate_request(request: Request):
-    token = (
-        request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        or request.headers.get("x-api-key", "")
-    )
+    token = request.headers.get("authorization", "").removeprefix(
+        "Bearer "
+    ).strip() or request.headers.get("x-api-key", "")
 
     from asgiref.sync import sync_to_async
     from .auth import authenticate_api_key
@@ -2346,7 +2415,9 @@ def build_mcp_app() -> Starlette:
         api_key = await _authenticate_request(request)
         if api_key is None:
             response = JSONResponse(
-                {"error": "Invalid or missing API key. Ensure the key has the mcp:access permission."},
+                {
+                    "error": "Invalid or missing API key. Ensure the key has the mcp:access permission."
+                },
                 status_code=401,
             )
             await response(scope, receive, send)
@@ -2354,9 +2425,7 @@ def build_mcp_app() -> Starlette:
 
         mcp_server = create_mcp_server(api_key)
 
-        async with sse_transport.connect_sse(
-            scope, request.receive, send
-        ) as streams:
+        async with sse_transport.connect_sse(scope, request.receive, send) as streams:
             await mcp_server.run(
                 streams[0],
                 streams[1],

@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 import structlog
 
 from .config import RunnerSettings
-from .models import DesktopSession, WorkspaceInfo
+from .models import DesktopReleaseResult, DesktopSession, WorkspaceInfo
 from .runtime.base import ImageArtifactInfo, PtyHandle, RuntimeBackend, WorkspaceConfig
 
 logger = structlog.get_logger(__name__)
@@ -55,9 +55,7 @@ _SHELL_OPERATOR_TOKENS = {
     "&>",
     "&>>",
 }
-_REDIRECTION_RE = re.compile(
-    r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$"
-)
+_REDIRECTION_RE = re.compile(r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$")
 
 WORKSPACE_CREDENTIAL_DIR = "/root/.opencuria-credentials"
 WORKSPACE_CREDENTIAL_MANIFEST = "/root/.opencuria-credentials/manifest"
@@ -77,6 +75,8 @@ DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
 COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+DESKTOP_HOLDER_VIEWER = "viewer"
+DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
 _SCROLL_BUTTONS = {
     "up": 4,
     "down": 5,
@@ -167,9 +167,7 @@ class WorkspaceService:
                     status=info.status,
                     runtime_type=runtime_type,
                     created_at=(
-                        existing.created_at
-                        if existing
-                        else datetime.now(timezone.utc)
+                        existing.created_at if existing else datetime.now(timezone.utc)
                     ),
                 )
 
@@ -237,10 +235,15 @@ class WorkspaceService:
             return ["bash", "-lc", raw_args]
 
         args = [str(arg) for arg in raw_args]
-        if len(args) >= 2 and args[0] in {"bash", "sh"} and args[1] in {
-            "-c",
-            "-lc",
-        }:
+        if (
+            len(args) >= 2
+            and args[0] in {"bash", "sh"}
+            and args[1]
+            in {
+                "-c",
+                "-lc",
+            }
+        ):
             return args
 
         if not any(
@@ -338,19 +341,19 @@ class WorkspaceService:
             "  home_prefix='${HOME}/'",
             '  if [ "$raw_path" = "~" ] || [ "$raw_path" = "${HOME}" ] || [ "$raw_path" = "${opencuria_credential_home}" ]; then',
             '    printf "%s\\n" "$opencuria_credential_home"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#"$tilde_prefix"}" != "$raw_path" ]; then',
             '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$tilde_prefix"}"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#"$home_prefix"}" != "$raw_path" ]; then',
             '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$home_prefix"}"',
-            '    return',
+            "    return",
             "  fi",
             '  if [ "${raw_path#/}" != "$raw_path" ]; then',
             '    printf "%s\\n" "$raw_path"',
-            '    return',
+            "    return",
             "  fi",
             '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
             "}",
@@ -359,7 +362,7 @@ class WorkspaceService:
             '  if [ ! -f "$env_file" ]; then',
             "    return",
             "  fi",
-            '  tmp_env=$(mktemp)',
+            "  tmp_env=$(mktemp)",
             f"  awk '/{WORKSPACE_CREDENTIAL_ENVIRONMENT_START}/{{skip=1}} "
             f"/{WORKSPACE_CREDENTIAL_ENVIRONMENT_END}/{{skip=0; next}} !skip' "
             '"$env_file" > "$tmp_env" || true',
@@ -414,7 +417,7 @@ class WorkspaceService:
                 '  while IFS= read -r file_path || [ -n "$file_path" ]; do',
                 '    [ -z "$file_path" ] && continue',
                 '    rm -f "$(opencuria_resolve_credential_path "$file_path")"',
-                "  done < \"$manifest\"",
+                '  done < "$manifest"',
                 "fi",
                 "opencuria_strip_environment_block",
                 f"rm -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
@@ -422,8 +425,8 @@ class WorkspaceService:
                 f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} ]; then",
                 "  tmp_bashrc=$(mktemp)",
                 f"  grep -vxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
-                f"{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} > \"$tmp_bashrc\" || true",
-                f"  cat \"$tmp_bashrc\" > {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                f'{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} > "$tmp_bashrc" || true',
+                f'  cat "$tmp_bashrc" > {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}',
                 '  rm -f "$tmp_bashrc"',
                 "fi",
                 "rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*",
@@ -542,8 +545,7 @@ class WorkspaceService:
                     "target_path=$(opencuria_resolve_credential_path "
                     f"{shlex.quote(target_path)})",
                     'mkdir -p "$(dirname "$target_path")"',
-                    f"install -m {mode:o} {shlex.quote(source_abspath)} "
-                    '"$target_path"',
+                    f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
                 ]
             )
             installed_paths.append(target_path)
@@ -588,16 +590,20 @@ class WorkspaceService:
             installed_paths.extend(["/root/.ssh/config", "/root/.ssh/known_hosts"])
 
         manifest = "".join(f"{path}\n" for path in installed_paths)
-        archive_files.append(
-            ("manifest", manifest.encode("utf-8"), 0o600)
-        )
+        archive_files.append(("manifest", manifest.encode("utf-8"), 0o600))
         archive_files.append(
             ("install.sh", ("\n".join(install_lines) + "\n").encode("utf-8"), 0o700)
         )
 
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
-            command=["mkdir", "-p", staging_dir, f"{staging_dir}/files", f"{staging_dir}/ssh"],
+            command=[
+                "mkdir",
+                "-p",
+                staging_dir,
+                f"{staging_dir}/files",
+                f"{staging_dir}/ssh",
+            ],
             workdir="/root",
         )
         if exit_code != 0:
@@ -766,6 +772,9 @@ class WorkspaceService:
             raise RuntimeError("Workspace has no instance assigned")
 
         await self.remove_workspace_credentials(runtime, info.instance_id, log)
+        await self.release_desktop(
+            workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
+        )
         await runtime.stop_workspace(info.instance_id)
         info.status = "exited"
         log.info("workspace_stopped")
@@ -790,7 +799,11 @@ class WorkspaceService:
             raise RuntimeError("Workspace has no instance assigned")
 
         if info.runtime_type == "qemu":
-            if qemu_vcpus is None or qemu_memory_mb is None or qemu_disk_size_gb is None:
+            if (
+                qemu_vcpus is None
+                or qemu_memory_mb is None
+                or qemu_disk_size_gb is None
+            ):
                 raise RuntimeError("Missing QEMU resource settings for resume")
             await runtime.reconfigure_workspace(
                 info.instance_id,
@@ -846,7 +859,9 @@ class WorkspaceService:
         """Reconfigure resources for an existing QEMU workspace."""
         info = self._get_cached(workspace_id)
         if info.runtime_type != "qemu":
-            raise RuntimeError("Workspace runtime does not support resource reconfiguration")
+            raise RuntimeError(
+                "Workspace runtime does not support resource reconfiguration"
+            )
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
@@ -863,6 +878,12 @@ class WorkspaceService:
         """Remove a workspace and clean up resources."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._cache.pop(workspace_id, None)
+        self._desktop_sessions.pop(workspace_id, None)
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
 
         if info and info.instance_id:
             runtime = self._runtimes.get(info.runtime_type)
@@ -966,7 +987,9 @@ class WorkspaceService:
                         continue
 
                     # Workspace is unreachable.
-                    first_failure = self._unreachable_since.setdefault(ws_id, time.monotonic())
+                    first_failure = self._unreachable_since.setdefault(
+                        ws_id, time.monotonic()
+                    )
                     unreachable_for = time.monotonic() - first_failure
 
                     log.warning(
@@ -1019,9 +1042,7 @@ class WorkspaceService:
         # Refresh status from runtime
         if info.instance_id:
             try:
-                status = await runtime.get_workspace_status(
-                    info.instance_id
-                )
+                status = await runtime.get_workspace_status(info.instance_id)
                 info.status = status.status
             except Exception:
                 info.status = "unknown"
@@ -1054,10 +1075,10 @@ class WorkspaceService:
                 "-lc",
                 (
                     "if command -v python3 >/dev/null 2>&1; then "
-                    "python3 -c \"import socket,sys; "
+                    'python3 -c "import socket,sys; '
                     "sock=socket.socket(); sock.settimeout(1); "
                     "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
-                    "sys.exit(0 if rc == 0 else 1)\"; "
+                    'sys.exit(0 if rc == 0 else 1)"; '
                     "else "
                     "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
                     "fi"
@@ -1082,11 +1103,9 @@ class WorkspaceService:
             if session is not None:
                 try:
                     if await self._is_desktop_session_live(workspace_id):
-                        item["desktop"] = {
-                            "port": session.port,
-                            "container_ip": self.get_desktop_container_ip(workspace_id),
-                            "network_name": self.get_desktop_network_name(workspace_id),
-                        }
+                        item["desktop"] = self._desktop_heartbeat_payload(
+                            workspace_id, session
+                        )
                     else:
                         self._desktop_sessions.pop(workspace_id, None)
                         item["desktop"] = None
@@ -1236,9 +1255,7 @@ class WorkspaceService:
         runtime = entry.runtime
         await runtime.pty_write(handle, data)
 
-    async def resize_terminal(
-        self, terminal_id: str, cols: int, rows: int
-    ) -> None:
+    async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
         """Resize the PTY window."""
         entry = self._terminals.get(terminal_id)
         if entry is None:
@@ -1257,15 +1274,72 @@ class WorkspaceService:
 
     # -- desktop session (KasmVNC) -----------------------------------------
 
-    async def start_desktop(
+    def _desktop_heartbeat_payload(
+        self,
+        workspace_id: uuid.UUID,
+        session: DesktopSession,
+    ) -> dict[str, Any]:
+        """Return heartbeat fields for a live desktop session."""
+        return {
+            "port": session.port,
+            "container_ip": self.get_desktop_container_ip(workspace_id),
+            "network_name": self.get_desktop_network_name(workspace_id),
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+        }
+
+    @staticmethod
+    def _parse_desktop_holder(holder: str) -> str:
+        """Validate a desktop lease holder kind."""
+        value = (holder or "").strip().lower()
+        if value not in {DESKTOP_HOLDER_VIEWER, DESKTOP_HOLDER_COMPUTERUSE}:
+            raise ValueError(f"Invalid desktop holder: {holder}")
+        return value
+
+    def _empty_desktop_release_result(self) -> DesktopReleaseResult:
+        """Return a release result when no desktop process is tracked."""
+        return DesktopReleaseResult(
+            stopped=False,
+            process_alive=False,
+            viewer_held=False,
+            computer_use_active=False,
+        )
+
+    def _desktop_release_result(
+        self,
+        session: DesktopSession | None,
+        *,
+        stopped: bool,
+    ) -> DesktopReleaseResult:
+        """Build a release result from the current session cache."""
+        if session is None:
+            return DesktopReleaseResult(
+                stopped=stopped,
+                process_alive=not stopped,
+                viewer_held=False,
+                computer_use_active=False,
+            )
+        return DesktopReleaseResult(
+            stopped=stopped,
+            process_alive=not stopped,
+            viewer_held=session.viewer_held,
+            computer_use_active=bool(session.computeruse_run_ids),
+        )
+
+    async def ensure_desktop_process(
         self,
         workspace_id: uuid.UUID,
     ) -> DesktopSession:
-        """Start a KasmVNC desktop session inside the workspace container.
+        """Start the shared KasmVNC process without acquiring a lease.
 
-        Idempotent: if a session is already running, returns the existing one.
+        Idempotent: a live cached or recovered session is reused. Leases on a
+        stale cache entry are copied onto the restarted session.
         """
         existing = self._desktop_sessions.get(workspace_id)
+        preserved_viewer = existing.viewer_held if existing is not None else False
+        preserved_runs = (
+            set(existing.computeruse_run_ids) if existing is not None else set()
+        )
         if existing is not None:
             if await self._is_desktop_session_live(workspace_id):
                 logger.info("desktop_already_running", workspace_id=str(workspace_id))
@@ -1280,6 +1354,8 @@ class WorkspaceService:
             recovered = DesktopSession(
                 workspace_id=workspace_id,
                 instance_id=self._get_cached(workspace_id).instance_id,
+                viewer_held=preserved_viewer,
+                computeruse_run_ids=preserved_runs,
             )
             self._desktop_sessions[workspace_id] = recovered
             logger.info(
@@ -1293,7 +1369,6 @@ class WorkspaceService:
 
         log = logger.bind(workspace_id=str(workspace_id))
 
-        # Execute the start script inside the container
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
             ["/usr/local/bin/opencuria-desktop-start"],
@@ -1306,18 +1381,158 @@ class WorkspaceService:
         session = DesktopSession(
             workspace_id=workspace_id,
             instance_id=info.instance_id,
+            viewer_held=preserved_viewer,
+            computeruse_run_ids=preserved_runs,
         )
         self._desktop_sessions[workspace_id] = session
         log.info("desktop_started", port=session.port)
         return session
 
-    async def stop_desktop(self, workspace_id: uuid.UUID) -> None:
-        """Stop a running desktop session."""
-        session = self._desktop_sessions.pop(workspace_id, None)
-        if session is None:
-            return
+    async def acquire_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+    ) -> DesktopSession:
+        """Ensure the desktop process and acquire a viewer or computer-use lease."""
+        kind = self._parse_desktop_holder(holder)
+        session = await self.ensure_desktop_process(workspace_id)
+        if kind == DESKTOP_HOLDER_VIEWER:
+            session.viewer_held = True
+        else:
+            session.computeruse_run_ids.add(self._sanitize_run_id(str(run_id or "")))
+        logger.info(
+            "desktop_lease_acquired",
+            workspace_id=str(workspace_id),
+            holder=kind,
+            run_id=run_id,
+            viewer=session.viewer_held,
+            computer_use=bool(session.computeruse_run_ids),
+        )
+        return session
 
+    async def release_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+        force: bool = False,
+    ) -> DesktopReleaseResult:
+        """Drop a desktop lease and stop Xvnc when no holders remain.
+
+        ``force=True`` ignores remaining leases, interrupts recordings, and
+        stops the process. Used for workspace stop/remove.
+        """
+        if force:
+            session = self._desktop_sessions.get(workspace_id)
+            has_recordings = any(
+                key[0] == workspace_id for key in self._desktop_recordings
+            )
+            if session is None and not has_recordings:
+                return DesktopReleaseResult(
+                    stopped=True,
+                    process_alive=False,
+                    viewer_held=False,
+                    computer_use_active=False,
+                )
+            await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
+            return DesktopReleaseResult(
+                stopped=True,
+                process_alive=False,
+                viewer_held=False,
+                computer_use_active=False,
+            )
+
+        kind = self._parse_desktop_holder(holder)
+        session = self._desktop_sessions.get(workspace_id)
+        if session is None:
+            return self._empty_desktop_release_result()
+
+        if kind == DESKTOP_HOLDER_VIEWER:
+            session.viewer_held = False
+        else:
+            session.computeruse_run_ids.discard(
+                self._sanitize_run_id(str(run_id or ""))
+            )
+
+        logger.info(
+            "desktop_lease_released",
+            workspace_id=str(workspace_id),
+            holder=kind,
+            run_id=run_id,
+            viewer=session.viewer_held,
+            computer_use=bool(session.computeruse_run_ids),
+        )
+        if session.viewer_held or session.computeruse_run_ids:
+            return self._desktop_release_result(session, stopped=False)
+
+        await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
+        return DesktopReleaseResult(
+            stopped=True,
+            process_alive=False,
+            viewer_held=False,
+            computer_use_active=False,
+        )
+
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> DesktopSession:
+        """Acquire the viewer lease and ensure the desktop process is running."""
+        return await self.acquire_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+
+    async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
+        """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
+        return await self.release_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+
+    async def _interrupt_desktop_recordings(self, workspace_id: uuid.UUID) -> None:
+        """Send SIGINT/SIGTERM to ffmpeg recordings for *workspace_id*."""
+        recordings = [
+            (run_id, pid, path)
+            for (ws_id, run_id), (pid, path) in self._desktop_recordings.items()
+            if ws_id == workspace_id
+        ]
+        if not recordings:
+            return
+        try:
+            for run_id, pid, _path in recordings:
+                stop_cmd = (
+                    f"kill -INT {pid} 2>/dev/null || true; "
+                    "sleep 0.5; "
+                    f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
+                )
+                await self._exec_desktop_shell(workspace_id, stop_cmd)
+                logger.info(
+                    "desktop_recording_interrupted",
+                    workspace_id=str(workspace_id),
+                    run_id=run_id,
+                    pid=pid,
+                )
+        except Exception:
+            logger.exception(
+                "desktop_recording_interrupt_failed",
+                workspace_id=str(workspace_id),
+            )
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
+
+    async def _stop_desktop_process(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        interrupt_recordings: bool,
+    ) -> None:
+        """Kill Xvnc and drop the cached desktop session."""
         log = logger.bind(workspace_id=str(workspace_id))
+        if interrupt_recordings:
+            await self._interrupt_desktop_recordings(workspace_id)
+
+        self._desktop_sessions.pop(workspace_id, None)
         try:
             runtime = self._get_runtime(workspace_id)
             info = self._get_cached(workspace_id)
@@ -1403,14 +1618,44 @@ class WorkspaceService:
         log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
 
         if action == "ensure":
-            session = await self.start_desktop(workspace_id)
+            session = await self.ensure_desktop_process(workspace_id)
             return {
                 "ok": True,
                 "display": DESKTOP_DISPLAY,
                 "port": session.port,
             }
 
-        if action not in {"ensure"}:
+        if action == "hold":
+            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
+            session = await self.acquire_desktop(
+                workspace_id,
+                holder=holder,
+                run_id=payload.get("run_id"),
+            )
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "port": session.port,
+                "viewer": session.viewer_held,
+                "computer_use": bool(session.computeruse_run_ids),
+            }
+
+        if action == "release":
+            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
+            result = await self.release_desktop(
+                workspace_id,
+                holder=holder,
+                run_id=payload.get("run_id"),
+            )
+            return {
+                "ok": True,
+                "stopped": result.stopped,
+                "process_alive": result.process_alive,
+                "viewer_held": result.viewer_held,
+                "computer_use_active": result.computer_use_active,
+            }
+
+        if action not in {"ensure", "hold", "release"}:
             await self._require_desktop_live(workspace_id)
 
         if action == "display_info":
@@ -1465,9 +1710,7 @@ class WorkspaceService:
                 f"{crop_filter}"
                 "-f image2 -vcodec mjpeg pipe:1 2>/dev/null | base64 -w0"
             )
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id, ffmpeg_cmd
-            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
             if exit_code != 0 or not output.strip():
                 log.error("desktop_screenshot_failed", exit_code=exit_code)
                 raise RuntimeError("Failed to capture desktop screenshot")
@@ -1583,7 +1826,7 @@ class WorkspaceService:
                 "chromium-browser; do "
                 f'if command -v "$browser" >/dev/null 2>&1; then '
                 f'"$browser" --no-sandbox --disable-gpu --disable-dev-shm-usage '
-                f'--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; '
+                f"--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; "
                 "done; "
                 f"xdg-open {quoted_url}"
             )
@@ -1603,9 +1846,7 @@ class WorkspaceService:
             if raw_path:
                 record_path = self._sanitize_path(str(raw_path))
             else:
-                record_path = (
-                    f"{COMPUTER_USE_RECORD_DIR}/{run_id}/session.mp4"
-                )
+                record_path = f"{COMPUTER_USE_RECORD_DIR}/{run_id}/session.mp4"
             width, height = await self._get_desktop_geometry(workspace_id)
             parent_dir = os.path.dirname(record_path)
             ffmpeg_cmd = (
@@ -1616,9 +1857,7 @@ class WorkspaceService:
                 f"{shlex.quote(record_path)} </dev/null "
                 f">>{shlex.quote(record_path + '.log')} 2>&1 & echo $!"
             )
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id, ffmpeg_cmd
-            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
             if exit_code != 0:
                 raise RuntimeError(f"Failed to start desktop recording: {output}")
             pid_text = output.strip().splitlines()[-1].strip()
@@ -1813,9 +2052,14 @@ class WorkspaceService:
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
             command=[
-                "find", safe_path,
-                "-maxdepth", "1", "-mindepth", "1",
-                "-printf", r"%y\t%s\t%p\n",
+                "find",
+                safe_path,
+                "-maxdepth",
+                "1",
+                "-mindepth",
+                "1",
+                "-printf",
+                r"%y\t%s\t%p\n",
             ],
             workdir="/workspace",
         )
@@ -1828,12 +2072,14 @@ class WorkspaceService:
             if len(parts) != 3:
                 continue
             file_type_char, size_str, file_path = parts
-            entries.append({
-                "name": os.path.basename(file_path),
-                "path": file_path,
-                "type": "directory" if file_type_char == "d" else "file",
-                "size": int(size_str) if size_str.isdigit() else 0,
-            })
+            entries.append(
+                {
+                    "name": os.path.basename(file_path),
+                    "path": file_path,
+                    "type": "directory" if file_type_char == "d" else "file",
+                    "size": int(size_str) if size_str.isdigit() else 0,
+                }
+            )
 
         # Sort: directories first, then alphabetically
         entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
@@ -1894,9 +2140,9 @@ class WorkspaceService:
                 f"test -f '{safe_path}' || exit 1; "
                 f"SZ=$(stat -c '%s' '{safe_path}'); "
                 f"MT=$(file --mime-type -b '{safe_path}' 2>/dev/null || echo 'application/octet-stream'); "
-                f"echo \"$SZ\"; "
-                f"echo \"$MT\"; "
-                f"if [ \"$SZ\" -le {read_limit} ]; then "
+                f'echo "$SZ"; '
+                f'echo "$MT"; '
+                f'if [ "$SZ" -le {read_limit} ]; then '
                 f"  base64 '{safe_path}'; "
                 f"else "
                 f"  head -c {read_limit} '{safe_path}' | base64; "
@@ -2016,7 +2262,8 @@ class WorkspaceService:
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=[
-                    "sh", "-c",
+                    "sh",
+                    "-c",
                     f"tar czf - -C '{os.path.dirname(safe_path)}' "
                     f"'{os.path.basename(safe_path)}' | base64",
                 ],
@@ -2077,9 +2324,7 @@ class WorkspaceService:
             raise FileNotFoundError(f"No such file or directory: {path}")
         is_dir = lines[0].strip() == "dir"
         size = int(lines[1].strip()) if len(lines) > 1 else 0
-        mime_type = (
-            lines[2].strip() if len(lines) > 2 else "application/octet-stream"
-        )
+        mime_type = lines[2].strip() if len(lines) > 2 else "application/octet-stream"
         return {
             "path": safe_path,
             "is_dir": is_dir,
@@ -2114,9 +2359,7 @@ class WorkspaceService:
         if mode < 0 or mode > 0o777:
             raise ValueError(f"Invalid file mode: {mode!r}")
 
-        archive = self._build_single_file_tar(
-            os.path.basename(safe_path), decoded
-        )
+        archive = self._build_single_file_tar(os.path.basename(safe_path), decoded)
         await runtime.put_archive(
             info.instance_id,
             os.path.dirname(safe_path) or "/workspace",
@@ -2169,11 +2412,11 @@ class WorkspaceService:
         wrapper = (
             f"{source}"
             f"__oc_out=$(mktemp); __oc_err=$(mktemp); "
-            f"sh -c {shlex.quote(inner)} >\"$__oc_out\" 2>\"$__oc_err\"; "
+            f'sh -c {shlex.quote(inner)} >"$__oc_out" 2>"$__oc_err"; '
             f"__oc_code=$?; "
-            f"echo {marker_out}; base64 \"$__oc_out\"; "
-            f"echo {marker_err}; base64 \"$__oc_err\"; "
-            f"echo \"EXIT:$__oc_code\"; rm -f \"$__oc_out\" \"$__oc_err\"; "
+            f'echo {marker_out}; base64 "$__oc_out"; '
+            f'echo {marker_err}; base64 "$__oc_err"; '
+            f'echo "EXIT:$__oc_code"; rm -f "$__oc_out" "$__oc_err"; '
             f"exit $__oc_code"
         )
         exit_code, output = await runtime.exec_command_wait(
@@ -2222,19 +2465,19 @@ class WorkspaceService:
             f"{source}"
             "__oc_dir=$(mktemp -d); "
             "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
-            "mkfifo \"$__oc_o\" \"$__oc_e\"; "
+            'mkfifo "$__oc_o" "$__oc_e"; '
             f"(sh -c {shlex.quote(inner)} "
-            ">\"$__oc_o\" 2>\"$__oc_e\"; echo $? >\"$__oc_dir/code\") & "
+            '>"$__oc_o" 2>"$__oc_e"; echo $? >"$__oc_dir/code") & '
             "__oc_pid=$!; "
             "(while IFS= read -r __oc_l; do "
             f"printf '{marker_out}%s\\n' \"$__oc_l\"; "
-            "done <\"$__oc_o\" & "
+            'done <"$__oc_o" & '
             "while IFS= read -r __oc_m; do "
             f"printf '{marker_err}%s\\n' \"$__oc_m\"; "
-            "done <\"$__oc_e\" & wait); "
-            "wait $__oc_pid; __oc_code=$(cat \"$__oc_dir/code\"); "
-            "rm -rf \"$__oc_dir\"; "
-            "echo \"OPENCURIA_EXIT:$__oc_code\""
+            'done <"$__oc_e" & wait); '
+            'wait $__oc_pid; __oc_code=$(cat "$__oc_dir/code"); '
+            'rm -rf "$__oc_dir"; '
+            'echo "OPENCURIA_EXIT:$__oc_code"'
         )
         exit_code = 0
         async for line in runtime.exec_command(
@@ -2244,9 +2487,9 @@ class WorkspaceService:
             env=env,
         ):
             if line.startswith(marker_out):
-                yield ("stdout", line[len(marker_out):])
+                yield ("stdout", line[len(marker_out) :])
             elif line.startswith(marker_err):
-                yield ("stderr", line[len(marker_err):])
+                yield ("stderr", line[len(marker_err) :])
             elif line.startswith("OPENCURIA_EXIT:"):
                 exit_code = int(line.split(":", 1)[1].strip() or 0)
                 yield ("exit", str(exit_code))
@@ -2293,7 +2536,9 @@ class WorkspaceService:
         """
         if runtime_type == "docker":
             if not dockerfile_content.strip():
-                raise RuntimeError("dockerfile_content is required for docker image builds")
+                raise RuntimeError(
+                    "dockerfile_content is required for docker image builds"
+                )
             if not image_tag.strip():
                 raise RuntimeError("image_tag is required for docker image builds")
             try:
@@ -2422,7 +2667,9 @@ class WorkspaceService:
 
             client = docker.from_env()
             try:
-                await asyncio.to_thread(client.images.remove, image=image_ref, force=True)
+                await asyncio.to_thread(
+                    client.images.remove, image=image_ref, force=True
+                )
                 logger.info("docker_image_deleted", image_ref=image_ref)
                 return "deleted"
             except ImageNotFound:
@@ -2441,7 +2688,9 @@ class WorkspaceService:
                 logger.info("qemu_image_already_absent", image_ref=image_ref)
                 return "already_absent"
 
-        raise RuntimeError(f"Unsupported runtime_type for image deletion: {runtime_type}")
+        raise RuntimeError(
+            f"Unsupported runtime_type for image deletion: {runtime_type}"
+        )
 
     async def create_workspace_from_image_artifact(
         self,

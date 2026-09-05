@@ -1022,3 +1022,58 @@ async def test_abort_run_cancels_child_session_task(
     service._tasks[str(child.id)] = child_task
     await service.abort_run(parent.id)
     assert child_task.done()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_busy_computeruse_leaves_parent_running(
+    harness_workspace,
+) -> None:
+    """Take-control aborts computer-use children without aborting the parent."""
+    service, _, _ = _service()
+    parent = await _db_create_session(harness_workspace)
+    computeruse = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=parent.workspace_id,
+        organization_id=parent.organization_id,
+        title="cu",
+        parent_id=parent.id,
+        agent_name="computeruse",
+        mode="build",
+        model="fake-model",
+    )
+    explore = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=parent.workspace_id,
+        organization_id=parent.organization_id,
+        title="explore",
+        parent_id=parent.id,
+        agent_name="explore",
+        mode="build",
+        model="fake-model",
+    )
+    hang = asyncio.Event()
+
+    async def never() -> None:
+        await hang.wait()
+
+    parent_task = asyncio.create_task(never())
+    cu_task = asyncio.create_task(never())
+    explore_task = asyncio.create_task(never())
+    service._tasks[str(parent.id)] = parent_task
+    service._tasks[str(computeruse.id)] = cu_task
+    service._tasks[str(explore.id)] = explore_task
+    await sync_to_async(HarnessSessionRepository.mark_status)(parent, "busy")
+    await sync_to_async(HarnessSessionRepository.mark_status)(computeruse, "busy")
+    await sync_to_async(HarnessSessionRepository.mark_status)(explore, "busy")
+
+    aborted = await service.abort_busy_computeruse_for_workspace(parent.workspace_id)
+
+    assert [session.id for session in aborted] == [computeruse.id]
+    assert cu_task.done()
+    assert not parent_task.done()
+    assert not explore_task.done()
+    hang.set()
+    parent_task.cancel()
+    explore_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parent_task
+    with pytest.raises(asyncio.CancelledError):
+        await explore_task

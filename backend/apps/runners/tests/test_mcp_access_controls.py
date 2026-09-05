@@ -79,7 +79,9 @@ def test_mcp_list_workspaces_is_owner_scoped(mcp_access_setup):
     )
 
     payload = json.loads(_parse_text_payload(result))
-    assert [entry["id"] for entry in payload] == [str(mcp_access_setup["admin_workspace"].id)]
+    assert [entry["id"] for entry in payload] == [
+        str(mcp_access_setup["admin_workspace"].id)
+    ]
 
 
 @pytest.mark.django_db
@@ -106,13 +108,12 @@ def test_mcp_harness_tools_require_permissions():
         == APIKeyPermission.HARNESS_PERMISSIONS
     )
     assert _TOOL_PERMISSIONS["delete_harness_session"] == APIKeyPermission.HARNESS_RUN
-    assert (
-        _TOOL_PERMISSIONS["set_harness_session_mode"] == APIKeyPermission.HARNESS_RUN
-    )
+    assert _TOOL_PERMISSIONS["set_harness_session_mode"] == APIKeyPermission.HARNESS_RUN
     assert (
         _TOOL_PERMISSIONS["list_harness_conversations"] == APIKeyPermission.HARNESS_READ
     )
     assert _TOOL_PERMISSIONS["list_provider_models"] == APIKeyPermission.HARNESS_READ
+    assert _TOOL_PERMISSIONS["take_desktop_control"] == APIKeyPermission.HARNESS_RUN
 
 
 @pytest.mark.django_db
@@ -160,9 +161,7 @@ def mcp_harness_service(monkeypatch):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_mcp_set_harness_session_mode_happy_path(
-    mcp_access_setup, mcp_harness_service
-):
+def test_mcp_set_harness_session_mode_happy_path(mcp_access_setup, mcp_harness_service):
     """Idle session mode switch aligns agent_name and registers the MCP tool."""
     tool_names = {tool.name for tool in _TOOLS}
     assert "set_harness_session_mode" in tool_names

@@ -33,7 +33,12 @@ from apps.harness.tools.computeruse import (
     pixel_coordinates,
     scale_coordinate,
 )
-from apps.harness.tools.subagents import ALLOWED_SUBAGENT_TYPES, TaskArgs, TaskTool, _child_registry
+from apps.harness.tools.subagents import (
+    ALLOWED_SUBAGENT_TYPES,
+    TaskArgs,
+    TaskTool,
+    _child_registry,
+)
 
 
 class ComputerUseTextProvider(ProviderAdapter):
@@ -336,6 +341,7 @@ async def test_computeruse_subagent_model_resolution(
     assert children[0].agent_name == "computeruse"
     assert children[0].model == expected_model
     actions = [call[0] for call in accessor.desktop_calls]
-    assert "ensure" in actions
+    assert "hold" in actions
     assert "record_start" in actions
     assert "record_stop" in actions
+    assert "release" in actions

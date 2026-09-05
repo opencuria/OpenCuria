@@ -15,6 +15,7 @@ from .models import (
     HarnessMessage,
     HarnessPart,
     HarnessSession,
+    HarnessSessionStatus,
     ProviderConfig,
     QuestionRequest,
     Todo,
@@ -150,9 +151,20 @@ class HarnessSessionRepository:
     def list_children(parent_id: uuid.UUID) -> list[HarnessSession]:
         """Return child sessions spawned from *parent_id*."""
         return list(
-            HarnessSession.objects.filter(parent_id=parent_id).order_by(
-                "created_at"
-            )
+            HarnessSession.objects.filter(parent_id=parent_id).order_by("created_at")
+        )
+
+    @staticmethod
+    def list_busy_computeruse_for_workspace(
+        workspace_id: uuid.UUID,
+    ) -> list[HarnessSession]:
+        """Return busy computer-use sessions for *workspace_id*."""
+        return list(
+            HarnessSession.objects.filter(
+                workspace_id=workspace_id,
+                agent_name="computeruse",
+                status=HarnessSessionStatus.BUSY,
+            ).order_by("created_at")
         )
 
     @staticmethod
@@ -182,9 +194,7 @@ class HarnessSessionRepository:
         return session
 
     @staticmethod
-    def set_skill_ids(
-        session: HarnessSession, skill_ids: list[str]
-    ) -> HarnessSession:
+    def set_skill_ids(session: HarnessSession, skill_ids: list[str]) -> HarnessSession:
         """Persist selected skill IDs for subsequent runs."""
         session.skill_ids = list(skill_ids or [])
         session.save(update_fields=["skill_ids", "updated_at"])

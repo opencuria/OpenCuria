@@ -192,7 +192,9 @@ class RunnerService:
                         TaskStatus.IN_PROGRESS,
                     }:
                         task = existing_task
-                        reused_active_task = image.status == ImageInstance.Status.DELETING
+                        reused_active_task = (
+                            image.status == ImageInstance.Status.DELETING
+                        )
                     else:
                         task = None
                 else:
@@ -260,9 +262,11 @@ class RunnerService:
         workspace managed by the runner so subscribed frontend clients can
         update their display without a full page refresh.
         """
-        workspaces = list(self.workspaces.list_by_runner(runner.id).exclude(
-            status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED]
-        ))
+        workspaces = list(
+            self.workspaces.list_by_runner(runner.id).exclude(
+                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED]
+            )
+        )
         event = "runner:offline" if status == "offline" else "runner:online"
         for ws in workspaces:
             ws_id = str(ws.id)
@@ -289,7 +293,9 @@ class RunnerService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _derive_workspace_name(name: str, repos: list[str], workspace_id: uuid.UUID) -> str:
+    def _derive_workspace_name(
+        name: str, repos: list[str], workspace_id: uuid.UUID
+    ) -> str:
         """Return a non-empty workspace name from user input or sensible defaults."""
         trimmed = name.strip()
         if trimmed:
@@ -308,25 +314,50 @@ class RunnerService:
         """Validate min/max/default and total limits for a runner's QEMU config."""
         if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
             raise ConflictError("Runner vCPU minimum cannot exceed maximum")
-        if not (runner.qemu_min_vcpus <= runner.qemu_default_vcpus <= runner.qemu_max_vcpus):
+        if not (
+            runner.qemu_min_vcpus <= runner.qemu_default_vcpus <= runner.qemu_max_vcpus
+        ):
             raise ConflictError("Runner default vCPU must be within min/max range")
 
         if runner.qemu_min_memory_mb > runner.qemu_max_memory_mb:
             raise ConflictError("Runner RAM minimum cannot exceed maximum")
-        if not (runner.qemu_min_memory_mb <= runner.qemu_default_memory_mb <= runner.qemu_max_memory_mb):
+        if not (
+            runner.qemu_min_memory_mb
+            <= runner.qemu_default_memory_mb
+            <= runner.qemu_max_memory_mb
+        ):
             raise ConflictError("Runner default RAM must be within min/max range")
 
         if runner.qemu_min_disk_size_gb > runner.qemu_max_disk_size_gb:
             raise ConflictError("Runner disk minimum cannot exceed maximum")
-        if not (runner.qemu_min_disk_size_gb <= runner.qemu_default_disk_size_gb <= runner.qemu_max_disk_size_gb):
+        if not (
+            runner.qemu_min_disk_size_gb
+            <= runner.qemu_default_disk_size_gb
+            <= runner.qemu_max_disk_size_gb
+        ):
             raise ConflictError("Runner default disk must be within min/max range")
 
-        if runner.qemu_max_active_vcpus is not None and runner.qemu_max_active_vcpus < runner.qemu_default_vcpus:
-            raise ConflictError("Runner total active vCPU limit cannot be smaller than default vCPU")
-        if runner.qemu_max_active_memory_mb is not None and runner.qemu_max_active_memory_mb < runner.qemu_default_memory_mb:
-            raise ConflictError("Runner total active RAM limit cannot be smaller than default RAM")
-        if runner.qemu_max_active_disk_size_gb is not None and runner.qemu_max_active_disk_size_gb < runner.qemu_default_disk_size_gb:
-            raise ConflictError("Runner total active disk limit cannot be smaller than default disk")
+        if (
+            runner.qemu_max_active_vcpus is not None
+            and runner.qemu_max_active_vcpus < runner.qemu_default_vcpus
+        ):
+            raise ConflictError(
+                "Runner total active vCPU limit cannot be smaller than default vCPU"
+            )
+        if (
+            runner.qemu_max_active_memory_mb is not None
+            and runner.qemu_max_active_memory_mb < runner.qemu_default_memory_mb
+        ):
+            raise ConflictError(
+                "Runner total active RAM limit cannot be smaller than default RAM"
+            )
+        if (
+            runner.qemu_max_active_disk_size_gb is not None
+            and runner.qemu_max_active_disk_size_gb < runner.qemu_default_disk_size_gb
+        ):
+            raise ConflictError(
+                "Runner total active disk limit cannot be smaller than default disk"
+            )
 
     @staticmethod
     def _task_workspace_operation(task_type: TaskType) -> WorkspaceOperation | None:
@@ -424,9 +455,9 @@ class RunnerService:
         if key in self._pending_credential_inject:
             return
 
-        resolved = await sync_to_async(
-            CredentialSvc().resolve_workspace_credentials
-        )(workspace)
+        resolved = await sync_to_async(CredentialSvc().resolve_workspace_credentials)(
+            workspace
+        )
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
             task_id=task_id,
@@ -498,21 +529,33 @@ class RunnerService:
         """Resolve effective QEMU resources and validate against runner limits."""
         current_vcpus = current[0] if current else runner.qemu_default_vcpus
         current_memory_mb = current[1] if current else runner.qemu_default_memory_mb
-        current_disk_size_gb = current[2] if current else runner.qemu_default_disk_size_gb
+        current_disk_size_gb = (
+            current[2] if current else runner.qemu_default_disk_size_gb
+        )
 
         resolved_vcpus = qemu_vcpus if qemu_vcpus is not None else current_vcpus
-        resolved_memory_mb = qemu_memory_mb if qemu_memory_mb is not None else current_memory_mb
-        resolved_disk_size_gb = qemu_disk_size_gb if qemu_disk_size_gb is not None else current_disk_size_gb
+        resolved_memory_mb = (
+            qemu_memory_mb if qemu_memory_mb is not None else current_memory_mb
+        )
+        resolved_disk_size_gb = (
+            qemu_disk_size_gb if qemu_disk_size_gb is not None else current_disk_size_gb
+        )
 
         if not (runner.qemu_min_vcpus <= resolved_vcpus <= runner.qemu_max_vcpus):
             raise ConflictError(
                 f"vCPU value must be between {runner.qemu_min_vcpus} and {runner.qemu_max_vcpus}"
             )
-        if not (runner.qemu_min_memory_mb <= resolved_memory_mb <= runner.qemu_max_memory_mb):
+        if not (
+            runner.qemu_min_memory_mb <= resolved_memory_mb <= runner.qemu_max_memory_mb
+        ):
             raise ConflictError(
                 f"RAM value must be between {runner.qemu_min_memory_mb} and {runner.qemu_max_memory_mb} MiB"
             )
-        if not (runner.qemu_min_disk_size_gb <= resolved_disk_size_gb <= runner.qemu_max_disk_size_gb):
+        if not (
+            runner.qemu_min_disk_size_gb
+            <= resolved_disk_size_gb
+            <= runner.qemu_max_disk_size_gb
+        ):
             raise ConflictError(
                 f"Disk value must be between {runner.qemu_min_disk_size_gb} and {runner.qemu_max_disk_size_gb} GiB"
             )
@@ -550,7 +593,9 @@ class RunnerService:
                 continue
             total_vcpus += ws.qemu_vcpus or runner.qemu_default_vcpus
             total_memory_mb += ws.qemu_memory_mb or runner.qemu_default_memory_mb
-            total_disk_size_gb += ws.qemu_disk_size_gb or runner.qemu_default_disk_size_gb
+            total_disk_size_gb += (
+                ws.qemu_disk_size_gb or runner.qemu_default_disk_size_gb
+            )
 
         next_total_vcpus = total_vcpus + requested_vcpus
         next_total_memory_mb = total_memory_mb + requested_memory_mb
@@ -646,7 +691,9 @@ class RunnerService:
             runner_id = selected_build_job.runner_id
         else:
             if source_workspace is None:
-                raise ConflictError("Captured image artifact is missing its source workspace")
+                raise ConflictError(
+                    "Captured image artifact is missing its source workspace"
+                )
             if (
                 organization_id
                 and source_workspace.runner.organization_id != organization_id
@@ -674,9 +721,13 @@ class RunnerService:
                 raise RunnerNotFoundError(str(runner_id))
         else:
             # Pick any online runner
-            runners_qs = self.runners.list_by_organization(organization_id).filter(
-                status=RunnerStatus.ONLINE
-            ) if organization_id else self.runners.list_online()
+            runners_qs = (
+                self.runners.list_by_organization(organization_id).filter(
+                    status=RunnerStatus.ONLINE
+                )
+                if organization_id
+                else self.runners.list_online()
+            )
             runner = await sync_to_async(lambda: runners_qs.first())()
             if runner is None:
                 raise NoAvailableRunnerError("any")
@@ -761,8 +812,12 @@ class RunnerService:
                 ],
                 "ssh_keys": ssh_keys or [],
                 "image_artifact_id": str(image_artifact_id),
-                "image_tag": selected_image.runner_ref if runtime_type == RuntimeType.DOCKER else "",
-                "base_image_path": selected_image.runner_ref if runtime_type == RuntimeType.QEMU else "",
+                "image_tag": selected_image.runner_ref
+                if runtime_type == RuntimeType.DOCKER
+                else "",
+                "base_image_path": selected_image.runner_ref
+                if runtime_type == RuntimeType.QEMU
+                else "",
             },
         )
         logger.info(
@@ -792,7 +847,9 @@ class RunnerService:
             trimmed = name.strip()
             if not trimmed:
                 raise ValueError("Workspace name must not be empty")
-            workspace = await sync_to_async(self.workspaces.update_name)(workspace, trimmed)
+            workspace = await sync_to_async(self.workspaces.update_name)(
+                workspace, trimmed
+            )
 
         if credentials is not None:
             workspace = await sync_to_async(self.workspaces.set_credentials)(
@@ -814,7 +871,10 @@ class RunnerService:
         if qemu_fields_requested:
             if workspace.runtime_type != RuntimeType.QEMU:
                 raise ValueError("QEMU resources can only be set for QEMU workspaces")
-            if workspace.status not in (WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED):
+            if workspace.status not in (
+                WorkspaceStatus.RUNNING,
+                WorkspaceStatus.STOPPED,
+            ):
                 raise WorkspaceStateError(
                     f"Workspace '{workspace_id}' is '{workspace.status}', must be running or stopped to reconfigure resources"
                 )
@@ -875,7 +935,9 @@ class RunnerService:
                         event="task:update_workspace",
                         task=task,
                         workspace=workspace,
-                        operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
+                        operation=self._task_workspace_operation(
+                            TaskType.UPDATE_WORKSPACE
+                        ),
                         payload={
                             "task_id": str(task_id),
                             "workspace_id": str(workspace_id),
@@ -1024,7 +1086,10 @@ class RunnerService:
                 f"Workspace '{workspace.id}' is already in deletion state '{workspace.status}'"
             )
 
-        if workspace.active_operation and workspace.active_operation != WorkspaceOperation.REMOVING:
+        if (
+            workspace.active_operation
+            and workspace.active_operation != WorkspaceOperation.REMOVING
+        ):
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
             )
@@ -1066,7 +1131,9 @@ class RunnerService:
             "workspace:status_changed",
             {
                 "workspace_id": str(workspace_id),
-                "status": WorkspaceStatus.DELETING if runner.is_online else WorkspaceStatus.PENDING_DELETION,
+                "status": WorkspaceStatus.DELETING
+                if runner.is_online
+                else WorkspaceStatus.PENDING_DELETION,
                 "task_id": str(task_id),
             },
             str(workspace_id),
@@ -1303,9 +1370,7 @@ class RunnerService:
         """Handle workspace:removed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
-            logger.warning(
-                "Received workspace:removed for unknown task: %s", task_id
-            )
+            logger.warning("Received workspace:removed for unknown task: %s", task_id)
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -1783,8 +1848,11 @@ class RunnerService:
         container_ip: str,
         network_name: str,
         runner_id: str | None = None,
+        *,
+        viewer: bool = True,
+        computer_use: bool = False,
     ) -> None:
-        """Handle desktop:started event from a runner."""
+        """Handle desktop:started after a viewer lease is acquired."""
         from .sio_server import emit_to_frontend
 
         task = None
@@ -1793,15 +1861,15 @@ class RunnerService:
             if task and not self._validate_task_runner(task, runner_id):
                 return
 
-        desktop_state = {
-            "port": port,
-            "container_ip": container_ip,
-            "network_name": network_name,
-        }
-
         self._record_active_desktop(
             workspace_id,
-            desktop_state,
+            {
+                "port": port,
+                "container_ip": container_ip,
+                "network_name": network_name,
+                "viewer": viewer,
+                "computer_use": computer_use,
+            },
             runner_id=runner_id,
         )
 
@@ -1815,12 +1883,101 @@ class RunnerService:
             container_ip,
         )
 
+        if not task_id:
+            return
+
         await emit_to_frontend(
             "desktop:started",
             {
                 "workspace_id": workspace_id,
                 "task_id": task_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
+                "computer_use_active": computer_use,
+            },
+            workspace_id,
+        )
+
+    async def handle_desktop_process(
+        self,
+        workspace_id: str,
+        port: int,
+        container_ip: str,
+        network_name: str,
+        runner_id: str | None = None,
+        *,
+        viewer: bool = False,
+        computer_use: bool = False,
+    ) -> None:
+        """Record live desktop process routing without a viewer acquire."""
+        self._record_active_desktop(
+            workspace_id,
+            {
+                "port": port,
+                "container_ip": container_ip,
+                "network_name": network_name,
+                "viewer": viewer,
+                "computer_use": computer_use,
+            },
+            runner_id=runner_id,
+        )
+        logger.info(
+            "Desktop process announced: workspace=%s, viewer=%s, computer_use=%s",
+            workspace_id,
+            viewer,
+            computer_use,
+        )
+
+    async def handle_desktop_viewer_released(
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+        *,
+        computer_use_active: bool = False,
+    ) -> None:
+        """Handle viewer lease release while the desktop process stays up."""
+        from .sio_server import emit_to_frontend
+
+        if runner_id:
+            cached = self._desktop_workspace_runner.get(workspace_id)
+            if cached is not None and cached != runner_id:
+                logger.warning(
+                    "desktop:viewer_released rejected: workspace %s is owned by "
+                    "runner %s, not %s",
+                    workspace_id,
+                    cached,
+                    runner_id,
+                )
+                return
+
+        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
+        if task:
+            if not self._validate_task_runner(task, runner_id):
+                return
+            await sync_to_async(self.tasks.complete)(task)
+
+        current = self._active_desktops.get(workspace_id)
+        if current is not None:
+            updated = dict(current)
+            updated["viewer"] = False
+            updated["computer_use"] = computer_use_active
+            self._record_active_desktop(
+                workspace_id,
+                updated,
+                runner_id=runner_id,
+            )
+
+        logger.info(
+            "Desktop viewer released: workspace=%s, computer_use=%s",
+            workspace_id,
+            computer_use_active,
+        )
+        await emit_to_frontend(
+            "desktop:viewer_released",
+            {
+                "workspace_id": workspace_id,
+                "task_id": task_id,
+                "computer_use_active": computer_use_active,
             },
             workspace_id,
         )
@@ -1874,6 +2031,17 @@ class RunnerService:
         """Get cached desktop session info if the runner reported one active."""
         return self._active_desktops.get(workspace_id)
 
+    @staticmethod
+    def _normalize_desktop_state(desktop_state: dict) -> dict:
+        """Normalize runner desktop payloads to the backend cache shape."""
+        return {
+            "port": desktop_state.get("port", 6901),
+            "container_ip": desktop_state.get("container_ip", ""),
+            "network_name": desktop_state.get("network_name", ""),
+            "viewer": bool(desktop_state.get("viewer", False)),
+            "computer_use": bool(desktop_state.get("computer_use", False)),
+        }
+
     def _record_active_desktop(
         self,
         workspace_id: str,
@@ -1882,7 +2050,9 @@ class RunnerService:
         runner_id: str | None = None,
     ) -> None:
         """Persist backend desktop state without performing network I/O."""
-        self._active_desktops[workspace_id] = dict(desktop_state)
+        self._active_desktops[workspace_id] = self._normalize_desktop_state(
+            desktop_state
+        )
         if runner_id:
             self._desktop_workspace_runner[workspace_id] = runner_id
 
@@ -1898,15 +2068,16 @@ class RunnerService:
             self._cleanup_desktop_state(workspace_id)
             return
 
+        normalized = self._normalize_desktop_state(desktop_state)
         current = self._active_desktops.get(workspace_id)
         current_runner = self._desktop_workspace_runner.get(workspace_id)
-        if current == desktop_state and current_runner == runner_id:
+        if current == normalized and current_runner == runner_id:
             return
 
         self._cleanup_desktop_state(workspace_id)
         self._record_active_desktop(
             workspace_id,
-            desktop_state,
+            normalized,
             runner_id=runner_id,
         )
 
@@ -2108,9 +2279,7 @@ class RunnerService:
             runner_ws_states[ws_id] = status
 
         # Check backend workspaces for this runner
-        backend_workspaces = list(
-            self.workspaces.list_by_runner(runner.id)
-        )
+        backend_workspaces = list(self.workspaces.list_by_runner(runner.id))
         backend_workspace_ids = {str(ws.id) for ws in backend_workspaces}
         runner_id_str = str(runner.id)
 
@@ -2180,9 +2349,7 @@ class RunnerService:
                         ws_id_str,
                         runner.id,
                     )
-                    self.workspaces.update_status(
-                        ws, WorkspaceStatus.FAILED
-                    )
+                    self.workspaces.update_status(ws, WorkspaceStatus.FAILED)
                     self._forward_workspace_status(ws, status="failed")
                 self._cleanup_desktop_state(ws_id_str)
             else:
@@ -2424,9 +2591,7 @@ class RunnerService:
         try:
             response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
         except SocketIOTimeoutError as exc:
-            raise RuntimeError(
-                f"Runner call timed out for event '{event}'"
-            ) from exc
+            raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
         if response is None:
             return {}
         if isinstance(response, dict):
@@ -2538,7 +2703,8 @@ class RunnerService:
         """
         self._route_harness_reply(event, data, runner_id=runner_id)
 
-    def _forward_to_frontend(        self,
+    def _forward_to_frontend(
+        self,
         event: str,
         data: dict,
         workspace_id: str,
@@ -2924,7 +3090,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
                 self.image_instances.get_by_build_job_id
             )(build.id)
             if existing_image is not None:
-                await sync_to_async(self.image_instances.mark_retired)(existing_image.id)
+                await sync_to_async(self.image_instances.mark_retired)(
+                    existing_image.id
+                )
             return build
 
         if not runner.sid:
@@ -2948,15 +3116,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             if image_definition.runtime_type == RuntimeType.DOCKER
             else f"/var/lib/opencuria/base-images/{build.id}.qcow2"
         )
-        await sync_to_async(
-            ImageBuildJob.objects.filter(id=build.id).update
-        )(
+        await sync_to_async(ImageBuildJob.objects.filter(id=build.id).update)(
             build_task=task,
             status=ImageBuildJob.Status.PENDING,
         )
-        image = await sync_to_async(
-            self.image_instances.get_by_build_job_id
-        )(build.id)
+        image = await sync_to_async(self.image_instances.get_by_build_job_id)(build.id)
         image_name = f"{image_definition.name} ({runner.name})"
         if image is None:
             await sync_to_async(self.image_instances.create_pending)(
@@ -2991,9 +3155,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
                 ]
             )
 
-        build = await sync_to_async(ImageBuildJob.objects.select_related(
-            "image_definition", "runner", "build_task"
-        ).get)(id=build.id)
+        build = await sync_to_async(
+            ImageBuildJob.objects.select_related(
+                "image_definition", "runner", "build_task"
+            ).get
+        )(id=build.id)
 
         payload = {
             "task_id": str(task.id),
@@ -3023,9 +3189,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         from .models import ImageBuildJob
 
         try:
-            build = ImageBuildJob.objects.select_related("runner").get(
-                id=build_job_id
-            )
+            build = ImageBuildJob.objects.select_related("runner").get(id=build_job_id)
         except ImageBuildJob.DoesNotExist:
             return
         if runner_id and str(build.runner_id) != str(runner_id):
@@ -3056,12 +3220,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         build = ImageBuildJob.objects.get(id=build_job_id)
         build.status = ImageBuildJob.Status.ACTIVE
         build.built_at = timezone.now()
-        build.save(
-            update_fields=["status", "built_at", "updated_at"]
-        )
-        image = self.image_instances.get_by_build_job_id(
-            uuid.UUID(build_job_id)
-        )
+        build.save(update_fields=["status", "built_at", "updated_at"])
+        image = self.image_instances.get_by_build_job_id(uuid.UUID(build_job_id))
         runner_ref = image_tag or image_path
         image_name = f"{build.image_definition.name} ({build.runner.name})"
         if image is None:
@@ -3112,9 +3272,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.FAILED
         )
-        image = self.image_instances.get_by_build_job_id(
-            uuid.UUID(build_job_id)
-        )
+        image = self.image_instances.get_by_build_job_id(uuid.UUID(build_job_id))
         if image is not None:
             self.image_instances.mark_failed(image.id)
         if task is not None:
@@ -3317,6 +3475,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
     ) -> None:
         """Delete an image instance safely and dispatch cleanup to the runner if needed."""
         from .models import ImageInstance
+
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -3339,7 +3498,10 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             )
 
         # Built images can only be deleted via their build job
-        if image.origin_type == ImageInstance.OriginType.DEFINITION_BUILD and image.build_job_id:
+        if (
+            image.origin_type == ImageInstance.OriginType.DEFINITION_BUILD
+            and image.build_job_id
+        ):
             raise ConflictError(
                 f"Built image artifact '{image_artifact_id}' can only be deleted via its runner build job"
             )
@@ -3354,7 +3516,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
                     f"Image artifact '{image_artifact_id}' cannot be deleted while it is still {image.status}"
                 )
             await sync_to_async(self.image_instances.mark_deleted)(image_artifact_id)
-            logger.info("Image artifact deleted without runner cleanup: %s", image_artifact_id)
+            logger.info(
+                "Image artifact deleted without runner cleanup: %s", image_artifact_id
+            )
             return
 
         task_id = generate_uuid()
@@ -3381,7 +3545,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             )
             await sync_to_async(self.tasks.mark_in_progress)(task)
         else:
-            await sync_to_async(self.image_instances.mark_pending_deletion)(image_artifact_id)
+            await sync_to_async(self.image_instances.mark_pending_deletion)(
+                image_artifact_id
+            )
 
         logger.info("Image artifact marked for deletion: %s", image_artifact_id)
 
@@ -3413,9 +3579,13 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             image = self.image_instances.get_by_task_id(task_id)
         if image is None and runner_ref and runner_id:
             pending = list(
-                self.image_instances.list_pending_delete_for_runner(uuid.UUID(runner_id))
+                self.image_instances.list_pending_delete_for_runner(
+                    uuid.UUID(runner_id)
+                )
             )
-            image = next((item for item in pending if item.runner_ref == runner_ref), None)
+            image = next(
+                (item for item in pending if item.runner_ref == runner_ref), None
+            )
 
         if image is not None:
             self.image_instances.mark_deleted(image.id)
@@ -3522,7 +3692,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             # Runner offline
             await sync_to_async(self.build_jobs.mark_pending_deletion)(build_job_id)
             if instance:
-                await sync_to_async(self.image_instances.mark_pending_deletion)(instance.id)
+                await sync_to_async(self.image_instances.mark_pending_deletion)(
+                    instance.id
+                )
         else:
             # No physical artifact to clean up
             await sync_to_async(self.build_jobs.mark_deleted)(build_job_id)
@@ -3609,7 +3781,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             return
         self.image_definitions.mark_delete_failed(definition_id, error=error)
 
-    def _mark_definition_deleting_if_needed(self, definition_id: uuid.UUID | None) -> None:
+    def _mark_definition_deleting_if_needed(
+        self, definition_id: uuid.UUID | None
+    ) -> None:
         """Promote a pending definition delete to deleting once runner cleanup starts."""
         if definition_id is None:
             return
@@ -3628,7 +3802,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
 
     async def deactivate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Deactivate a definition — immediately not selectable for new workspaces."""
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
         await sync_to_async(self.image_definitions.deactivate)(definition_id)
@@ -3637,7 +3813,10 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
     async def activate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Re-activate a deactivated definition."""
         from .models import ImageDefinition
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
         if definition.status not in (
@@ -3670,7 +3849,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         """
         from .models import ImageDefinition, ImageBuildJob
 
-        definition = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
+        definition = await sync_to_async(self.image_definitions.get_by_id)(
+            definition_id
+        )
         if definition is None:
             raise ValueError(f"Image definition '{definition_id}' not found")
 
@@ -3740,6 +3921,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             try:
                 # Find existing task
                 from .models import Task as TaskModel
+
                 task = await sync_to_async(
                     lambda: TaskModel.objects.filter(
                         workspace=ws,
@@ -3773,7 +3955,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             except Exception:
                 logger.exception(
                     "Failed to dispatch pending workspace deletion %s for runner %s",
-                    ws.id, runner.id,
+                    ws.id,
+                    runner.id,
                 )
         return dispatched
 
@@ -3787,7 +3970,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
 
         dispatched = []
         for build in pending:
-            instance = await sync_to_async(lambda: getattr(build, "image_instance", None))()
+            instance = await sync_to_async(
+                lambda: getattr(build, "image_instance", None)
+            )()
             if not instance or not instance.runner_ref:
                 continue
             try:
@@ -3842,7 +4027,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             except Exception:
                 logger.exception(
                     "Failed to dispatch pending build deletion %s for runner %s",
-                    build.id, runner.id,
+                    build.id,
+                    runner.id,
                 )
         return dispatched
 
@@ -3922,7 +4108,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         resolved_ssh_keys = ssh_keys or []
 
         if credentials is not None:
-            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(credentials)
+            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(
+                credentials
+            )
 
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)

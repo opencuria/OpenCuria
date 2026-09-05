@@ -14,7 +14,25 @@ class DummyService:
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.create_workspace_calls = []
-        self.start_desktop = AsyncMock()
+        self.start_desktop = AsyncMock(
+            return_value=type(
+                "Session",
+                (),
+                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
+            )()
+        )
+        self.stop_desktop = AsyncMock(
+            return_value=type(
+                "Release",
+                (),
+                {
+                    "stopped": True,
+                    "process_alive": False,
+                    "viewer_held": False,
+                    "computer_use_active": False,
+                },
+            )()
+        )
         self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
         self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
@@ -97,18 +115,26 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         service.sync_from_runtime.assert_awaited_once()
         service.recover_desktop_sessions_from_runtime.assert_awaited_once()
         interface._sio.emit.assert_any_await(
-            "desktop:started",
+            "desktop:process",
             {
                 "workspace_id": service.get_workspace_heartbeat_statuses.return_value[0]["workspace_id"],
                 "port": 6901,
                 "container_ip": "127.0.0.1",
                 "network_name": "workspace-net",
+                "viewer": False,
+                "computer_use": False,
             },
         )
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
-        service.start_desktop = AsyncMock(return_value=type("Session", (), {"port": 6901})())
+        service.start_desktop = AsyncMock(
+            return_value=type(
+                "Session",
+                (),
+                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
+            )()
+        )
         service.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
         service.get_desktop_network_name = lambda workspace_id: ""
 
@@ -130,6 +156,60 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "port": 6901,
                 "container_ip": "10.100.0.2",
                 "network_name": "",
+                "viewer": True,
+                "computer_use": False,
+            },
+        )
+
+    async def test_stop_desktop_emits_stopped_when_process_ends(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "desktop-stop-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:stop_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        service.stop_desktop.assert_awaited_once_with(workspace_id)
+        interface._sio.emit.assert_awaited_with(
+            "desktop:stopped",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+            },
+        )
+
+    async def test_stop_desktop_emits_viewer_released_when_computer_use_holds(
+        self,
+    ) -> None:
+        service = DummyService()
+        service.stop_desktop = AsyncMock(
+            return_value=type(
+                "Release",
+                (),
+                {
+                    "stopped": False,
+                    "process_alive": True,
+                    "viewer_held": False,
+                    "computer_use_active": True,
+                },
+            )()
+        )
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "desktop-stop-2"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:stop_desktop"]
+        await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
+
+        interface._sio.emit.assert_awaited_with(
+            "desktop:viewer_released",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "computer_use_active": True,
             },
         )
 

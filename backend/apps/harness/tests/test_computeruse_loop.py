@@ -46,9 +46,7 @@ class FakeProvider(ProviderAdapter):
         opts: ChatOptions | None = None,
     ) -> AsyncIterator[Delta]:
         """Yield the next canned step."""
-        self.calls.append(
-            {"model": model, "tools": [tool.name for tool in tools]}
-        )
+        self.calls.append({"model": model, "tools": [tool.name for tool in tools]})
         self.messages.append(list(messages))
         if not self._steps:
             yield Delta(text="done", usage=Usage(0, 0, 0))
@@ -135,11 +133,12 @@ async def test_computeruse_happy_path_records_and_compacts_images() -> None:
     result = await runner.run("click button", "computeruse", "m", "build", opts)
 
     actions = [call[0] for call in accessor.desktop_calls]
-    assert actions[0] == "ensure"
+    assert actions[0] == "hold"
     assert actions[1] == "record_start"
     assert "screenshot" in actions
     assert "click" in actions
-    assert actions[-1] == "record_stop"
+    assert "record_stop" in actions
+    assert actions[-1] == "release"
     assert "![Computer use](/workspace/.opencuria/computeruse/" in result.output
     assert result.metadata.get("recording_path", "").endswith("session.mp4")
 
@@ -187,6 +186,7 @@ async def test_computeruse_abort_still_stops_recording() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert any(call[0] == "record_stop" for call in accessor.desktop_calls)
+    assert any(call[0] == "release" for call in accessor.desktop_calls)
 
 
 def test_truncate_task_output_preserves_video_marker() -> None:
@@ -239,8 +239,8 @@ async def test_computeruse_ledger_discards_old_screenshots() -> None:
     assert ledger_found
 
 
-async def test_record_start_failure_raises_without_hanging() -> None:
-    """record_start errors fail fast and still attempt record_stop when started."""
+async def test_record_start_failure_still_releases_desktop_hold() -> None:
+    """record_start errors fail fast and still release the computer-use lease."""
 
     class RecordStartFails(FakeAccessor):
         async def desktop_action(
@@ -260,6 +260,7 @@ async def test_record_start_failure_raises_without_hanging() -> None:
     with pytest.raises(RuntimeError, match="record_start failed|ffmpeg missing"):
         await runner.run("go", "computeruse", "m", "build", opts)
     actions = [call[0] for call in accessor.desktop_calls]
-    assert actions[0] == "ensure"
+    assert actions[0] == "hold"
     assert "record_start" in actions
     assert "record_stop" not in actions
+    assert actions[-1] == "release"

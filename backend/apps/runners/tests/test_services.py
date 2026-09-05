@@ -15,7 +15,13 @@ from django.utils import timezone
 
 from apps.credentials.models import CredentialService
 from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
-from apps.runners.enums import RunnerStatus, TaskStatus, TaskType, WorkspaceOperation, WorkspaceStatus
+from apps.runners.enums import (
+    RunnerStatus,
+    TaskStatus,
+    TaskType,
+    WorkspaceOperation,
+    WorkspaceStatus,
+)
 from apps.runners.exceptions import (
     RunnerNotFoundError,
     RunnerOfflineError,
@@ -24,7 +30,14 @@ from apps.runners.exceptions import (
 )
 from common.exceptions import ConflictError, NotFoundError
 
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob, Task, Workspace
+from apps.runners.models import (
+    ImageDefinition,
+    ImageInstance,
+    Runner,
+    ImageBuildJob,
+    Task,
+    Workspace,
+)
 from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
 
@@ -92,6 +105,8 @@ class TestDesktopStateCleanup:
             "port": 6901,
             "container_ip": "172.19.0.3",
             "network_name": "workspace-net",
+            "viewer": True,
+            "computer_use": False,
         }
         emit.assert_awaited_once()
 
@@ -127,6 +142,8 @@ class TestDesktopStateCleanup:
             "port": 6901,
             "container_ip": "10.100.0.2",
             "network_name": "",
+            "viewer": True,
+            "computer_use": False,
         }
         emit.assert_awaited_once()
 
@@ -211,6 +228,8 @@ class TestDesktopStateCleanup:
             "port": 6901,
             "container_ip": "172.19.0.3",
             "network_name": "workspace-net",
+            "viewer": False,
+            "computer_use": False,
         }
         assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
 
@@ -276,6 +295,149 @@ class TestDesktopStateCleanup:
         assert workspace_id not in service._active_desktops
         assert workspace_id not in service._desktop_workspace_runner
 
+    def test_heartbeat_restores_lease_flags(self, service, runner, workspace):
+        """Heartbeat desktop payloads include viewer and computer-use leases."""
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                    "desktop": {
+                        "port": 6901,
+                        "container_ip": "172.19.0.3",
+                        "network_name": "workspace-net",
+                        "viewer": False,
+                        "computer_use": True,
+                    },
+                }
+            ],
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+            "viewer": False,
+            "computer_use": True,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_process_records_proxy_without_frontend_event(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Reconnect process announcements must not look like a viewer acquire."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_process(
+            str(workspace.id),
+            port=6901,
+            container_ip="172.19.0.3",
+            network_name="workspace-net",
+            runner_id=str(runner.id),
+            viewer=False,
+            computer_use=True,
+        )
+
+        assert service.get_desktop_info(str(workspace.id))["computer_use"] is True
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_viewer_released_keeps_proxy_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Releasing the viewer must not drop VNC routing while computer-use holds."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        service._record_active_desktop(
+            str(workspace.id),
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": True,
+                "computer_use": True,
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_viewer_released(
+            str(task.id),
+            str(workspace.id),
+            runner_id=str(runner.id),
+            computer_use_active=True,
+        )
+
+        task.refresh_from_db()
+        assert task.status == TaskStatus.COMPLETED
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+            "viewer": False,
+            "computer_use": True,
+        }
+        emit.assert_awaited_once()
+        assert emit.await_args.args[0] == "desktop:viewer_released"
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_stopped_clears_proxy_state(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """desktop:stopped still clears proxy routing when the process dies."""
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_DESKTOP,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        service._record_active_desktop(
+            str(workspace.id),
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": True,
+                "computer_use": False,
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_stopped(
+            str(task.id),
+            str(workspace.id),
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) is None
+        emit.assert_awaited_once()
+        assert emit.await_args.args[0] == "desktop:stopped"
+
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspace:
@@ -317,7 +479,9 @@ class TestCreateWorkspace:
                     content='{"access_token":"test"}',
                 )
             ],
-            ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
+            ssh_keys=[
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
+            ],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -478,7 +642,9 @@ class TestCreateWorkspace:
             )
 
     @pytest.mark.asyncio
-    async def test_rejects_runner_without_selected_definition_image(self, service, runner, user):
+    async def test_rejects_runner_without_selected_definition_image(
+        self, service, runner, user
+    ):
         """A manually selected runner must match the chosen definition image build."""
         other_runner = Runner.objects.create(
             name="other-runner",
@@ -514,7 +680,8 @@ class TestCreateWorkspace:
         )
 
         with pytest.raises(
-            ConflictError, match="Selected runner does not have the selected image artifact"
+            ConflictError,
+            match="Selected runner does not have the selected image artifact",
         ):
             await service.create_workspace(
                 name="mismatch-runner",
@@ -683,7 +850,9 @@ class TestRemoveWorkspace:
 @pytest.mark.django_db(transaction=True)
 class TestCreateImageArtifactSecurity:
     @pytest.mark.asyncio
-    async def test_rejects_image_artifact_for_workspace_in_other_organization(self, service, user):
+    async def test_rejects_image_artifact_for_workspace_in_other_organization(
+        self, service, user
+    ):
         local_org = Organization.objects.create(
             name=f"Snapshot Local Org {uuid.uuid4().hex[:6]}",
             slug=f"snapshot-local-org-{uuid.uuid4().hex[:8]}",
@@ -1071,7 +1240,9 @@ class TestImageDeletionLifecycle:
             created_by=user,
         )
 
-        with pytest.raises(ConflictError, match="cannot be deleted while it is still capturing"):
+        with pytest.raises(
+            ConflictError, match="cannot be deleted while it is still capturing"
+        ):
             await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
@@ -1188,15 +1359,21 @@ class TestRuntimeCompatibilityGuards:
         runner.available_runtimes = ["docker"]
         runner.save(update_fields=["available_runtimes"])
 
-        with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
+        with pytest.raises(
+            ConflictError, match="Runner does not support runtime 'qemu'"
+        ):
             await service.resume_workspace(stopped_workspace.id)
 
-    def test_update_runner_qemu_settings_rejects_docker_only_runner(self, service, runner):
+    def test_update_runner_qemu_settings_rejects_docker_only_runner(
+        self, service, runner
+    ):
         """QEMU runner settings cannot be updated on a runner without QEMU support."""
         runner.available_runtimes = ["docker"]
         runner.save(update_fields=["available_runtimes"])
 
-        with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
+        with pytest.raises(
+            ConflictError, match="Runner does not support runtime 'qemu'"
+        ):
             service.update_runner_qemu_settings(runner.id, qemu_default_vcpus=4)
 
     @pytest.mark.asyncio
@@ -1214,7 +1391,9 @@ class TestRuntimeCompatibilityGuards:
             base_distro="ubuntu:24.04",
         )
 
-        with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
+        with pytest.raises(
+            ConflictError, match="Runner does not support runtime 'qemu'"
+        ):
             await service.trigger_build_job(
                 image_definition=definition,
                 runner=runner,
@@ -1250,7 +1429,9 @@ class TestRuntimeCompatibilityGuards:
         runner.available_runtimes = ["docker"]
         runner.save(update_fields=["available_runtimes"])
 
-        with pytest.raises(ConflictError, match="Runner does not support runtime 'qemu'"):
+        with pytest.raises(
+            ConflictError, match="Runner does not support runtime 'qemu'"
+        ):
             await service.create_workspace_from_image_artifact(
                 image_artifact_id=artifact.id,
                 name="clone-qemu",
@@ -1308,7 +1489,9 @@ class TestCreateWorkspaceFromImageArtifact:
 
         assert workspace.status == WorkspaceStatus.CREATING
         assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
-        assert list(workspace.credentials.values_list("id", flat=True)) == [credential.id]
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
 
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
@@ -1410,7 +1593,9 @@ class TestHandleWorkspaceError:
         assert task.status == TaskStatus.FAILED
         assert task.error == "clone failed"
 
-    def test_marks_workspace_delete_failed_for_remove_task(self, service, runner, workspace):
+    def test_marks_workspace_delete_failed_for_remove_task(
+        self, service, runner, workspace
+    ):
         task = Task.objects.create(
             runner=runner,
             workspace=workspace,
@@ -1444,9 +1629,7 @@ class TestHandleWorkspaceError:
 @pytest.mark.django_db(transaction=True)
 class TestWorkspaceOperationState:
     @pytest.mark.asyncio
-    async def test_running_qemu_update_sets_restart_operation(
-        self, service, workspace
-    ):
+    async def test_running_qemu_update_sets_restart_operation(self, service, workspace):
         """Running QEMU resource updates should mark the workspace as restarting."""
         workspace.runtime_type = "qemu"
         workspace.qemu_vcpus = 2
@@ -1552,9 +1735,7 @@ class TestHeartbeatReconciliation:
             name="Heartbeat Workspace",
         )
 
-    def test_promotes_stopped_workspace_to_running(
-        self, service
-    ):
+    def test_promotes_stopped_workspace_to_running(self, service):
         """Heartbeat should promote STOPPED to RUNNING when runtime is active."""
         runner = self._create_runner()
         stopped_workspace = self._create_workspace(runner, WorkspaceStatus.STOPPED)
@@ -1571,9 +1752,7 @@ class TestHeartbeatReconciliation:
         stopped_workspace.refresh_from_db()
         assert stopped_workspace.status == WorkspaceStatus.RUNNING
 
-    def test_creating_workspace_not_promoted_by_heartbeat(
-        self, service
-    ):
+    def test_creating_workspace_not_promoted_by_heartbeat(self, service):
         """Heartbeat must not bypass explicit workspace:created transition."""
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.CREATING)
@@ -1692,13 +1871,19 @@ class TestHeartbeatReconciliation:
 @pytest.mark.django_db(transaction=True)
 class TestAutoStopInactiveWorkspaces:
     @pytest.mark.asyncio
-    async def test_dispatches_stop_for_inactive_workspace(self, service, sio_mock, workspace):
+    async def test_dispatches_stop_for_inactive_workspace(
+        self, service, sio_mock, workspace
+    ):
         workspace.runner.organization.workspace_auto_stop_timeout_minutes = 5
-        workspace.runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
+        workspace.runner.organization.save(
+            update_fields=["workspace_auto_stop_timeout_minutes"]
+        )
         workspace.last_activity_at = timezone.now() - timedelta(minutes=10)
         workspace.save(update_fields=["last_activity_at", "updated_at"])
 
-        tasks = await service.auto_stop_inactive_workspaces(runner_id=workspace.runner_id)
+        tasks = await service.auto_stop_inactive_workspaces(
+            runner_id=workspace.runner_id
+        )
 
         assert len(tasks) == 1
         workspace.refresh_from_db()
@@ -1709,7 +1894,9 @@ class TestAutoStopInactiveWorkspaces:
         assert payload["workspace_id"] == str(workspace.id)
 
     @pytest.mark.asyncio
-    async def test_terminal_and_file_events_touch_workspace_activity(self, service, workspace):
+    async def test_terminal_and_file_events_touch_workspace_activity(
+        self, service, workspace
+    ):
         before = workspace.last_activity_at
         await service.forward_terminal_input(
             workspace_id=str(workspace.id),
@@ -1723,7 +1910,11 @@ class TestAutoStopInactiveWorkspaces:
         await service.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:list",
-            data={"workspace_id": str(workspace.id), "request_id": "req-1", "path": "/workspace"},
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "req-1",
+                "path": "/workspace",
+            },
         )
         workspace.refresh_from_db()
         assert workspace.last_activity_at >= after_terminal
@@ -2009,9 +2200,7 @@ class TestHarnessReplyRouting:
 
         assert routed == []
 
-    def test_unknown_workspace_reply_is_dropped(
-        self, service, runner, monkeypatch
-    ):
+    def test_unknown_workspace_reply_is_dropped(self, service, runner, monkeypatch):
         """Replies for a workspace that is not in the database are dropped."""
         routed: list[dict] = []
         monkeypatch.setattr(
@@ -2030,9 +2219,7 @@ class TestHarnessReplyRouting:
 
         assert routed == []
 
-    def test_invalid_runner_id_reply_is_dropped(
-        self, service, workspace, monkeypatch
-    ):
+    def test_invalid_runner_id_reply_is_dropped(self, service, workspace, monkeypatch):
         """Malformed runner ids must not be treated as a valid owner."""
         routed: list[dict] = []
         monkeypatch.setattr(
@@ -2056,9 +2243,7 @@ class TestHarnessReplyRouting:
 class TestDesktopSessionImageContent:
     """QEMU images get XFCE+WhiteSur; Docker keeps Openbox + Chrome."""
 
-    def test_qemu_init_script_uses_xfce_whitesur_stack(
-        self, service, runner, user
-    ):
+    def test_qemu_init_script_uses_xfce_whitesur_stack(self, service, runner, user):
         """QEMU image builds must provision XFCE, WhiteSur, Plank, and no Openbox."""
         definition = ImageDefinition.objects.create(
             organization=runner.organization,
@@ -2124,9 +2309,7 @@ class TestDesktopSessionImageContent:
     def test_qemu_and_packer_desktop_scripts_stay_in_sync(self):
         """Backend and Packer QEMU desktop provisioners must stay identical."""
         backend_script = (
-            Path(__file__).resolve().parents[1]
-            / "scripts"
-            / "qemu_desktop_session.sh"
+            Path(__file__).resolve().parents[1] / "scripts" / "qemu_desktop_session.sh"
         )
         packer_script = (
             Path(__file__).resolve().parents[4]
@@ -2344,7 +2527,9 @@ class TestPersistentWorkspaceCredentials:
         assert workspace.status == WorkspaceStatus.STOPPED
         assert workspace.credentials_present is False
 
-    def test_heartbeat_stop_leaves_credentials_present(self, service, runner, workspace):
+    def test_heartbeat_stop_leaves_credentials_present(
+        self, service, runner, workspace
+    ):
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present"])
 

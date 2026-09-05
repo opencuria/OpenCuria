@@ -253,9 +253,10 @@ and executed there. The runner exposes plain operations the harness calls via
 - **Harness exec/file RPC** — `harness:exec_stream`, `harness:exec_wait`,
   `harness:read_file`, `harness:write_file`, `harness:list`, `harness:stat`
   (all sandboxed to `/workspace`), plus terminal/desktop/files.
-- **Desktop display I/O** — `harness:desktop_action` (ensure desktop session,
-  screenshot, xdotool input, ffmpeg session recording). Dumb display primitive;
-  the runner has no agent knowledge.
+- **Desktop display I/O** — `harness:desktop_action` (ensure/hold/release,
+  screenshot, xdotool input, ffmpeg session recording). One shared X11
+  display per workspace with independent viewer and computer-use leases.
+  The runner has no agent knowledge.
 - No legacy prompt path exists anymore (the harness owns all prompting).
 
 ### 4.5 Service Layer (`service.py`)
@@ -276,8 +277,10 @@ and executed there. The runner exposes plain operations the harness calls via
 - `write_terminal(terminal_id, data)` — sends stdin to PTY
 - `resize_terminal(terminal_id, cols, rows)` — resizes PTY
 - `close_terminal(terminal_id)` — closes PTY session
-- `desktop_action(workspace_id, action, args)` — desktop ensure/screenshot,
-  xdotool input, ffmpeg record/stop (no agent logic)
+- `desktop_action(workspace_id, action, args)` — desktop ensure/hold/release,
+  screenshot, xdotool input, ffmpeg record/stop (no agent logic). Viewer
+  `task:start_desktop`/`task:stop_desktop` acquire/release a viewer lease;
+  Xvnc stops only when no computer-use hold remains.
 
 ### 4.6 Interfaces
 
@@ -477,9 +480,13 @@ subagents, plus `computeruse` for desktop automation) — no DB records. Modes
 (`plan`/`build`) and per-agent permission rules come from the same definitions.
 The `computeruse` subagent exposes desktop tools only (spawned via `task`);
 session recordings are written under `.opencuria/computeruse/` and appended to
-chat as markdown video refs. Desktop images need `ffmpeg` and `xdotool` (rebuild
-image definitions after adding them). To add tooling to workspaces, extend the
-image definitions (packages / custom Dockerfile / init script).
+chat as markdown video refs. Computer-use acquires a desktop lease for the
+run (`hold`/`release`) so closing the manual VNC viewer does not kill the
+agent. While computer-use holds the display, the viewer is observe-only;
+**Take control** aborts busy `computeruse` sessions on that workspace.
+Desktop images need `ffmpeg` and `xdotool` (rebuild image definitions after
+adding them). To add tooling to workspaces, extend the image definitions
+(packages / custom Dockerfile / init script).
 
 **Security:** computer-use session recordings capture the workspace display;
 credentials or other sensitive content visible on screen may appear in the mp4.
@@ -649,6 +656,10 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
 | Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` |
 | Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
+| Runner -> Backend | `desktop:started` | viewer lease acquired (`task_id`, routing, `viewer`, `computer_use`) |
+| Runner -> Backend | `desktop:process` | live Xvnc for proxy routing after reconnect (not a viewer acquire) |
+| Runner -> Backend | `desktop:stopped` | Xvnc process ended |
+| Runner -> Backend | `desktop:viewer_released` | viewer lease dropped, process still up (`computer_use_active`) |
 | Backend -> Runner | `harness:cancel` | `{request_id}` |
 | Backend -> Runner | `task:stop_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id, credentials_present}` |
@@ -678,6 +689,9 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `harness.part_updated` | `{workspace_id, session_id, delta, step, part_id}` |
 | Backend -> Frontend | `harness.permission_required` / `harness.question_required` / `harness.session_status` | `{workspace_id, session_id, ...}` |
 | Backend -> Frontend | `harness.todo_updated` / `harness.subtask_started/finished` | `{workspace_id, session_id, ...}` |
+| Backend -> Frontend | `desktop:started` | `{workspace_id, task_id, proxy_url, computer_use_active?}` |
+| Backend -> Frontend | `desktop:stopped` | `{workspace_id, task_id}` |
+| Backend -> Frontend | `desktop:viewer_released` | `{workspace_id, task_id, computer_use_active}` |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.
 Frontend Socket.IO authentication: JWT token passed in `auth: { token }` on connect (validated server-side).

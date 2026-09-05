@@ -226,6 +226,14 @@ class DesktopStatusOut(Schema):
 
     active: bool
     proxy_url: str | None = None
+    viewer_held: bool = False
+    computer_use_active: bool = False
+
+
+class DesktopTakeControlOut(Schema):
+    """Response schema after taking control of the desktop from computer-use."""
+
+    aborted_session_ids: list[uuid.UUID]
 
 
 class DesktopClipboardWriteIn(Schema):

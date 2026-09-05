@@ -248,9 +248,7 @@ class HarnessRunner:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning(
-                "emit_failed", error=str(exc), event_type=event.get("type")
-            )
+            log.warning("emit_failed", error=str(exc), event_type=event.get("type"))
 
     def _filtered_schemas(
         self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
@@ -421,9 +419,7 @@ class HarnessRunner:
             return self._tool_error_outcome(
                 call, "todowrite is not available to subagents."
             )
-        decision = self._decide(
-            agent, call.name, action, mode, doom_loop=doom_loop
-        )
+        decision = self._decide(agent, call.name, action, mode, doom_loop=doom_loop)
         approved = True
         if decision == DENY:
             approved = False
@@ -488,9 +484,7 @@ class HarnessRunner:
                     "error": str(exc),
                 }
             )
-            return self._tool_error_outcome(
-                call, f"Tool '{call.name}' failed: {exc}"
-            )
+            return self._tool_error_outcome(call, f"Tool '{call.name}' failed: {exc}")
         await self._send(
             {
                 "type": "tool_completed",
@@ -548,9 +542,7 @@ class HarnessRunner:
         """Execute *calls* concurrently; return outcomes in original order."""
         doom_flags: list[bool] = []
         for call in calls:
-            fingerprint = (
-                f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
-            )
+            fingerprint = f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
             recent_calls.append(fingerprint)
             doom_flags.append(
                 len(recent_calls) >= DOOM_LOOP_REPEATS
@@ -602,9 +594,7 @@ class HarnessRunner:
                     }
                 )
                 outcomes.append(
-                    self._tool_error_outcome(
-                        call, f"Tool '{call.name}' failed: {item}"
-                    )
+                    self._tool_error_outcome(call, f"Tool '{call.name}' failed: {item}")
                 )
                 continue
             outcomes.append(item)
@@ -712,9 +702,7 @@ class HarnessRunner:
         if self.accessor is not None:
             last = messages[-1]
             if last.role == "user" and isinstance(last.content, str):
-                hydrated = await hydrate_workspace_images(
-                    last.content, self.accessor
-                )
+                hydrated = await hydrate_workspace_images(last.content, self.accessor)
                 messages[-1] = LLMMessage(
                     role=last.role,
                     content=hydrated,
@@ -853,7 +841,9 @@ class HarnessRunner:
         )
         user_prompt = LLMMessage(role="user", content=prompt)
         if self.accessor is not None and isinstance(user_prompt.content, str):
-            hydrated = await hydrate_workspace_images(user_prompt.content, self.accessor)
+            hydrated = await hydrate_workspace_images(
+                user_prompt.content, self.accessor
+            )
             user_prompt = LLMMessage(role="user", content=hydrated)
         cu_state = ComputerUseLoopState(
             base_messages=[
@@ -886,26 +876,25 @@ class HarnessRunner:
         last_text = ""
         recent_calls: list[str] = []
         record_started = False
+        held = False
         recording_path = default_recording_path(run_id)
 
         try:
-            await ctx.accessor.desktop_action("ensure")
+            await ctx.accessor.desktop_action(
+                "hold",
+                {"kind": "computeruse", "run_id": run_id},
+            )
+            held = True
             try:
                 start = await ctx.accessor.desktop_action(
                     "record_start", {"run_id": run_id}
                 )
             except Exception as exc:
-                raise RuntimeError(
-                    f"Computer-use record_start failed: {exc}"
-                ) from exc
+                raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
             if not start.get("ok"):
-                raise RuntimeError(
-                    f"Computer-use record_start failed: {start!r}"
-                )
+                raise RuntimeError(f"Computer-use record_start failed: {start!r}")
             record_started = True
-            recording_path = str(
-                start.get("path") or default_recording_path(run_id)
-            )
+            recording_path = str(start.get("path") or default_recording_path(run_id))
             initial = await self.tools.execute("view_screen", {}, ctx)
             if not initial.image_jpeg:
                 raise RuntimeError(
@@ -976,10 +965,7 @@ class HarnessRunner:
                 )
                 for outcome in outcomes:
                     cu_state.round_messages.append(outcome.message)
-                    if (
-                        outcome.result is not None
-                        and outcome.result.image_jpeg
-                    ):
+                    if outcome.result is not None and outcome.result.image_jpeg:
                         cu_state.set_screenshot(
                             FRESH_DESKTOP_TEXT, outcome.result.image_jpeg
                         )
@@ -1011,6 +997,18 @@ class HarnessRunner:
                 except Exception as exc:  # pragma: no cover - best effort
                     log.warning(
                         "computeruse_record_stop_failed",
+                        run_id=run_id,
+                        error=str(exc),
+                    )
+            if held:
+                try:
+                    await ctx.accessor.desktop_action(
+                        "release",
+                        {"kind": "computeruse", "run_id": run_id},
+                    )
+                except Exception as exc:  # pragma: no cover - best effort
+                    log.warning(
+                        "computeruse_desktop_release_failed",
                         run_id=run_id,
                         error=str(exc),
                     )
@@ -1111,7 +1109,6 @@ class HarnessRunner:
         except Exception:  # pragma: no cover - title must never break loop
             return tool_name
 
-
     async def _maybe_compact_history(
         self,
         *,
@@ -1202,9 +1199,7 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def desktop_action(
-        self, action, args=None, timeout=None
-    ):  # type: ignore[no-untyped-def]
+    async def desktop_action(self, action, args=None, timeout=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 

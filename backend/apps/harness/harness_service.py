@@ -261,8 +261,10 @@ class HarnessService:
                 id__in={session.workspace_id for session in sessions}
             ).only("id", "name")
             workspace_names = {str(row.id): row.name for row in rows}
-            latest_assistant_at = self.messages.latest_assistant_completed_at_by_session(
-                [session.id for session in sessions]
+            latest_assistant_at = (
+                self.messages.latest_assistant_completed_at_by_session(
+                    [session.id for session in sessions]
+                )
             )
         return [
             {
@@ -508,6 +510,22 @@ class HarnessService:
         for child in children:
             await self.abort_run(child.id)
         return session
+
+    async def abort_busy_computeruse_for_workspace(
+        self, workspace_id: uuid.UUID
+    ) -> list[HarnessSession]:
+        """Abort busy computer-use sessions for *workspace_id*.
+
+        Parent build/plan sessions are left running. Each aborted child
+        still releases its desktop lease in the computer-use ``finally``.
+        """
+        sessions = await sync_to_async(
+            self.sessions.list_busy_computeruse_for_workspace
+        )(workspace_id)
+        aborted: list[HarnessSession] = []
+        for session in sessions:
+            aborted.append(await self.abort_run(session.id))
+        return aborted
 
     async def resolve_permission(
         self, *, session: HarnessSession, request_id: uuid.UUID, response: str

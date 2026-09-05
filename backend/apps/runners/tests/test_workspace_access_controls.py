@@ -175,16 +175,66 @@ def test_global_image_artifact_create_requires_images_create_permission(
 @pytest.mark.parametrize(
     ("method", "path_template", "payload", "permissions"),
     [
-        ("get", "/api/v1/workspaces/{workspace_id}/", None, [APIKeyPermission.WORKSPACES_READ.value]),
-        ("post", "/api/v1/workspaces/{workspace_id}/terminal/", {"cols": 80, "rows": 24}, [APIKeyPermission.TERMINAL_ACCESS.value]),
-        ("patch", "/api/v1/workspaces/{workspace_id}/", {"name": "renamed"}, [APIKeyPermission.WORKSPACES_UPDATE.value]),
-        ("post", "/api/v1/workspaces/{workspace_id}/stop/", None, [APIKeyPermission.WORKSPACES_STOP.value]),
-        ("post", "/api/v1/workspaces/{workspace_id}/resume/", None, [APIKeyPermission.WORKSPACES_RESUME.value]),
-        ("delete", "/api/v1/workspaces/{workspace_id}/", None, [APIKeyPermission.WORKSPACES_DELETE.value]),
-        ("get", "/api/v1/workspaces/{workspace_id}/image-artifacts/", None, [APIKeyPermission.IMAGES_READ.value]),
-        ("post", "/api/v1/workspaces/{workspace_id}/image-artifacts/", {"name": "snapshot"}, [APIKeyPermission.IMAGES_CREATE.value]),
-        ("delete", "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/", None, [APIKeyPermission.IMAGES_DELETE.value]),
-        ("post", "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/workspaces/", {"name": "clone"}, [APIKeyPermission.IMAGES_CLONE.value]),
+        (
+            "get",
+            "/api/v1/workspaces/{workspace_id}/",
+            None,
+            [APIKeyPermission.WORKSPACES_READ.value],
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{workspace_id}/terminal/",
+            {"cols": 80, "rows": 24},
+            [APIKeyPermission.TERMINAL_ACCESS.value],
+        ),
+        (
+            "patch",
+            "/api/v1/workspaces/{workspace_id}/",
+            {"name": "renamed"},
+            [APIKeyPermission.WORKSPACES_UPDATE.value],
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{workspace_id}/stop/",
+            None,
+            [APIKeyPermission.WORKSPACES_STOP.value],
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{workspace_id}/resume/",
+            None,
+            [APIKeyPermission.WORKSPACES_RESUME.value],
+        ),
+        (
+            "delete",
+            "/api/v1/workspaces/{workspace_id}/",
+            None,
+            [APIKeyPermission.WORKSPACES_DELETE.value],
+        ),
+        (
+            "get",
+            "/api/v1/workspaces/{workspace_id}/image-artifacts/",
+            None,
+            [APIKeyPermission.IMAGES_READ.value],
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{workspace_id}/image-artifacts/",
+            {"name": "snapshot"},
+            [APIKeyPermission.IMAGES_CREATE.value],
+        ),
+        (
+            "delete",
+            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/",
+            None,
+            [APIKeyPermission.IMAGES_DELETE.value],
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/workspaces/",
+            {"name": "clone"},
+            [APIKeyPermission.IMAGES_CLONE.value],
+        ),
     ],
 )
 def test_foreign_workspace_endpoints_return_not_found(
@@ -216,3 +266,49 @@ def test_foreign_workspace_endpoints_return_not_found(
         )
 
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_take_desktop_control_requires_harness_run(workspace_access_setup):
+    """A terminal-only API key cannot abort computer-use via take-control."""
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.TERMINAL_ACCESS.value],
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_access_setup['owner_workspace'].id}"
+        "/desktop/take-control/"
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+
+
+@pytest.mark.django_db
+def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeypatch):
+    """Take-control with terminal + harness:run aborts busy computer-use sessions."""
+    from types import SimpleNamespace
+
+    async def fake_abort(workspace_id):
+        return [SimpleNamespace(id=uuid.uuid4())]
+
+    monkeypatch.setattr(
+        "apps.harness.harness_service.get_harness_service",
+        lambda: SimpleNamespace(abort_busy_computeruse_for_workspace=fake_abort),
+    )
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[
+            APIKeyPermission.TERMINAL_ACCESS.value,
+            APIKeyPermission.HARNESS_RUN.value,
+        ],
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_access_setup['owner_workspace'].id}"
+        "/desktop/take-control/"
+    )
+    assert response.status_code == 200, response.content[:500]
+    body = response.json()
+    assert "aborted_session_ids" in body
+    assert len(body["aborted_session_ids"]) == 1

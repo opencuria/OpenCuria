@@ -117,11 +117,18 @@ export interface DesktopStartedEvent {
   workspace_id: string
   task_id: string
   proxy_url: string
+  computer_use_active?: boolean
 }
 
 export interface DesktopStoppedEvent {
   workspace_id: string
   task_id: string
+}
+
+export interface DesktopViewerReleasedEvent {
+  workspace_id: string
+  task_id: string
+  computer_use_active: boolean
 }
 
 export interface RunnerOfflineEvent {
@@ -151,6 +158,7 @@ type EventMap = {
   'terminal:closed': TerminalClosedEvent
   'desktop:started': DesktopStartedEvent
   'desktop:stopped': DesktopStoppedEvent
+  'desktop:viewer_released': DesktopViewerReleasedEvent
   'files:list_result': FilesListResultEvent
   'files:content_result': FilesContentResultEvent
   'files:upload_result': FilesUploadResultEvent
