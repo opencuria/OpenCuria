@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "apps.organizations",
     "apps.runners",
     "apps.credentials",
+    "apps.harness",
     "apps.skills",
 ]
 
