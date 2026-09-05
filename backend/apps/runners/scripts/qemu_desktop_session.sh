@@ -164,7 +164,9 @@ git clone --depth=1 --branch 2026-08-11 \
 git clone --depth=1 \
     https://github.com/vinceliuice/WhiteSur-cursors.git \
     "$THEME_WORKDIR/cursors"
-"$THEME_WORKDIR/cursors/install.sh"
+# install.sh copies ./dist relative to CWD, not the script path.
+test -d "$THEME_WORKDIR/cursors/dist"
+( cd "$THEME_WORKDIR/cursors" && ./install.sh )
 
 mkdir -p /usr/share/backgrounds/opencuria
 wget -q -O /usr/share/backgrounds/opencuria/Ventura-light.jpg \

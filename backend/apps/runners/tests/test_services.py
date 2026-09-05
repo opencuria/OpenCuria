@@ -2068,6 +2068,7 @@ class TestDesktopSessionImageContent:
         assert "--start-maximized" not in script
         assert "openbox-session" not in script
         assert "xfce4-session" in script
+        assert 'cd "$THEME_WORKDIR/cursors" && ./install.sh' in script
 
     def test_qemu_init_script_skipped_for_alpine(self, service, runner, user):
         """Alpine QEMU images must not receive the XFCE desktop block."""
