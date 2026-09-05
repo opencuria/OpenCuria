@@ -121,8 +121,8 @@ describe('DashboardView harness conversations', () => {
     await flushPromises()
 
     expect(wrapper.find('input[placeholder="Search conversations..."]').exists()).toBe(true)
-    expect(wrapper.get('[title="List view"]').exists()).toBe(true)
-    expect(wrapper.get('[title="Kanban view"]').exists()).toBe(true)
+    expect(wrapper.find('[title="List view"]').exists()).toBe(true)
+    expect(wrapper.find('[title="Kanban view"]').exists()).toBe(true)
   })
 
   it('persists selected dashboard view mode in localStorage', async () => {

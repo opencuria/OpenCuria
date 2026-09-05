@@ -43,7 +43,11 @@ function selectedOptions(questionIndex: number): string[] {
     : []
 }
 
-function toggleOption(questionIndex: number, label: string, multiple: boolean): void {
+function toggleOption(
+  questionIndex: number,
+  label: string,
+  multiple = false,
+): void {
   const current = selectedOptions(questionIndex)
   if (multiple) {
     const next = current.includes(label)
@@ -64,7 +68,7 @@ function handleSubmit(): void {
   const answers = props.request.questions.map((question, index) => {
     if (question.options?.length) {
       const selected = selectedOptions(index)
-      if (question.multiple) return selected
+      if (question.multiple) return selected.join('\u0000')
       return selected[0] ?? ''
     }
     return freeTextAnswers.value[index]?.trim() ?? ''
