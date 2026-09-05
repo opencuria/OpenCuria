@@ -21,23 +21,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import AgentDefinitionModal from '@/components/agents/AgentDefinitionModal.vue'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
-import type { AgentOption, Organization } from '@/types'
+import type { Organization } from '@/types'
 import { formatMinutesAsDuration } from '@/lib/utils'
 import {
-  Bot,
   Plus,
-  Pencil,
-  Trash2,
   ChevronDown,
   ChevronUp,
   Key,
   Check,
   X,
-  Terminal,
-  Settings2,
-  Copy,
   HardDrive,
   Clock3,
 } from '@lucide/vue'
@@ -45,30 +38,6 @@ import {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-interface AgentCommand {
-  id?: string
-  phase: string
-  args: string[]
-  workdir?: string | null
-  env: Record<string, string>
-  description: string
-  order: number
-}
-
-interface OrgAgentDefinition {
-  id: string
-  name: string
-  description: string
-  is_standard: boolean
-  organization_id: string | null
-  available_options: AgentOption[]
-  default_env: Record<string, string>
-  supports_multi_chat: boolean
-  required_credential_service_ids: string[]
-  commands: AgentCommand[]
-  is_active: boolean
-}
 
 interface CredentialServiceWithActivation {
   id: string
@@ -100,25 +69,14 @@ const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
 
-const agentDefs = ref<OrgAgentDefinition[]>([])
 const credentialServices = ref<CredentialServiceWithActivation[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const organizationSettings = ref<Organization | null>(null)
-const activeTab = ref<'workspace-policies' | 'agents' | 'image-definitions' | 'credential-services'>(
+const activeTab = ref<'workspace-policies' | 'image-definitions' | 'credential-services'>(
   'workspace-policies',
 )
 
-// Expanded detail panels
-const expandedAgent = ref<string | null>(null)
-
-// Agent modal
-const showAgentModal = ref(false)
-const editingAgent = ref<OrgAgentDefinition | null>(null)
-
-// Delete
-const deleteTargetAgent = ref<OrgAgentDefinition | null>(null)
-const deleteLoading = ref(false)
 
 const toggleLoading = ref<string | null>(null)
 const policySaving = ref(false)
@@ -192,11 +150,9 @@ async function loadData() {
     if (!activeOrganizationId.value) {
       throw new Error('No active organization selected')
     }
-    const [agents, services] = await Promise.all([
-      get<OrgAgentDefinition[]>('/org-agent-definitions/'),
+    const [services] = await Promise.all([
       get<CredentialServiceWithActivation[]>('/org-credential-services/'),
     ])
-    agentDefs.value = agents
     credentialServices.value = services
     organizationSettings.value = await getOrganization(activeOrganizationId.value)
     autoStopEnabled.value = organizationSettings.value.workspace_auto_stop_timeout_minutes != null
@@ -236,38 +192,6 @@ async function saveWorkspacePolicy() {
     error.value = (e as Error).message || 'Failed to update workspace policy'
   } finally {
     policySaving.value = false
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Agent activation toggle
-// ---------------------------------------------------------------------------
-
-async function toggleAgentActivation(agent: OrgAgentDefinition) {
-  toggleLoading.value = agent.id
-  try {
-    const updated = await post<OrgAgentDefinition>(`/org-agent-definitions/${agent.id}/activation/`, {
-      active: !agent.is_active,
-    })
-    const idx = agentDefs.value.findIndex((a) => a.id === agent.id)
-    if (idx !== -1) agentDefs.value[idx] = updated
-  } catch (e) {
-    error.value = 'Failed to toggle agent activation'
-  } finally {
-    toggleLoading.value = null
-  }
-}
-
-async function duplicateAgent(agent: OrgAgentDefinition) {
-  toggleLoading.value = `dup:${agent.id}`
-  try {
-    const duplicated = await post<OrgAgentDefinition>(`/org-agent-definitions/${agent.id}/duplicate/`, {})
-    agentDefs.value = [...agentDefs.value, duplicated].sort((a, b) => a.name.localeCompare(b.name))
-    expandedAgent.value = duplicated.id
-  } catch (e) {
-    error.value = (e as Error).message || 'Failed to duplicate agent definition'
-  } finally {
-    toggleLoading.value = null
   }
 }
 
@@ -350,80 +274,14 @@ async function createCredentialService() {
 }
 
 // ---------------------------------------------------------------------------
-// Agent modal open/close
-// ---------------------------------------------------------------------------
-
-function openCreateAgent() {
-  editingAgent.value = null
-  showAgentModal.value = true
-}
-
-function openEditAgent(agent: OrgAgentDefinition) {
-  editingAgent.value = agent
-  showAgentModal.value = true
-}
-
-function onAgentSaved(savedAgent: OrgAgentDefinition) {
-  const idx = agentDefs.value.findIndex((a) => a.id === savedAgent.id)
-  if (idx !== -1) {
-    agentDefs.value[idx] = savedAgent
-  } else {
-    agentDefs.value.push(savedAgent)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Delete
-// ---------------------------------------------------------------------------
-
-function openDeleteAgentDialog(agent: OrgAgentDefinition) {
-  deleteTargetAgent.value = agent
-}
-
-function closeDeleteAgentDialog() {
-  if (!deleteLoading.value) deleteTargetAgent.value = null
-}
-
-async function confirmDeleteAgent() {
-  if (!deleteTargetAgent.value) return
-  deleteLoading.value = true
-  try {
-    await del(`/org-agent-definitions/${deleteTargetAgent.value.id}/`)
-    agentDefs.value = agentDefs.value.filter((a) => a.id !== deleteTargetAgent.value?.id)
-    deleteTargetAgent.value = null
-  } catch (e) {
-    error.value = 'Failed to delete agent definition'
-  } finally {
-    deleteLoading.value = false
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function toggleExpandAgent(id: string) {
-  expandedAgent.value = expandedAgent.value === id ? null : id
-}
 
 function getCredentialServiceName(id: string): string {
   const svc = credentialServices.value.find((s) => s.id === id)
   return svc ? svc.name : id
 }
 
-const deleteAgentDescription = computed(() =>
-  deleteTargetAgent.value
-    ? `Delete agent definition "${deleteTargetAgent.value.name}"? This cannot be undone.`
-    : ''
-)
-
-// Phase display helpers
-function configureCommands(agent: OrgAgentDefinition) {
-  return agent.commands.filter((c) => c.phase === 'configure')
-}
-function runCommand(agent: OrgAgentDefinition) {
-  return agent.commands.find((c) => c.phase === 'run')
-}
 </script>
 
 <template>
@@ -433,7 +291,7 @@ function runCommand(agent: OrgAgentDefinition) {
       <div>
         <h2 class="text-xl font-semibold text-foreground">Organization Settings</h2>
         <p class="text-sm text-muted-foreground mt-1">
-          Manage workspace policy, agent definitions, and credential services for your organization.
+          Manage workspace policy, harness provider config, and credential services for your organization.
         </p>
       </div>
     </div>
@@ -469,7 +327,6 @@ function runCommand(agent: OrgAgentDefinition) {
         <button
           v-for="tab in [
             { key: 'workspace-policies', label: 'Workspace Policies', icon: Clock3 },
-            { key: 'agents', label: 'Agent Definitions', icon: Bot },
             { key: 'image-definitions', label: 'Image Definitions', icon: HardDrive },
             { key: 'credential-services', label: 'Credential Services', icon: Key },
           ]"
@@ -481,7 +338,7 @@ function runCommand(agent: OrgAgentDefinition) {
               ? 'border-primary text-primary'
               : 'border-transparent text-muted-foreground hover:text-foreground'
           "
-          @click="activeTab = tab.key as 'workspace-policies' | 'agents' | 'image-definitions' | 'credential-services'"
+          @click="activeTab = tab.key as 'workspace-policies' | 'image-definitions' | 'credential-services'"
         >
           <component :is="tab.icon" :size="14" />
           {{ tab.label }}
@@ -576,226 +433,8 @@ function runCommand(agent: OrgAgentDefinition) {
       </div>
 
       <!-- ================================================================ -->
-      <!-- Agent Definitions Tab -->
-      <!-- ================================================================ -->
-      <div v-else-if="activeTab === 'agents'" class="space-y-4">
-        <div class="flex justify-between items-center">
-          <p class="text-sm text-muted-foreground">
-            Activate or deactivate agent definitions. Admins can also create custom agents.
-          </p>
-          <Button size="sm" @click="openCreateAgent">
-            <Plus :size="14" />
-            New Agent
-          </Button>
-        </div>
-
-        <!-- Agent list -->
-        <div class="space-y-2">
-          <div
-            v-for="agent in agentDefs"
-            :key="agent.id"
-            class="rounded-md border border-border bg-card overflow-hidden transition-colors"
-          >
-            <!-- Header row -->
-            <div class="flex items-center gap-3 px-4 py-3">
-              <!-- Expand toggle -->
-              <button
-                type="button"
-                class="text-muted-foreground hover:text-foreground transition-colors"
-                @click="toggleExpandAgent(agent.id)"
-              >
-                <ChevronDown v-if="expandedAgent !== agent.id" :size="15" />
-                <ChevronUp v-else :size="15" />
-              </button>
-
-              <!-- Icon + name -->
-              <Bot :size="16" class="text-muted-foreground shrink-0" />
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="font-medium text-sm text-foreground truncate">{{ agent.name }}</span>
-                  <span
-                    class="text-xs px-1.5 py-0.5 rounded font-medium"
-                    :class="agent.is_standard ? 'bg-muted/20 text-muted-foreground' : 'bg-primary/10 text-primary'"
-                  >
-                    {{ agent.is_standard ? 'standard' : 'custom' }}
-                  </span>
-                  <span
-                    v-if="agent.supports_multi_chat"
-                    class="text-xs px-1.5 py-0.5 rounded bg-success/10 text-success"
-                  >multi-chat</span>
-                </div>
-                <p v-if="agent.description" class="text-xs text-muted-foreground truncate mt-0.5">
-                  {{ agent.description }}
-                </p>
-              </div>
-
-              <!-- Actions -->
-              <div class="flex items-center gap-1.5 shrink-0">
-                <!-- Edit (org-owned only) -->
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title="Duplicate"
-                  :disabled="toggleLoading === `dup:${agent.id}`"
-                  @click.stop="duplicateAgent(agent)"
-                >
-                  <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
-                  <Copy v-else :size="14" />
-                </Button>
-
-                <Button
-                  v-if="!agent.is_standard"
-                  variant="ghost"
-                  size="icon-sm"
-                  title="Edit"
-                  @click.stop="openEditAgent(agent)"
-                >
-                  <Pencil :size="14" />
-                </Button>
-
-                <!-- Delete (org-owned only) -->
-                <Button
-                  v-if="!agent.is_standard"
-                  variant="ghost"
-                  size="icon-sm"
-                  title="Delete"
-                  @click.stop="openDeleteAgentDialog(agent)"
-                >
-                  <Trash2 :size="14" />
-                </Button>
-
-                <!-- Activation toggle -->
-                <button
-                  type="button"
-                  class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border font-medium transition-colors"
-                  :class="
-                    agent.is_active
-                      ? 'border-success/30 bg-success/10 text-success hover:bg-success/20'
-                      : 'border-border bg-muted/10 text-muted-foreground hover:bg-muted/20'
-                  "
-                  :disabled="toggleLoading === agent.id"
-                  @click="toggleAgentActivation(agent)"
-                >
-                  <LoadingSpinner v-if="toggleLoading === agent.id" :size="10" />
-                  <Check v-else-if="agent.is_active" :size="11" />
-                  <X v-else :size="11" />
-                  {{ agent.is_active ? 'Active' : 'Inactive' }}
-                </button>
-              </div>
-            </div>
-
-            <!-- Expanded detail panel -->
-            <div
-              v-if="expandedAgent === agent.id"
-              class="border-t border-border px-4 py-3 space-y-3"
-            >
-              <!-- Required credentials -->
-              <div v-if="agent.required_credential_service_ids.length > 0">
-                <p class="text-xs font-medium text-muted-foreground mb-1.5">Required Credentials</p>
-                <div class="flex flex-wrap gap-1.5">
-                  <span
-                    v-for="id in agent.required_credential_service_ids"
-                    :key="id"
-                    class="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-muted/10 text-muted-foreground border border-border"
-                  >
-                    <Key :size="10" />
-                    {{ getCredentialServiceName(id) }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Commands overview -->
-              <div>
-                <p class="text-xs font-medium text-muted-foreground mb-1.5">
-                  Commands ({{ agent.commands.length }})
-                </p>
-                <div class="space-y-1">
-                  <!-- Configure commands -->
-                  <div
-                    v-for="(cmd, idx) in configureCommands(agent)"
-                    :key="'cfg-' + idx"
-                    class="flex items-center gap-2 text-xs"
-                  >
-                    <span class="px-1.5 py-0.5 rounded-sm bg-muted/10 text-muted-foreground font-mono w-20 text-center shrink-0">
-                      configure
-                    </span>
-                    <code class="text-muted-foreground font-mono truncate">{{ cmd.args.join(' ') }}</code>
-                    <span v-if="cmd.description" class="text-muted-foreground/60 truncate hidden sm:inline">
-                      — {{ cmd.description }}
-                    </span>
-                  </div>
-                  <!-- Run command -->
-                  <div v-if="runCommand(agent)" class="flex items-center gap-2 text-xs">
-                    <span class="px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary font-mono w-20 text-center shrink-0">
-                      run
-                    </span>
-                    <code class="text-muted-foreground font-mono truncate">
-                      {{ runCommand(agent)?.args.join(' ') }}
-                    </code>
-                    <span v-if="runCommand(agent)?.description" class="text-muted-foreground/60 truncate hidden sm:inline">
-                      — {{ runCommand(agent)?.description }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Default env -->
-              <div v-if="Object.keys(agent.default_env || {}).length > 0">
-                <p class="text-xs font-medium text-muted-foreground mb-1.5">Default Environment</p>
-                <div class="flex flex-wrap gap-1.5">
-                  <span
-                    v-for="[k, v] in Object.entries(agent.default_env)"
-                    :key="k"
-                    class="text-xs px-2 py-0.5 rounded font-mono bg-muted/10 text-muted-foreground"
-                  >
-                    {{ k }}=<span class="opacity-60">{{ String(v).length > 20 ? '***' : v }}</span>
-                  </span>
-                </div>
-              </div>
-
-              <!-- Edit button for custom agents -->
-              <div v-if="!agent.is_standard" class="pt-1">
-                <div class="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    :disabled="toggleLoading === `dup:${agent.id}`"
-                    @click="duplicateAgent(agent)"
-                  >
-                    <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
-                    <Copy v-else :size="12" />
-                    Duplicate
-                  </Button>
-                  <Button size="sm" variant="outline" @click="openEditAgent(agent)">
-                    <Settings2 :size="12" />
-                    Edit Definition
-                  </Button>
-                </div>
-              </div>
-              <div v-else class="pt-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  :disabled="toggleLoading === `dup:${agent.id}`"
-                  @click="duplicateAgent(agent)"
-                >
-                  <LoadingSpinner v-if="toggleLoading === `dup:${agent.id}`" :size="12" />
-                  <Copy v-else :size="12" />
-                  Duplicate
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Empty state -->
-        <div v-if="agentDefs.length === 0" class="text-center py-12 text-muted-foreground text-sm">
-          No agent definitions found.
-        </div>
-      </div>
-
-      <!-- ================================================================ -->
-      <!-- Credential Services Tab -->
+      <!-- Image Definitions Tab -->
+      <!-- (credential services below) -->
       <!-- ================================================================ -->
       <div v-else-if="activeTab === 'image-definitions'" class="space-y-4">
         <ImageDefinitionsTab />
@@ -878,7 +517,7 @@ function runCommand(agent: OrgAgentDefinition) {
         <DialogHeader>
           <DialogTitle>Create Credential Service</DialogTitle>
           <DialogDescription>
-            Define a new credential service your organization can use in credentials and agents.
+            Define a new credential service your organization can use in credentials and workspaces.
           </DialogDescription>
         </DialogHeader>
 
@@ -973,41 +612,5 @@ function runCommand(agent: OrgAgentDefinition) {
       </DialogContent>
     </Dialog>
 
-    <!-- ================================================================== -->
-    <!-- Agent Definition Modal -->
-    <!-- ================================================================== -->
-    <AgentDefinitionModal
-      :open="showAgentModal"
-      :agent="editingAgent"
-      :credential-services="credentialServices"
-      @update:open="(v) => (showAgentModal = v)"
-      @saved="onAgentSaved"
-    />
-
-    <!-- ================================================================== -->
-    <!-- Delete Confirmation Dialog -->
-    <!-- ================================================================== -->
-    <Dialog
-      :open="!!deleteTargetAgent"
-      @update:open="(v) => !v && closeDeleteAgentDialog()"
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete Agent Definition</DialogTitle>
-          <DialogDescription>{{ deleteAgentDescription }}</DialogDescription>
-        </DialogHeader>
-
-        <div class="flex justify-end gap-2">
-          <Button variant="outline" :disabled="deleteLoading" @click="closeDeleteAgentDialog">
-            Cancel
-          </Button>
-          <Button variant="destructive" :disabled="deleteLoading" @click="confirmDeleteAgent">
-            <LoadingSpinner v-if="deleteLoading" :size="12" />
-            <Trash2 v-else :size="12" />
-            Delete
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   </div>
 </template>

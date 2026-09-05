@@ -441,7 +441,7 @@ const isValid = computed(
       <DialogHeader>
         <DialogTitle>Create Workspace</DialogTitle>
         <DialogDescription>
-          Provision a new workspace container. You'll choose an AI agent when starting a chat.
+          Provision a new workspace container. Start a harness session to run the agent.
         </DialogDescription>
       </DialogHeader>
 

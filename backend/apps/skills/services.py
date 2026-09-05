@@ -10,7 +10,7 @@ import uuid
 
 from common.exceptions import AuthenticationError, NotFoundError
 
-from .repositories import SessionSkillRepository, SkillRepository
+from .repositories import SkillRepository
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,6 @@ class SkillService:
 
     def __init__(self) -> None:
         self.skills = SkillRepository
-        self.session_skills = SessionSkillRepository
 
     # ------------------------------------------------------------------
     # Queries
@@ -117,25 +116,6 @@ class SkillService:
         self._assert_can_edit(skill, user=user, org_id=org_id, is_admin=is_admin)
         self.skills.delete(skill_id)
         logger.info("Skill deleted: %s", skill_id)
-
-    # ------------------------------------------------------------------
-    # Session snapshot
-    # ------------------------------------------------------------------
-
-    def snapshot_skills_for_session(
-        self, session, skill_ids: list[uuid.UUID]
-    ) -> list:
-        """Fetch skills by IDs and create snapshot records for a session.
-
-        Silently skips IDs not found — we do not error on deleted skills
-        during prompt dispatch.
-        """
-        if not skill_ids:
-            return []
-        skills = self.skills.get_many_by_ids(skill_ids)
-        if not skills:
-            return []
-        return self.session_skills.create_snapshots(session, skills)
 
     # ------------------------------------------------------------------
     # Internal helpers

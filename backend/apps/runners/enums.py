@@ -49,22 +49,11 @@ class WorkspaceOperation(models.TextChoices):
     CAPTURING_IMAGE = "capturing_image", "Capturing Image"
 
 
-class SessionStatus(models.TextChoices):
-    """Status of a prompt session — mirrors runner SessionStatus."""
-
-    PENDING = "pending", "Pending"
-    RUNNING = "running", "Running"
-    COMPLETED = "completed", "Completed"
-    FAILED = "failed", "Failed"
-
-
 class TaskType(models.TextChoices):
     """Types of tasks the backend can dispatch to runners."""
 
     CREATE_WORKSPACE = "create_workspace", "Create Workspace"
     UPDATE_WORKSPACE = "update_workspace", "Update Workspace"
-    RUN_PROMPT = "run_prompt", "Run Prompt"
-    CANCEL_SESSION = "cancel_session", "Cancel Session"
     STOP_WORKSPACE = "stop_workspace", "Stop Workspace"
     RESUME_WORKSPACE = "resume_workspace", "Resume Workspace"
     REMOVE_WORKSPACE = "remove_workspace", "Remove Workspace"
@@ -87,11 +76,3 @@ class TaskStatus(models.TextChoices):
     IN_PROGRESS = "in_progress", "In Progress"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
-
-
-class AgentCommandPhase(models.TextChoices):
-    """Phase in which an agent command is executed."""
-
-    CONFIGURE = "configure", "Configure"
-    RUN = "run", "Run"
-    RUN_FIRST = "run_first", "Run (First Message)"

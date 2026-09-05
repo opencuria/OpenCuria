@@ -99,7 +99,7 @@ async function handleDelete(): Promise<void> {
       <div>
         <h2 class="text-xl font-semibold text-foreground">Skills</h2>
         <p class="text-sm text-muted-foreground mt-1">
-          Reusable prompt fragments appended to agent messages. Personal skills are yours across all
+          Reusable prompt fragments appended to harness prompts. Personal skills are yours across all
           organizations; organization skills are shared with all members.
         </p>
       </div>
@@ -131,7 +131,7 @@ async function handleDelete(): Promise<void> {
         <BookText :size="40" class="text-muted-foreground mb-3" />
         <p class="text-sm font-medium text-foreground">No skills yet</p>
         <p class="text-sm text-muted-foreground mt-1">
-          Create your first skill to inject reusable prompt context into agent sessions.
+          Create your first skill to inject reusable prompt context into harness sessions.
         </p>
       </div>
     </Card>
@@ -280,8 +280,7 @@ async function handleDelete(): Promise<void> {
           <DialogTitle>Delete Skill</DialogTitle>
         </DialogHeader>
         <p class="text-sm text-foreground mb-4">
-          Delete <strong>{{ deletingSkill?.name }}</strong>? This cannot be undone. Sessions that
-          previously used this skill will keep their snapshot.
+          Delete <strong>{{ deletingSkill?.name }}</strong>? This cannot be undone.
         </p>
         <div class="flex justify-end gap-2">
           <Button variant="outline" @click="deletingSkill = null">Cancel</Button>

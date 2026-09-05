@@ -10,16 +10,17 @@
 
 ## 1. What is opencuria?
 
-opencuria is a platform for **centrally provisioning, managing and monitoring AI
-coding agents** (GitHub Copilot CLI, Claude Code, OpenAI Codex, etc.).
+opencuria is a platform for **centrally provisioning, managing and monitoring an
+integrated AI agent harness** (OpenRouter provider, workspace tools, permissions,
+plan/build modes, subagents).
 
 It consists of three components:
 
 | Component | Tech | Status | Purpose |
 |-----------|------|--------|---------|
-| `runner/` | Python 3.10+, asyncio | **Implemented** | Dumb executor — runs Docker containers or QEMU/KVM VMs and executes commands sent by the backend |
-| `backend/` | Django + Django Ninja + Channels | **Implemented** | Central control plane — owns agent definitions, assigns tasks to runners, stores results, exposes REST + WebSocket API |
-| `webapp/` | Vue 3 | **Implemented** | Dashboard for managing agents, workspaces, credentials, conversations |
+| `runner/` | Python 3.10+, asyncio | **Implemented** | Exec daemon — runs Docker containers or QEMU/KVM VMs; lifecycle, terminal, desktop, files, harness exec RPC |
+| `backend/` | Django + Django Ninja + Channels | **Implemented** | Central control plane — owns the agent harness (providers, tools, permissions, loop), dispatches exec RPC to runners, stores results, exposes REST + WebSocket API |
+| `webapp/` | Vue 3 | **Implemented** | Dashboard for workspaces, harness chat, credentials, images |
 
 ---
 
@@ -40,7 +41,7 @@ It consists of three components:
        ▼
 ┌──────────────────────────────┐  ┌──────────────────────────────┐
 │  Docker Containers           │  │  QEMU/KVM Virtual Machines   │
-│  (Ubuntu 22.04 + agents)     │  │  (Ubuntu 22.04 + agents)     │
+│  (Ubuntu 22.04 + tooling)    │  │  (Ubuntu 22.04 + tooling)    │
 │  - Fast startup              │  │  - Full VM isolation          │
 │  - Lightweight               │  │  - Snapshot / clone support   │
 └──────────────────────────────┘  └──────────────────────────────┘
@@ -52,10 +53,11 @@ It consists of three components:
    container orchestration logic. The WebSocket interface delegates to it.
    Never duplicate business logic in an interface.
 
-2. **Agent definitions in the backend** — agent knowledge (configure commands,
-   run command templates) is stored as DB records (`AgentDefinition` +
-   `AgentCommand` models). The backend builds and sends fully resolved
-   commands to runners. Runners have no agent-specific logic.
+2. **Agent harness in the backend** — agentic knowledge (providers, tools,
+   permissions, prompts, agents/modes, subagents) lives in `backend/apps/harness/`.
+   The backend executes the agentic loop and sends plain exec/file RPC
+   (`harness:*`) to runners. Runners have no agent-specific logic and no
+   agent CLIs are installed in workspace images.
 
 3. **Two runner abstraction layers** — each with an ABC and concrete implementation:
    - **Runtime** (`runtime/base.py`) — virtualisation backend. Two implementations:
@@ -161,7 +163,7 @@ opencuria/
 │       │   └── api.py             ← REST endpoints
 │       └── runners/               ← Runner + workspace + agent management
 │           ├── enums.py            ← Status enums (TextChoices)
-│           ├── models.py           ← Runner, Workspace, Session, Task, AgentDefinition, AgentCommand
+│           ├── models.py           ← Runner, Workspace, Task (+ images/metrics)
 │           ├── repositories.py     ← Data access layer (static methods)
 │           ├── services.py         ← Business logic (RunnerService)
 │           ├── schemas.py          ← Pydantic v2 request/response schemas
@@ -200,7 +202,7 @@ The runner uses lightweight in-memory dataclasses instead of a database:
 
 | Dataclass | Purpose |
 |-----------|--------|
-| `WorkspaceInfo` | Maps a workspace UUID to a runtime instance. Holds `workspace_id`, `instance_id`, `agent_type`, `runtime_type`, `status`, `repos`, `created_at`. |
+| `WorkspaceInfo` | Maps a workspace UUID to a runtime instance. Holds `workspace_id`, `instance_id`, `runtime_type`, `status`, `created_at`. |
 
 State is derived from the runtime backends (single point of truth) via
 labels (Docker) or libvirt domain names (QEMU) and cached in memory.
@@ -238,23 +240,24 @@ Container naming: `opencuria-workspace-{uuid}`, Volume naming: `opencuria-worksp
 Both runtimes can run simultaneously — the runner maintains a
 `dict[str, RuntimeBackend]` and selects per workspace based on `runtime_type`.
 
-### 4.4 Runner as Dumb Executor
+### 4.4 Runner as Exec Daemon
 
-The runner has **no agent-specific logic** and does not advertise per-agent
-capabilities. All agent knowledge (commands, templates) is owned by the backend
-and sent to the runner as structured command dicts.
-
-The runner executes two kinds of commands from the backend:
-- **Configure commands** — sent with `task:create_workspace`, executed
-  sequentially after container creation and repo cloning.
-- **Run command** — sent with `task:run_prompt`, executed with streaming output.
+The runner has **no agent-specific logic**. All agentic knowledge (providers,
+tools, permissions, prompts, modes, subagents) is owned by the backend harness
+and executed there. The runner exposes plain operations the harness calls via
+`harness:*` RPC:
+- **Lifecycle** — `task:create_workspace` (clone repos), stop/resume/remove.
+- **Harness exec/file RPC** — `harness:exec_stream`, `harness:exec_wait`,
+  `harness:read_file`, `harness:write_file`, `harness:list`, `harness:stat`
+  (all sandboxed to `/workspace`), plus terminal/desktop/files.
+- No legacy prompt path exists anymore (the harness owns all prompting).
 
 ### 4.5 Service Layer (`service.py`)
 
 `WorkspaceService` is the **only** place where container orchestration logic lives:
 - `sync_from_runtime()` — rebuilds the in-memory cache from Docker containers
-- `create_workspace(repos, agent_type, env_vars, ssh_keys, configure_commands, workspace_id) -> UUID`
-- `run_command(workspace_id, command) -> AsyncIterator[str]`
+- `create_workspace(repos, env_vars, ssh_keys, files, workspace_id, ...) -> UUID`
+- `exec_harness_command[_stream](workspace_id, command, workdir, env)` — harness exec
 - `stop_workspace(workspace_id)`
 - `resume_workspace(workspace_id)`
 - `remove_workspace(workspace_id)`
@@ -272,16 +275,18 @@ The runner executes two kinds of commands from the backend:
 **WebSocket** (`interfaces/websocket.py`): python-socketio `AsyncClient`.
 Connects to the Django backend, authenticates with Bearer token. Sends
 `supported_runtimes` on register. Listens for task events
-(`task:create_workspace`, `task:run_prompt`, etc.) and emits results
-(`workspace:created`, `output:chunk`, `output:complete`, etc.). Each task runs
-as an `asyncio.Task` for concurrent execution.
+(`task:create_workspace`, lifecycle, terminal, desktop, files, `harness:*`)
+and emits results (`workspace:created`, `harness:*_result`, `terminal:*`, etc.).
+Exec streams run as `asyncio.Task` for concurrent execution.
 
 The runner has no CLI interface — it operates purely as a daemon.
 
-### 4.7 Workspace Container (`Dockerfile`)
+### 4.7 Workspace Images
 
-Based on Ubuntu 22.04. Pre-installed:
-- Node.js 22.x, GitHub CLI, GitHub Copilot CLI (`@github/copilot`)
+Workspace images are built from `ImageDefinition` records (packages +
+`custom_dockerfile`/`custom_init_script`) plus KasmVNC desktop support.
+Base: Ubuntu 22.04 with tooling only (no agent CLIs):
+- Node.js 22.x, GitHub CLI (`gh`)
 - Python 3, pip, venv, git, openssh-client, build-essential, common tools
 - `git-wrapper.sh` — safety wrapper that blocks commits/pushes to `main`/`master`
 - `workspace-entrypoint.sh` — lightweight entrypoint that executes the container command
@@ -311,10 +316,16 @@ The backend follows **Clean Architecture** with strict separation of concerns:
 1. **API Layer** (`api.py`) — thin Django Ninja routers. No business logic.
    Validates input via Pydantic schemas, delegates to services, returns responses.
 2. **Service Layer** (`services.py`) — all business logic lives here.
-   `RunnerService` orchestrates runner management, workspace lifecycle, and
-   prompt dispatch. Receives a `sio_server` instance for emitting events.
+   `RunnerService` orchestrates runner management and workspace lifecycle
+   (no prompt dispatch — prompts run in the harness). Receives a `sio_server`
+   instance for emitting events.
 3. **Repository Layer** (`repositories.py`) — data access via static methods
    wrapping Django ORM. Services never call the ORM directly.
+4. **Harness app** (`apps/harness/`) — the only agentic business logic:
+   providers (`providers/`), tools + registry (`tools/`), permission evaluator
+   (`permissions/`), static agent/mode definitions (`agents/`), system-prompt
+   composer (`prompts/`), agentic loop (`runner.py`), persistence
+   (`HarnessSession`/`HarnessMessage`/`HarnessPart`/`Todo`/`PermissionRequest`).
 4. **Socket.IO Layer** (`sio_server.py`) — event handlers for runner WebSocket
    connections. Thin adapter that delegates to `RunnerService`.
 
@@ -322,13 +333,13 @@ The backend follows **Clean Architecture** with strict separation of concerns:
 
 | Model | Purpose |
 |-------|--------|
-| `Runner` | Registered runner instance. Tracks name, hashed API token, available agents, available runtimes, online/offline status, Socket.IO session ID. |
-| `Workspace` | A workspace on a runner. FK to Runner. Tracks status (`creating` → `running` → `stopped` / `failed`), agent type, runtime type (`docker`/`qemu`), repos (JSON). |
-| `Session` | A prompt/response pair within a workspace. Tracks prompt, accumulated output, status, timestamps. |
-| `Task` | A dispatched command to a runner. FK to Runner, optional FK to Workspace/Session. Tracks type, status, error message. |
-| `AgentDefinition` | DB-managed agent type (e.g. "copilot"). Unique name, description. |
-| `AgentCommand` | A command belonging to an agent. Phase (`configure`/`run`), args (JSON list with `{prompt}`/`{workdir}` placeholders), workdir, env, execution order. |
-| `Snapshot` | A snapshot of a QEMU workspace. FK to Workspace. Tracks runner_snapshot_id, name, size_bytes, created_at. |
+| `Runner` | Registered runner instance. Tracks name, hashed API token, available runtimes, online/offline status, Socket.IO session ID. |
+| `Workspace` | A workspace on a runner. FK to Runner. Tracks status (`creating` → `running` → `stopped` / `failed`), runtime type (`docker`/`qemu`). |
+| `Task` | A dispatched command to a runner. FK to Runner, optional FK to Workspace. Tracks type, status, error message. |
+| `HarnessSession`/`HarnessMessage`/`HarnessPart` | Agent conversation with streamed block parts (text/reasoning/tool/step/subtask/patch). |
+| `PermissionRequest` | Tool permission gate (`pending`/`approved`/`rejected`, once/always). |
+| `Todo` | Session todo list. |
+| `ProviderConfig` | Org-wide LLM provider config (encrypted key, base URL, models). |
 
 **Credentials models** (`apps/credentials/models.py`):
 
@@ -344,9 +355,8 @@ Six separate routers:
 | Prefix | Endpoints |
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
-| `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/prompt/`, `POST /{id}/stop/`, `POST /{id}/resume/`, `GET /{id}/sessions/`, snapshots (below) |
-| `/api/v1/workspaces/{id}/snapshots/` | `GET /` list, `POST /` create, `DELETE /{snapshot_id}/` delete, `POST /{snapshot_id}/clone/` clone |
-| `/api/v1/agents/` | `GET /` list available agents across online runners |
+| `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `POST /harness/sessions/{id}/message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 
@@ -389,7 +399,7 @@ Two types are supported:
 
 `CredentialService` records are admin-managed catalog entries (one type per service). `Credential` records are org-scoped instances with an encrypted value.
 
-When a workspace is created, `CredentialSvc.resolve_credentials()` decrypts all attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars: dict` and `ssh_keys: list[str]`. The backend sends both to the runner in the `task:create_workspace` payload. The runner's `_setup_ssh_keys()` writes each private key to `/root/.ssh/`, runs `ssh-keyscan` for common Git providers, and configures `~/.ssh/config` **before** cloning repos.
+When a workspace is created, `CredentialSvc.resolve_credentials()` decrypts all attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars`/`files`/`ssh_keys`. The backend sends them to the runner in the `task:create_workspace` payload. The runner materializes them as a per-operation credential context (bootstrap/cleanup scripts) **before** cloning repos and tears it down afterwards.
 
 ---
 
@@ -434,13 +444,13 @@ When a workspace is created, `CredentialSvc.resolve_credentials()` decrypts all 
 - Service methods should catch errors and update DB state (e.g. mark sessions
   as `FAILED`) before re-raising.
 
-### 6.5 Adding a New Agent
+### 6.5 Harness Agents/Modes
 
-1. Create a new `AgentDefinition` record in the database (via Django Admin,
-   management command, or data migration)
-2. Add `AgentCommand` records for the configure phase (0+) and run phase (exactly 1)
-3. Use `{prompt}` and `{workdir}` placeholders in command args / workdir
-4. Update the workspace `Dockerfile` if the agent needs additional tooling
+Agents are static code definitions in `backend/apps/harness/agents/definitions.py`
+(`build`/`plan` primary, `general`/`explore`/hidden `title`+`compaction`
+subagents) — no DB records. Modes (`plan`/`build`) and per-agent permission
+rules come from the same definitions. To add tooling to workspaces, extend
+the image definitions (packages / custom Dockerfile / init script).
 
 ### 6.6 Adding a New Runtime Backend
 
@@ -594,12 +604,14 @@ The runner connects to the backend as a socketio client. Events:
 | Direction | Event | Payload |
 |-----------|-------|---------|
 | Runner -> Backend | `runner:register` | `{supported_runtimes: ["docker", "qemu"], status}` |
-| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, agent_type}]}` |
-| Backend -> Runner | `task:create_workspace` | `{task_id, workspace_id, repos, agent_type, env_vars, configure_commands: [{args, workdir, env, description}]}` |
+| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?}]}` |
+| Backend -> Runner | `task:create_workspace` | `{task_id, workspace_id, repos, runtime_type, env_vars, files, ssh_keys, image_tag/base_image_path}` |
 | Runner -> Backend | `workspace:created` | `{task_id, workspace_id, status}` |
-| Backend -> Runner | `task:run_prompt` | `{task_id, workspace_id, prompt, command: {args, workdir, env, description}}` |
-| Runner -> Backend | `output:chunk` | `{task_id, workspace_id, line}` |
-| Runner -> Backend | `output:complete` | `{task_id, workspace_id}` |
+| Backend -> Runner | `harness:exec_stream` / `harness:exec_wait` | `{request_id, workspace_id, command, workdir, env, timeout}` |
+| Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
+| Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
+| Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `harness:cancel` | `{request_id}` |
 | Backend -> Runner | `task:stop_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id}` |
 | Backend -> Runner | `task:resume_workspace` | `{task_id, workspace_id}` |
@@ -607,7 +619,6 @@ The runner connects to the backend as a socketio client. Events:
 | Backend -> Runner | `task:remove_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:removed` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:error` | `{task_id, error}` |
-| Runner -> Backend | `output:error` | `{task_id, workspace_id, error}` |
 | Backend -> Runner | `task:start_terminal` | `{task_id, workspace_id, cols, rows}` |
 | Runner -> Backend | `terminal:started` | `{task_id, workspace_id, terminal_id}` |
 | Runner -> Backend | `terminal:output` | `{workspace_id, terminal_id, data}` (base64) |
@@ -615,11 +626,6 @@ The runner connects to the backend as a socketio client. Events:
 | Backend -> Runner | `terminal:resize` | `{workspace_id, terminal_id, cols, rows}` |
 | Backend -> Runner | `terminal:close` | `{workspace_id, terminal_id}` |
 | Runner -> Backend | `terminal:closed` | `{workspace_id, terminal_id}` |
-| Backend -> Runner | `task:snapshot_workspace` | `{task_id, workspace_id, snapshot_name}` |
-| Runner -> Backend | `snapshot:created` | `{task_id, workspace_id, snapshot_id, name, size_bytes}` |
-| Backend -> Runner | `task:delete_snapshot` | `{task_id, workspace_id, snapshot_id}` |
-| Runner -> Backend | `snapshot:deleted` | `{task_id, workspace_id, snapshot_id}` |
-| Backend -> Runner | `task:clone_workspace` | `{task_id, workspace_id, source_snapshot_id, ...}` |
 
 Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 
@@ -633,6 +639,9 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `terminal:started` | `{workspace_id, terminal_id, task_id}` |
 | Backend -> Frontend | `terminal:output` | `{workspace_id, terminal_id, data}` (base64) |
 | Backend -> Frontend | `terminal:closed` | `{workspace_id, terminal_id}` |
+| Backend -> Frontend | `harness.part_updated` | `{workspace_id, session_id, delta, step, part_id}` |
+| Backend -> Frontend | `harness.permission_required` / `harness.session_status` | `{workspace_id, session_id, ...}` |
+| Backend -> Frontend | `harness.todo_updated` / `harness.subtask_started/finished` | `{workspace_id, session_id, ...}` |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.
 Frontend Socket.IO authentication: JWT token passed in `auth: { token }` on connect (validated server-side).

@@ -26,7 +26,7 @@ def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_workspace_uses_operation_credentials_for_clone_and_configure() -> None:
+async def test_create_workspace_uses_operation_credentials_for_clone() -> None:
     class DummyRuntime:
         async def create_workspace(self, config):  # noqa: ANN001
             return "instance-1"
@@ -39,18 +39,10 @@ async def test_create_workspace_uses_operation_credentials_for_clone_and_configu
         return_value=credential_context
     )
     service._cleanup_operation_credential_context = AsyncMock()
-    service._exec_command = AsyncMock(side_effect=[(0, ""), (0, "")])
+    service._exec_command = AsyncMock(side_effect=[(0, "")])
 
     await service.create_workspace(
         repos=["git@github.com:example/private-repo.git"],
-        configure_commands=[
-            {
-                "args": ["echo", "configured"],
-                "workdir": "/workspace",
-                "env": {},
-                "description": "configure",
-            }
-        ],
         env_vars={"GITHUB_TOKEN": "secret"},
         ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
         runtime_type="docker",
@@ -65,7 +57,7 @@ async def test_create_workspace_uses_operation_credentials_for_clone_and_configu
     assert create_ctx_args[4] == [
         "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
     ]
-    assert service._exec_command.await_count == 2
+    assert service._exec_command.await_count == 1
     clone_call = service._exec_command.await_args_list[0]
     assert clone_call.kwargs["credential_context"] is credential_context
     assert clone_call.args[2]["args"] == [
@@ -73,8 +65,6 @@ async def test_create_workspace_uses_operation_credentials_for_clone_and_configu
         "clone",
         "git@github.com:example/private-repo.git",
     ]
-    configure_call = service._exec_command.await_args_list[1]
-    assert configure_call.kwargs["credential_context"] is credential_context
     service._cleanup_operation_credential_context.assert_awaited_once()
 
 

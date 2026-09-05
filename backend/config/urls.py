@@ -15,11 +15,8 @@ from apps.harness.api import harness_router
 from apps.skills.api import skill_router
 from apps.organizations.api import org_router
 from apps.runners.api import (
-    agent_router,
-    conversation_router,
     image_artifact_router,
     image_definition_router,
-    org_agent_def_router,
     runner_router,
     workspace_image_artifact_router,
     workspace_router,
@@ -49,13 +46,10 @@ api.add_router("/runners/", runner_router)
 api.add_router("/workspaces/", workspace_router)
 api.add_router("/workspaces/", workspace_image_artifact_router)
 api.add_router("/image-artifacts/", image_artifact_router)
-api.add_router("/agents/", agent_router)
-api.add_router("/conversations/", conversation_router)
 api.add_router("/credential-services/", credential_service_router)
 api.add_router("/credentials/", credential_router)
 api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
-api.add_router("/org-agent-definitions/", org_agent_def_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
 

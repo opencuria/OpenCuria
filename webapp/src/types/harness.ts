@@ -1,14 +1,11 @@
 /**
- * Harness block-model types for the M7 frontend chat (M6 backend contracts).
+ * Harness block-model types for the frontend chat.
  *
  * Mirrors `backend/apps/harness/models.py` (HarnessSession, HarnessMessage,
  * HarnessPart, Todo, PermissionRequest) and the frontend socket payloads
  * emitted by `HarnessService` (`harness.part_updated`,
  * `harness.permission_required`, `harness.session_status`,
  * `harness.todo_updated`, `harness.subtask_started/finished`).
- *
- * Additive only: the legacy `Session` type in `types/index.ts` stays
- * untouched (M8 removes it).
  */
 
 // --- Block model -----------------------------------------------------------

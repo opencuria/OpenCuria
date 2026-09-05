@@ -40,10 +40,10 @@ def _create_api_key(*, user, permissions: list[str]) -> str:
 
 
 @pytest.mark.django_db
-def test_api_key_without_conversations_read_cannot_list_workspace_sessions(client: Client):
+def test_legacy_workspace_sessions_endpoint_is_gone(client: Client):
     user_model = get_user_model()
-    user = user_model.objects.create_user(email="conv@test.local", password="secret")
-    org = Organization.objects.create(name="Conv Org", slug="conv-org")
+    user = user_model.objects.create_user(email="gone@test.local", password="secret")
+    org = Organization.objects.create(name="Gone Org", slug="gone-org")
     Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
     runner = Runner.objects.create(
         name="runner",
@@ -65,15 +65,14 @@ def test_api_key_without_conversations_read_cannot_list_workspace_sessions(clien
         **_auth_headers(token, str(org.id)),
     )
 
-    assert response.status_code == 403
-    assert response.json()["code"] == "permission_denied"
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db
-def test_api_key_without_conversations_read_cannot_mark_conversation_unread(client: Client):
+def test_legacy_conversations_endpoint_is_gone(client: Client):
     user_model = get_user_model()
-    user = user_model.objects.create_user(email="conv-unread@test.local", password="secret")
-    org = Organization.objects.create(name="Conv Unread Org", slug="conv-unread-org")
+    user = user_model.objects.create_user(email="conv-gone@test.local", password="secret")
+    org = Organization.objects.create(name="Conv Gone Org", slug="conv-gone-org")
     Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
     token = _create_api_key(user=user, permissions=[APIKeyPermission.WORKSPACES_READ.value])
 
@@ -84,45 +83,4 @@ def test_api_key_without_conversations_read_cannot_mark_conversation_unread(clie
         **_auth_headers(token, str(org.id)),
     )
 
-    assert response.status_code == 403
-    assert response.json()["code"] == "permission_denied"
-
-
-@pytest.mark.django_db
-def test_api_key_without_org_agent_write_cannot_create_credential_relation(client: Client):
-    user_model = get_user_model()
-    user = user_model.objects.create_user(email="agent@test.local", password="secret")
-    org = Organization.objects.create(name="Agent Org", slug="agent-org")
-    Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
-    token = _create_api_key(user=user, permissions=[APIKeyPermission.ORG_AGENT_DEFINITIONS_READ.value])
-
-    from apps.credentials.models import CredentialService
-    from apps.runners.models import AgentDefinition
-
-    agent = AgentDefinition.objects.create(
-        name="Org Agent",
-        organization=org,
-    )
-    service = CredentialService.objects.create(
-        name="GitHub Token",
-        slug="github-token-perm-test",
-        credential_type="env",
-        env_var_name="GITHUB_TOKEN",
-        label="GitHub PAT",
-    )
-
-    response = client.post(
-        f"/api/v1/org-agent-definitions/{agent.id}/credential-relations/",
-        data=json.dumps(
-            {
-                "credential_service_id": str(service.id),
-                "default_env": {},
-                "commands": [],
-            }
-        ),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 403
-    assert response.json()["code"] == "permission_denied"
+    assert response.status_code == 404

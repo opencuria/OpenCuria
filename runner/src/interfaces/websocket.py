@@ -1,8 +1,8 @@
 """WebSocket interface using python-socketio (async client).
 
 Connects to the Django backend, authenticates with a Bearer token,
-and listens for task events.  Agent output is streamed back to the
-backend in real time via ``output:chunk`` events.
+and listens for task events.  Harness exec output is streamed back
+to the backend in real time via ``harness:*`` events.
 
 Includes a periodic heartbeat that reports workspace container states
 so the backend can reconcile its records with actual runtime state.
@@ -17,7 +17,6 @@ import asyncio
 import base64
 import contextlib
 import os
-import shlex
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,7 +29,6 @@ import socketio
 import structlog
 
 from ..config import RunnerSettings
-from ..runtime.base import CommandExecutionError
 from ..service import WorkspaceService
 from .base import Interface
 
@@ -80,7 +78,6 @@ class WebSocketInterface(Interface):
             logger=False,
         )
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
-        self._cancelling_task_ids: set[str] = set()
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._health_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
@@ -409,32 +406,6 @@ class WebSocketInterface(Interface):
     def _setup_handlers(self) -> None:
         sio = self._sio
 
-        def _prompt_pidfile(task_id: str) -> str:
-            return f"/tmp/opencuria-prompt-{task_id}.pid"
-
-        def _build_prompt_wrapped_args(
-            command_args: list[str] | str,
-            task_id: str,
-        ) -> list[str]:
-            pid_file = _prompt_pidfile(task_id)
-            normalised_args = self._service._normalise_command_args(command_args)
-            wrapped_entrypoint = (
-                f"printf '%s' \"$$\" > {shlex.quote(pid_file)}; exec \"$@\""
-            )
-            return [
-                "sh",
-                "-lc",
-                wrapped_entrypoint,
-                "opencuria-prompt",
-                *normalised_args,
-            ]
-
-        def _wrap_prompt_command(command: dict, task_id: str) -> dict:
-            return {
-                **command,
-                "args": _build_prompt_wrapped_args(command["args"], task_id),
-            }
-
         @sio.event
         async def connect() -> None:
             logger.info("websocket_connected", url=self._settings.backend_url)
@@ -521,7 +492,6 @@ class WebSocketInterface(Interface):
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
                     qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    configure_commands=data.get("configure_commands", []),
                     env_vars=data.get("env_vars", {}),
                     files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
@@ -596,206 +566,6 @@ class WebSocketInterface(Interface):
                     },
                 )
                 log.exception("image_build_failed")
-
-        @sio.on("task:run_prompt")
-        async def on_run_prompt(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            command = _wrap_prompt_command(data["command"], task_id)
-            configure_commands = data.get("configure_commands", [])
-            fallback_configure_commands = data.get("fallback_configure_commands", [])
-
-            log = logger.bind(
-                task_id=task_id, workspace_id=str(workspace_id)
-            )
-            log.info("task_received", task="run_prompt")
-
-            # Run as a background asyncio task so we can handle
-            # multiple prompts concurrently.
-            async def _stream() -> None:
-                prepared = None
-                try:
-                    prepared = await self._service.prepare_operation(
-                        workspace_id,
-                        env_vars=data.get("env_vars", {}),
-                        files=data.get("files", []),
-                        ssh_keys=data.get("ssh_keys", []),
-                    )
-
-                    async def _emit_status(status: str, detail: str) -> None:
-                        await sio.emit(
-                            "output:status",
-                            {
-                                "task_id": task_id,
-                                "workspace_id": str(workspace_id),
-                                "status": status,
-                                "detail": detail,
-                            },
-                        )
-
-                    async def _emit_output(text: str) -> None:
-                        if not text:
-                            return
-                        await sio.emit(
-                            "output:chunk",
-                            {
-                                "task_id": task_id,
-                                "workspace_id": str(workspace_id),
-                                "line": text,
-                            },
-                        )
-
-                    async def _run_and_stream(command_payload: dict) -> str:
-                        chunks: list[str] = []
-                        async for line in self._service.run_command(
-                            workspace_id,
-                            command_payload,
-                            prepared=prepared,
-                        ):
-                            chunks.append(line)
-                            await _emit_output(line)
-                        return "\n".join(chunks)
-
-                    # Run configure commands first if this is the first time this
-                    # agent is used in the workspace (sent by backend when needed).
-                    if configure_commands:
-                        log.info(
-                            "running_configure_commands",
-                            count=len(configure_commands),
-                        )
-                        await _emit_status(
-                            "executing_configuration_commands",
-                            "Executing Configuration Commands…",
-                        )
-                        await self._service.run_configure_commands(
-                            workspace_id,
-                            configure_commands,
-                            prepared=prepared,
-                        )
-
-                    await _emit_status(
-                        "executing_agent_command",
-                        "Executing Agent Command…",
-                    )
-                    try:
-                        await _run_and_stream(command)
-                    except CommandExecutionError as exc:
-                        if not fallback_configure_commands or exc.exit_code != 127:
-                            if (
-                                task_id in self._cancelling_task_ids
-                                and exc.exit_code in {137, 143}
-                            ):
-                                raise asyncio.CancelledError from exc
-                            raise
-                        log.info(
-                            "retry_after_missing_command_exit_code",
-                            configure_count=len(fallback_configure_commands),
-                            exit_code=exc.exit_code,
-                        )
-                        await _emit_status(
-                            "retrying_configuration_commands",
-                            "Command missing in workspace. Installing agent…",
-                        )
-                        await self._service.run_configure_commands(
-                            workspace_id,
-                            fallback_configure_commands,
-                            prepared=prepared,
-                        )
-                        await _emit_status(
-                            "retrying_agent_command",
-                            "Retrying Agent Command…",
-                        )
-                        await _run_and_stream(command)
-
-                    await sio.emit(
-                        "output:complete",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                        },
-                    )
-                except asyncio.CancelledError:
-                    await sio.emit(
-                        "output:error",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "error": "Prompt execution cancelled by user",
-                        },
-                    )
-                except Exception as exc:
-                    await sio.emit(
-                        "output:error",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "error": str(exc),
-                        },
-                    )
-                    log.exception("prompt_stream_failed")
-                finally:
-                    try:
-                        await self._service.cleanup_prompt_process_tracking(
-                            workspace_id,
-                            _prompt_pidfile(task_id),
-                        )
-                    except Exception:
-                        log.exception("prompt_pidfile_cleanup_failed")
-                    if prepared is not None:
-                        try:
-                            await self._service.cleanup_operation(prepared)
-                        except Exception:
-                            log.exception("operation_context_cleanup_failed")
-                    self._cancelling_task_ids.discard(task_id)
-                    self._running_tasks.pop(task_id, None)
-
-            task = asyncio.create_task(_stream())
-            self._running_tasks[task_id] = task
-
-        @sio.on("task:cancel_prompt")
-        async def on_cancel_prompt(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            target_task_id = data.get("target_task_id", "")
-            log = logger.bind(
-                task_id=task_id,
-                workspace_id=str(workspace_id),
-                target_task_id=target_task_id,
-            )
-            try:
-                if not target_task_id:
-                    raise ValueError("Missing target_task_id")
-
-                self._cancelling_task_ids.add(target_task_id)
-                await self._service.terminate_prompt_process(
-                    workspace_id,
-                    _prompt_pidfile(target_task_id),
-                )
-
-                target_task = self._running_tasks.get(target_task_id)
-                if target_task and not target_task.done():
-                    target_task.cancel()
-
-                await sio.emit(
-                    "prompt:cancelled",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "target_task_id": target_task_id,
-                    },
-                )
-                log.info("prompt_cancelled")
-            except Exception as exc:
-                self._cancelling_task_ids.discard(target_task_id)
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "error": str(exc),
-                    },
-                )
-                log.exception("cancel_prompt_failed")
 
         @sio.on("task:stop_workspace")
         async def on_stop_workspace(data: dict) -> None:
@@ -943,7 +713,6 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
-            configure_commands = data.get("configure_commands", [])
             log = logger.bind(
                 task_id=task_id, workspace_id=str(workspace_id)
             )
@@ -957,12 +726,6 @@ class WebSocketInterface(Interface):
                     files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
                 )
-                if configure_commands:
-                    await self._service.run_configure_commands(
-                        workspace_id,
-                        configure_commands,
-                        prepared=prepared,
-                    )
                 terminal_id = await self._service.start_terminal(
                     workspace_id,
                     cols=cols,

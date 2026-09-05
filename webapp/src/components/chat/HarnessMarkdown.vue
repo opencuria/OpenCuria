@@ -9,7 +9,7 @@ const props = defineProps<{
   compact?: boolean
 }>()
 
-/** Render harness markdown through the same pipeline as the legacy chat. */
+/** Render harness markdown (marked + DOMPurify, links open in a new tab). */
 function renderMarkdown(text: string): string {
   if (!text) return ''
   const rawHtml = marked.parse(text) as string

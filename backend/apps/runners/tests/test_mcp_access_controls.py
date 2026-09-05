@@ -8,14 +8,12 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RunnerStatus, SessionStatus, WorkspaceStatus
-from apps.runners.models import Chat, Runner, Session, Workspace
+from apps.runners.enums import RunnerStatus, WorkspaceStatus
+from apps.runners.models import Runner, Workspace
 from apps.mcp_app.server import (
+    _TOOL_HANDLERS,
+    _TOOLS,
     _call_get_workspace,
-    _call_list_chat_sessions,
-    _call_list_agents,
-    _call_list_conversations,
-    _call_list_workspace_chats,
     _call_list_workspaces,
 )
 from common.utils import hash_token
@@ -58,10 +56,6 @@ def mcp_access_setup(db):
         status=WorkspaceStatus.RUNNING,
         created_by=admin,
     )
-    owner_chat = Chat.objects.create(workspace=owner_workspace, name="Owner Chat")
-    admin_chat = Chat.objects.create(workspace=admin_workspace, name="Admin Chat")
-    Session.objects.create(chat=owner_chat, prompt="owner", status=SessionStatus.COMPLETED)
-    Session.objects.create(chat=admin_chat, prompt="admin", status=SessionStatus.COMPLETED)
     return {
         "org": org,
         "owner_workspace": owner_workspace,
@@ -99,118 +93,22 @@ def test_mcp_get_workspace_rejects_foreign_admin_access(mcp_access_setup):
 
 
 @pytest.mark.django_db
-def test_mcp_get_workspace_omits_sessions(mcp_access_setup):
-    result = _call_get_workspace(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {"workspace_id": str(mcp_access_setup["admin_workspace"].id)},
-    )
-
-    payload = json.loads(_parse_text_payload(result))
-    assert payload["id"] == str(mcp_access_setup["admin_workspace"].id)
-    assert "sessions" not in payload
-
-
-@pytest.mark.django_db
-def test_mcp_chat_tools_are_owner_scoped(mcp_access_setup):
-    result = _call_list_workspace_chats(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {"workspace_id": str(mcp_access_setup["admin_workspace"].id)},
-    )
-    payload = json.loads(_parse_text_payload(result))
-    assert [entry["workspace_id"] for entry in payload] == [
-        str(mcp_access_setup["admin_workspace"].id)
-    ]
-
-    foreign = _call_list_chat_sessions(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {
-            "workspace_id": str(mcp_access_setup["owner_workspace"].id),
-            "chat_id": str(mcp_access_setup["owner_workspace"].chats.first().id),
-        },
-    )
-    assert _parse_text_payload(foreign) == "Error: Workspace not found"
-
-
-@pytest.mark.django_db
-def test_mcp_list_conversations_is_owner_scoped(mcp_access_setup):
-    result = _call_list_conversations(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {},
-    )
-
-    payload = json.loads(_parse_text_payload(result))
-    assert [entry["workspace_id"] for entry in payload] == [
-        str(mcp_access_setup["admin_workspace"].id)
-    ]
-
-
-@pytest.mark.django_db
-def test_mcp_list_agents_passes_owned_workspace_to_service(mcp_access_setup, monkeypatch):
-    captured: dict[str, object] = {}
-    workspace = mcp_access_setup["admin_workspace"]
-
-    class FakeService:
-        def get_workspace_for_user(self, workspace_id, *, user, organization_id):
-            assert workspace_id == workspace.id
-            assert user == mcp_access_setup["admin_api_key"].user
-            assert organization_id == mcp_access_setup["org"].id
-            return workspace
-
-        def get_available_agents(self, *, organization_id, user, workspace=None):
-            captured["organization_id"] = organization_id
-            captured["user"] = user
-            captured["workspace"] = workspace
-            return []
-
-    monkeypatch.setattr("apps.runners.sio_server.get_runner_service", lambda: FakeService())
-
-    result = _call_list_agents(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {"workspace_id": str(workspace.id)},
-    )
-
-    assert json.loads(_parse_text_payload(result)) == []
-    assert captured == {
-        "organization_id": mcp_access_setup["org"].id,
-        "user": mcp_access_setup["admin_api_key"].user,
-        "workspace": workspace,
-    }
-
-
-@pytest.mark.django_db
-def test_mcp_list_agents_requires_org_membership_without_workspace_id(
-    mcp_access_setup, monkeypatch
-):
-    captured: dict[str, object] = {}
-
-    class FakeOrgService:
-        def require_membership(self, user, organization_id):
-            captured["user"] = user
-            captured["organization_id"] = organization_id
-
-    class FakeService:
-        def get_available_agents(self, *, organization_id, user, workspace=None):
-            return []
-
-    monkeypatch.setattr(
-        "apps.organizations.services.OrganizationService",
-        lambda: FakeOrgService(),
-    )
-    monkeypatch.setattr("apps.runners.sio_server.get_runner_service", lambda: FakeService())
-
-    result = _call_list_agents(
-        mcp_access_setup["admin_api_key"],
-        mcp_access_setup["org"].id,
-        {},
-    )
-
-    assert json.loads(_parse_text_payload(result)) == []
-    assert captured == {
-        "user": mcp_access_setup["admin_api_key"].user,
-        "organization_id": mcp_access_setup["org"].id,
-    }
+def test_mcp_legacy_agent_tools_are_removed():
+    """Negative test: legacy agent/chat/conversation/prompt tools are gone."""
+    names = {tool.name for tool in _TOOLS}
+    for legacy in [
+        "list_workspace_chats",
+        "list_chat_sessions",
+        "run_prompt",
+        "cancel_prompt",
+        "list_agents",
+        "list_conversations",
+        "list_org_agent_definitions",
+        "create_org_agent_definition",
+        "update_org_agent_definition",
+        "delete_org_agent_definition",
+        "duplicate_org_agent_definition",
+        "toggle_org_agent_definition_activation",
+    ]:
+        assert legacy not in names
+        assert legacy not in _TOOL_HANDLERS

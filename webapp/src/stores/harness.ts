@@ -1,11 +1,9 @@
 /**
- * Harness Pinia store (M7, additive).
+ * Harness Pinia store.
  *
  * Owns the harness block model (`HarnessSession` + `HarnessMessage` with
- * `parts[]` + todos + pending permission requests) next to the legacy
- * session model in `stores/workspaces.ts` (left untouched; M8 removes it).
- * All streaming transitions delegate to the pure reducers in
- * `lib/harnessReducer.ts`.
+ * `parts[]` + todos + pending permission requests). All streaming
+ * transitions delegate to the pure reducers in `lib/harnessReducer.ts`.
  */
 
 import { defineStore } from 'pinia'

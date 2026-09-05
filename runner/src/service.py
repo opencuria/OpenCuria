@@ -1,9 +1,9 @@
 """Central business logic for workspace management.
 
-The runner is a "dumb executor" — it receives structured commands
-from the backend and runs them inside workspace environments.  All agent
-knowledge (configure commands, run command templates) lives in the
-backend database.
+The runner is a "dumb executor" — it runs lifecycle, terminal, file,
+and harness exec operations requested by the backend.  All agentic
+knowledge (providers, tools, permissions, prompts) lives in the
+backend harness.
 
 The runner has no local database — all workspace state is derived from
 the runtime backends (Docker, QEMU/KVM) and cached in memory.
@@ -634,7 +634,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
-        configure_commands: list[dict] | None = None,
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
@@ -647,9 +646,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
         Args:
             repos: Git repository URLs to clone into the workspace.
-            configure_commands: List of structured command dicts from the
-                backend, each with ``args``, ``workdir``, ``env``,
-                ``description`` keys.
             env_vars: Optional environment variables available during initial
                 repository clone/configure steps.
             files: Optional credential files available during initial
@@ -762,21 +758,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
                 else:
                     log.info("repo_cloned", repo=repo_url)
 
-            # Run configure commands from the backend
-            for cmd in configure_commands or []:
-                log.info("configure_step", description=cmd.get("description", ""))
-                exit_code, output = await self._exec_command(
-                    runtime,
-                    instance_id,
-                    cmd,
-                    credential_context=credential_context,
-                )
-                if exit_code != 0:
-                    log.warning(
-                        "configure_step_failed",
-                        description=cmd.get("description", ""),
-                        output=output,
-                    )
         finally:
             await self._cleanup_operation_credential_context(
                 runtime,
@@ -840,186 +821,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             prepared.instance_id,
             prepared.credential_context,
             prepared.log,
-        )
-
-    async def run_configure_commands(
-        self,
-        workspace_id: uuid.UUID,
-        configure_commands: list[dict],
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> None:
-        """Run configure commands in an existing workspace (agent first-time setup).
-
-        This is called before the first prompt of a new agent in a workspace,
-        allowing the agent to be installed/configured without a workspace restart.
-
-        Args:
-            workspace_id: Target workspace UUID.
-            configure_commands: List of structured command dicts from the backend.
-        """
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        try:
-            for cmd in configure_commands:
-                log.info("configure_step", description=cmd.get("description", ""))
-                exit_code, output = await self._exec_command(
-                    prepared.runtime,
-                    prepared.instance_id,
-                    cmd,
-                    credential_context=prepared.credential_context,
-                )
-                if exit_code != 0:
-                    log.warning(
-                        "configure_step_failed",
-                        description=cmd.get("description", ""),
-                        output=output,
-                    )
-            log.info("configure_commands_complete", count=len(configure_commands))
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def run_command(
-        self,
-        workspace_id: uuid.UUID,
-        command: dict,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command in a workspace and stream output lines."""
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        log.info(
-            "running_command",
-            description=command.get("description", ""),
-        )
-        try:
-            async for line in self._exec_command_stream(
-                prepared.runtime,
-                prepared.instance_id,
-                command,
-                credential_context=prepared.credential_context,
-            ):
-                yield line
-            log.info("command_completed")
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def run_command_wait(
-        self,
-        workspace_id: uuid.UUID,
-        command: dict,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
-    ) -> tuple[int, str]:
-        """Execute a command in a workspace and return exit code + output.
-
-        Args:
-            workspace_id: Target workspace UUID.
-            command: Structured command dict from the backend with
-                ``args``, ``workdir``, ``env``, ``description`` keys.
-        """
-        own_prepared = prepared is None
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-
-        log.info(
-            "running_command",
-            description=command.get("description", ""),
-        )
-        try:
-            exit_code, output = await self._exec_command(
-                prepared.runtime,
-                prepared.instance_id,
-                command,
-                credential_context=prepared.credential_context,
-            )
-            log.info("command_completed", exit_code=exit_code)
-            return exit_code, output
-        finally:
-            if own_prepared:
-                await self.cleanup_operation(prepared)
-
-    async def terminate_prompt_process(
-        self,
-        workspace_id: uuid.UUID,
-        pid_file: str,
-    ) -> None:
-        """Terminate a tracked prompt process by PID file."""
-        kill_script = self._build_prompt_termination_script(pid_file)
-        await self.run_command_wait(
-            workspace_id,
-            {
-                "args": ["sh", "-lc", kill_script],
-                "description": "Terminate active prompt process",
-            },
-        )
-
-    @staticmethod
-    def _build_prompt_termination_script(pid_file: str) -> str:
-        """Return shell script that terminates a prompt PID and its process group."""
-
-        quoted_pid_file = shlex.quote(pid_file)
-        return (
-            f"pid_file={quoted_pid_file}; "
-            "if [ ! -f \"$pid_file\" ]; then exit 0; fi; "
-            "pid=$(tr -d '[:space:]' < \"$pid_file\" 2>/dev/null || true); "
-            "if [ -z \"$pid\" ]; then rm -f \"$pid_file\"; exit 0; fi; "
-            "pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d '[:space:]' || true); "
-            "if [ -n \"$pgid\" ]; then "
-            "/bin/kill -TERM -- \"-$pgid\" 2>/dev/null || true; "
-            "pkill -TERM -g \"$pgid\" 2>/dev/null || true; "
-            "fi; "
-            "/bin/kill -TERM \"$pid\" 2>/dev/null || true; "
-            "sleep 1; "
-            "if [ -n \"$pgid\" ]; then "
-            "/bin/kill -KILL -- \"-$pgid\" 2>/dev/null || true; "
-            "pkill -KILL -g \"$pgid\" 2>/dev/null || true; "
-            "fi; "
-            "/bin/kill -KILL \"$pid\" 2>/dev/null || true; "
-            "rm -f \"$pid_file\""
-        )
-
-    async def cleanup_prompt_process_tracking(
-        self,
-        workspace_id: uuid.UUID,
-        pid_file: str,
-    ) -> None:
-        """Remove prompt PID tracking file if it still exists."""
-        cleanup_script = f"rm -f '{pid_file}'"
-        await self.run_command_wait(
-            workspace_id,
-            {
-                "args": ["sh", "-lc", cleanup_script],
-                "description": "Cleanup prompt PID tracking",
-            },
         )
 
     async def stop_workspace(self, workspace_id: uuid.UUID) -> None:

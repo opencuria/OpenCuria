@@ -2,7 +2,7 @@
  * Socket.IO client for real-time frontend updates.
  *
  * Connects to the backend's /frontend namespace to receive
- * workspace status changes and streaming prompt output.
+ * workspace status changes and harness streaming events.
  *
  * The client is a singleton — call `connect()` once on app init
  * and `disconnect()` on teardown.
@@ -85,38 +85,6 @@ export interface WorkspaceOperationEvent {
   active_operation: string | null
 }
 
-export interface OutputChunkEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  line: string
-}
-
-export interface SessionCompleteEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-}
-
-export interface SessionFailedEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  error: string
-}
-
-export interface SessionStatusEvent {
-  workspace_id: string
-  session_id: string
-  chat_id: string | null
-  task_id: string
-  status: string
-  detail: string
-}
-
 export interface WorkspaceErrorEvent {
   workspace_id: string
   task_id: string
@@ -166,10 +134,6 @@ type EventMap = {
   'workspace:status_changed': WorkspaceStatusEvent
   'workspace:operation_changed': WorkspaceOperationEvent
   'workspace:error': WorkspaceErrorEvent
-  'session:output_chunk': OutputChunkEvent
-  'session:status': SessionStatusEvent
-  'session:completed': SessionCompleteEvent
-  'session:failed': SessionFailedEvent
   'harness.part_updated': HarnessPartUpdatedEvent
   'harness.permission_required': HarnessPermissionRequiredEvent
   'harness.session_status': HarnessSessionStatusEvent

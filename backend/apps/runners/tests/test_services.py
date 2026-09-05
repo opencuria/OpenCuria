@@ -14,14 +14,7 @@ from django.utils import timezone
 
 from apps.credentials.models import CredentialService
 from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
-from apps.runners.enums import (
-    AgentCommandPhase,
-    RunnerStatus,
-    TaskStatus,
-    TaskType,
-    WorkspaceOperation,
-    WorkspaceStatus,
-)
+from apps.runners.enums import RunnerStatus, TaskStatus, TaskType, WorkspaceOperation, WorkspaceStatus
 from apps.runners.exceptions import (
     RunnerNotFoundError,
     RunnerOfflineError,
@@ -30,20 +23,7 @@ from apps.runners.exceptions import (
 )
 from common.exceptions import ConflictError, NotFoundError
 
-from apps.runners.models import (
-    AgentCommand,
-    AgentCredentialRelationCommand,
-    AgentDefinition,
-    AgentDefinitionCredentialRelation,
-    Chat,
-    ImageDefinition,
-    ImageInstance,
-    Runner,
-    ImageBuildJob,
-    Session,
-    Task,
-    Workspace,
-)
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob, Task, Workspace
 from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
 
@@ -1545,13 +1525,13 @@ class TestWorkspaceOperationState:
         service._dispatch_workspace_task.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_busy_workspace_rejects_prompt(self, service, workspace):
-        """Prompts must be blocked while a blocking workspace operation is active."""
+    async def test_busy_workspace_rejects_stop(self, service, workspace):
+        """Lifecycle ops must be blocked while another operation is active."""
         workspace.active_operation = WorkspaceOperation.RESTARTING
         workspace.save(update_fields=["active_operation", "updated_at"])
 
         with pytest.raises(ConflictError, match="currently restarting"):
-            await service.run_prompt(workspace.id, "Fix the bug")
+            await service.stop_workspace(workspace.id)
 
 
 @pytest.mark.django_db
@@ -1741,24 +1721,6 @@ class TestAutoStopInactiveWorkspaces:
         assert payload["workspace_id"] == str(workspace.id)
 
     @pytest.mark.asyncio
-    async def test_skips_workspace_with_active_session(self, service, sio_mock, workspace):
-        workspace.runner.organization.workspace_auto_stop_timeout_minutes = 5
-        workspace.runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
-        workspace.last_activity_at = timezone.now() - timedelta(minutes=10)
-        workspace.save(update_fields=["last_activity_at", "updated_at"])
-        chat = Chat.objects.create(workspace=workspace, name="Busy Chat")
-        Session.objects.create(
-            chat=chat,
-            prompt="Still running",
-            status="running",
-        )
-
-        tasks = await service.auto_stop_inactive_workspaces(runner_id=workspace.runner_id)
-
-        assert tasks == []
-        sio_mock.emit.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_terminal_and_file_events_touch_workspace_activity(self, service, workspace):
         before = workspace.last_activity_at
         await service.forward_terminal_input(
@@ -1821,166 +1783,40 @@ class TestAutoStopInactiveWorkspaces:
 
 
 @pytest.mark.django_db(transaction=True)
-class TestRunPrompt:
-    @pytest.mark.asyncio
-    async def test_dispatches_prompt(self, service, sio_mock, workspace):
-        """Running a prompt should create session + task and emit."""
-        AgentDefinition.objects.create(
-            name="copilot",
-            description="copilot",
-            supports_multi_chat=True,
-        )
-        agent = AgentDefinition.objects.get(name="copilot")
-        AgentCommand.objects.create(
-            agent=agent,
-            phase="run",
-            args=["copilot", "run", "{prompt}"],
-            workdir="/workspace",
-            order=0,
-        )
-        chat = Chat.objects.create(
-            workspace=workspace,
-            name="Default",
-            agent_definition=agent,
-            agent_type="copilot",
-        )
-        session, task, _ = await service.run_prompt(
-            workspace.id,
-            "Fix the bug",
-            chat_id=str(chat.id),
-        )
+class TestLegacyPromptPathRemoved:
+    """Negative tests: task:run_prompt service path no longer exists."""
 
-        assert session.prompt == "Fix the bug"
-        assert task.type == TaskType.RUN_PROMPT
-        sio_mock.emit.assert_called_once()
+    def test_no_run_prompt_method(self, service):
+        """RunnerService must not expose run_prompt anymore."""
+        assert not hasattr(service, "run_prompt")
 
-    @pytest.mark.asyncio
-    async def test_stopped_workspace_raises(self, service, stopped_workspace):
-        """Should raise when workspace is not RUNNING."""
-        with pytest.raises(WorkspaceStateError):
-            await service.run_prompt(
-                stopped_workspace.id, "Fix the bug"
-            )
+    def test_no_cancel_session_prompt_method(self, service):
+        """RunnerService must not expose cancel_session_prompt anymore."""
+        assert not hasattr(service, "cancel_session_prompt")
 
-    @pytest.mark.asyncio
-    async def test_dispatches_credential_relation_preflight_commands(
-        self, service, sio_mock, workspace, user
-    ):
-        """run_prompt should include relation-bound preflight commands."""
-        credential_service = CredentialService.objects.create(
-            name="GitHub Token",
-            slug=f"github-token-{uuid.uuid4().hex[:6]}",
-            credential_type="env",
-            env_var_name="GITHUB_TOKEN",
-            label="GitHub PAT",
-        )
-        credential = CredentialSvc().create_org_credential(
-            organization_id=workspace.runner.organization_id,
-            service_id=credential_service.id,
-            name="GitHub PAT",
-            value="secret-token",
-            user=user,
-        )
-        workspace.credentials.add(credential)
+    def test_no_build_run_command_method(self, service):
+        """RunnerService must not expose build_run_command anymore."""
+        assert not hasattr(service, "build_run_command")
 
-        agent = AgentDefinition.objects.create(
-            name=f"copilot-{uuid.uuid4().hex[:6]}",
-            description="copilot",
-            supports_multi_chat=True,
-            default_env={"AGENT_DEFAULT": "1"},
-        )
-        AgentCommand.objects.create(
-            agent=agent,
-            phase="run",
-            args=["copilot", "run", "{prompt}"],
-            workdir="/workspace",
-            order=0,
-        )
-        relation = AgentDefinitionCredentialRelation.objects.create(
-            agent_definition=agent,
-            credential_service=credential_service,
-            default_env={"RELATION_DEFAULT": "yes"},
-        )
-        AgentCredentialRelationCommand.objects.create(
-            relation=relation,
-            phase=AgentCommandPhase.CONFIGURE,
-            args=["gh", "auth", "setup-git"],
-            workdir="/workspace",
-            env={"REL_CMD": "1"},
-            description="Bind GitHub auth",
-            order=0,
-        )
-        chat = Chat.objects.create(
-            workspace=workspace,
-            name="Default",
-            agent_definition=agent,
-            agent_type=agent.name,
-        )
-
-        await service.run_prompt(
-            workspace.id,
-            "Fix the bug",
-            chat_id=str(chat.id),
-        )
-
-        event, payload = sio_mock.emit.await_args.args[:2]
-        assert event == "task:run_prompt"
-        assert payload["env_vars"]["GITHUB_TOKEN"] == "secret-token"
-        assert payload["configure_commands"] == [
-            {
-                "args": ["gh", "auth", "setup-git"],
-                "workdir": "/workspace",
-                "env": {
-                    "GITHUB_TOKEN": "secret-token",
-                    "RELATION_DEFAULT": "yes",
-                    "AGENT_DEFAULT": "1",
-                    "REL_CMD": "1",
-                },
-                "description": "Bind GitHub auth",
-            }
-        ]
-        assert payload["command"]["env"] == {
-            "GITHUB_TOKEN": "secret-token",
-            "RELATION_DEFAULT": "yes",
-            "AGENT_DEFAULT": "1",
-        }
-
-    @pytest.mark.asyncio
-    async def test_single_chat_old_chat_locked(self, service, workspace):
-        """Single-chat agents only allow writes to their latest chat."""
-        agent = AgentDefinition.objects.create(
-            name="single-agent",
-            description="single",
-            supports_multi_chat=False,
-        )
-        old_chat = Chat.objects.create(
-            workspace=workspace,
-            name="Old",
-            agent_definition=agent,
-            agent_type="single-agent",
-        )
-        Chat.objects.create(
-            workspace=workspace,
-            name="Latest",
-            agent_definition=agent,
-            agent_type="single-agent",
-        )
-
-        with pytest.raises(ConflictError):
-            await service.run_prompt(
-                workspace.id,
-                "Try old chat",
-                chat_id=str(old_chat.id),
-            )
+    def test_no_output_handlers(self, service):
+        """Legacy output:* handlers must be gone."""
+        for name in [
+            "handle_output_chunk",
+            "handle_output_status",
+            "handle_output_complete",
+            "handle_output_error",
+            "handle_prompt_cancelled",
+        ]:
+            assert not hasattr(service, name)
 
 
 @pytest.mark.django_db(transaction=True)
 class TestStartTerminal:
     @pytest.mark.asyncio
-    async def test_dispatches_terminal_with_credential_relation_preflights(
+    async def test_dispatches_terminal_with_workspace_credentials(
         self, service, sio_mock, workspace, user
     ):
-        """start_terminal should include relation-bound preflight commands."""
+        """start_terminal should inject workspace credentials without agent setup."""
         credential_service = CredentialService.objects.create(
             name="GitHub Token",
             slug=f"github-token-{uuid.uuid4().hex[:6]}",
@@ -1997,119 +1833,12 @@ class TestStartTerminal:
         )
         workspace.credentials.add(credential)
 
-        agent = AgentDefinition.objects.create(
-            name=f"terminal-agent-{uuid.uuid4().hex[:6]}",
-            description="terminal",
-            supports_multi_chat=True,
-        )
-        relation = AgentDefinitionCredentialRelation.objects.create(
-            agent_definition=agent,
-            credential_service=credential_service,
-            default_env={"RELATION_DEFAULT": "yes"},
-        )
-        AgentCredentialRelationCommand.objects.create(
-            relation=relation,
-            phase=AgentCommandPhase.CONFIGURE,
-            args=["gh", "auth", "status"],
-            workdir="/workspace",
-            env={"CHECK_AUTH": "1"},
-            description="Verify GitHub auth",
-            order=0,
-        )
-        Chat.objects.create(
-            workspace=workspace,
-            name="Default",
-            agent_definition=agent,
-            agent_type=agent.name,
-        )
-
         task = await service.start_terminal(workspace.id)
 
         assert task.type == TaskType.START_TERMINAL
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:start_terminal"
         assert payload["env_vars"]["GITHUB_TOKEN"] == "terminal-token"
-        assert payload["configure_commands"] == [
-            {
-                "args": ["gh", "auth", "status"],
-                "workdir": "/workspace",
-                "env": {
-                    "GITHUB_TOKEN": "terminal-token",
-                    "RELATION_DEFAULT": "yes",
-                    "CHECK_AUTH": "1",
-                },
-                "description": "Verify GitHub auth",
-            }
-        ]
-
-
-@pytest.mark.django_db
-class TestHandleOutputError:
-    def test_user_cancelled_keeps_failed_session_without_persistent_error(
-        self, service, workspace, runner
-    ):
-        """User-cancelled prompts should fail session but not set error_message."""
-        chat = Chat.objects.create(workspace=workspace, name="Test")
-        session = Session.objects.create(
-            chat=chat,
-            prompt="Cancelled prompt",
-            output="partial output",
-            status="running",
-        )
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            session=session,
-            type=TaskType.RUN_PROMPT,
-            status=TaskStatus.IN_PROGRESS,
-        )
-
-        service.handle_output_error(
-            str(task.id),
-            str(workspace.id),
-            "Prompt execution cancelled by user",
-            runner_id=str(runner.id),
-        )
-
-        session.refresh_from_db()
-        task.refresh_from_db()
-        assert session.status == "failed"
-        assert session.error_message is None
-        assert session.output == "partial output\n[Error] Prompt execution cancelled by user"
-        assert task.status == TaskStatus.FAILED
-        assert task.error == "Prompt execution cancelled by user"
-
-    def test_regular_error_remains_persistent(self, service, workspace, runner):
-        """Non-cancellation errors should still persist in session.error_message."""
-        chat = Chat.objects.create(workspace=workspace, name="Test")
-        session = Session.objects.create(
-            chat=chat,
-            prompt="Broken prompt",
-            output="work in progress",
-            status="running",
-        )
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            session=session,
-            type=TaskType.RUN_PROMPT,
-            status=TaskStatus.IN_PROGRESS,
-        )
-
-        service.handle_output_error(
-            str(task.id),
-            str(workspace.id),
-            "Tool crashed",
-            runner_id=str(runner.id),
-        )
-
-        session.refresh_from_db()
-        task.refresh_from_db()
-        assert session.status == "failed"
-        assert session.error_message == "Tool crashed"
-        assert session.output == "work in progress\n[Error] Tool crashed"
-        assert task.status == TaskStatus.FAILED
-        assert task.error == "Tool crashed"
 
 
 @pytest.mark.django_db(transaction=True)

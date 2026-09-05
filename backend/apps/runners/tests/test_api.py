@@ -13,15 +13,8 @@ from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import SessionStatus, WorkspaceStatus
-from apps.runners.models import (
-    AgentDefinition,
-    Chat,
-    OrgAgentDefinitionActivation,
-    Runner,
-    Session,
-    Workspace,
-)
+from apps.runners.enums import WorkspaceStatus
+from apps.runners.models import Runner, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -48,7 +41,6 @@ def auth_context(db):
             APIKeyPermission.RUNNERS_READ.value,
             APIKeyPermission.RUNNERS_CREATE.value,
             APIKeyPermission.WORKSPACES_READ.value,
-            APIKeyPermission.AGENTS_READ.value,
         ],
     )
     return {
@@ -172,92 +164,42 @@ class TestListWorkspaces:
 
 
 @pytest.mark.django_db
-class TestListAgents:
-    def test_returns_agents(self, client, auth_context):
-        """GET /api/v1/agents/ should return available agents."""
-        agent, _ = AgentDefinition.objects.get_or_create(
-            name=f"copilot-{uuid.uuid4().hex[:6]}",
-            organization=auth_context["organization"],
-            defaults={"description": "Copilot test agent"},
-        )
-        OrgAgentDefinitionActivation.objects.get_or_create(
-            organization=auth_context["organization"],
-            agent_definition=agent,
-        )
+class TestLegacyAgentStackRemoved:
+    """Negative tests: the legacy agent/chat/conversation stack is gone."""
+
+    def test_agents_endpoint_is_404(self, client):
+        """GET /api/v1/agents/ no longer exists (harness owns agents)."""
         response = client.get("/api/v1/agents/")
-        assert response.status_code == 200
-        agents = response.json()
-        assert any(a["id"] == str(agent.id) for a in agents)
+        assert response.status_code == 404
 
+    def test_conversations_endpoint_is_404(self, client):
+        """GET /api/v1/conversations/ no longer exists."""
+        response = client.get("/api/v1/conversations/")
+        assert response.status_code == 404
 
-@pytest.mark.django_db
-class TestConversationReadStateApi:
-    @pytest.fixture
-    def conversation_auth_context(self):
-        """Create an authenticated org admin with conversation permissions."""
-        user_model = get_user_model()
-        user = user_model.objects.create_user(
-            email=f"conversation-api-{uuid.uuid4().hex[:8]}@example.com",
-            password="secret",
-        )
-        org = Organization.objects.create(
-            name=f"Conversation API Org {uuid.uuid4().hex[:6]}",
-            slug=f"conversation-api-org-{uuid.uuid4().hex[:10]}",
-        )
-        Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
-        token = generate_api_token()
-        APIKey.objects.create(
-            user=user,
-            name="conversation-api-test-key",
-            key_hash=hash_token(token),
-            key_prefix=token[:12],
-            permissions=[APIKeyPermission.CONVERSATIONS_READ.value],
-        )
-        return {
-            "user": user,
-            "organization": org,
-            "headers": {
-                "HTTP_X_API_KEY": token,
-                "HTTP_X_ORGANIZATION_ID": str(org.id),
-            },
-        }
+    def test_org_agent_definitions_endpoint_is_404(self, client):
+        """GET /api/v1/org-agent-definitions/ no longer exists."""
+        response = client.get("/api/v1/org-agent-definitions/")
+        assert response.status_code == 404
 
-    @pytest.fixture
-    def conversation_client(self, conversation_auth_context) -> Client:
-        """Django test client authenticated for conversation endpoints."""
-        return Client(**conversation_auth_context["headers"])
+    def test_workspace_prompt_endpoint_is_404(self, client, auth_context):
+        """POST /api/v1/workspaces/{id}/prompt/ no longer exists."""
+        from apps.runners.models import Runner as RunnerModel
 
-    def test_mark_conversation_unread_clears_read_timestamp(
-        self,
-        conversation_client: Client,
-        conversation_auth_context,
-    ):
-        runner = Runner.objects.create(
-            name="conversation-runner",
-            api_token_hash=hash_token("runner-token-conversation"),
-            organization=conversation_auth_context["organization"],
+        runner = RunnerModel.objects.create(
+            name="legacy-prompt-runner",
+            api_token_hash="x",
+            organization=auth_context["organization"],
         )
         workspace = Workspace.objects.create(
             runner=runner,
-            name="Workspace",
+            name="Legacy Prompt Workspace",
             status=WorkspaceStatus.RUNNING,
-            created_by=conversation_auth_context["user"],
+            created_by=auth_context["user"],
         )
-        chat = Chat.objects.create(workspace=workspace, name="Chat")
-        session = Session.objects.create(
-            chat=chat,
-            prompt="hello",
-            output="done",
-            status=SessionStatus.COMPLETED,
-            read_at=timezone.now(),
-        )
-
-        response = conversation_client.post(
-            "/api/v1/conversations/unread/",
-            data={"session_id": str(session.id)},
+        response = client.post(
+            f"/api/v1/workspaces/{workspace.id}/prompt/",
+            data={"prompt": "hello"},
             content_type="application/json",
         )
-
-        assert response.status_code == 204
-        session.refresh_from_db()
-        assert session.read_at is None
+        assert response.status_code == 404

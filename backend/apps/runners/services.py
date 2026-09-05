@@ -26,10 +26,8 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_uuid, hash_token, verify_token
 
 from .enums import (
-    AgentCommandPhase,
     RunnerStatus,
     RuntimeType,
-    SessionStatus,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -44,19 +42,15 @@ from .exceptions import (
     WorkspaceStateError,
 )
 from .repositories import (
-    AgentRepository,
-    ChatRepository,
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
     ImageBuildJobRepository,
-    SessionRepository,
     TaskRepository,
     WorkspaceRepository,
 )
 
 logger = logging.getLogger(__name__)
-USER_CANCELLED_PROMPT_ERROR = "Prompt execution cancelled by user"
 
 
 class RunnerService:
@@ -79,10 +73,7 @@ class RunnerService:
         self.sio = sio_server
         self.runners = RunnerRepository
         self.workspaces = WorkspaceRepository
-        self.sessions = SessionRepository
         self.tasks = TaskRepository
-        self.agents = AgentRepository
-        self.chats = ChatRepository
         self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
         self.build_jobs = ImageBuildJobRepository
@@ -238,12 +229,9 @@ class RunnerService:
         """
         Mark a runner as offline when it disconnects.
 
-        Looks up the runner by its Socket.IO session ID. Any sessions that are
-        still active (PENDING / RUNNING) on this runner's workspaces are
-        immediately marked as FAILED so the frontend does not get stuck waiting
-        for output that will never arrive.
+        Looks up the runner by its Socket.IO session ID.
         """
-        from .models import Runner, Session, Task
+        from .models import Runner
 
         try:
             runner = Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
@@ -251,54 +239,11 @@ class RunnerService:
             logger.warning("Disconnect from unknown SID: %s", sid)
             return
 
-        # Collect active sessions BEFORE marking runner offline so we can
-        # still resolve them via the FK chain.
-        active_sessions = list(
-            Session.objects.filter(
-                chat__workspace__runner=runner,
-                status__in=[SessionStatus.PENDING, SessionStatus.RUNNING],
-            ).select_related("chat__workspace")
-        )
-
-        # Also fail any pending/in-progress tasks on this runner's workspaces
-        # that are for run_prompt (so task state is consistent).
-        from .enums import TaskStatus as TS
-        Task.objects.filter(
-            runner=runner,
-            status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
-            type=TaskType.RUN_PROMPT,
-        ).update(
-            status=TaskStatus.FAILED,
-            error="Runner went offline",
-        )
-
         self.runners.set_offline(runner)
         logger.info("Runner unregistered: %s", runner.id)
 
         # Notify frontend about runner going offline so it can update display.
         self._forward_runner_status_to_frontend(runner, "offline")
-
-        # Fail stuck sessions and notify frontend.
-        for session in active_sessions:
-            self.sessions.fail(session, error_message="Runner went offline")
-            workspace_id = str(session.chat.workspace_id)
-            session_id = str(session.id)
-            chat_id = str(session.chat_id) if session.chat_id else None
-            logger.warning(
-                "Failing session %s because runner %s went offline",
-                session_id,
-                runner.id,
-            )
-            self._forward_to_frontend(
-                "session:failed",
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "chat_id": chat_id,
-                    "error": "Runner went offline",
-                },
-                workspace_id,
-            )
 
     def _forward_runner_status_to_frontend(
         self,
@@ -334,241 +279,6 @@ class RunnerService:
         if workspace is None:
             return
         await sync_to_async(self.workspaces.touch_activity)(workspace, at=at)
-
-    # ------------------------------------------------------------------
-    # Agent command helpers
-    # ------------------------------------------------------------------
-
-    def get_configure_commands(self, agent_definition_id: uuid.UUID) -> list[dict]:
-        """Load configure-phase commands from the DB for an agent.
-
-        Returns a list of structured command dicts ready for dispatch.
-        """
-        commands = self.agents.get_configure_commands(agent_definition_id)
-        return [
-            {
-                "args": cmd.args,
-                "workdir": cmd.workdir,
-                "env": cmd.env or {},
-                "description": cmd.description,
-            }
-            for cmd in commands
-        ]
-
-    @staticmethod
-    def _get_agent_required_credential_service_slugs(agent_def) -> list[str]:
-        """Return the credential service slugs required by an agent."""
-        return [
-            svc.slug
-            for svc in agent_def.required_credential_services.all()
-            if svc.slug
-        ]
-
-    @staticmethod
-    def _get_workspace_credential_service_slugs(workspace) -> set[str]:
-        """Return the credential service slugs available inside a workspace."""
-        return {
-            credential.service.slug
-            for credential in workspace.credentials.all()
-            if credential.service_id and credential.service.slug
-        }
-
-    @staticmethod
-    def _merge_workspace_env_vars(
-        command: dict,
-        workspace_env_vars: dict[str, str],
-    ) -> dict:
-        """Return a command dict with workspace env vars merged in."""
-        return {
-            **command,
-            "env": {
-                **workspace_env_vars,
-                **(command.get("env") or {}),
-            },
-        }
-
-    def build_run_command(
-        self,
-        agent_definition_id: uuid.UUID,
-        prompt: str,
-        model: str = "",
-        workdir: str = "/workspace",
-        chat_id: str = "",
-        is_first_message: bool = False,
-        extra_options: dict[str, str] | None = None,
-        additional_default_env: dict[str, str] | None = None,
-    ) -> dict:
-        """Build a run command dict by rendering the DB template.
-
-        Substitutes ``{prompt}``, ``{workdir}``, ``{model}``, ``{chat_id}``
-        and any additional ``{key}`` placeholders from ``extra_options`` in
-        the stored command template.
-
-        When ``is_first_message`` is True and the agent has a ``run_first``
-        command defined, that template is used instead of ``run``. This
-        supports agents like Claude Code that require a different invocation
-        (e.g. ``--session-id``) for the very first message in a chat.
-
-        Returns a structured command dict ready for dispatch to a runner.
-        """
-        cmd = None
-        if is_first_message:
-            cmd = self.agents.get_run_first_command(agent_definition_id)
-        if cmd is None:
-            cmd = self.agents.get_run_command(agent_definition_id)
-        if cmd is None:
-            raise ValueError(
-                f"No run command defined for agent '{agent_definition_id}'"
-            )
-
-        # Fetch agent default_env; per-command env takes precedence.
-        agent_def = self.agents.get_by_id(agent_definition_id)
-        default_env: dict[str, str] = (
-            agent_def.default_env if agent_def and agent_def.default_env else {}
-        )
-        merged_env = {
-            **(additional_default_env or {}),
-            **default_env,
-            **(cmd.env or {}),
-        }
-
-        options = extra_options or {}
-
-        def _render(arg: str) -> str:
-            result = (
-                arg.replace("{prompt}", prompt)
-                .replace("{workdir}", workdir)
-                .replace("{model}", model)
-                .replace("{chat_id}", chat_id)
-            )
-            for key, value in options.items():
-                result = result.replace(f"{{{key}}}", value)
-            return result
-
-        rendered_args = [_render(arg) for arg in cmd.args]
-        rendered_workdir = (
-            _render(cmd.workdir)
-            if cmd.workdir
-            else workdir
-        )
-
-        return {
-            "args": rendered_args,
-            "workdir": rendered_workdir,
-            "env": merged_env,
-            "description": cmd.description,
-        }
-
-    def _build_render_context(
-        self,
-        *,
-        prompt: str,
-        model: str,
-        workdir: str,
-        chat_id: str,
-        extra_options: dict[str, str] | None,
-    ) -> dict[str, str]:
-        """Return placeholder values for rendering agent commands."""
-        return {
-            "prompt": prompt,
-            "workdir": workdir,
-            "model": model,
-            "chat_id": chat_id,
-            **(extra_options or {}),
-        }
-
-    def _render_template_value(
-        self,
-        template: str,
-        context: dict[str, str],
-    ) -> str:
-        """Render supported ``{placeholder}`` values in a command field."""
-        rendered = template
-        for key, value in context.items():
-            rendered = rendered.replace(f"{{{key}}}", value)
-        return rendered
-
-    def _build_credential_relation_operation_data(
-        self,
-        *,
-        workspace,
-        agent_definition_id: uuid.UUID,
-        phase: str,
-        prompt: str = "",
-        model: str = "",
-        workdir: str = "/workspace",
-        chat_id: str = "",
-        extra_options: dict[str, str] | None = None,
-    ) -> tuple[dict[str, str], list[dict]]:
-        """Resolve relation default env and commands for an operation phase."""
-
-        agent_def = self.agents.get_by_id(agent_definition_id)
-        if agent_def is None:
-            return {}, []
-
-        workspace_service_ids = {
-            credential.service_id
-            for credential in workspace.credentials.all()
-            if credential.service_id
-        }
-        if not workspace_service_ids:
-            return {}, []
-
-        relations = list(
-            agent_def.credential_relations.select_related(
-                "credential_service"
-            ).prefetch_related("commands").filter(
-                credential_service_id__in=workspace_service_ids
-            ).order_by("credential_service__slug", "id")
-        )
-        if not relations:
-            return {}, []
-
-        render_context = self._build_render_context(
-            prompt=prompt,
-            model=model,
-            workdir=workdir,
-            chat_id=chat_id,
-            extra_options=extra_options,
-        )
-        agent_default_env = dict(agent_def.default_env or {})
-        merged_default_env: dict[str, str] = {}
-        commands: list[dict] = []
-
-        for relation in relations:
-            relation_default_env = dict(relation.default_env or {})
-            merged_default_env.update(relation_default_env)
-            phase_commands = sorted(
-                (
-                    cmd
-                    for cmd in relation.commands.all()
-                    if cmd.phase == phase
-                ),
-                key=lambda cmd: cmd.order,
-            )
-            for cmd in phase_commands:
-                command_env = {
-                    **relation_default_env,
-                    **agent_default_env,
-                    **(cmd.env or {}),
-                }
-                commands.append(
-                    {
-                        "args": [
-                            self._render_template_value(arg, render_context)
-                            for arg in cmd.args
-                        ],
-                        "workdir": (
-                            self._render_template_value(cmd.workdir, render_context)
-                            if cmd.workdir
-                            else workdir
-                        ),
-                        "env": command_env,
-                        "description": cmd.description,
-                    }
-                )
-
-        return merged_default_env, commands
 
     # ------------------------------------------------------------------
     # Workspace operations (initiated by REST API or frontend)
@@ -812,9 +522,8 @@ class RunnerService:
         """
         Create a new workspace on a runner.
 
-        Agent type is no longer required at workspace creation time — it is
-        selected when creating the first chat. If runner_id is not specified,
-        any online runner in the organization is selected.
+        If runner_id is not specified, any online runner in the
+        organization is selected.
 
         Returns the created Workspace and Task records.
         """
@@ -879,7 +588,7 @@ class RunnerService:
             if organization_id and runner.organization_id != organization_id:
                 raise RunnerNotFoundError(str(runner_id))
         else:
-            # Pick any online runner (no agent filter needed)
+            # Pick any online runner
             runners_qs = self.runners.list_by_organization(organization_id).filter(
                 status=RunnerStatus.ONLINE
             ) if organization_id else self.runners.list_online()
@@ -940,8 +649,7 @@ class RunnerService:
         )
 
         # Dispatch to runner — include workspace_id so the runner
-        # uses the same UUID the backend assigned. No configure_commands
-        # at this stage — they run on first chat usage.
+        # uses the same UUID the backend assigned.
         await self._dispatch_workspace_task(
             runner=runner,
             event="task:create_workspace",
@@ -979,302 +687,6 @@ class RunnerService:
             task_id,
         )
         return workspace, task
-
-    async def run_prompt(
-        self,
-        workspace_id: uuid.UUID,
-        prompt: str,
-        agent_model: str | None = None,
-        agent_options: dict[str, str] | None = None,
-        chat_id: str | None = None,
-        skill_ids: list[uuid.UUID] | None = None,
-    ) -> tuple["Session", "Task", "Chat"]:
-        """
-        Run a prompt in an existing workspace.
-
-        Creates a Session and Task, then dispatches to the runner.
-        If the agent supports multi-chat and no chat_id is provided,
-        a new chat is created automatically.
-
-        ``agent_options`` is a dict of option key/value pairs (e.g.
-        ``{"model": "claude-opus-4-6", "permission_mode": "plan"}``).
-        The legacy ``agent_model`` parameter is still accepted for
-        backwards compatibility; if both are provided, ``agent_options``
-        takes precedence for the model key.
-        """
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
-
-        if workspace.status != WorkspaceStatus.RUNNING:
-            raise WorkspaceStateError(
-                f"Workspace '{workspace_id}' is '{workspace.status}', "
-                f"must be '{WorkspaceStatus.RUNNING}' to run prompts"
-            )
-
-        has_active = await sync_to_async(self.sessions.has_active_for_workspace)(
-            workspace_id
-        )
-        if has_active:
-            raise ConflictError("Workspace already has an active session")
-
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
-
-        # Determine agent definition from the chat
-        chat_agent_definition_id: uuid.UUID | None = None
-        if chat_id:
-            _temp_chat = await sync_to_async(self.chats.get_by_id)(uuid.UUID(chat_id))
-            if _temp_chat:
-                chat_agent_definition_id = _temp_chat.agent_definition_id
-
-        if chat_agent_definition_id is None:
-            raise ValueError("No agent definition defined for this chat")
-
-        agent_def = await sync_to_async(self.agents.get_by_id)(chat_agent_definition_id)
-        if agent_def is None:
-            raise ValueError(
-                f"Unknown agent definition for chat '{chat_id}': '{chat_agent_definition_id}'"
-            )
-
-        # Merge legacy agent_model into agent_options for unified handling
-        resolved_options: dict[str, str] = dict(agent_options or {})
-        if agent_model and "model" not in resolved_options:
-            resolved_options["model"] = agent_model.strip()
-
-        # Resolve defaults for any available_options defined on the agent
-        available_opt_defs: list[dict] = list(agent_def.available_options or [])
-        for opt_def in available_opt_defs:
-            key = opt_def.get("key", "")
-            if not key:
-                continue
-            choices: list[str] = opt_def.get("choices", [])
-            default: str = opt_def.get("default", choices[0] if choices else "")
-            if key not in resolved_options or not resolved_options[key]:
-                # Fall back to last session's value for this key
-                if key == "model":
-                    latest_session = await sync_to_async(
-                        self.sessions.get_latest_for_workspace
-                    )(workspace_id)
-                    latest_val = (
-                        (latest_session.agent_options or {}).get("model", "")
-                        if latest_session else ""
-                    ).strip()
-                    resolved_options[key] = (
-                        latest_val if (latest_val and (not choices or latest_val in choices))
-                        else default
-                    )
-                else:
-                    resolved_options[key] = default
-            elif choices and resolved_options[key] not in choices:
-                raise ValueError(
-                    f"Option '{key}' value '{resolved_options[key]}' is not in "
-                    f"allowed choices for agent '{agent_def.name}'"
-                )
-
-        selected_model = resolved_options.get("model", "")
-
-        # Resolve or create chat
-        chat = await self._resolve_chat(
-            workspace, agent_def, chat_id, prompt
-        )
-        await self._assert_chat_is_writable(workspace, agent_def, chat)
-
-        # Build augmented prompt: append skill bodies for the runner.
-        # The session record stores only the original user prompt.
-        effective_prompt = prompt
-        resolved_skills = []
-        if skill_ids:
-            from apps.skills.repositories import SkillRepository
-            resolved_skills = await sync_to_async(SkillRepository.get_many_by_ids)(
-                skill_ids
-            )
-            if resolved_skills:
-                appendix = "\n\n---\n# Follow these instructions (skills) carefully:\n\n"
-                appendix += "\n\n".join(
-                    f"## {s.name}\n\n{s.body}" for s in resolved_skills
-                )
-                effective_prompt = prompt + appendix
-
-        # Detect whether this is the first message in the chat so agents that
-        # need different initialisation (e.g. Claude Code's --session-id flag)
-        # can use their run_first command template.
-        #
-        # We intentionally ignore failed sessions: if all prior sessions in
-        # this chat failed (e.g. the runner went offline mid-conversation),
-        # the next prompt should be treated as a fresh first message so the
-        # correct agent initialisation command is used.
-        is_first_message = not await sync_to_async(
-            self.sessions.has_any_successful_for_chat
-        )(chat.id)
-
-        # Build the run command from the agent definition in DB
-        workspace_credentials = await sync_to_async(
-            CredentialSvc().resolve_workspace_credentials
-        )(workspace)
-        relation_default_env, relation_preflight_commands = await sync_to_async(
-            self._build_credential_relation_operation_data
-        )(
-            workspace=workspace,
-            agent_definition_id=agent_def.id,
-            phase=AgentCommandPhase.CONFIGURE,
-            prompt=effective_prompt,
-            model=selected_model,
-            chat_id=str(chat.id),
-            extra_options=resolved_options,
-        )
-        run_command = await sync_to_async(self.build_run_command)(
-            agent_def.id,
-            effective_prompt,
-            selected_model,
-            chat_id=str(chat.id),
-            is_first_message=is_first_message,
-            extra_options=resolved_options,
-            additional_default_env=relation_default_env,
-        )
-        run_command = self._merge_workspace_env_vars(
-            run_command,
-            workspace_credentials.env_vars,
-        )
-
-        configure_commands: list[dict] = [
-            self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-            for cmd in relation_preflight_commands
-        ]
-        fallback_configure_commands = await sync_to_async(self.get_configure_commands)(
-            agent_def.id
-        )
-        fallback_configure_commands = [
-            self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-            for cmd in fallback_configure_commands
-        ]
-
-        # Create session and task
-        session_id = generate_uuid()
-        session = await sync_to_async(self.sessions.create)(
-            session_id=session_id,
-            prompt=prompt,  # store original prompt, not augmented
-            agent_model=selected_model,
-            agent_options=resolved_options,
-            chat=chat,
-        )
-
-        # Snapshot skills immediately after session creation
-        if resolved_skills:
-            from apps.skills.repositories import SessionSkillRepository
-            await sync_to_async(SessionSkillRepository.create_snapshots)(
-                session, resolved_skills
-            )
-
-        task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.RUN_PROMPT,
-            workspace=workspace,
-            session=session,
-        )
-
-        # Dispatch — include configure_commands if this agent needs first-time setup
-        await self._emit_to_runner(
-            runner,
-            "task:run_prompt",
-            {
-                "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-                "prompt": prompt,
-                "command": run_command,
-                "configure_commands": configure_commands,
-                "fallback_configure_commands": fallback_configure_commands,
-                "env_vars": workspace_credentials.env_vars,
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in workspace_credentials.files
-                ],
-                "ssh_keys": workspace_credentials.ssh_keys,
-            },
-        )
-
-        await sync_to_async(self.tasks.mark_in_progress)(task)
-        logger.info(
-            "Dispatched run_prompt to runner %s (workspace=%s, chat=%s, task=%s)",
-            runner.id,
-            workspace_id,
-            chat.id,
-            task_id,
-        )
-        return session, task, chat
-
-    async def _resolve_chat(
-        self,
-        workspace,
-        agent_def,
-        chat_id: str | None,
-        prompt: str,
-    ):
-        """Resolve or create the chat for a prompt dispatch.
-
-        - If chat_id is given: use that chat (validate it belongs to workspace).
-        - If agent supports multi-chat and no chat_id: create a new chat.
-        - If agent does NOT support multi-chat: use the single implicit chat
-          (create if needed).
-        """
-        if chat_id:
-            chat = await sync_to_async(self.chats.get_by_id)(uuid.UUID(chat_id))
-            if chat is None or chat.workspace_id != workspace.id:
-                raise ValueError(f"Chat '{chat_id}' not found in workspace '{workspace.id}'")
-            return chat
-
-        if agent_def.supports_multi_chat:
-            # Create a new chat for each prompt without an explicit chat_id
-            chat_name = prompt[:50] + "…" if len(prompt) > 50 else prompt
-            new_chat = await sync_to_async(self.chats.create)(
-                chat_id=generate_uuid(),
-                workspace=workspace,
-                name=chat_name,
-                agent_definition=agent_def,
-                agent_type=agent_def.name,
-            )
-            return new_chat
-        else:
-            # Single-chat agent: reuse latest chat for this agent.
-            latest_chat = await sync_to_async(
-                self.chats.get_latest_for_workspace_agent
-            )(workspace.id, agent_def.id)
-            if latest_chat:
-                return latest_chat
-            # Create the first (and only) chat
-            return await sync_to_async(self.chats.create)(
-                chat_id=generate_uuid(),
-                workspace=workspace,
-                name="Chat",
-                agent_definition=agent_def,
-                agent_type=agent_def.name,
-            )
-
-    async def _assert_chat_is_writable(self, workspace, agent_def, chat) -> None:
-        """Reject writes to stale chats for single-chat agents."""
-        if agent_def.supports_multi_chat:
-            return
-
-        latest_chat = await sync_to_async(self.chats.get_latest_for_workspace_agent)(
-            workspace.id,
-            agent_def.id,
-        )
-        if latest_chat is None:
-            return
-        if latest_chat.id != chat.id:
-            raise ConflictError(
-                "This chat is locked because a newer chat exists for this agent. "
-                "Please use the latest chat."
-            )
 
     async def update_workspace(
         self,
@@ -1426,64 +838,6 @@ class RunnerService:
                 "workspace_id": str(workspace_id),
             },
         )
-        return task
-
-    async def cancel_session_prompt(
-        self,
-        workspace_id: uuid.UUID,
-        session_id: uuid.UUID,
-    ) -> "Task":
-        """Cancel a running prompt session without stopping the workspace."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
-
-        session = await sync_to_async(self.sessions.get_by_id)(session_id)
-        if session is None or session.chat.workspace_id != workspace_id:
-            raise ValueError(
-                f"Session '{session_id}' not found in workspace '{workspace_id}'"
-            )
-
-        if session.status not in [SessionStatus.PENDING, SessionStatus.RUNNING]:
-            raise ConflictError(
-                f"Session '{session_id}' is '{session.status}' and cannot be cancelled"
-            )
-
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
-
-        run_task = await sync_to_async(self.tasks.get_active_run_task_for_session)(
-            session_id
-        )
-        if run_task is None:
-            raise ConflictError(
-                f"No active run task found for session '{session_id}'"
-            )
-
-        task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.CANCEL_SESSION,
-            workspace=workspace,
-            session=session,
-        )
-
-        await self._emit_to_runner(
-            runner,
-            "task:cancel_prompt",
-            {
-                "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-                "target_task_id": str(run_task.id),
-                "session_id": str(session_id),
-            },
-        )
-
-        await sync_to_async(self.tasks.mark_in_progress)(task)
         return task
 
     async def resume_workspace(self, workspace_id: uuid.UUID) -> "Task":
@@ -1798,202 +1152,6 @@ class RunnerService:
                 workspace_id,
             )
 
-    def handle_output_chunk(
-        self,
-        task_id: str,
-        workspace_id: str,
-        line: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """
-        Handle output:chunk event from a runner.
-
-        Appends the line to the session output and forwards the chunk
-        to subscribed frontend clients via Socket.IO.
-        """
-        # Normalize line endings: some runtimes (e.g. QEMU/asyncssh) include
-        # a trailing newline in each yielded line. Strip it so that
-        # append_output (which joins lines with "\n") does not produce
-        # double newlines in the stored output.
-        line = line.rstrip("\r\n")
-
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        if session:
-            self.sessions.append_output(session, line)
-
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        self._forward_to_frontend(
-            "session:output_chunk",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "line": line,
-            },
-            workspace_id,
-        )
-
-    def handle_output_status(
-        self,
-        task_id: str,
-        workspace_id: str,
-        status: str,
-        detail: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle output:status event from a runner and forward to frontend."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        self._forward_to_frontend(
-            "session:status",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "status": status,
-                "detail": detail,
-            },
-            workspace_id,
-        )
-
-    def handle_output_complete(
-        self, task_id: str, workspace_id: str, runner_id: str | None = None
-    ) -> None:
-        """Handle output:complete event from a runner."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received output:complete for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        if session:
-            self.sessions.complete(session)
-
-        self.tasks.complete(task)
-        logger.info(
-            "Prompt completed (task=%s, workspace=%s)", task_id, workspace_id
-        )
-
-        self._forward_to_frontend(
-            "session:completed",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-            },
-            workspace_id,
-        )
-
-    def handle_output_error(
-        self,
-        task_id: str,
-        workspace_id: str,
-        error: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle output:error event from a runner."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received output:error for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        session = task.session
-        session_id = str(session.id) if session else None
-        chat_id = str(session.chat_id) if session and session.chat_id else None
-        normalized_error = error.strip()
-        is_user_cancelled = (
-            normalized_error.casefold()
-            == USER_CANCELLED_PROMPT_ERROR.casefold()
-        )
-        if session:
-            failed_output = (
-                f"{session.output}\n[Error] {normalized_error}"
-                if session.output
-                else f"[Error] {normalized_error}"
-            )
-            self.sessions.fail(
-                session,
-                output=failed_output,
-                error_message=None if is_user_cancelled else normalized_error,
-            )
-
-        self.tasks.fail(task, normalized_error)
-        logger.error(
-            "Prompt error (task=%s, workspace=%s): %s",
-            task_id,
-            workspace_id,
-            normalized_error,
-        )
-
-        self._forward_to_frontend(
-            "session:failed",
-            {
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "chat_id": chat_id,
-                "task_id": task_id,
-                "error": normalized_error,
-            },
-            workspace_id,
-        )
-
-    def handle_prompt_cancelled(
-        self,
-        task_id: str,
-        workspace_id: str,
-        target_task_id: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle prompt:cancelled from runner and complete cancel task."""
-        task = self.tasks.get_by_id(uuid.UUID(task_id))
-        if task is None:
-            logger.warning(
-                "Received prompt:cancelled for unknown task: %s", task_id
-            )
-            return
-
-        if not self._validate_task_runner(task, runner_id):
-            return
-
-        self.tasks.complete(task)
-        logger.info(
-            "Prompt cancellation completed (task=%s, workspace=%s, target=%s)",
-            task_id,
-            workspace_id,
-            target_task_id,
-        )
-
     def handle_workspace_removed(
         self,
         task_id: str,
@@ -2104,25 +1262,6 @@ class RunnerService:
         workspace_credentials = await sync_to_async(
             CredentialSvc().resolve_workspace_credentials
         )(workspace)
-        latest_chat = await sync_to_async(
-            lambda: self.chats.list_by_workspace(workspace.id)
-            .order_by("-created_at", "-id")
-            .first()
-        )()
-        terminal_agent_definition_id = latest_chat.agent_definition_id if latest_chat else None
-        configure_commands: list[dict] = []
-        if terminal_agent_definition_id:
-            _, relation_preflight_commands = await sync_to_async(
-                self._build_credential_relation_operation_data
-            )(
-                workspace=workspace,
-                agent_definition_id=terminal_agent_definition_id,
-                phase=AgentCommandPhase.CONFIGURE,
-            )
-            configure_commands = [
-                self._merge_workspace_env_vars(cmd, workspace_credentials.env_vars)
-                for cmd in relation_preflight_commands
-            ]
 
         await self._emit_to_runner(
             runner,
@@ -2132,7 +1271,6 @@ class RunnerService:
                 "workspace_id": str(workspace_id),
                 "cols": cols,
                 "rows": rows,
-                "configure_commands": configure_commands,
                 "env_vars": workspace_credentials.env_vars,
                 "files": [
                     {
@@ -2766,8 +1904,6 @@ class RunnerService:
             return False
         if workspace.active_operation:
             return False
-        if bool(getattr(workspace, "has_active_session", False)):
-            return False
         runner = getattr(workspace, "runner", None)
         if runner is None or not runner.is_online:
             return False
@@ -2829,7 +1965,7 @@ class RunnerService:
 
         Args:
             runner: The Runner that sent the heartbeat.
-            workspaces: List of dicts with workspace_id, status, agent_type.
+            workspaces: List of dicts with workspace_id and status.
         """
         from django.utils import timezone as tz
 
@@ -3123,173 +2259,6 @@ class RunnerService:
         if workspace.created_by_id != user.id:
             raise WorkspaceNotFoundError(str(workspace_id))
         return workspace
-
-    def list_sessions(self, workspace_id: uuid.UUID) -> list["Session"]:
-        """Return all sessions for a workspace."""
-        return list(self.sessions.list_by_workspace(workspace_id))
-
-    def list_chats(self, workspace_id: uuid.UUID) -> list:
-        """Return all chats for a workspace."""
-        return list(self.chats.list_by_workspace(workspace_id))
-
-    def list_chat_sessions(self, chat_id: uuid.UUID) -> list["Session"]:
-        """Return all sessions for a specific chat."""
-        return list(self.sessions.list_by_chat(chat_id))
-
-    def create_chat(
-        self,
-        workspace_id: uuid.UUID,
-        name: str = "",
-        agent_definition_id: uuid.UUID | None = None,
-    ) -> "Chat":
-        """Create a new chat within a workspace."""
-        workspace = self.workspaces.get_by_id(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        # Validate agent exists if specified
-        agent_def = None
-        agent_type = ""
-        if agent_definition_id:
-            agent_def = self.agents.get_visible_by_id(
-                agent_definition_id,
-                workspace.runner.organization_id,
-            )
-            if agent_def is None:
-                raise ValueError(f"Unknown agent definition: '{agent_definition_id}'")
-            agent_type = agent_def.name
-            if agent_def.required_credential_services.exists():
-                required_slugs = self._get_agent_required_credential_service_slugs(agent_def)
-                workspace_slugs = self._get_workspace_credential_service_slugs(workspace)
-                missing_slugs = [slug for slug in required_slugs if slug not in workspace_slugs]
-                if missing_slugs:
-                    raise ConflictError(
-                        "Workspace is missing required credentials for agent "
-                        f"'{agent_def.name}': {', '.join(missing_slugs)}"
-                    )
-
-        return self.chats.create(
-            chat_id=generate_uuid(),
-            workspace=workspace,
-            name=name,
-            agent_definition=agent_def,
-            agent_type=agent_type,
-        )
-
-    def rename_chat(self, chat_id: uuid.UUID, name: str) -> "Chat":
-        """Rename an existing chat."""
-        chat = self.chats.get_by_id(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        trimmed = name.strip()
-        if not trimmed:
-            raise ValueError("Chat name must not be empty")
-        return self.chats.update_name(chat, trimmed)
-
-    def delete_chat(self, chat_id: uuid.UUID) -> None:
-        """Delete a chat and its sessions."""
-        chat = self.chats.get_by_id(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        self.chats.delete(chat_id)
-
-    def mark_conversation_read(
-        self,
-        session_id: uuid.UUID,
-    ) -> None:
-        """
-        Mark a session as read.
-
-        Sets ``read_at`` if the session was previously COMPLETED or FAILED, so
-        that ``ConversationRepository.list_for_user`` reflects ``is_read=True``
-        for the corresponding conversation without overwriting the outcome.
-        """
-        session = self.sessions.get_by_id(session_id)
-        if session is not None:
-            self.sessions.mark_read(session)
-
-    def mark_conversation_unread(
-        self,
-        session_id: uuid.UUID,
-    ) -> None:
-        """
-        Mark a session as unread again.
-
-        Clears ``read_at`` for completed or failed sessions so the frontend can
-        explicitly resurface a reply as unread until the user re-enters the
-        conversation.
-        """
-        session = self.sessions.get_by_id(session_id)
-        if session is not None:
-            self.sessions.mark_unread(session)
-
-    def get_available_agents(
-        self,
-        organization_id: uuid.UUID | None = None,
-        user=None,
-        workspace=None,
-    ) -> list[dict]:
-        """Return agent definitions from the DB with availability metadata.
-
-        When ``workspace`` is provided, availability is calculated against
-        the credentials already attached to the workspace. Otherwise, credential
-        availability falls back to credentials visible to the current user
-        within the organization.
-
-        Note: Agents are independent of runners. All agents are available
-        as long as there is at least one online runner in the organization.
-        """
-        all_agents = list(self.agents.list_all_with_credential_slugs(organization_id=organization_id))
-
-        # Check online runner availability (generic, no agent-specific support).
-        if workspace is not None:
-            has_online_runner = workspace.runner.is_online
-        elif organization_id:
-            has_online_runner = self.runners.list_by_organization(organization_id).filter(
-                status=RunnerStatus.ONLINE
-            ).exists()
-        else:
-            has_online_runner = self.runners.list_online().exists()
-
-        if workspace is not None:
-            available_credential_slugs = self._get_workspace_credential_service_slugs(
-                workspace
-            )
-        else:
-            # Gather credential service slugs the user already has credentials for
-            available_credential_slugs: set[str] = set()
-            if user and organization_id:
-                from apps.credentials.models import Credential
-
-                user_creds = Credential.objects.filter(
-                    user=user,
-                ).select_related("service")
-                org_creds = Credential.objects.filter(
-                    organization__id=organization_id,
-                ).select_related("service")
-                for cred in list(user_creds) + list(org_creds):
-                    if cred.service.slug:
-                        available_credential_slugs.add(cred.service.slug)
-
-        result = []
-        for agent in all_agents:
-            required_slugs = self._get_agent_required_credential_service_slugs(agent)
-            has_credentials = all(
-                slug in available_credential_slugs for slug in required_slugs
-            )
-            result.append(
-                {
-                    "id": str(agent.id),
-                    "name": agent.name,
-                    "description": agent.description,
-                    "available_options": list(agent.available_options or []),
-                    "supports_multi_chat": agent.supports_multi_chat,
-                    "has_online_runner": has_online_runner,
-                    "required_credential_service_slugs": required_slugs,
-                    "has_credentials": has_credentials,
-                }
-            )
-        return result
 
     # ------------------------------------------------------------------
     # Internal helpers

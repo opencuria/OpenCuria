@@ -11,17 +11,11 @@ Tools and their required permissions
 -------------------------------------
 - list_workspaces        → workspaces:read
 - get_workspace          → workspaces:read
-- list_workspace_chats   → conversations:read
-- list_chat_sessions     → conversations:read
 - create_workspace       → workspaces:create
 - stop_workspace         → workspaces:stop
 - resume_workspace       → workspaces:resume
 - remove_workspace       → workspaces:delete
-- run_prompt             → prompts:run
-- cancel_prompt          → prompts:cancel
 - list_runners           → runners:read
-- list_agents            → agents:read
-- list_conversations     → conversations:read
 - list_image_artifacts   → images:read
 - create_image_artifact  → images:create
 - list_image_definitions → image_definitions:read
@@ -34,12 +28,6 @@ Tools and their required permissions
 - delete_build_job → image_definitions:manage_runners
 - get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
-- list_org_agent_definitions         → org_agent_definitions:read
-- create_org_agent_definition        → org_agent_definitions:write
-- update_org_agent_definition        → org_agent_definitions:write
-- delete_org_agent_definition        → org_agent_definitions:write
-- duplicate_org_agent_definition     → org_agent_definitions:write
-- toggle_org_agent_definition_activation → org_agent_definitions:write
 - list_org_credential_services       → org_credential_services:read
 - toggle_org_credential_service_activation → org_credential_services:write
 """
@@ -87,7 +75,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="get_workspace",
-        description="Get details of a single workspace without chat session history.",
+        description="Get details of a single workspace.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -96,29 +84,8 @@ _TOOLS: list[Tool] = [
             "required": ["workspace_id"],
         },
     ),
-    Tool(
-        name="list_workspace_chats",
-        description="List chats for a workspace.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {"type": "string", "description": "Workspace UUID."}
-            },
-            "required": ["workspace_id"],
-        },
-    ),
-    Tool(
-        name="list_chat_sessions",
-        description="List sessions for a specific chat in a workspace.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "chat_id": {"type": "string", "description": "Chat UUID."},
-            },
-            "required": ["workspace_id", "chat_id"],
-        },
-    ),
+
+
     Tool(
         name="create_workspace",
         description="Create a new workspace on a runner.",
@@ -185,64 +152,15 @@ _TOOLS: list[Tool] = [
             "required": ["workspace_id"],
         },
     ),
-    Tool(
-        name="run_prompt",
-        description="Run a prompt / send a message to an AI agent in a workspace.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "prompt": {"type": "string", "description": "The prompt / message to send."},
-                "agent_model": {
-                    "type": "string",
-                    "description": "Agent model override (optional).",
-                },
-                "chat_id": {
-                    "type": "string",
-                    "description": "Existing chat UUID to continue (optional).",
-                },
-            },
-            "required": ["workspace_id", "prompt"],
-        },
-    ),
-    Tool(
-        name="cancel_prompt",
-        description="Cancel a running prompt session in a workspace.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "session_id": {
-                    "type": "string",
-                    "description": "Session UUID to cancel.",
-                },
-            },
-            "required": ["workspace_id", "session_id"],
-        },
-    ),
+
+
     Tool(
         name="list_runners",
         description="List runners in the active organization.",
         inputSchema={"type": "object", "properties": {}},
     ),
-    Tool(
-        name="list_agents",
-        description="List available agent definitions.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {
-                    "type": "string",
-                    "description": "Filter by workspace UUID (optional).",
-                }
-            },
-        },
-    ),
-    Tool(
-        name="list_conversations",
-        description="List conversations (chats) for the current user.",
-        inputSchema={"type": "object", "properties": {}},
-    ),
+
+
     Tool(
         name="list_image_artifacts",
         description="List image artifacts owned by the current user.",
@@ -389,80 +307,12 @@ _TOOLS: list[Tool] = [
         description="List credentials (metadata only, no secrets) for the current user.",
         inputSchema={"type": "object", "properties": {}},
     ),
-    Tool(
-        name="list_org_agent_definitions",
-        description="List standard and organization-specific agent definitions with activation status (admin).",
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="create_org_agent_definition",
-        description="Create an organization-owned agent definition (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "description": {"type": "string"},
-                "available_options": {"type": "array", "items": {"type": "object"}},
-                "default_env": {"type": "object"},
-                "supports_multi_chat": {"type": "boolean"},
-                "required_credential_service_ids": {"type": "array", "items": {"type": "string"}},
-                "commands": {"type": "array", "items": {"type": "object"}},
-            },
-            "required": ["name", "commands"],
-        },
-    ),
-    Tool(
-        name="update_org_agent_definition",
-        description="Update an organization-owned agent definition (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "name": {"type": "string"},
-                "description": {"type": "string"},
-                "available_options": {"type": "array", "items": {"type": "object"}},
-                "default_env": {"type": "object"},
-                "supports_multi_chat": {"type": "boolean"},
-                "required_credential_service_ids": {"type": "array", "items": {"type": "string"}},
-                "commands": {"type": "array", "items": {"type": "object"}},
-            },
-            "required": ["agent_id"],
-        },
-    ),
-    Tool(
-        name="delete_org_agent_definition",
-        description="Delete an organization-owned agent definition (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {"agent_id": {"type": "string"}},
-            "required": ["agent_id"],
-        },
-    ),
-    Tool(
-        name="duplicate_org_agent_definition",
-        description="Duplicate a visible agent definition into the current organization (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "name": {"type": "string"},
-                "activate": {"type": "boolean"},
-            },
-            "required": ["agent_id"],
-        },
-    ),
-    Tool(
-        name="toggle_org_agent_definition_activation",
-        description="Activate or deactivate an agent definition for the organization (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "active": {"type": "boolean"},
-            },
-            "required": ["agent_id", "active"],
-        },
-    ),
+
+
+
+
+
+
     Tool(
         name="list_org_credential_services",
         description="List all credential services with organization activation status (admin).",
@@ -486,17 +336,11 @@ _TOOLS: list[Tool] = [
 _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspaces": APIKeyPermission.WORKSPACES_READ,
     "get_workspace": APIKeyPermission.WORKSPACES_READ,
-    "list_workspace_chats": APIKeyPermission.CONVERSATIONS_READ,
-    "list_chat_sessions": APIKeyPermission.CONVERSATIONS_READ,
     "create_workspace": APIKeyPermission.WORKSPACES_CREATE,
     "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
     "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
-    "run_prompt": APIKeyPermission.PROMPTS_RUN,
-    "cancel_prompt": APIKeyPermission.PROMPTS_CANCEL,
     "list_runners": APIKeyPermission.RUNNERS_READ,
-    "list_agents": APIKeyPermission.AGENTS_READ,
-    "list_conversations": APIKeyPermission.CONVERSATIONS_READ,
     "list_image_artifacts": APIKeyPermission.IMAGES_READ,
     "create_image_artifact": APIKeyPermission.IMAGES_CREATE,
     "list_image_definitions": APIKeyPermission.IMAGE_DEFINITIONS_READ,
@@ -510,12 +354,6 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
-    "list_org_agent_definitions": APIKeyPermission.ORG_AGENT_DEFINITIONS_READ,
-    "create_org_agent_definition": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
-    "update_org_agent_definition": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
-    "delete_org_agent_definition": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
-    "duplicate_org_agent_definition": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
-    "toggle_org_agent_definition_activation": APIKeyPermission.ORG_AGENT_DEFINITIONS_WRITE,
     "list_org_credential_services": APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ,
     "toggle_org_credential_service_activation": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
 }
@@ -635,95 +473,6 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "created_at": workspace.created_at.isoformat(),
     }
     return _text(result)
-
-
-def _call_list_workspace_chats(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    workspace_id_str = args.get("workspace_id")
-    if not workspace_id_str:
-        return _error("workspace_id is required")
-    try:
-        workspace_id = _uuid.UUID(workspace_id_str)
-    except ValueError:
-        return _error("Invalid workspace_id UUID")
-
-    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-    if error is not None:
-        return error
-
-    from django.db.models import Count
-    from apps.runners.models import Chat
-
-    chats = (
-        Chat.objects.filter(workspace_id=workspace.id)
-        .annotate(_session_count=Count("sessions"))
-        .order_by("-created_at")
-    )
-    return _text(
-        [
-            {
-                "id": str(chat.id),
-                "workspace_id": str(chat.workspace_id),
-                "name": chat.name,
-                "agent_definition_id": (
-                    str(chat.agent_definition_id) if chat.agent_definition_id else None
-                ),
-                "agent_type": chat.agent_type,
-                "session_count": chat._session_count,
-                "created_at": chat.created_at.isoformat(),
-                "updated_at": chat.updated_at.isoformat(),
-            }
-            for chat in chats
-        ]
-    )
-
-
-def _call_list_chat_sessions(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    workspace_id_str = args.get("workspace_id")
-    chat_id_str = args.get("chat_id")
-    if not workspace_id_str:
-        return _error("workspace_id is required")
-    if not chat_id_str:
-        return _error("chat_id is required")
-    try:
-        workspace_id = _uuid.UUID(workspace_id_str)
-        chat_id = _uuid.UUID(chat_id_str)
-    except ValueError:
-        return _error("Invalid workspace_id or chat_id UUID")
-
-    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-    if error is not None:
-        return error
-
-    from apps.runners.models import Chat
-    from apps.runners.sio_server import get_runner_service
-
-    chat = Chat.objects.filter(id=chat_id, workspace_id=workspace.id).first()
-    if chat is None:
-        return _error("Chat not found in workspace")
-
-    svc = get_runner_service()
-    sessions = list(svc.list_chat_sessions(chat_id))
-    return _text(
-        [
-            {
-                "id": str(session.id),
-                "chat_id": str(session.chat_id),
-                "prompt": session.prompt,
-                "status": str(session.status),
-                "output": session.output,
-                "error_message": session.error_message,
-                "created_at": session.created_at.isoformat(),
-                "completed_at": (
-                    session.completed_at.isoformat() if session.completed_at else None
-                ),
-            }
-            for session in sessions
-        ]
-    )
 
 
 def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
@@ -888,105 +637,6 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         return _error(str(e))
 
 
-def _call_run_prompt(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError, ConflictError
-
-    import asyncio
-    import uuid as _uuid
-
-    workspace_id_str = args.get("workspace_id")
-    prompt = args.get("prompt")
-    if not workspace_id_str or not prompt:
-        return _error("workspace_id and prompt are required")
-    try:
-        workspace_id = _uuid.UUID(workspace_id_str)
-    except ValueError:
-        return _error("Invalid workspace_id UUID")
-
-    agent_model = args.get("agent_model")
-    chat_id_str = args.get("chat_id")
-    chat_id = None
-    if chat_id_str:
-        try:
-            chat_id = _uuid.UUID(chat_id_str)
-        except ValueError:
-            return _error("Invalid chat_id UUID")
-
-    try:
-        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-        if error is not None:
-            return error
-
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
-
-        async def _run():
-            return await svc.run_prompt(
-                workspace_id,
-                prompt,
-                agent_model,
-                agent_options={},
-                chat_id=chat_id,
-                skill_ids=[],
-            )
-
-        loop = asyncio.new_event_loop()
-        session, task, chat = loop.run_until_complete(_run())
-        loop.close()
-        return _text({
-            "session_id": str(session.id),
-            "task_id": str(task.id),
-            "chat_id": str(chat.id),
-            "status": str(session.status),
-            "message": "Prompt dispatched. Use list_chat_sessions to see output.",
-        })
-    except (NotFoundError, ConflictError) as e:
-        return _error(str(e))
-
-
-def _call_cancel_prompt(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError, ConflictError
-
-    import asyncio
-    import uuid as _uuid
-
-    workspace_id_str = args.get("workspace_id")
-    session_id_str = args.get("session_id")
-    if not workspace_id_str or not session_id_str:
-        return _error("workspace_id and session_id are required")
-
-    try:
-        workspace_id = _uuid.UUID(workspace_id_str)
-        session_id = _uuid.UUID(session_id_str)
-    except ValueError:
-        return _error("Invalid workspace_id or session_id UUID")
-
-    try:
-        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-        if error is not None:
-            return error
-
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
-
-        async def _cancel():
-            return await svc.cancel_session_prompt(workspace_id, session_id)
-
-        loop = asyncio.new_event_loop()
-        task = loop.run_until_complete(_cancel())
-        loop.close()
-        return _text(
-            {
-                "task_id": str(task.id),
-                "message": "Cancellation task dispatched.",
-            }
-        )
-    except (NotFoundError, ConflictError, ValueError) as e:
-        return _error(str(e))
-
-
 def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
@@ -1005,44 +655,6 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
         for r in runners
     ]
     return _text(result)
-
-
-def _call_list_agents(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
-
-    import uuid as _uuid
-
-    svc = get_runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-
-    workspace = None
-    if args.get("workspace_id"):
-        try:
-            workspace_id = _uuid.UUID(args["workspace_id"])
-        except ValueError:
-            return _error("Invalid workspace_id UUID")
-        workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-        if error is not None:
-            return error
-
-    agents = svc.get_available_agents(
-        organization_id=org_id,
-        user=api_key.user,
-        workspace=workspace,
-    )
-    return _text(agents)
-
-
-def _call_list_conversations(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.repositories import ConversationRepository
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    rows = ConversationRepository.list_for_user(org_id, api_key.user.id)
-    return _text(rows)
 
 
 def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1543,259 +1155,6 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
     return _text(result)
 
 
-def _require_org_admin(user, org_id):
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    org_service.require_membership(user, org_id)
-    if org_service.get_user_role(user, org_id) != "admin":
-        raise PermissionError("Admin role required")
-
-
-def _org_agent_to_dict(agent, activated_ids: set) -> dict:
-    commands = [
-        {
-            "id": str(cmd.id),
-            "phase": cmd.phase,
-            "args": list(cmd.args or []),
-            "workdir": cmd.workdir,
-            "env": dict(cmd.env or {}),
-            "description": cmd.description,
-            "order": cmd.order,
-        }
-        for cmd in agent.commands.all().order_by("phase", "order")
-    ]
-    required_ids = [str(svc.id) for svc in agent.required_credential_services.all()]
-    return {
-        "id": str(agent.id),
-        "name": agent.name,
-        "description": agent.description,
-        "is_standard": agent.organization_id is None,
-        "organization_id": str(agent.organization_id) if agent.organization_id else None,
-        "available_options": list(agent.available_options or []),
-        "default_env": dict(agent.default_env or {}),
-        "supports_multi_chat": bool(agent.supports_multi_chat),
-        "required_credential_service_ids": required_ids,
-        "commands": commands,
-        "is_active": agent.id in activated_ids,
-    }
-
-
-def _parse_uuid(value: str | None, field_name: str):
-    import uuid as _uuid
-
-    if not value:
-        raise ValueError(f"{field_name} is required")
-    try:
-        return _uuid.UUID(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid {field_name} UUID") from exc
-
-
-def _validate_run_commands(commands: list[dict]) -> None:
-    run_commands = [c for c in commands if c.get("phase") == "run"]
-    if len(run_commands) != 1:
-        raise ValueError("Exactly one 'run' command is required")
-
-
-def _call_list_org_agent_definitions(api_key, org_id, args: dict) -> list[TextContent]:
-    from django.db.models import Q
-
-    from apps.runners.models import AgentDefinition, OrgAgentDefinitionActivation
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-    except PermissionError as exc:
-        return _error(str(exc))
-
-    definitions = list(
-        AgentDefinition.objects.filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .prefetch_related("commands", "required_credential_services")
-        .order_by("name")
-    )
-    activated_ids = set(
-        OrgAgentDefinitionActivation.objects.filter(organization_id=org_id).values_list(
-            "agent_definition_id", flat=True
-        )
-    )
-    return _text([_org_agent_to_dict(agent, activated_ids) for agent in definitions])
-
-
-def _call_create_org_agent_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    from django.db import IntegrityError
-
-    from apps.credentials.models import CredentialService
-    from apps.runners.models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-        name = args.get("name")
-        if not name:
-            raise ValueError("name is required")
-        commands = args.get("commands") or []
-        if not isinstance(commands, list):
-            raise ValueError("commands must be a list")
-        _validate_run_commands(commands)
-
-        agent = AgentDefinition.objects.create(
-            organization_id=org_id,
-            name=name,
-            description=args.get("description", ""),
-            available_options=args.get("available_options") or [],
-            default_env=args.get("default_env") or {},
-            supports_multi_chat=bool(args.get("supports_multi_chat", False)),
-        )
-
-        required_ids = args.get("required_credential_service_ids") or []
-        if required_ids:
-            service_ids = [_parse_uuid(value, "required_credential_service_id") for value in required_ids]
-            services = CredentialService.objects.filter(id__in=service_ids)
-            agent.required_credential_services.set(services)
-
-        for cmd in commands:
-            AgentCommand.objects.create(
-                agent=agent,
-                phase=cmd.get("phase"),
-                args=cmd.get("args") or [],
-                workdir=cmd.get("workdir"),
-                env=cmd.get("env") or {},
-                description=cmd.get("description", ""),
-                order=int(cmd.get("order", 0)),
-            )
-
-        OrgAgentDefinitionActivation.objects.get_or_create(
-            organization_id=org_id,
-            agent_definition=agent,
-        )
-        agent = AgentDefinition.objects.prefetch_related(
-            "commands", "required_credential_services"
-        ).get(id=agent.id)
-        return _text(_org_agent_to_dict(agent, {agent.id}))
-    except PermissionError as exc:
-        return _error(str(exc))
-    except IntegrityError:
-        return _error(f"Agent definition '{args.get('name')}' already exists in this organization")
-    except ValueError as exc:
-        return _error(str(exc))
-
-
-def _call_update_org_agent_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.credentials.models import CredentialService
-    from apps.runners.models import AgentCommand, AgentDefinition, OrgAgentDefinitionActivation
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-        agent_id = _parse_uuid(args.get("agent_id"), "agent_id")
-        agent = AgentDefinition.objects.filter(id=agent_id, organization_id=org_id).first()
-        if agent is None:
-            return _error("Agent definition not found or is not org-owned")
-
-        if "name" in args:
-            agent.name = args.get("name")
-        if "description" in args:
-            agent.description = args.get("description", "")
-        if "available_options" in args:
-            agent.available_options = args.get("available_options") or []
-        if "default_env" in args:
-            agent.default_env = args.get("default_env") or {}
-        if "supports_multi_chat" in args:
-            agent.supports_multi_chat = bool(args.get("supports_multi_chat"))
-        agent.save()
-
-        if "required_credential_service_ids" in args:
-            required_ids = args.get("required_credential_service_ids") or []
-            service_ids = [_parse_uuid(value, "required_credential_service_id") for value in required_ids]
-            services = CredentialService.objects.filter(id__in=service_ids)
-            agent.required_credential_services.set(services)
-
-        if "commands" in args:
-            commands = args.get("commands") or []
-            if not isinstance(commands, list):
-                raise ValueError("commands must be a list")
-            _validate_run_commands(commands)
-            AgentCommand.objects.filter(agent=agent).delete()
-            for cmd in commands:
-                AgentCommand.objects.create(
-                    agent=agent,
-                    phase=cmd.get("phase"),
-                    args=cmd.get("args") or [],
-                    workdir=cmd.get("workdir"),
-                    env=cmd.get("env") or {},
-                    description=cmd.get("description", ""),
-                    order=int(cmd.get("order", 0)),
-                )
-
-        agent = AgentDefinition.objects.prefetch_related(
-            "commands", "required_credential_services"
-        ).get(id=agent.id)
-        activated_ids = set(
-            OrgAgentDefinitionActivation.objects.filter(organization_id=org_id).values_list(
-                "agent_definition_id", flat=True
-            )
-        )
-        return _text(_org_agent_to_dict(agent, activated_ids))
-    except PermissionError as exc:
-        return _error(str(exc))
-    except ValueError as exc:
-        return _error(str(exc))
-
-
-def _call_delete_org_agent_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.models import AgentDefinition
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-        agent_id = _parse_uuid(args.get("agent_id"), "agent_id")
-        agent = AgentDefinition.objects.filter(id=agent_id, organization_id=org_id).first()
-        if agent is None:
-            return _error("Agent definition not found or is not org-owned")
-        agent.delete()
-        return _text({"deleted": True, "agent_id": str(agent_id)})
-    except PermissionError as exc:
-        return _error(str(exc))
-    except ValueError as exc:
-        return _error(str(exc))
-
-
-def _call_toggle_org_agent_definition_activation(api_key, org_id, args: dict) -> list[TextContent]:
-    from django.db.models import Q
-
-    from apps.runners.models import AgentDefinition, OrgAgentDefinitionActivation
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-        agent_id = _parse_uuid(args.get("agent_id"), "agent_id")
-        if "active" not in args:
-            raise ValueError("active is required")
-        active = bool(args.get("active"))
-
-        agent = AgentDefinition.objects.prefetch_related(
-            "commands", "required_credential_services"
-        ).filter(Q(organization__isnull=True) | Q(organization_id=org_id), id=agent_id).first()
-        if agent is None:
-            return _error("Agent definition not found")
-        if agent.organization_id is None and not api_key.user.is_staff:
-            return _error("Only staff users can modify standard agent definition activation")
-
-        if active:
-            OrgAgentDefinitionActivation.objects.get_or_create(
-                organization_id=org_id,
-                agent_definition=agent,
-            )
-            activated_ids = {agent.id}
-        else:
-            OrgAgentDefinitionActivation.objects.filter(
-                organization_id=org_id,
-                agent_definition=agent,
-            ).delete()
-            activated_ids = set()
-        return _text(_org_agent_to_dict(agent, activated_ids))
-    except PermissionError as exc:
-        return _error(str(exc))
-    except ValueError as exc:
-        return _error(str(exc))
-
-
 def _call_list_org_credential_services(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 
@@ -1871,123 +1230,6 @@ def _call_toggle_org_credential_service_activation(api_key, org_id, args: dict) 
         return _error(str(exc))
 
 
-def _call_duplicate_org_agent_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    from django.db import connection, transaction
-    from django.db.models import Q
-
-    from apps.runners.models import (
-        AgentCommand,
-        AgentCredentialRelationCommand,
-        AgentDefinition,
-        AgentDefinitionCredentialRelation,
-        OrgAgentDefinitionActivation,
-    )
-
-    def _copy_name(base_name: str) -> str:
-        base = (base_name or "").strip() or "agent"
-        if len(base) > 64:
-            base = base[:64]
-        candidate = base
-        if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-            return candidate
-
-        suffix = " (Copy)"
-        candidate = f"{base[: 64 - len(suffix)]}{suffix}"
-        if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-            return candidate
-
-        idx = 2
-        while True:
-            suffix = f" (Copy {idx})"
-            candidate = f"{base[: 64 - len(suffix)]}{suffix}"
-            if not AgentDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-                return candidate
-            idx += 1
-
-    try:
-        _require_org_admin(api_key.user, org_id)
-        agent_id = _parse_uuid(args.get("agent_id"), "agent_id")
-        requested_name = args.get("name")
-        if requested_name is not None and not str(requested_name).strip():
-            raise ValueError("name cannot be empty")
-        active = bool(args.get("activate", True))
-
-        relation_table = AgentDefinitionCredentialRelation._meta.db_table
-        has_relation_table = relation_table in connection.introspection.table_names()
-        prefetches = ["commands", "required_credential_services"]
-        if has_relation_table:
-            prefetches.append("credential_relations__commands")
-
-        source = (
-            AgentDefinition.objects.filter(
-                Q(organization__isnull=True) | Q(organization_id=org_id),
-                id=agent_id,
-            )
-            .prefetch_related(*prefetches)
-            .first()
-        )
-        if source is None:
-            return _error("Agent definition not found")
-
-        target_name = _copy_name(str(requested_name or source.name))
-
-        with transaction.atomic():
-            copied = AgentDefinition.objects.create(
-                organization_id=org_id,
-                name=target_name,
-                description=source.description,
-                available_options=list(source.available_options or []),
-                default_env=dict(source.default_env or {}),
-                supports_multi_chat=source.supports_multi_chat,
-            )
-            copied.required_credential_services.set(source.required_credential_services.all())
-
-            for cmd in source.commands.all():
-                AgentCommand.objects.create(
-                    agent=copied,
-                    phase=cmd.phase,
-                    args=list(cmd.args or []),
-                    workdir=cmd.workdir,
-                    env=dict(cmd.env or {}),
-                    description=cmd.description,
-                    order=cmd.order,
-                )
-
-            if has_relation_table:
-                for relation in source.credential_relations.all():
-                    copied_relation = AgentDefinitionCredentialRelation.objects.create(
-                        agent_definition=copied,
-                        credential_service=relation.credential_service,
-                        default_env=dict(relation.default_env or {}),
-                    )
-                    for rel_cmd in relation.commands.all():
-                        AgentCredentialRelationCommand.objects.create(
-                            relation=copied_relation,
-                            phase=rel_cmd.phase,
-                            args=list(rel_cmd.args or []),
-                            workdir=rel_cmd.workdir,
-                            env=dict(rel_cmd.env or {}),
-                            description=rel_cmd.description,
-                            order=rel_cmd.order,
-                        )
-
-            if active:
-                OrgAgentDefinitionActivation.objects.get_or_create(
-                    organization_id=org_id,
-                    agent_definition=copied,
-                )
-
-        copied = AgentDefinition.objects.prefetch_related(
-            "commands", "required_credential_services"
-        ).get(id=copied.id)
-        activated_ids = {copied.id} if active else set()
-        return _text(_org_agent_to_dict(copied, activated_ids))
-    except PermissionError as exc:
-        return _error(str(exc))
-    except ValueError as exc:
-        return _error(str(exc))
-
-
 # ---------------------------------------------------------------------------
 # Tool dispatch table
 # ---------------------------------------------------------------------------
@@ -1995,17 +1237,11 @@ def _call_duplicate_org_agent_definition(api_key, org_id, args: dict) -> list[Te
 _TOOL_HANDLERS = {
     "list_workspaces": _call_list_workspaces,
     "get_workspace": _call_get_workspace,
-    "list_workspace_chats": _call_list_workspace_chats,
-    "list_chat_sessions": _call_list_chat_sessions,
     "create_workspace": _call_create_workspace,
     "stop_workspace": _call_stop_workspace,
     "resume_workspace": _call_resume_workspace,
     "remove_workspace": _call_remove_workspace,
-    "run_prompt": _call_run_prompt,
-    "cancel_prompt": _call_cancel_prompt,
     "list_runners": _call_list_runners,
-    "list_agents": _call_list_agents,
-    "list_conversations": _call_list_conversations,
     "list_image_artifacts": _call_list_image_artifacts,
     "create_image_artifact": _call_create_image_artifact,
     "list_image_definitions": _call_list_image_definitions,
@@ -2019,12 +1255,6 @@ _TOOL_HANDLERS = {
     "delete_build_job": _call_delete_build_job,
     "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
-    "list_org_agent_definitions": _call_list_org_agent_definitions,
-    "create_org_agent_definition": _call_create_org_agent_definition,
-    "update_org_agent_definition": _call_update_org_agent_definition,
-    "delete_org_agent_definition": _call_delete_org_agent_definition,
-    "duplicate_org_agent_definition": _call_duplicate_org_agent_definition,
-    "toggle_org_agent_definition_activation": _call_toggle_org_agent_definition_activation,
     "list_org_credential_services": _call_list_org_credential_services,
     "toggle_org_credential_service_activation": _call_toggle_org_credential_service_activation,
 }

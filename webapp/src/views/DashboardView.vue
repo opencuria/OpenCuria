@@ -1,90 +1,46 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, computed, ref } from 'vue'
 import { useRunnerStore } from '@/stores/runners'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import { useConversationStore } from '@/stores/conversations'
 import { usePolling } from '@/composables/usePolling'
 import {
   subscribeToWorkspace,
   unsubscribeFromWorkspace,
   onEvent,
 } from '@/services/socket'
-import { SessionStatus, WorkspaceOperation, WorkspaceStatus } from '@/types'
-import {
-  isConversationIdle,
-  isConversationRunning,
-  isSessionActive,
-} from '@/lib/sessionState'
+import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { Input } from '@/components/ui/input'
 import {
   Search,
   Wifi,
   Container,
-  LayoutList,
-  LayoutGrid,
 } from '@lucide/vue'
+import { useRouter } from 'vue-router'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
-import ConversationListView from '@/components/conversations/ConversationListView.vue'
-import ConversationKanbanView from '@/components/conversations/ConversationKanbanView.vue'
+import WorkspaceList from '@/components/workspaces/WorkspaceList.vue'
+import type { Workspace } from '@/types'
 
 const router = useRouter()
 const runnerStore = useRunnerStore()
 const workspaceStore = useWorkspaceStore()
-const conversationStore = useConversationStore()
+const searchQuery = ref('')
 
-// Poll runners + workspaces for the stats bar
+// Poll runners + workspaces
 const { start: startRunnerPolling } = usePolling(() => runnerStore.fetchRunners(), 10000)
 const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
-// Poll conversations for fresh data
-const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 15000)
 
 // WebSocket cleanup functions
 const cleanupFns: (() => void)[] = []
 const subscribedWorkspaceIds: string[] = []
 
 function setupSocketListeners(): void {
-  for (const wsId of conversationStore.uniqueWorkspaceIds) {
-    subscribeToWorkspace(wsId)
-    subscribedWorkspaceIds.push(wsId)
+  for (const workspace of workspaceStore.workspaces) {
+    subscribeToWorkspace(workspace.id)
+    subscribedWorkspaceIds.push(workspace.id)
   }
 
   cleanupFns.push(
-    onEvent('session:output_chunk', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.RUNNING,
-      )
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('session:completed', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.COMPLETED,
-      )
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('session:failed', (data) => {
-      conversationStore.updateConversationSession(
-        data.workspace_id,
-        data.chat_id,
-        data.session_id,
-        SessionStatus.FAILED,
-      )
-    }),
-  )
-
-  cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
-      conversationStore.updateWorkspaceStatus(data.workspace_id, data.status as WorkspaceStatus)
       workspaceStore.updateWorkspaceStatus(data.workspace_id, data.status as WorkspaceStatus)
     }),
   )
@@ -129,22 +85,15 @@ function cleanupSocket(): void {
 onMounted(async () => {
   startRunnerPolling()
   startWorkspacePolling()
-  await conversationStore.fetchConversations()
-  startConvPolling()
+  await workspaceStore.fetchWorkspaces()
   setupSocketListeners()
 })
+
+import { onUnmounted } from 'vue'
 
 onUnmounted(() => {
   cleanupSocket()
 })
-
-// View mode — persisted across sessions; default kanban on first visit
-const VIEW_MODE_KEY = 'opencuria:dashboard-view'
-const savedViewMode = localStorage.getItem(VIEW_MODE_KEY)
-const viewMode = ref<'list' | 'kanban'>(
-  savedViewMode === 'list' || savedViewMode === 'kanban' ? savedViewMode : 'kanban',
-)
-watch(viewMode, (v) => localStorage.setItem(VIEW_MODE_KEY, v))
 
 // Stats for the compact header bar
 const onlineRunnersCount = computed(() => runnerStore.onlineRunners.length)
@@ -156,32 +105,6 @@ const activeWorkspacesCount = computed(
         workspace.status === WorkspaceStatus.RUNNING && workspace.runner_online,
     ).length,
 )
-
-// ---------------------------------------------------------------------------
-// Kanban columns
-// ---------------------------------------------------------------------------
-
-/** Column 1 – Available: no active session, or completed/failed and already read */
-const idleConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => isConversationIdle(conv)),
-)
-
-/** Column 2 – Working: session is pending or running */
-const workingConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => isConversationRunning(conv)),
-)
-
-/** Column 3 – Done/unread: session completed or failed, not yet opened */
-const doneConvs = computed(() =>
-  conversationStore.filteredConversations.filter((conv) => {
-    const status = conv.last_session?.status
-    return Boolean(status && !isSessionActive(status) && !conv.is_read)
-  }),
-)
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function workspaceStatusVariant(
   status: WorkspaceStatus,
@@ -198,6 +121,21 @@ function workspaceStatusVariant(
   }
 }
 
+const filteredWorkspaces = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  const list = workspaceStore.workspaces.filter(
+    (w) => w.status !== WorkspaceStatus.DELETED && w.status !== WorkspaceStatus.REMOVED,
+  )
+  if (!q) return list
+  return list.filter(
+    (w) => w.name.toLowerCase().includes(q) || w.id.toLowerCase().includes(q),
+  )
+})
+
+function openWorkspace(workspace: Workspace): void {
+  router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+}
+
 function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime()
   const seconds = Math.floor(diff / 1000)
@@ -208,20 +146,6 @@ function formatTimeAgo(isoString: string): string {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
-}
-
-function navigateToConversation(conv: {
-  workspace_id: string
-  chat_id: string | null
-  last_session: { id: string } | null
-}): void {
-  if (conv.last_session) {
-    conversationStore.markAsRead(conv.workspace_id, conv.chat_id, conv.last_session.id)
-  }
-  router.push({
-    path: `/workspaces/${conv.workspace_id}`,
-    query: conv.chat_id ? { chatId: conv.chat_id } : {},
-  })
 }
 </script>
 
@@ -250,64 +174,23 @@ function navigateToConversation(conv: {
       </div>
     </div>
 
-    <!-- Search bar + view toggle -->
+    <!-- Search bar -->
     <div class="border-b border-border bg-header px-4 py-2 lg:px-6 shrink-0">
       <div class="flex items-center gap-2">
         <div class="relative flex-1">
           <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
-            v-model="conversationStore.searchQuery"
-            placeholder="Search conversations..."
+            v-model="searchQuery"
+            placeholder="Search workspaces..."
             class="pl-8 h-8 text-sm"
           />
-        </div>
-        <!-- View toggle: only on lg+ -->
-        <div class="hidden lg:flex items-center gap-0.5 rounded-md border border-border p-0.5">
-          <button
-            :class="[
-              'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'list' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
-            ]"
-            title="List view"
-            @click="viewMode = 'list'"
-          >
-            <LayoutList :size="14" />
-          </button>
-          <button
-            :class="[
-              'flex items-center justify-center w-7 h-7 rounded transition-colors',
-              viewMode === 'kanban' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
-            ]"
-            title="Kanban view"
-            @click="viewMode = 'kanban'"
-          >
-            <LayoutGrid :size="14" />
-          </button>
         </div>
       </div>
     </div>
 
-    <!-- List view — always visible on mobile; hidden on lg+ when kanban -->
-    <div :class="viewMode === 'kanban' ? 'lg:hidden' : ''">
-      <ConversationListView
-        :conversations="conversationStore.filteredConversations"
-        :loading="conversationStore.loading"
-        :search-query="conversationStore.searchQuery"
-        :format-time-ago="formatTimeAgo"
-        :workspace-status-variant="workspaceStatusVariant"
-        @conversation-click="navigateToConversation"
-      />
+    <div class="flex-1 overflow-y-auto px-4 py-4 lg:px-6">
+      <WorkspaceList :workspaces="filteredWorkspaces" @select="openWorkspace" />
     </div>
-
-    <!-- Kanban view — lg+ only, rendered only when viewMode === 'kanban' -->
-    <ConversationKanbanView
-      v-if="viewMode === 'kanban'"
-      :idle-convs="idleConvs"
-      :working-convs="workingConvs"
-      :done-convs="doneConvs"
-      :format-time-ago="formatTimeAgo"
-      :workspace-status-variant="workspaceStatusVariant"
-      @conversation-click="navigateToConversation"
-    />
   </div>
 </template>
+

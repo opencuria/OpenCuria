@@ -30,13 +30,6 @@ export enum WorkspaceOperation {
   CAPTURING_IMAGE = 'capturing_image',
 }
 
-export enum SessionStatus {
-  PENDING = 'pending',
-  RUNNING = 'running',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-}
-
 export enum TaskStatus {
   PENDING = 'pending',
   IN_PROGRESS = 'in_progress',
@@ -47,8 +40,6 @@ export enum TaskStatus {
 export enum TaskType {
   CREATE_WORKSPACE = 'create_workspace',
   UPDATE_WORKSPACE = 'update_workspace',
-  RUN_PROMPT = 'run_prompt',
-  CANCEL_SESSION = 'cancel_session',
   STOP_WORKSPACE = 'stop_workspace',
   RESUME_WORKSPACE = 'resume_workspace',
   REMOVE_WORKSPACE = 'remove_workspace',
@@ -275,83 +266,17 @@ export interface WorkspaceCreateOut {
   status: string
 }
 
-// --- Session ---
-
-export interface SessionSkill {
-  id: string
-  skill_id: string | null
-  name: string
-  body: string
-  created_at: string
-}
-
-export interface Session {
-  id: string
-  workspace_id: string
-  chat_id: string | null
-  prompt: string
-  agent_model: string
-  agent_options: Record<string, string>
-  output: string
-  error_message: string | null
-  status: SessionStatus
-  read_at: string | null
-  status_detail?: string
-  created_at: string
-  completed_at: string | null
-  skills: SessionSkill[]
-}
-
-// --- Prompt ---
-
-export interface PromptIn {
-  prompt: string
-  agent_model?: string
-  agent_options?: Record<string, string>
-  chat_id?: string
-  skill_ids?: string[]
-}
-
-export interface PromptOut {
-  session_id: string
-  task_id: string
-  chat_id: string
-  status: string
-}
-
 // --- Task ---
 
 export interface Task {
   id: string
   runner_id: string
   workspace_id: string | null
-  session_id: string | null
   type: TaskType
   status: TaskStatus
   error: string
   created_at: string
   completed_at: string | null
-}
-
-// --- Agent ---
-
-export interface AgentOption {
-  key: string
-  label: string
-  choices: string[]
-  default: string
-}
-
-export interface Agent {
-  id: string
-  name: string
-  description: string
-  available_options: AgentOption[]
-  default_env: Record<string, string>
-  supports_multi_chat: boolean
-  has_online_runner: boolean
-  required_credential_service_slugs: string[]
-  has_credentials: boolean
 }
 
 // --- Error ---
@@ -404,53 +329,6 @@ export interface CredentialUpdateIn {
 
 export interface PublicKeyOut {
   public_key: string
-}
-
-// --- Chat ---
-
-export interface Chat {
-  id: string
-  workspace_id: string
-  name: string
-  agent_definition_id: string | null
-  agent_type: string
-  created_at: string
-  updated_at: string
-  session_count: number
-  /** True if this chat has not been persisted to the backend yet (draft state). */
-  is_pending?: boolean
-}
-
-export interface ChatCreateIn {
-  name?: string
-  agent_definition_id?: string
-}
-
-export interface ChatRenameIn {
-  name: string
-}
-
-// --- Conversation ---
-
-export interface LastSession {
-  id: string
-  prompt: string
-  status: SessionStatus
-  created_at: string
-}
-
-export interface Conversation {
-  chat_id: string | null
-  workspace_id: string
-  workspace_name: string
-  workspace_status: WorkspaceStatus
-  agent_definition_id: string | null
-  agent_type: string
-  chat_name: string
-  last_session: LastSession | null
-  session_count: number
-  updated_at: string
-  is_read: boolean
 }
 
 // --- File Explorer ---
