@@ -253,6 +253,9 @@ and executed there. The runner exposes plain operations the harness calls via
 - **Harness exec/file RPC** — `harness:exec_stream`, `harness:exec_wait`,
   `harness:read_file`, `harness:write_file`, `harness:list`, `harness:stat`
   (all sandboxed to `/workspace`), plus terminal/desktop/files.
+- **Desktop display I/O** — `harness:desktop_action` (ensure desktop session,
+  screenshot, xdotool input, ffmpeg session recording). Dumb display primitive;
+  the runner has no agent knowledge.
 - No legacy prompt path exists anymore (the harness owns all prompting).
 
 ### 4.5 Service Layer (`service.py`)
@@ -273,6 +276,8 @@ and executed there. The runner exposes plain operations the harness calls via
 - `write_terminal(terminal_id, data)` — sends stdin to PTY
 - `resize_terminal(terminal_id, cols, rows)` — resizes PTY
 - `close_terminal(terminal_id)` — closes PTY session
+- `desktop_action(workspace_id, action, args)` — desktop ensure/screenshot,
+  xdotool input, ffmpeg record/stop (no agent logic)
 
 ### 4.6 Interfaces
 
@@ -468,9 +473,16 @@ When a workspace is created or resumed, `CredentialSvc.resolve_credentials()` de
 
 Agents are static code definitions in `backend/apps/harness/agents/definitions.py`
 (`build`/`plan` primary, `general`/`explore`/hidden `title`+`compaction`
-subagents) — no DB records. Modes (`plan`/`build`) and per-agent permission
-rules come from the same definitions. To add tooling to workspaces, extend
-the image definitions (packages / custom Dockerfile / init script).
+subagents, plus `computeruse` for desktop automation) — no DB records. Modes
+(`plan`/`build`) and per-agent permission rules come from the same definitions.
+The `computeruse` subagent exposes desktop tools only (spawned via `task`);
+session recordings are written under `.opencuria/computeruse/` and appended to
+chat as markdown video refs. Desktop images need `ffmpeg` and `xdotool` (rebuild
+image definitions after adding them). To add tooling to workspaces, extend the
+image definitions (packages / custom Dockerfile / init script).
+
+**Security:** computer-use session recordings capture the workspace display;
+credentials or other sensitive content visible on screen may appear in the mp4.
 
 ### 6.6 Adding a New Runtime Backend
 
@@ -635,6 +647,8 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` |
+| Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
 | Backend -> Runner | `harness:cancel` | `{request_id}` |
 | Backend -> Runner | `task:stop_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id, credentials_present}` |

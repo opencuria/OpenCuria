@@ -8,6 +8,8 @@ import {
   Globe,
   Lightbulb,
   ListTodo,
+  Monitor,
+  MousePointer2,
   Network,
   Search,
   Terminal,
@@ -51,9 +53,25 @@ const label = computed(() => {
   return props.part.title || toolName.value
 })
 
+const COMPUTER_USE_VIEW_TOOLS = new Set(['view_screen', 'view_region'])
+const COMPUTER_USE_INPUT_TOOLS = new Set([
+  'move_mouse',
+  'left_click',
+  'right_click',
+  'middle_click',
+  'double_click',
+  'drag',
+  'scroll',
+  'type_text',
+  'press_key',
+  'wait',
+  'ask_user',
+])
+
 const icon = computed<Component>(() => {
   if (props.part.type === 'reasoning') return Lightbulb
-  switch ((props.part.tool || '').trim().toLowerCase()) {
+  const tool = (props.part.tool || '').trim().toLowerCase()
+  switch (tool) {
     case 'bash':
       return Terminal
     case 'read':
@@ -69,10 +87,13 @@ const icon = computed<Component>(() => {
     case 'task':
       return Network
     case 'webfetch':
+    case 'open_url':
       return Globe
     case 'todowrite':
       return ListTodo
     default:
+      if (COMPUTER_USE_VIEW_TOOLS.has(tool)) return Monitor
+      if (COMPUTER_USE_INPUT_TOOLS.has(tool)) return MousePointer2
       return Wrench
   }
 })

@@ -83,6 +83,12 @@ class ProviderConfig(models.Model):
         blank=True,
         help_text="Cheaper model for title/compaction tasks.",
     )
+    computer_use_model = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+        help_text="Model for the computeruse subagent; falls back to default_model.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

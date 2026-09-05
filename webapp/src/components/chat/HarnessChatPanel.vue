@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useRoute } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
@@ -21,6 +22,8 @@ const props = defineProps<{
   canPrompt?: boolean
   showWorkspaceToolbar?: boolean
 }>()
+
+provide(harnessWorkspaceIdKey, toRef(props, 'workspaceId'))
 
 const harness = useHarnessStore()
 const route = useRoute()

@@ -1264,6 +1264,35 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_stat_failed")
 
+        @sio.on("harness:desktop_action")
+        async def on_harness_desktop_action(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            action = data.get("action", "")
+            args = data.get("args") or {}
+            try:
+                result = await self._service.desktop_action(
+                    workspace_id, action, args
+                )
+                await _harness_result(
+                    "harness:desktop_action_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        **result,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:desktop_action_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_desktop_action_failed")
+
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
             request_id = data.get("request_id", "")

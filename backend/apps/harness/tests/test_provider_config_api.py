@@ -117,6 +117,7 @@ def test_org_provider_config_crud_roundtrip(provider_setup):
                 "base_url": "https://openrouter.ai/api/v1",
                 "default_model": "model-a",
                 "small_model": "model-b",
+                "computer_use_model": "model-cu",
             }
         ),
         content_type="application/json",
@@ -126,6 +127,7 @@ def test_org_provider_config_crud_roundtrip(provider_setup):
     assert body["base_url"] == "https://openrouter.ai/api/v1"
     assert body["default_model"] == "model-a"
     assert body["small_model"] == "model-b"
+    assert body["computer_use_model"] == "model-cu"
     assert body["has_api_key"] is True
     assert body["api_key_hint"] == "••••1234"
     assert "sk-live-1234" not in put.content.decode()

@@ -12,6 +12,7 @@ import mimetypes
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 HARNESS_WORKSPACE_ROOT = "/workspace"
 
@@ -147,3 +148,18 @@ class WorkspaceAccessor(abc.ABC):
     @abc.abstractmethod
     async def stat(self, path: str) -> FileStat:
         """Stat a path inside the sandboxed workspace."""
+
+    @abc.abstractmethod
+    async def desktop_action(
+        self,
+        action: str,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Run a desktop automation action in the workspace.
+
+        Forwards to the runner via ``harness:desktop_action`` /
+        ``harness:desktop_action_result``. Returns the runner result dict
+        (e.g. ``ok``, ``image_b64``, ``width``, ``height`` for screenshots).
+        Raises on runner-reported ``error``.
+        """

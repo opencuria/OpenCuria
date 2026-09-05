@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
@@ -70,6 +71,27 @@ WORKSPACE_CREDENTIAL_ENVIRONMENT = "/etc/environment"
 WORKSPACE_CREDENTIAL_ENVIRONMENT_START = "# OPENCURIA_CREDENTIALS_START"
 WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
 
+DESKTOP_DISPLAY = ":1"
+DESKTOP_HOME = "/root"
+DEFAULT_DESKTOP_WIDTH = 1920
+DEFAULT_DESKTOP_HEIGHT = 1080
+COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
+_RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+_SCROLL_BUTTONS = {
+    "up": 4,
+    "down": 5,
+    "left": 6,
+    "right": 7,
+}
+_CLICK_BUTTONS = {
+    "left": 1,
+    "middle": 2,
+    "right": 3,
+    1: 1,
+    2: 2,
+    3: 3,
+}
+
 
 @dataclass
 class TerminalSession:
@@ -104,6 +126,7 @@ class WorkspaceService:
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._terminals: dict[str, TerminalSession] = {}
         self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
+        self._desktop_recordings: dict[tuple[uuid.UUID, str], tuple[int, str]] = {}
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
@@ -1307,7 +1330,328 @@ class WorkspaceService:
         except Exception:
             log.exception("desktop_stop_failed")
 
+        self._desktop_recordings = {
+            key: value
+            for key, value in self._desktop_recordings.items()
+            if key[0] != workspace_id
+        }
         log.info("desktop_stopped")
+
+    @staticmethod
+    def _desktop_env() -> dict[str, str]:
+        """Return environment variables for desktop X11 commands."""
+        return {"HOME": DESKTOP_HOME, "DISPLAY": DESKTOP_DISPLAY}
+
+    @staticmethod
+    def _sanitize_run_id(run_id: str) -> str:
+        """Validate a computer-use recording run identifier."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise ValueError(f"Invalid run_id: {run_id}")
+        return run_id
+
+    async def _require_desktop_live(self, workspace_id: uuid.UUID) -> None:
+        """Raise when the workspace desktop session is not accepting input."""
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+    async def _exec_desktop_shell(
+        self,
+        workspace_id: uuid.UUID,
+        command: str,
+    ) -> tuple[int, str]:
+        """Execute a shell command inside the workspace desktop environment."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        return await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env=self._desktop_env(),
+        )
+
+    async def _get_desktop_geometry(
+        self,
+        workspace_id: uuid.UUID,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """Return desktop width and height, optionally overriding query results."""
+        if width is not None and height is not None:
+            return width, height
+
+        exit_code, output = await self._exec_desktop_shell(
+            workspace_id,
+            "xdotool getdisplaygeometry 2>/dev/null || echo '1920 1080'",
+        )
+        if exit_code == 0:
+            parts = output.strip().split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+
+        return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+
+    async def desktop_action(
+        self,
+        workspace_id: uuid.UUID,
+        action: str,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a desktop I/O action inside the workspace display."""
+        payload = args or {}
+        log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
+
+        if action == "ensure":
+            session = await self.start_desktop(workspace_id)
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "port": session.port,
+            }
+
+        if action not in {"ensure"}:
+            await self._require_desktop_live(workspace_id)
+
+        if action == "display_info":
+            width, height = await self._get_desktop_geometry(workspace_id)
+            return {
+                "ok": True,
+                "display": DESKTOP_DISPLAY,
+                "width": width,
+                "height": height,
+            }
+
+        if action == "screenshot":
+            width, height = await self._get_desktop_geometry(
+                workspace_id,
+                width=payload.get("width"),
+                height=payload.get("height"),
+            )
+            crop_w = payload.get("crop_w")
+            crop_h = payload.get("crop_h")
+            crop_x = payload.get("crop_x")
+            crop_y = payload.get("crop_y")
+            crop_filter = ""
+            result_width = width
+            result_height = height
+            if (
+                crop_w is not None
+                and crop_h is not None
+                and crop_x is not None
+                and crop_y is not None
+            ):
+                crop_w_int = int(crop_w)
+                crop_h_int = int(crop_h)
+                crop_x_int = int(crop_x)
+                crop_y_int = int(crop_y)
+                if (
+                    crop_w_int < 1
+                    or crop_h_int < 1
+                    or crop_x_int < 0
+                    or crop_y_int < 0
+                    or crop_x_int + crop_w_int > width
+                    or crop_y_int + crop_h_int > height
+                ):
+                    raise ValueError("Invalid screenshot crop bounds")
+                crop_filter = (
+                    f"-vf crop={crop_w_int}:{crop_h_int}:{crop_x_int}:{crop_y_int} "
+                )
+                result_width = crop_w_int
+                result_height = crop_h_int
+            ffmpeg_cmd = (
+                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
+                f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -frames:v 1 "
+                f"{crop_filter}"
+                "-f image2 -vcodec mjpeg pipe:1 2>/dev/null | base64 -w0"
+            )
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, ffmpeg_cmd
+            )
+            if exit_code != 0 or not output.strip():
+                log.error("desktop_screenshot_failed", exit_code=exit_code)
+                raise RuntimeError("Failed to capture desktop screenshot")
+            return {
+                "ok": True,
+                "image_b64": output.strip(),
+                "mime": "image/jpeg",
+                "width": result_width,
+                "height": result_height,
+                "text": "",
+            }
+
+        if action == "move":
+            x = int(payload["x"])
+            y = int(payload["y"])
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool mousemove --sync {x} {y}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to move mouse: {output}")
+            return {"ok": True}
+
+        if action == "click":
+            button = _CLICK_BUTTONS.get(payload.get("button", "left"))
+            if button is None:
+                raise ValueError(f"Invalid mouse button: {payload.get('button')}")
+            x = payload.get("x")
+            y = payload.get("y")
+            parts: list[str] = []
+            if x is not None and y is not None:
+                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
+            repeat = " --repeat 2" if payload.get("double") else ""
+            parts.append(f"xdotool click{repeat} {button}")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, " && ".join(parts)
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to click mouse: {output}")
+            return {"ok": True}
+
+        if action == "drag":
+            start_x = int(payload["start_x"])
+            start_y = int(payload["start_y"])
+            end_x = int(payload["end_x"])
+            end_y = int(payload["end_y"])
+            command = (
+                f"xdotool mousemove --sync {start_x} {start_y} mousedown 1 "
+                f"mousemove --sync {end_x} {end_y} mouseup 1"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to drag mouse: {output}")
+            return {"ok": True}
+
+        if action == "scroll":
+            direction = str(payload.get("direction", "")).lower()
+            button = _SCROLL_BUTTONS.get(direction)
+            if button is None:
+                raise ValueError(f"Invalid scroll direction: {direction}")
+            amount = int(payload.get("amount", 1))
+            if amount < 1 or amount > 20:
+                raise ValueError("Scroll amount must be between 1 and 20")
+            x = payload.get("x")
+            y = payload.get("y")
+            parts = []
+            if x is not None and y is not None:
+                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
+            parts.append(f"xdotool click --repeat {amount} {button}")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, " && ".join(parts)
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to scroll: {output}")
+            return {"ok": True}
+
+        if action == "type":
+            text = str(payload.get("text", ""))
+            if not text:
+                raise ValueError("text must not be empty")
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool type --delay 0 -- {shlex.quote(text)}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to type text: {output}")
+            return {"ok": True}
+
+        if action == "key":
+            key = str(payload.get("key", "")).strip()
+            if not key:
+                raise ValueError("key must not be empty")
+            modifiers = payload.get("modifiers") or []
+            if not isinstance(modifiers, list):
+                raise ValueError("modifiers must be a list")
+            combo = "+".join([*modifiers, key])
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id,
+                f"xdotool key -- {shlex.quote(combo)}",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to send key: {output}")
+            return {"ok": True}
+
+        if action == "open_url":
+            url = str(payload.get("url", "")).strip()
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("url must use http or https")
+            quoted_url = shlex.quote(url)
+            command = (
+                "for browser in google-chrome-stable google-chrome chromium "
+                "chromium-browser; do "
+                f'if command -v "$browser" >/dev/null 2>&1; then '
+                f'"$browser" --no-sandbox --disable-gpu --disable-dev-shm-usage '
+                f'--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; '
+                "done; "
+                f"xdg-open {quoted_url}"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to open url: {output}")
+            return {"ok": True}
+
+        if action == "record_start":
+            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
+            record_key = (workspace_id, run_id)
+            existing = self._desktop_recordings.get(record_key)
+            if existing is not None:
+                return {"ok": True, "path": existing[1], "run_id": run_id}
+
+            raw_path = payload.get("path")
+            if raw_path:
+                record_path = self._sanitize_path(str(raw_path))
+            else:
+                record_path = (
+                    f"{COMPUTER_USE_RECORD_DIR}/{run_id}/session.mp4"
+                )
+            width, height = await self._get_desktop_geometry(workspace_id)
+            parent_dir = os.path.dirname(record_path)
+            ffmpeg_cmd = (
+                f"mkdir -p {shlex.quote(parent_dir)} && "
+                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
+                f"-framerate 10 -draw_mouse 1 -i {DESKTOP_DISPLAY} "
+                "-c:v libx264 -preset ultrafast -pix_fmt yuv420p "
+                f"{shlex.quote(record_path)} </dev/null "
+                f">>{shlex.quote(record_path + '.log')} 2>&1 & echo $!"
+            )
+            exit_code, output = await self._exec_desktop_shell(
+                workspace_id, ffmpeg_cmd
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to start desktop recording: {output}")
+            pid_text = output.strip().splitlines()[-1].strip()
+            try:
+                pid = int(pid_text)
+            except ValueError:
+                raise RuntimeError(
+                    f"Failed to start desktop recording: invalid pid {pid_text!r}"
+                )
+            self._desktop_recordings[record_key] = (pid, record_path)
+            log.info("desktop_recording_started", run_id=run_id, pid=pid)
+            return {"ok": True, "path": record_path, "run_id": run_id}
+
+        if action == "record_stop":
+            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
+            record_key = (workspace_id, run_id)
+            recording = self._desktop_recordings.get(record_key)
+            if recording is None:
+                raise RuntimeError(f"No active recording for run_id: {run_id}")
+            pid, record_path = recording
+            stop_cmd = (
+                f"kill -INT {pid} 2>/dev/null || true; "
+                "sleep 0.5; "
+                f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
+            )
+            exit_code, output = await self._exec_desktop_shell(workspace_id, stop_cmd)
+            self._desktop_recordings.pop(record_key, None)
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to stop desktop recording: {output}")
+            log.info("desktop_recording_stopped", run_id=run_id, pid=pid)
+            return {"ok": True, "path": record_path}
+
+        raise ValueError(f"Unknown desktop action: {action}")
 
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
         """Write plain text into the desktop clipboard inside the workspace VM/container."""

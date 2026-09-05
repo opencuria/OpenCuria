@@ -14,8 +14,9 @@ Protocol (backend -> runner)::
     harness:read_file   {request_id, workspace_id, path, max_size}
     harness:write_file  {request_id, workspace_id, path, content, mode}
     harness:list        {request_id, workspace_id, path}
-    harness:stat        {request_id, workspace_id, path}
-    harness:cancel      {request_id, workspace_id}
+    harness:stat           {request_id, workspace_id, path}
+    harness:desktop_action {request_id, workspace_id, action, args}
+    harness:cancel         {request_id, workspace_id}
 
 Protocol (runner -> backend)::
 
@@ -30,8 +31,10 @@ Protocol (runner -> backend)::
                               or {..., error}
     harness:list_result      {request_id, workspace_id, entries}
                              or {..., error}
-    harness:stat_result      {request_id, workspace_id, path, is_dir,
-                              size, mime} or {..., error}
+    harness:stat_result           {request_id, workspace_id, path, is_dir,
+                                   size, mime} or {..., error}
+    harness:desktop_action_result {request_id, workspace_id, ok?, ...}
+                                  or {..., error}
 
 Timeouts are enforced locally with ``asyncio``; on timeout or task
 cancellation a best-effort ``harness:cancel`` is sent so the runner can
@@ -508,6 +511,28 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             size=int(result.get("size", 0) or 0),
             mime=mime,
         )
+
+    async def desktop_action(
+        self,
+        action: str,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Run a desktop automation action in the workspace."""
+        request_id = uuid.uuid4().hex
+        result = await self._await_result(
+            request_id,
+            "harness:desktop_action",
+            {
+                "request_id": request_id,
+                "workspace_id": self.workspace_id,
+                "action": action,
+                "args": dict(args or {}),
+            },
+            timeout,
+        )
+        self._raise_for_error(result, "harness:desktop_action")
+        return result
 
 
 def _resolve_future(

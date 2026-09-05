@@ -2453,6 +2453,7 @@ class RunnerService:
             "harness:write_file_result",
             "harness:list_result",
             "harness:stat_result",
+            "harness:desktop_action_result",
         }
         if event not in harness_events:
             return None
@@ -2603,7 +2604,7 @@ class RunnerService:
         """Return Dockerfile lines that install KasmVNC desktop session support."""
         return """# --- KasmVNC desktop session support ---
 RUN apt-get update && apt-get install -y \\
-    xfonts-base openbox dbus-x11 x11-xserver-utils \\
+    xfonts-base openbox dbus-x11 x11-xserver-utils ffmpeg xdotool \\
     libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\

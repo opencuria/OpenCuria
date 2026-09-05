@@ -54,6 +54,7 @@ class ProviderConfigService:
         base_url: str = DEFAULT_BASE_URL,
         default_model: str = "",
         small_model: str = "",
+        computer_use_model: str = "",
     ) -> ProviderConfig:
         """Create or update the provider config for an organization."""
         normalized_url = (base_url or DEFAULT_BASE_URL).strip() or (DEFAULT_BASE_URL)
@@ -70,6 +71,7 @@ class ProviderConfigService:
                 base_url=normalized_url,
                 default_model=default_model.strip(),
                 small_model=small_model.strip(),
+                computer_use_model=computer_use_model.strip(),
             )
             clear_models_cache(str(organization_id))
             log.info("provider_config_created", organization_id=str(organization_id))
@@ -86,6 +88,7 @@ class ProviderConfigService:
             base_url=normalized_url,
             default_model=default_model.strip(),
             small_model=small_model.strip(),
+            computer_use_model=computer_use_model.strip(),
         )
         clear_models_cache(str(organization_id))
         log.info("provider_config_updated", organization_id=str(organization_id))

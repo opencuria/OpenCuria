@@ -651,6 +651,53 @@ def test_create_session_plan_mode_aligns_agent_name(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("subagent", ("general", "explore", "computeruse"))
+def test_create_session_child_honors_subagent_agent_name(
+    harness_workspace, subagent: str
+) -> None:
+    """Child sessions persist subagent agent_name while keeping parent mode."""
+    service, _, _ = _service()
+    parent = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="parent",
+        mode="build",
+    )
+    child = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="child task",
+        parent_id=parent.id,
+        agent_name=subagent,
+        mode="build",
+    )
+    assert child.mode == "build"
+    assert child.agent_name == subagent
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("hidden_agent", ("title", "compaction"))
+def test_create_session_child_rejects_hidden_agent(
+    harness_workspace, hidden_agent: str
+) -> None:
+    """Hidden agents cannot be spawned as subagent child sessions."""
+    service, _, _ = _service()
+    parent = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="parent",
+    )
+    with pytest.raises(ValueError, match="subagent child"):
+        service.create_session(
+            workspace_id=harness_workspace.id,
+            organization_id=harness_workspace.runner.organization_id,
+            prompt="child",
+            parent_id=parent.id,
+            agent_name=hidden_agent,
+        )
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
     """create_session persists a valid reasoning_effort token."""
     service, _, _ = _service()

@@ -21,7 +21,7 @@ TASK_OUTPUT_MAX_CHARS = 8000
 
 #: Agents allowed as ``task`` targets. Anything else (notably primary
 #: agents like ``build``/``plan`` and hidden agents) is rejected.
-ALLOWED_SUBAGENT_TYPES = ("general", "explore")
+ALLOWED_SUBAGENT_TYPES = ("general", "explore", "computeruse")
 
 
 class TaskArgs(BaseModel):
@@ -30,10 +30,12 @@ class TaskArgs(BaseModel):
     description: str = Field(description="Short task summary.")
     prompt: str = Field(description="Full instructions for the subagent.")
     subagent_type: str = Field(
-        default="general", description="Subagent kind: general|explore."
+        default="general",
+        description="Subagent kind: general|explore|computeruse.",
     )
     agent: str | None = Field(
-        default=None, description="Alias for subagent_type (general|explore)."
+        default=None,
+        description="Alias for subagent_type (general|explore|computeruse).",
     )
     model_override: str | None = Field(
         default=None, description="Optional model for the child run."
@@ -55,8 +57,8 @@ class TaskTool(Tool):
 
     name = "task"
     description = (
-        "Launch a subagent (general|explore) for a subtask and return "
-        "its result text. Subagents cannot launch further subagents "
+        "Launch a subagent (general|explore|computeruse) for a subtask and "
+        "return its result text. Subagents cannot launch further subagents "
         "beyond the depth limit and cannot use todowrite."
     )
     args_schema: type[BaseModel] = TaskArgs
@@ -123,7 +125,7 @@ class TaskTool(Tool):
                 "description": args.description,
             },
         )
-        child_registry = _child_registry(ctx.registry)
+        child_registry = _child_registry(ctx.registry, agent)
         child = HarnessRunner(
             provider=ctx.provider,
             tools=child_registry,
@@ -161,12 +163,21 @@ class TaskTool(Tool):
             )
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool=self.name)
         output = result.output or ""
-        truncated = len(output) > TASK_OUTPUT_MAX_CHARS
-        if truncated:
-            output = (
-                output[:TASK_OUTPUT_MAX_CHARS]
-                + f"\n…[truncated {len(result.output)} chars total]"
+        if agent == "computeruse":
+            from ..computeruse_loop import sanitize_run_id, truncate_task_output
+
+            output, truncated = truncate_task_output(
+                output,
+                sanitize_run_id(child_opts.session_id),
+                TASK_OUTPUT_MAX_CHARS,
             )
+        else:
+            truncated = len(output) > TASK_OUTPUT_MAX_CHARS
+            if truncated:
+                output = (
+                    output[:TASK_OUTPUT_MAX_CHARS]
+                    + f"\n…[truncated {len(result.output)} chars total]"
+                )
         await self._emit_parent(
             ctx,
             {
@@ -219,21 +230,35 @@ class TaskTool(Tool):
         return _emit
 
 
-def _child_registry(registry: Any) -> Any:
-    """Return a child registry without ``task``/``todowrite`` tools.
+def _child_registry(registry: Any, agent_name: str = "") -> Any:
+    """Return a child registry without disallowed parent tools.
 
     Depth enforcement is belt-and-braces: the runner also withholds
     ``task`` at the depth limit and ``TaskTool`` rejects direct calls.
     Filtering here keeps nested ``task`` and ``todowrite`` out of the
     child tool schemas entirely (OpenCode parity: subagents get no
-    todowrite).
+    todowrite). ``computeruse`` children receive the dedicated
+    computer-use registry instead of the parent tool set.
     """
+    from . import computeruse_tool_registry
     from .base import ToolRegistry
+    from .computeruse import COMPUTER_USE_TOOL_NAMES
+
+    agent = (agent_name or "").strip().lower()
+    if agent == "computeruse":
+        child = computeruse_tool_registry()
+        for hook in getattr(registry, "before_hooks", []):
+            child.add_before_hook(hook)
+        for hook in getattr(registry, "after_hooks", []):
+            child.add_after_hook(hook)
+        return child
 
     child = ToolRegistry()
     for tool in registry.list():
         key = (tool.name or "").strip().lower()
         if key in ("task", "todowrite"):
+            continue
+        if key in COMPUTER_USE_TOOL_NAMES:
             continue
         child.register(tool)
     for hook in getattr(registry, "before_hooks", []):

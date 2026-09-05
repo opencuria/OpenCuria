@@ -55,7 +55,9 @@ apt-get install -y --no-install-recommends \
     fonts-noto-color-emoji \
     adwaita-icon-theme \
     procps \
-    psmisc
+    psmisc \
+    ffmpeg \
+    xdotool
 apt-get install -y libasound2t64 || apt-get install -y libasound2
 
 # Exposé: Ubuntu 22.04 ships skippy-xd; 24.04 does not.

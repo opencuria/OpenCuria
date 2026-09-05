@@ -13,13 +13,14 @@ from apps.harness.agents.definitions import (
 )
 
 
-def test_all_six_agents_defined() -> None:
+def test_all_agents_defined() -> None:
     """All expected agents exist with valid modes."""
     assert set(AGENT_DEFINITIONS) == {
         "build",
         "plan",
         "general",
         "explore",
+        "computeruse",
         "title",
         "compaction",
     }
@@ -27,6 +28,9 @@ def test_all_six_agents_defined() -> None:
     assert get_agent("plan").mode == "primary"
     assert get_agent("general").mode == "subagent"
     assert get_agent("explore").mode == "subagent"
+    assert get_agent("computeruse").mode == "subagent"
+    assert get_agent("computeruse").steps == 25
+    assert get_agent("computeruse").permissions == {"*": "allow"}
     assert get_agent("title").mode == "hidden"
     assert get_agent("compaction").mode == "hidden"
 
@@ -88,6 +92,7 @@ def test_list_agents_filters_by_mode() -> None:
     assert {agent.name for agent in list_agents(mode="subagent")} == {
         "general",
         "explore",
+        "computeruse",
     }
     with pytest.raises(ValueError, match="Invalid agent mode"):
         list_agents(mode="bogus")
@@ -95,7 +100,7 @@ def test_list_agents_filters_by_mode() -> None:
 
 def test_subagent_descriptions_only_subagents() -> None:
     """Only subagent-mode agents are advertised to the task tool."""
-    assert set(subagent_descriptions()) == {"general", "explore"}
+    assert set(subagent_descriptions()) == {"general", "explore", "computeruse"}
 
 
 def test_invalid_mode_rejected() -> None:

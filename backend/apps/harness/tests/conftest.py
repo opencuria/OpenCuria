@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -21,6 +23,44 @@ from apps.organizations.models import Organization
 
 # Allow sync ORM calls from async test functions (Django safety check).
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+TINY_JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xd9"
+)
+DEFAULT_DESKTOP_WIDTH = 1920
+DEFAULT_DESKTOP_HEIGHT = 1080
+
+
+def desktop_screenshot_result(
+    *,
+    width: int = DEFAULT_DESKTOP_WIDTH,
+    height: int = DEFAULT_DESKTOP_HEIGHT,
+    jpeg: bytes = TINY_JPEG,
+) -> dict[str, Any]:
+    """Build a runner-style screenshot payload for FakeAccessor."""
+    return {
+        "ok": True,
+        "image_b64": base64.b64encode(jpeg).decode("ascii"),
+        "mime": "image/jpeg",
+        "width": width,
+        "height": height,
+        "text": "",
+    }
+
+
+def desktop_display_info_result(
+    *,
+    width: int = DEFAULT_DESKTOP_WIDTH,
+    height: int = DEFAULT_DESKTOP_HEIGHT,
+) -> dict[str, Any]:
+    """Build a runner-style display_info payload for FakeAccessor."""
+    return {
+        "ok": True,
+        "display": ":1",
+        "width": width,
+        "height": height,
+    }
 
 
 @pytest.fixture
@@ -42,17 +82,57 @@ class FakeAccessor(WorkspaceAccessor):
         files: dict[str, bytes] | None = None,
         error: Exception | None = None,
         exec_result: ExecResult | None = None,
+        desktop_result: dict[str, Any] | None = None,
+        desktop_results: list[dict[str, Any]] | None = None,
+        desktop_width: int = DEFAULT_DESKTOP_WIDTH,
+        desktop_height: int = DEFAULT_DESKTOP_HEIGHT,
     ) -> None:
         super().__init__(workspace_id)
         self.files: dict[str, bytes] = dict(files or {})
         self.error = error
         self.exec_result = exec_result
+        self.desktop_result = desktop_result
+        self.desktop_results = list(desktop_results or [])
+        self.desktop_width = desktop_width
+        self.desktop_height = desktop_height
         self.written: dict[str, bytes] = {}
         self.exec_calls: list[tuple] = []
+        self.desktop_calls: list[tuple] = []
 
     def _maybe_fail(self) -> None:
         if self.error is not None:
             raise self.error
+
+    def _desktop_payload(
+        self, action: str, args: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        if self.desktop_results:
+            return dict(self.desktop_results.pop(0))
+        if self.desktop_result is not None:
+            return dict(self.desktop_result)
+        if action == "display_info":
+            return desktop_display_info_result(
+                width=self.desktop_width,
+                height=self.desktop_height,
+            )
+        if action == "ensure":
+            return {"ok": True, "display": ":1", "port": 5900}
+        if action == "record_start":
+            run_id = str((args or {}).get("run_id") or "run")
+            path = f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
+            self.files[path] = b"fake-mp4"
+            return {"ok": True, "path": path, "run_id": run_id}
+        if action == "record_stop":
+            run_id = str((args or {}).get("run_id") or "run")
+            path = f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
+            return {"ok": True, "path": path}
+        if action == "screenshot":
+            crop_w = (args or {}).get("crop_w")
+            crop_h = (args or {}).get("crop_h")
+            width = int(crop_w) if crop_w is not None else self.desktop_width
+            height = int(crop_h) if crop_h is not None else self.desktop_height
+            return desktop_screenshot_result(width=width, height=height)
+        return {"ok": True}
 
     async def exec_stream(
         self,
@@ -124,6 +204,17 @@ class FakeAccessor(WorkspaceAccessor):
         if path in self.files:
             return FileStat(path=path, size=len(self.files[path]))
         raise RunnerAccessorError(f"stat failed: not found {path}")
+
+    async def desktop_action(
+        self,
+        action: str,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Return the canned desktop action result."""
+        self._maybe_fail()
+        self.desktop_calls.append((action, args, timeout))
+        return self._desktop_payload(action, args or {})
 
 
 @pytest.fixture

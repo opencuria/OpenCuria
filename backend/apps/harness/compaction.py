@@ -8,7 +8,9 @@ are logged and ignored so the main harness run continues.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+from .images import IMAGE_TOKEN_ESTIMATE
 from .providers.base import LLMMessage
 
 #: Approximate token budget before older history is summarized (see module docstring).
@@ -24,15 +26,29 @@ class CompactionResult:
     compacted: bool
 
 
+def _estimate_content_tokens(content: str | list[dict[str, Any]] | None) -> int:
+    """Estimate tokens for message content (~4 chars/token for text)."""
+    if not content:
+        return 0
+    if isinstance(content, str):
+        return max(len(content) // 4, 0)
+    total = 0
+    for part in content:
+        if part.get("type") == "text":
+            total += len(str(part.get("text", ""))) // 4
+        elif part.get("type") == "image_url":
+            total += IMAGE_TOKEN_ESTIMATE
+    return total
+
+
 def estimate_message_tokens(messages: list[LLMMessage]) -> int:
-    """Rough token estimate from message character counts (~4 chars/token)."""
-    total_chars = 0
+    """Rough token estimate from message content and tool-call arguments."""
+    total = 0
     for message in messages:
-        if message.content:
-            total_chars += len(message.content)
+        total += _estimate_content_tokens(message.content)
         for call in message.tool_calls or ():
-            total_chars += len(str(call.get("arguments", "")))
-    return max(total_chars // 4, 0)
+            total += len(str(call.get("arguments", ""))) // 4
+    return max(total, 0)
 
 
 def should_compact(
@@ -49,13 +65,30 @@ def should_compact(
     return estimated >= threshold
 
 
+def _format_content_for_compaction(
+    content: str | list[dict[str, Any]] | None,
+) -> str:
+    """Serialize message content for compaction without base64 payloads."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if part.get("type") == "text":
+            parts.append(str(part.get("text", "")))
+        elif part.get("type") == "image_url":
+            parts.append("[image]")
+    return "".join(parts)
+
+
 def build_compaction_prompt(messages: list[LLMMessage]) -> str:
     """Serialize *messages* (excluding system) for the compaction agent."""
     lines: list[str] = []
     for message in messages:
         if message.role == "system":
             continue
-        content = message.content or ""
+        content = _format_content_for_compaction(message.content)
         if message.tool_calls:
             for call in message.tool_calls:
                 content = (

@@ -66,6 +66,7 @@ describe('HarnessChatInput', () => {
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
       small_model: 'model-small',
+      computer_use_model: 'model-cu',
       has_api_key: true,
       api_key_hint: '',
     })
@@ -113,6 +114,7 @@ describe('HarnessChatInput', () => {
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
       small_model: 'model-small',
+      computer_use_model: 'model-cu',
       has_api_key: false,
       api_key_hint: '',
     })

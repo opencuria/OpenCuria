@@ -68,6 +68,7 @@ class ToolContext:
     call_id: str = ""
     on_question: Callable[..., Awaitable[list[Any]]] | None = None
     question_timeout: float = 600.0
+    computer_use: Any | None = None
 
 
 @dataclass
@@ -77,6 +78,7 @@ class ToolResult:
     output: str
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    image_jpeg: bytes | None = None
 
 
 BeforeHook = Callable[[str, BaseModel, ToolContext], Awaitable[None]]

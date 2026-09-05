@@ -497,6 +497,19 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:stat_result", data, runner_id=runner_id
         )
 
+    @sio.on("harness:desktop_action_result")
+    async def on_harness_desktop_action_result(sid: str, data: dict):
+        """Route desktop action results to the owning harness accessor."""
+        runner_id = await _require_runner_id(
+            sio, sid, "harness:desktop_action_result"
+        )
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:desktop_action_result", data, runner_id=runner_id
+        )
+
     # --- Terminal events from runner ---
 
     @sio.on("terminal:started")

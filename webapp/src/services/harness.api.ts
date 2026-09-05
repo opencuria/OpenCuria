@@ -25,6 +25,7 @@ export interface HarnessProviderConfig {
   base_url: string
   default_model: string
   small_model: string
+  computer_use_model: string
   has_api_key: boolean
   api_key_hint: string
 }
@@ -34,6 +35,7 @@ export interface HarnessProviderConfigIn {
   base_url?: string
   default_model?: string
   small_model?: string
+  computer_use_model?: string
 }
 
 export interface HarnessSessionOut extends HarnessSession {}
@@ -153,6 +155,7 @@ export function saveProviderConfig(
     base_url: data.base_url ?? '',
     default_model: data.default_model ?? '',
     small_model: data.small_model ?? '',
+    computer_use_model: data.computer_use_model ?? '',
   })
 }
 

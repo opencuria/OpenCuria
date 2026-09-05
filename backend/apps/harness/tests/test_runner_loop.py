@@ -35,6 +35,7 @@ class FakeProvider(ProviderAdapter):
     def __init__(self, steps: list[list[Delta]]) -> None:
         self._steps = [list(step) for step in steps]
         self.calls: list[dict[str, Any]] = []
+        self.messages: list[list[LLMMessage]] = []
 
     async def chat_stream(  # type: ignore[no-untyped-def]
         self,
@@ -47,6 +48,7 @@ class FakeProvider(ProviderAdapter):
         self.calls.append(
             {"model": model, "tools": [tool.name for tool in tools]}
         )
+        self.messages.append(list(messages))
         if not self._steps:
             yield Delta(text="done", usage=Usage(0, 0, 0))
             return
@@ -363,6 +365,34 @@ async def test_history_is_included_in_provider_messages() -> None:
     await runner.run("now", "build", "m", "build", opts)
     # Provider saw only schemas; verify history threaded via message count.
     assert provider.calls and provider.calls[0]["model"] == "m"
+
+
+async def test_prompt_workspace_image_hydrated_for_provider() -> None:
+    """User prompts with workspace image markdown become multimodal."""
+    provider = FakeProvider([_text_step("seen")])
+    events: list[dict[str, Any]] = []
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 4
+    runner, opts = _runner(
+        provider,
+        events,
+        files={"/workspace/cat.png": png_bytes},
+    )
+    await runner.run(
+        "look ![cat](/workspace/cat.png)",
+        "build",
+        "m",
+        "build",
+        opts,
+    )
+    user_messages = [
+        message
+        for message in provider.messages[0]
+        if message.role == "user" and message.content
+    ]
+    assert user_messages
+    last_user = user_messages[-1]
+    assert isinstance(last_user.content, list)
+    assert any(part.get("type") == "image_url" for part in last_user.content)
 
 
 async def test_plan_mode_read_only_bash_auto_flows() -> None:

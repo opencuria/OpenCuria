@@ -26,6 +26,7 @@ vi.mock('@/services/harness.api', async () => {
       base_url: '',
       default_model: '',
       small_model: '',
+      computer_use_model: '',
       has_api_key: false,
       api_key_hint: '',
     }),

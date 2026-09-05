@@ -112,4 +112,25 @@ describe('HarnessWorkRow', () => {
 
     expect(wrapper.find('.loading-stub').exists()).toBe(true)
   })
+
+  it('uses Monitor for computer-use view tools', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({ tool: 'view_screen', title: 'View screen' }),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-work-row-label"]').text()).toBe('View screen')
+    expect(wrapper.find('svg.lucide-monitor').exists()).toBe(true)
+  })
+
+  it('uses MousePointer2 for computer-use input tools', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({ tool: 'left_click', title: 'Left click' }),
+      },
+    })
+
+    expect(wrapper.find('svg.lucide-mouse-pointer-2').exists()).toBe(true)
+  })
 })

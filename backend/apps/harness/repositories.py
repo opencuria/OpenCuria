@@ -42,6 +42,7 @@ class ProviderConfigRepository:
         base_url: str,
         default_model: str = "",
         small_model: str = "",
+        computer_use_model: str = "",
     ) -> ProviderConfig:
         """Create a provider config for an organization."""
         return ProviderConfig.objects.create(
@@ -50,6 +51,7 @@ class ProviderConfigRepository:
             base_url=base_url,
             default_model=default_model,
             small_model=small_model,
+            computer_use_model=computer_use_model,
         )
 
     @staticmethod
@@ -60,6 +62,7 @@ class ProviderConfigRepository:
         base_url: str | None = None,
         default_model: str | None = None,
         small_model: str | None = None,
+        computer_use_model: str | None = None,
     ) -> ProviderConfig:
         """Update provider config fields."""
         update_fields = ["updated_at"]
@@ -75,6 +78,9 @@ class ProviderConfigRepository:
         if small_model is not None:
             config.small_model = small_model
             update_fields.append("small_model")
+        if computer_use_model is not None:
+            config.computer_use_model = computer_use_model
+            update_fields.append("computer_use_model")
         config.save(update_fields=update_fields)
         return config
 

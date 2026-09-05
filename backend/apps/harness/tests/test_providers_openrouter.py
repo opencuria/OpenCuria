@@ -177,3 +177,22 @@ def test_build_payload_omits_reasoning_when_unset() -> None:
     adapter = OpenRouterAdapter(api_key="k")
     payload = adapter._build_payload("m", [], [], ChatOptions())
     assert "reasoning" not in payload
+
+
+def test_message_to_dict_preserves_multimodal_content() -> None:
+    """Image parts are serialized into the OpenAI request payload."""
+    adapter = OpenRouterAdapter(api_key="k")
+    parts = [
+        {"type": "text", "text": "see image"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        },
+    ]
+    payload = adapter._build_payload(
+        "m",
+        [LLMMessage(role="user", content=parts)],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == parts

@@ -1942,6 +1942,30 @@ class TestHarnessReplyRouting:
 
         assert routed == [payload]
 
+    def test_desktop_action_result_is_routed(
+        self, service, runner, workspace, monkeypatch
+    ):
+        """Desktop action replies route like other harness *_result events."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+        payload = {
+            "request_id": "req-desktop",
+            "workspace_id": str(workspace.id),
+            "ok": True,
+            "image_b64": "aGVsbG8=",
+        }
+
+        service.handle_harness_reply(
+            "harness:desktop_action_result",
+            payload,
+            runner_id=str(runner.id),
+        )
+
+        assert routed == [payload]
+
     def test_owner_reply_accepts_hex_runner_id(
         self, service, runner, workspace, monkeypatch
     ):
@@ -2054,6 +2078,8 @@ class TestDesktopSessionImageContent:
         assert "button_layout" in script
         assert "Ventura-light.jpg" in script
         assert "opencuria-desktop-browser" in script
+        assert "ffmpeg" in script
+        assert "xdotool" in script
         assert "--start-maximized" not in script
         assert "openbox-session" not in script
         assert "xfce4-session" in script
@@ -2089,6 +2115,8 @@ class TestDesktopSessionImageContent:
 
         assert "openbox" in dockerfile
         assert "openbox-session" in dockerfile
+        assert "ffmpeg" in dockerfile
+        assert "xdotool" in dockerfile
         assert "startxfce4" not in dockerfile
         assert "WhiteSur" not in dockerfile
         assert "--start-maximized" in dockerfile

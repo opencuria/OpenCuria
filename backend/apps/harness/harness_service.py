@@ -35,6 +35,7 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from common.exceptions import ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
+from .images import hydrate_user_messages
 from .models import (
     HarnessMessage,
     HarnessPart,
@@ -122,8 +123,18 @@ class HarnessService:
         normalized_mode = (mode or "build").strip().lower()
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
-        # Primary agents: plan|build mode always uses the matching agent name.
+        requested = (agent_name or "").strip().lower()
+        # Root sessions: agent_name follows mode (plan|build). Child sessions
+        # honor subagent agent_name while keeping parent plan|build mode.
         resolved_agent = normalized_mode
+        if parent_id is not None and requested:
+            definition = get_agent(requested)
+            if definition.mode == "hidden":
+                raise ValueError(
+                    f"Agent '{requested}' cannot be used as a subagent child"
+                )
+            if definition.mode == "subagent":
+                resolved_agent = requested
         get_agent(resolved_agent)  # raises KeyError for unknown agents
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
@@ -644,8 +655,12 @@ class HarnessService:
         async with ThreadSensitiveContext():
             await coro
 
-    def _tools_for_session(self, session_id: str):  # type: ignore[no-untyped-def]
-        """Build the standard tool registry with the Django todo repo."""
+    def _tools_for_session(self, session_id: str, agent_name: str = "build"):  # type: ignore[no-untyped-def]
+        """Build the tool registry for a session agent."""
+        from .tools import computeruse_tool_registry, default_tool_registry
+
+        if (agent_name or "").strip().lower() == "computeruse":
+            return computeruse_tool_registry()
         registry = default_tool_registry()
         try:
             registry._tools["todowrite"] = TodoWriteTool(
@@ -671,6 +686,8 @@ class HarnessService:
         key = str(session.id)
         active_provider = provider
         small_model = ""
+        computer_use_model = ""
+        default_model = ""
         if active_provider is None:
             if self._provider_factory is not None:
                 active_provider = self._provider_factory(organization_id)
@@ -679,6 +696,8 @@ class HarnessService:
                 config = await sync_to_async(config_service.get_config)(organization_id)
                 active_provider = config_service.adapter_from_config(config)
                 small_model = (config.small_model or "").strip()
+                computer_use_model = (config.computer_use_model or "").strip()
+                default_model = (config.default_model or "").strip()
                 if session.model:
                     model_default = session.model
                 else:
@@ -690,7 +709,9 @@ class HarnessService:
         accessor = None
         if self._accessor_factory is not None:
             accessor = await self._accessor_factory(str(session.workspace_id))
-        tools = self._tools_for_session(key)
+        if accessor is not None:
+            history = await hydrate_user_messages(history, accessor)
+        tools = self._tools_for_session(key, session.agent_name or "build")
         if self._runner_factory is not None:
             loop_runner = self._runner_factory(
                 provider=active_provider,
@@ -728,6 +749,8 @@ class HarnessService:
                 subtask_id=subtask_id,
                 organization_id=organization_id,
                 small_model=small_model,
+                computer_use_model=computer_use_model,
+                default_model=default_model,
             ),
         )
         try:
@@ -1281,13 +1304,26 @@ class HarnessService:
         subtask_id: str,
         organization_id: uuid.UUID,
         small_model: str,
+        computer_use_model: str = "",
+        default_model: str = "",
     ) -> Any:
         """Create a child session, run it to completion, return tool output."""
+        from .computeruse_loop import sanitize_run_id, truncate_task_output
         from .tools.base import ToolError, ToolResult
         from .tools.subagents import TASK_OUTPUT_MAX_CHARS
 
         agent = (args.agent or args.subagent_type or "general").strip().lower()
-        model = (args.model_override or ctx.model or parent.model or "").strip()
+        if agent == "computeruse":
+            model = (
+                args.model_override
+                or computer_use_model
+                or ctx.model
+                or parent.model
+                or default_model
+                or ""
+            ).strip()
+        else:
+            model = (args.model_override or ctx.model or parent.model or "").strip()
         if not model:
             raise ToolError(
                 "No model available for subagent run",
@@ -1355,13 +1391,20 @@ class HarnessService:
                 },
             )
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool="task") from exc
-        truncated = len(output) > TASK_OUTPUT_MAX_CHARS
-        display_output = output
-        if truncated:
-            display_output = (
-                output[:TASK_OUTPUT_MAX_CHARS]
-                + f"\n…[truncated {len(output)} chars total]"
+        if agent == "computeruse":
+            display_output, truncated = truncate_task_output(
+                output,
+                sanitize_run_id(str(child.id)),
+                TASK_OUTPUT_MAX_CHARS,
             )
+        else:
+            truncated = len(output) > TASK_OUTPUT_MAX_CHARS
+            display_output = output
+            if truncated:
+                display_output = (
+                    output[:TASK_OUTPUT_MAX_CHARS]
+                    + f"\n…[truncated {len(output)} chars total]"
+                )
         await self._on_runner_event(
             parent,
             parent_assistant,

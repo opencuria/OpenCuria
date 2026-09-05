@@ -27,6 +27,7 @@ class _FakeService:
         self.read_calls: list[tuple[str, str, object]] = []
         self.write_calls: list[tuple[str, str, str, int]] = []
         self.stat_calls: list[tuple[str, str]] = []
+        self.desktop_action_calls: list[tuple[object, str, object]] = []
         self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
 
@@ -100,6 +101,16 @@ class _FakeService:
             "size": 2,
             "mime_type": "text/plain",
         }
+
+    async def desktop_action(self, workspace_id, action, args=None):
+        self.desktop_action_calls.append((workspace_id, action, args))
+        if action == "ensure":
+            return {"ok": True, "display": ":1", "port": 6901}
+        if action == "screenshot" and args and args.get("fail"):
+            raise RuntimeError("Desktop session is not active")
+        if action == "record_start" and args and args.get("path") == "/etc/passwd":
+            raise ValueError("Path must be under /workspace")
+        return {"ok": True, "action": action}
 
 
 def _interface(service: _FakeService) -> WebSocketInterface:
@@ -298,6 +309,53 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         event, payload = interface._sio.emit.await_args.args
         self.assertEqual(event, "harness:read_file_result")
         self.assertIn("/workspace", payload["error"])
+
+
+class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_desktop_action_emits_result(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d1",
+                action="ensure",
+                args={},
+            )
+        )
+        interface._sio.emit.assert_awaited_with(
+            "harness:desktop_action_result",
+            {
+                "workspace_id": str(workspace_id),
+                "request_id": "d1",
+                "ok": True,
+                "display": ":1",
+                "port": 6901,
+            },
+        )
+        self.assertEqual(
+            service.desktop_action_calls,
+            [(workspace_id, "ensure", {})],
+        )
+
+    async def test_desktop_action_error_reports_error(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d2",
+                action="screenshot",
+                args={"fail": True},
+            )
+        )
+        event, payload = interface._sio.emit.await_args.args
+        self.assertEqual(event, "harness:desktop_action_result")
+        self.assertEqual(payload["error"], "Desktop session is not active")
 
 
 class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):

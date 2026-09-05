@@ -25,6 +25,7 @@ describe('ProviderConfigTab', () => {
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
       small_model: 'model-small',
+      computer_use_model: 'model-cu',
       has_api_key: true,
       api_key_hint: '••••cdef',
     })
@@ -32,6 +33,7 @@ describe('ProviderConfigTab', () => {
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
       small_model: 'model-small',
+      computer_use_model: 'model-cu',
       has_api_key: true,
       api_key_hint: '••••wxyz',
     })
@@ -46,6 +48,7 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('#provider-base-url').exists()).toBe(true)
     expect(wrapper.find('#provider-default-model').exists()).toBe(true)
     expect(wrapper.find('#provider-small-model').exists()).toBe(true)
+    expect(wrapper.find('#provider-computer-use-model').exists()).toBe(true)
     expect((wrapper.find('#provider-default-model').element as HTMLInputElement).value).toBe(
       'model-big',
     )
@@ -65,6 +68,7 @@ describe('ProviderConfigTab', () => {
     await flushPromises()
 
     await wrapper.find('#provider-default-model').setValue('model-updated')
+    await wrapper.find('#provider-computer-use-model').setValue('model-cu-updated')
     await wrapper.findAll('button').find((b) => b.text().includes('Save Provider Config'))!.trigger('click')
     await flushPromises()
 
@@ -73,6 +77,7 @@ describe('ProviderConfigTab', () => {
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-updated',
       small_model: 'model-small',
+      computer_use_model: 'model-cu-updated',
     })
     expect(wrapper.text()).toContain('••••wxyz')
     expect(wrapper.text()).not.toContain('sk-or-live-secret')

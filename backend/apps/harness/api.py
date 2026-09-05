@@ -226,6 +226,7 @@ class ProviderConfigIn(Schema):
     base_url: str = ""
     default_model: str = ""
     small_model: str = ""
+    computer_use_model: str = ""
 
 
 class ProviderConfigOut(Schema):
@@ -234,6 +235,7 @@ class ProviderConfigOut(Schema):
     base_url: str
     default_model: str
     small_model: str
+    computer_use_model: str
     has_api_key: bool
     api_key_hint: str
 
@@ -266,6 +268,7 @@ def _provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-unt
         base_url=config.base_url or "",
         default_model=config.default_model or "",
         small_model=config.small_model or "",
+        computer_use_model=config.computer_use_model or "",
         has_api_key=bool(config.api_key_encrypted),
         api_key_hint=_api_key_hint(config),
     )
@@ -308,6 +311,7 @@ def _save_org_provider_config(
         base_url=payload.base_url or "",
         default_model=payload.default_model or "",
         small_model=payload.small_model or "",
+        computer_use_model=payload.computer_use_model or "",
     )
     return _provider_config_to_out(config)
 

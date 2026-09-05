@@ -344,6 +344,7 @@ _TOOLS: list[Tool] = [
                 "base_url": {"type": "string"},
                 "default_model": {"type": "string"},
                 "small_model": {"type": "string"},
+                "computer_use_model": {"type": "string"},
             },
         },
     ),

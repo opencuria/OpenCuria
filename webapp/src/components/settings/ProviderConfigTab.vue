@@ -23,6 +23,7 @@ const apiKey = ref('')
 const baseUrl = ref(DEFAULT_BASE_URL)
 const defaultModel = ref('')
 const smallModel = ref('')
+const computerUseModel = ref('')
 
 const apiKeyPlaceholder = computed(() => {
   if (config.value?.has_api_key && config.value.api_key_hint) {
@@ -39,6 +40,7 @@ function applyConfig(next: HarnessProviderConfig): void {
   baseUrl.value = next.base_url || DEFAULT_BASE_URL
   defaultModel.value = next.default_model || ''
   smallModel.value = next.small_model || ''
+  computerUseModel.value = next.computer_use_model || ''
   apiKey.value = ''
 }
 
@@ -52,6 +54,7 @@ async function loadConfig(): Promise<void> {
     baseUrl.value = DEFAULT_BASE_URL
     defaultModel.value = ''
     smallModel.value = ''
+    computerUseModel.value = ''
     apiKey.value = ''
     const message = e instanceof Error ? e.message : 'Failed to load provider config'
     if (!message.toLowerCase().includes('not found')) {
@@ -72,6 +75,7 @@ async function handleSave(): Promise<void> {
       base_url: baseUrl.value.trim() || DEFAULT_BASE_URL,
       default_model: defaultModel.value.trim(),
       small_model: smallModel.value.trim(),
+      computer_use_model: computerUseModel.value.trim(),
     })
     applyConfig(saved)
   } catch (e: unknown) {
@@ -92,6 +96,7 @@ async function handleDelete(): Promise<void> {
     baseUrl.value = DEFAULT_BASE_URL
     defaultModel.value = ''
     smallModel.value = ''
+    computerUseModel.value = ''
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'Failed to delete provider config'
   } finally {
@@ -173,6 +178,15 @@ onMounted(() => {
             id="provider-small-model"
             v-model="smallModel"
             placeholder="e.g. openai/gpt-4o-mini"
+          />
+        </div>
+
+        <div class="space-y-2">
+          <Label for="provider-computer-use-model">Computer-use model</Label>
+          <Input
+            id="provider-computer-use-model"
+            v-model="computerUseModel"
+            placeholder="e.g. anthropic/claude-sonnet-4"
           />
         </div>
       </div>
