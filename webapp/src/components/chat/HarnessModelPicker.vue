@@ -42,12 +42,14 @@ const catalogModel = computed(() =>
 
 const effortOptions = computed(() => catalogModel.value?.reasoning_efforts ?? [])
 
-const triggerLabel = computed(() => {
-  if (effortOptions.value.length > 0 && props.effort) {
-    return formatEffort(props.effort)
-  }
+const triggerModelName = computed(() => {
   if (!props.model.trim()) return 'Auto'
   return catalogModel.value?.name ?? props.model
+})
+
+const triggerEffortLabel = computed(() => {
+  if (effortOptions.value.length === 0 || !props.effort) return ''
+  return formatEffort(props.effort)
 })
 
 const filteredModels = computed(() => {
@@ -90,12 +92,18 @@ function modelEffortHint(item: ProviderModel): string {
         type="button"
         variant="ghost"
         size="sm"
-        class="h-8 gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+        class="h-8 max-w-56 gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
         data-testid="composer-model-trigger"
         :disabled="disabled"
       >
-        {{ loading ? 'Loading…' : triggerLabel }}
-        <ChevronDown :size="12" class="opacity-70" />
+        <span v-if="loading">Loading…</span>
+        <template v-else>
+          <span class="min-w-0 truncate text-foreground">{{ triggerModelName }}</span>
+          <span v-if="triggerEffortLabel" class="shrink-0 text-muted-foreground">
+            {{ triggerEffortLabel }}
+          </span>
+        </template>
+        <ChevronDown :size="12" class="shrink-0 opacity-70" />
       </Button>
     </DropdownMenuTrigger>
     <DropdownMenuContent side="top" align="start" class="w-56 min-w-56" data-testid="composer-model-menu">

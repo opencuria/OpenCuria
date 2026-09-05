@@ -45,6 +45,16 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(true)
   })
 
+  it('shows model name and effort on the compact trigger', () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: 'acme/think', effort: 'high', models },
+      global: { stubs },
+    })
+    const trigger = wrapper.find('[data-testid="composer-model-trigger"]')
+    expect(trigger.text()).toContain('Think')
+    expect(trigger.text()).toContain('High')
+  })
+
   it('hides the effort submenu when the model has no reasoning', () => {
     const wrapper = mount(HarnessModelPicker, {
       props: { model: 'acme/plain', effort: '', models },
@@ -52,6 +62,7 @@ describe('HarnessModelPicker', () => {
     })
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Plain')
+    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('High')
   })
 
   it('filters the catalog by the search query', async () => {
