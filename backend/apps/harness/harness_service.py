@@ -394,6 +394,13 @@ class HarnessService:
         )
         session.status = HarnessSessionStatus.BUSY
         history = await self._build_history(session, exclude_message_id=assistant.id)
+        skill_bodies: list[str] = []
+        if session.skill_ids and user_id is not None:
+            skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                list(session.skill_ids or []),
+                user_id=user_id,
+                organization_id=org_id,
+            )
         run_ctx: dict[str, Any] = {
             "session_id": key,
             "workspace_id": workspace_id or str(session.workspace_id),
@@ -404,15 +411,7 @@ class HarnessService:
             "tool_parts": {},
             "step_parts": {},
             "subtask_parts": {},
-            "skill_bodies": (
-                resolve_skill_bodies(
-                    list(session.skill_ids or []),
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
-                if session.skill_ids and user_id is not None
-                else []
-            ),
+            "skill_bodies": skill_bodies,
         }
         self._runs[key] = run_ctx
         task = self._spawn_background(

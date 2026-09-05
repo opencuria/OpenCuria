@@ -1457,10 +1457,13 @@ def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent
     return _text([_session_dict(session) for session in sessions])
 
 
-def _call_create_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
+async def _call_create_harness_session(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    """Create a session and start the first run without nested event loops."""
     import uuid as _uuid
 
+    from asgiref.sync import sync_to_async
     from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
@@ -1472,14 +1475,16 @@ def _call_create_harness_session(api_key, org_id, args: dict) -> list[TextConten
     except ValueError:
         return _error("Invalid workspace_id UUID")
 
-    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    workspace, error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, workspace_id
+    )
     if error is not None:
         return error
 
     service = _get_harness_service()
 
-    async def _create():
-        session = service.create_session(
+    try:
+        session = await sync_to_async(service.create_session)(
             workspace_id=workspace.id,
             organization_id=org_id,
             prompt=prompt,
@@ -1497,21 +1502,17 @@ def _call_create_harness_session(api_key, org_id, args: dict) -> list[TextConten
             user_id=api_key.user.id,
             skill_ids=list(args.get("skill_ids") or []),
         )
-        return service.get_session(session.id)
-
-    try:
-        loop = asyncio.new_event_loop()
-        session = loop.run_until_complete(_create())
-        loop.close()
-        return _text(_session_dict(session))
+        fresh = await sync_to_async(service.get_session)(session.id)
+        return _text(_session_dict(fresh))
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
 
-def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
+async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]:
+    """Send a follow-up prompt without nested event loops."""
     import uuid as _uuid
 
+    from asgiref.sync import sync_to_async
     from common.exceptions import ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
@@ -1523,20 +1524,26 @@ def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]
     except ValueError:
         return _error("Invalid session_id UUID")
 
-    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    session, error = await sync_to_async(_owned_harness_session_or_error)(
+        api_key, org_id, session_id
+    )
     if error is not None:
         return error
 
     service = _get_harness_service()
 
-    async def _send():
-        current = service.get_session(session.id)
-        service.ensure_user_promptable(current)
+    try:
+        current = await sync_to_async(service.get_session)(session.id)
+        await sync_to_async(service.ensure_user_promptable)(current)
         if not service.is_running(current.id):
             if args.get("mode"):
-                current = service.set_mode(current.id, args["mode"])
+                current = await sync_to_async(service.set_mode)(
+                    current.id, args["mode"]
+                )
             if args.get("model"):
-                current = service.set_model(current.id, args["model"])
+                current = await sync_to_async(service.set_model)(
+                    current.id, args["model"]
+                )
         await service.start_run(
             current,
             prompt,
@@ -1545,13 +1552,8 @@ def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextContent]
             user_id=api_key.user.id,
             skill_ids=list(args.get("skill_ids") or []) or None,
         )
-        return service.get_session(current.id)
-
-    try:
-        loop = asyncio.new_event_loop()
-        updated = loop.run_until_complete(_send())
-        loop.close()
-        return _text(_session_dict(updated))
+        fresh = await sync_to_async(service.get_session)(current.id)
+        return _text(_session_dict(fresh))
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -2032,7 +2034,12 @@ def create_mcp_server(api_key) -> Server:
         org_id = _uuid.UUID(str(orgs[0]["id"]))
 
         try:
-            result = await sync_to_async(handler)(api_key, org_id, args)
+            import inspect
+
+            if inspect.iscoroutinefunction(handler):
+                result = await handler(api_key, org_id, args)
+            else:
+                result = await sync_to_async(handler)(api_key, org_id, args)
             return result
         except Exception as exc:
             logger.exception("MCP tool %s failed", name)

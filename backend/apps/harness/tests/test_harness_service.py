@@ -393,6 +393,63 @@ async def test_execute_run_todowrite_without_sync_orm(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_execute_run_with_skills_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """start_run must wrap skill-body ORM so Daphne does not 500."""
+    from apps.skills.models import Skill
+
+    org_id = harness_workspace.runner.organization_id
+    user_id = harness_workspace.created_by_id
+    skill = Skill.objects.create(
+        name="Hints",
+        body="Always use type hints.",
+        organization_id=org_id,
+        created_by_id=user_id,
+    )
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="skill-orm-safe run",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+        skill_ids=[str(skill.id)],
+    )
+    captured: list[list[str]] = []
+    original = HarnessService._execute_run
+
+    async def _capture(self, **kwargs):  # type: ignore[no-untyped-def]
+        key = str(kwargs["session"].id)
+        captured.append(list(self._runs.get(key, {}).get("skill_bodies") or []))
+        await original(self, **kwargs)
+
+    monkeypatch.setattr(HarnessService, "_execute_run", _capture)
+    service, _fake, _events = _service()
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        await service.start_run(
+            session,
+            "say hello",
+            organization_id=org_id,
+            workspace_id=str(harness_workspace.id),
+            user_id=user_id,
+        )
+        await service._tasks[str(session.id)]
+    except SynchronousOnlyOperation:
+        pytest.fail("start_run resolved skill bodies from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assistant = [m for m in stored if m.role == "assistant"][0]
+    assert assistant.finish == "stop"
+    assert assistant.content == "hello"
+    assert captured
+    assert "Always use type hints." in captured[0][0]
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_generate_title_loads_org_provider_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
