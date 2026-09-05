@@ -11,7 +11,7 @@ from .base import (
     WorkspaceAccessor,
     sanitize_harness_path,
 )
-from .runner_accessor import RunnerWorkspaceAccessor
+from .runner_accessor import RunnerWorkspaceAccessor, create_harness_accessor
 
 __all__ = [
     "DirEntry",
@@ -21,5 +21,6 @@ __all__ = [
     "FileStat",
     "RunnerWorkspaceAccessor",
     "WorkspaceAccessor",
+    "create_harness_accessor",
     "sanitize_harness_path",
 ]

@@ -1430,5 +1430,40 @@ def _title_from_prompt(prompt: str) -> str:
     return title or "Harness session"
 
 
+_default_harness_service: HarnessService | None = None
+
+
+def create_default_harness_service() -> HarnessService:
+    """Build the production service with runner-backed workspace access.
+
+    REST and MCP both use :func:`get_harness_service` so abort, permissions,
+    and in-flight runs share one task registry.
+    """
+    from apps.runners.sio_server import get_runner_service
+
+    from .access.runner_accessor import create_harness_accessor
+
+    runner_service = get_runner_service()
+
+    async def accessor_factory(workspace_id: str) -> Any:
+        return await create_harness_accessor(runner_service, workspace_id)
+
+    return HarnessService(accessor_factory=accessor_factory)
+
+
+def get_harness_service() -> HarnessService:
+    """Return the process-wide HarnessService singleton."""
+    global _default_harness_service
+    if _default_harness_service is None:
+        _default_harness_service = create_default_harness_service()
+    return _default_harness_service
+
+
+def reset_default_harness_service() -> None:
+    """Drop the process singleton (tests)."""
+    global _default_harness_service
+    _default_harness_service = None
+
+
 #: Backwards-friendly alias used by tests for the double-run conflict.
 HarnessBusyError = ConflictError

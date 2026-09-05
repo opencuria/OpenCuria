@@ -29,7 +29,7 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     HarnessSessionRepository,
 )
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import ConflictError
 
 
 class FakeProvider(ProviderAdapter):
@@ -54,6 +54,27 @@ class FakeProvider(ProviderAdapter):
         step = self._steps.pop(0) if len(self._steps) > 1 else self._steps[0]
         for delta in step:
             yield delta
+
+
+def _tool_step(
+    tool: str,
+    args: dict[str, Any],
+    *,
+    call_id: str = "call-1",
+) -> list[Delta]:
+    return [
+        Delta(
+            tool_calls=(
+                {
+                    "index": 0,
+                    "id": call_id,
+                    "name": tool,
+                    "arguments": json.dumps(args),
+                },
+            ),
+            usage=Usage(2, 3, 5),
+        )
+    ]
 
 
 def _text_step(text: str) -> list[Delta]:
@@ -507,3 +528,79 @@ async def _db_create_session(harness_workspace):  # type: ignore[no-untyped-def]
         mode="build",
         model="fake-model",
     )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_uses_accessor_factory_for_list_tool(
+    harness_workspace,
+) -> None:
+    """Workspace tools run through the injected accessor, not MissingAccessor."""
+    from apps.harness.tests.conftest import FakeAccessor
+
+    fake_accessor = FakeAccessor(files={"/workspace/readme.txt": b"hi"})
+    wired: list[str] = []
+
+    async def factory(workspace_id: str):
+        wired.append(workspace_id)
+        return fake_accessor
+
+    provider = FakeProvider(
+        [
+            _tool_step("list", {"path": "/workspace"}),
+            _text_step("listed"),
+        ]
+    )
+    collected: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        collected.append({"event": event, **data})
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+        provider_factory=lambda _org: provider,
+        accessor_factory=factory,
+    )
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "list files",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    assert wired == [str(harness_workspace.id)]
+    parts = HarnessPartRepository.list_for_session(session.id)
+    tool_parts = [part for part in parts if part.type == "tool"]
+    assert len(tool_parts) == 1
+    assert tool_parts[0].state == "completed"
+    assert "readme.txt" in (tool_parts[0].output or "")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_without_accessor_factory_errors_list_tool(
+    harness_workspace,
+) -> None:
+    """Unwired production-style service fails workspace tools with a clear error."""
+    provider = FakeProvider(
+        [
+            _tool_step("list", {"path": "/workspace"}),
+            _text_step("handled"),
+        ]
+    )
+    service, _, _ = _service(provider=provider)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "list files",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+    parts = HarnessPartRepository.list_for_session(session.id)
+    tool_parts = [part for part in parts if part.type == "tool"]
+    assert tool_parts and tool_parts[0].state == "error"
+    assert "No workspace accessor configured" in (tool_parts[0].output or "")

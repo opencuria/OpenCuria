@@ -65,6 +65,11 @@ class TestWorkspaceRepository:
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.STOPPED
 
+    def test_get_runner_id(self, workspace, runner):
+        """Ownership lookup returns the runner UUID, or None if missing."""
+        assert WorkspaceRepository.get_runner_id(workspace.id) == runner.id
+        assert WorkspaceRepository.get_runner_id(uuid.uuid4()) is None
+
 
 @pytest.mark.django_db
 class TestTaskRepository:

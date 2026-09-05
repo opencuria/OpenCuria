@@ -51,33 +51,11 @@ def _get_service():  # type: ignore[no-untyped-def]
     return get_runner_service()
 
 
-def _get_harness_service():  # type: ignore[no-untyped-def]
-    """Return a process-wide HarnessService (lazy import, no cycles)."""
-    from apps.harness.harness_service import HarnessService
-
-    global _harness_service
-    try:
-        return _harness_service
-    except NameError:
-        _harness_service = HarnessService()
-        return _harness_service
-
-
-_harness_service = None  # type: ignore[assignment]
-try:
-    _harness_service
-except NameError:
-    _harness_service = None
-
-
 def _resolve_harness_service():  # type: ignore[no-untyped-def]
-    """Resolve the singleton, creating it on first use."""
-    global _harness_service
-    if _harness_service is None:
-        from apps.harness.harness_service import HarnessService
+    """Return the process-wide HarnessService (runner accessor wired)."""
+    from apps.harness.harness_service import get_harness_service
 
-        _harness_service = HarnessService()
-    return _harness_service
+    return get_harness_service()
 
 
 def _get_org_id(request: HttpRequest) -> uuid.UUID:

@@ -250,7 +250,7 @@ class ListTool(Tool):
         safe_path = sanitize_harness_path(args.path or ctx.directory)
         try:
             entries = await ctx.accessor.list_dir(safe_path)
-        except RunnerAccessorError as exc:
+        except (RunnerAccessorError, TimeoutError) as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         lines = [
             f"{'dir' if entry.is_dir else 'file'} {entry.name}" for entry in entries

@@ -224,6 +224,19 @@ class WorkspaceRepository:
         )
 
     @staticmethod
+    def get_runner_id(workspace_id: uuid.UUID) -> uuid.UUID | None:
+        """Return the owning runner id, or None when the workspace is missing.
+
+        Lightweight lookup for harness reply authorization — avoids the
+        related-object graph loaded by :meth:`get_by_id`.
+        """
+        return (
+            Workspace.objects.filter(id=workspace_id)
+            .values_list("runner_id", flat=True)
+            .first()
+        )
+
+    @staticmethod
     def list_all() -> QuerySet[Workspace]:
         """Return all workspaces."""
         return (

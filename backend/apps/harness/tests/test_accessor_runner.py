@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import threading
+import uuid
 
 import pytest
 
@@ -11,6 +13,7 @@ from apps.harness.access.base import ExecChunk
 from apps.harness.access.runner_accessor import (
     RunnerAccessorError,
     RunnerWorkspaceAccessor,
+    create_harness_accessor,
     route_harness_chunk,
     route_harness_done,
     route_harness_result,
@@ -231,3 +234,121 @@ async def test_unknown_request_id_returns_false() -> None:
     assert route_harness_result({"request_id": "nope"}) is False
     assert route_harness_chunk({"request_id": "nope"}) is False
     assert route_harness_done({"request_id": "nope"}) is False
+
+
+async def test_result_delivered_from_worker_thread() -> None:
+    """Replies arriving on a worker thread still resolve the waiter."""
+    transport = FakeTransport()
+    finished = threading.Event()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        def from_thread() -> None:
+            route_harness_result(
+                {
+                    "request_id": payload["request_id"],
+                    "workspace_id": "ws-1",
+                    "exit_code": 0,
+                    "stdout": "from-thread",
+                    "stderr": "",
+                }
+            )
+            finished.set()
+
+        threading.Thread(target=from_thread, daemon=True).start()
+
+    transport.auto_reply = auto_reply
+    result = await asyncio.wait_for(_accessor(transport).exec_wait(["echo"]), 2)
+    assert result.stdout == "from-thread"
+    assert finished.wait(timeout=2)
+
+
+class _RecordingRunnerService:
+    """Minimal runner service for create_harness_accessor tests."""
+
+    def __init__(self) -> None:
+        from apps.runners.repositories import WorkspaceRepository
+
+        self.workspaces = WorkspaceRepository
+        self.emitted: list[tuple[str, str, dict]] = []
+
+    async def emit_harness_event(self, runner, event, payload) -> None:  # type: ignore[no-untyped-def]
+        self.emitted.append((str(runner.sid), event, payload))
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": payload["workspace_id"],
+                "entries": [
+                    {
+                        "name": "a.txt",
+                        "path": "/workspace/a.txt",
+                        "is_dir": False,
+                        "size": 1,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_create_harness_accessor_lists_via_runner_rpc(harness_workspace) -> None:
+    """Factory-built accessors emit harness:list and return correlated entries."""
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    entries = await accessor.list_dir("/workspace")
+    assert entries[0].name == "a.txt"
+    assert service.emitted[0][0] == harness_workspace.runner.sid
+    assert service.emitted[0][1] == "harness:list"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_create_harness_accessor_uses_live_runner_sid(harness_workspace) -> None:
+    """Emit uses the runner SID from the DB, not a stale captured object."""
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    runner = harness_workspace.runner
+    runner.sid = "rotated-sid"
+    runner.save(update_fields=["sid"])
+    await accessor.list_dir("/workspace")
+    assert service.emitted[-1][0] == "rotated-sid"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_create_harness_accessor_rejects_offline_runner(
+    harness_workspace,
+) -> None:
+    """Factory raises when the owning runner is offline."""
+    from apps.runners.enums import RunnerStatus
+    from apps.runners.exceptions import RunnerOfflineError
+
+    runner = harness_workspace.runner
+    runner.status = RunnerStatus.OFFLINE
+    runner.sid = ""
+    runner.save(update_fields=["status", "sid"])
+    with pytest.raises(RunnerOfflineError):
+        await create_harness_accessor(
+            _RecordingRunnerService(), str(harness_workspace.id)
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_create_harness_accessor_rejects_unknown_workspace() -> None:
+    """Factory raises when the workspace id does not exist."""
+    from apps.runners.exceptions import WorkspaceNotFoundError
+
+    with pytest.raises(WorkspaceNotFoundError):
+        await create_harness_accessor(_RecordingRunnerService(), str(uuid.uuid4()))
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) -> None:
+    """A later emit surfaces a tool-level accessor error if the runner drops."""
+    from apps.runners.enums import RunnerStatus
+
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    runner = harness_workspace.runner
+    runner.status = RunnerStatus.OFFLINE
+    runner.sid = ""
+    runner.save(update_fields=["status", "sid"])
+    with pytest.raises(RunnerAccessorError, match="offline"):
+        await accessor.list_dir("/workspace")

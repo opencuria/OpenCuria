@@ -326,7 +326,9 @@ The backend follows **Clean Architecture** with strict separation of concerns:
    (`permissions/`), static agent/mode definitions (`agents/`), system-prompt
    composer (`prompts/`), agentic loop (`runner.py`), persistence
    (`HarnessSession`/`HarnessMessage`/`HarnessPart`/`Todo`/`PermissionRequest`).
-4. **Socket.IO Layer** (`sio_server.py`) — event handlers for runner WebSocket
+   Production REST and MCP share `get_harness_service()`, which wires
+   `RunnerWorkspaceAccessor` so tools reach the workspace via `harness:*` RPC.
+5. **Socket.IO Layer** (`sio_server.py`) — event handlers for runner WebSocket
    connections. Thin adapter that delegates to `RunnerService`.
 
 ### 5.3 Data Model (`apps/runners/models.py`)

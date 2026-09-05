@@ -1360,22 +1360,10 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _get_harness_service():
-    """Return the process-wide HarnessService singleton."""
-    from apps.harness.harness_service import HarnessService
+    """Return the process-wide HarnessService (shared with REST)."""
+    from apps.harness.harness_service import get_harness_service
 
-    global _harness_service_singleton
-    try:
-        return _harness_service_singleton
-    except NameError:
-        _harness_service_singleton = HarnessService()
-        return _harness_service_singleton
-
-
-_harness_service_singleton = None  # type: ignore[assignment]
-try:
-    _harness_service_singleton
-except NameError:
-    _harness_service_singleton = None
+    return get_harness_service()
 
 
 def _session_dict(session) -> dict:

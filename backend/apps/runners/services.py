@@ -2370,19 +2370,22 @@ class RunnerService:
         runner_id: str,
     ) -> bool:
         """Return True when *workspace_id* belongs to *runner_id* (sync)."""
-        from django.db import connection
-
         try:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT runner_id FROM runners_workspace WHERE id = %s",
-                    [str(workspace_id)],
-                )
-                row = cursor.fetchone()
-        except Exception:
-            logger.exception("harness reply workspace lookup failed")
+            claimed_runner_id = uuid.UUID(str(runner_id))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "harness reply rejected: invalid runner_id %s",
+                runner_id,
+            )
             return False
-        if row is None or str(row[0]) != runner_id:
+        owner_id = self.workspaces.get_runner_id(workspace_id)
+        if owner_id is None:
+            logger.warning(
+                "harness reply rejected: workspace %s not found",
+                workspace_id,
+            )
+            return False
+        if owner_id != claimed_runner_id:
             logger.warning(
                 "harness reply rejected: workspace %s not owned by %s",
                 workspace_id,

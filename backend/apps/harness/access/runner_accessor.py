@@ -147,6 +147,32 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self._default_timeout = default_timeout
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = (
+                asyncio.get_running_loop()
+            )
+        except RuntimeError:
+            self._loop = None
+
+    def _schedule(self, callback: Callable[..., None], *args: Any) -> None:
+        """Run *callback* on this accessor's loop (thread-safe).
+
+        Socket.IO replies arrive via ``sync_to_async`` worker threads.
+        ``Future.set_result`` / ``Queue.put_nowait`` must run on the loop
+        that owns the waiter.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            callback(*args)
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            callback(*args)
+            return
+        loop.call_soon_threadsafe(callback, *args)
 
     # -- reply routing (called from Socket.IO handlers) -------------------
 
@@ -157,7 +183,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         if future is None or future.done():
             log.warning("harness_result_no_pending", request_id=request_id)
             return
-        future.set_result(data)
+        self._schedule(_resolve_future, future, data)
 
     def _deliver_chunk(self, data: dict[str, Any]) -> None:
         """Push a stream chunk into the queue for *data*."""
@@ -166,12 +192,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         if queue is None:
             log.warning("harness_chunk_no_stream", request_id=request_id)
             return
-        queue.put_nowait(
+        self._schedule(
+            queue.put_nowait,
             {
                 "type": "chunk",
                 "stream": str(data.get("stream", "stdout")),
                 "data": str(data.get("data", "")),
-            }
+            },
         )
 
     def _deliver_done(self, data: dict[str, Any]) -> None:
@@ -181,7 +208,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         if queue is None:
             log.warning("harness_done_no_stream", request_id=request_id)
             return
-        queue.put_nowait({"type": "done", "payload": data})
+        self._schedule(queue.put_nowait, {"type": "done", "payload": data})
 
     # -- internals --------------------------------------------------------
 
@@ -483,6 +510,14 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         )
 
 
+def _resolve_future(
+    future: asyncio.Future[dict[str, Any]], data: dict[str, Any]
+) -> None:
+    """Set *future* result if it is still waiting."""
+    if not future.done():
+        future.set_result(data)
+
+
 async def create_harness_accessor(
     service: Any,
     workspace_id: str,
@@ -514,11 +549,27 @@ async def create_harness_accessor(
     if workspace is None:
         raise WorkspaceNotFoundError(workspace_id)
     runner = workspace.runner
-    if not runner.is_online:
+    if not runner.is_online or not runner.sid:
         raise RunnerOfflineError(str(runner.id))
 
     async def _emit(event: str, payload: dict[str, Any]) -> None:
-        await service.emit_harness_event(runner, event, payload)
+        """Emit *event* to the workspace's current runner SID."""
+        current = await sync_to_async(service.workspaces.get_by_id)(
+            _uuid.UUID(workspace_id)
+        )
+        if current is None:
+            raise RunnerAccessorError(
+                f"{event} failed: workspace {workspace_id} not found"
+            )
+        live_runner = current.runner
+        if not live_runner.is_online or not live_runner.sid:
+            raise RunnerAccessorError(
+                f"{event} failed: runner {live_runner.id} is offline"
+            )
+        try:
+            await service.emit_harness_event(live_runner, event, payload)
+        except RunnerOfflineError as exc:
+            raise RunnerAccessorError(f"{event} failed: {exc}") from exc
 
     return RunnerWorkspaceAccessor(
         workspace_id,

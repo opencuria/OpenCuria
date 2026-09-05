@@ -1927,3 +1927,112 @@ class TestDispatchPendingImageBuilds:
         """When there are no pending builds, return an empty list."""
         dispatched = await service.dispatch_pending_image_builds(runner)
         assert dispatched == []
+
+
+@pytest.mark.django_db
+class TestHarnessReplyRouting:
+    def test_owner_reply_is_routed(self, service, runner, workspace, monkeypatch):
+        """Replies from the workspace owner reach the harness accessor."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+        payload = {
+            "request_id": "req-owner",
+            "workspace_id": str(workspace.id),
+            "content": "agents",
+        }
+
+        service.handle_harness_reply(
+            "harness:read_file_result",
+            payload,
+            runner_id=str(runner.id),
+        )
+
+        assert routed == [payload]
+
+    def test_owner_reply_accepts_hex_runner_id(
+        self, service, runner, workspace, monkeypatch
+    ):
+        """UUID comparison must not depend on hyphenated vs hex formatting."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+        payload = {
+            "request_id": "req-hex",
+            "workspace_id": workspace.id.hex,
+        }
+
+        service.handle_harness_reply(
+            "harness:read_file_result",
+            payload,
+            runner_id=runner.id.hex,
+        )
+
+        assert routed == [payload]
+
+    def test_foreign_runner_reply_is_dropped(
+        self, service, workspace, offline_runner, monkeypatch
+    ):
+        """Replies from a runner that does not own the workspace are dropped."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+
+        service.handle_harness_reply(
+            "harness:read_file_result",
+            {
+                "request_id": "req-foreign",
+                "workspace_id": str(workspace.id),
+            },
+            runner_id=str(offline_runner.id),
+        )
+
+        assert routed == []
+
+    def test_unknown_workspace_reply_is_dropped(
+        self, service, runner, monkeypatch
+    ):
+        """Replies for a workspace that is not in the database are dropped."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+
+        service.handle_harness_reply(
+            "harness:read_file_result",
+            {
+                "request_id": "req-missing",
+                "workspace_id": str(uuid.uuid4()),
+            },
+            runner_id=str(runner.id),
+        )
+
+        assert routed == []
+
+    def test_invalid_runner_id_reply_is_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        """Malformed runner ids must not be treated as a valid owner."""
+        routed: list[dict] = []
+        monkeypatch.setattr(
+            "apps.harness.access.runner_accessor.route_harness_result",
+            lambda data: routed.append(data) or True,
+        )
+
+        service.handle_harness_reply(
+            "harness:read_file_result",
+            {
+                "request_id": "req-bad-runner",
+                "workspace_id": str(workspace.id),
+            },
+            runner_id="not-a-uuid",
+        )
+
+        assert routed == []

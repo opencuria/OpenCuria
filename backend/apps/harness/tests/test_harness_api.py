@@ -529,3 +529,22 @@ def test_permission_resolve_needs_permission_key(harness_setup, fake_harness_ser
         content_type="application/json",
     )
     assert response.status_code == 403
+
+
+@pytest.mark.django_db(transaction=True)
+def test_production_harness_service_wires_runner_accessor():
+    """REST and MCP share a singleton whose accessor talks to the runner."""
+    from apps.harness.harness_service import (
+        get_harness_service,
+        reset_default_harness_service,
+    )
+    from apps.mcp_app import server as mcp_server
+
+    reset_default_harness_service()
+    try:
+        service = harness_api._resolve_harness_service()
+        assert callable(service._accessor_factory)
+        assert mcp_server._get_harness_service() is service
+        assert get_harness_service() is service
+    finally:
+        reset_default_harness_service()
