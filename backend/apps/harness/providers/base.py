@@ -35,11 +35,21 @@ class ToolSchema:
 
 @dataclass(frozen=True)
 class Usage:
-    """Token usage reported by the provider."""
+    """Token usage and billed cost reported by the provider."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cost: float = 0.0
+
+    def merge(self, other: Usage) -> Usage:
+        """Return a new usage with token counts and cost added together."""
+        return Usage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+            cost=self.cost + other.cost,
+        )
 
 
 @dataclass(frozen=True)

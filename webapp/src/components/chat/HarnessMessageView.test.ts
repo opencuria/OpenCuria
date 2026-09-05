@@ -123,4 +123,55 @@ describe('HarnessMessageView', () => {
 
     expect(wrapper.text()).toContain('Agent is thinking')
   })
+
+  it('does not render step-finish markers', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'Hello' }),
+          makePart({
+            id: 'step-1',
+            type: 'step-finish',
+            title: 'Step 1 finished',
+            meta: { step: 1, cost: 0.01, tokens: { prompt_tokens: 10, completion_tokens: 4 } },
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.text()).not.toContain('Step 1 finished')
+    expect(wrapper.find('[data-block-kind="step"]').exists()).toBe(false)
+  })
+
+  it('shows a hover usage footer on finished answers', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: {
+          ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Done' })]),
+          cost: 0.0123,
+          tokens: { prompt: 1204, completion: 318, total: 1522 },
+        },
+      },
+    })
+
+    const footer = wrapper.get('[data-testid="harness-message-usage"]')
+    expect(footer.text()).toBe('$0.0123 · 1,204 in · 318 out')
+    expect(footer.classes()).toContain('opacity-0')
+    expect(footer.classes()).toContain('group-hover:opacity-100')
+  })
+
+  it('hides the usage footer while streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: {
+          ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Done' })]),
+          cost: 0.01,
+          tokens: { prompt: 10, completion: 4, total: 14 },
+        },
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-message-usage"]').exists()).toBe(false)
+  })
 })

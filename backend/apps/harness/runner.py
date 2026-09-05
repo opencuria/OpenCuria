@@ -463,13 +463,8 @@ class HarnessRunner:
             text, calls, usage = await self._provider_step(
                 model=model, messages=messages, schemas=schemas, step=step
             )
-            total_usage = Usage(
-                prompt_tokens=total_usage.prompt_tokens + usage.prompt_tokens,
-                completion_tokens=(
-                    total_usage.completion_tokens + usage.completion_tokens
-                ),
-                total_tokens=total_usage.total_tokens + usage.total_tokens,
-            )
+            total_usage = total_usage.merge(usage)
+            total_cost = total_usage.cost
             await self._send(
                 {
                     "type": "step_finish",
@@ -479,7 +474,7 @@ class HarnessRunner:
                         "completion_tokens": usage.completion_tokens,
                         "total_tokens": usage.total_tokens,
                     },
-                    "cost": 0.0,
+                    "cost": usage.cost,
                 }
             )
             if not calls:
@@ -721,12 +716,7 @@ class HarnessRunner:
             model, messages, schemas, self.chat_options
         ):
             if delta.usage is not None:
-                usage = Usage(
-                    prompt_tokens=usage.prompt_tokens + delta.usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens
-                    + delta.usage.completion_tokens,
-                    total_tokens=usage.total_tokens + delta.usage.total_tokens,
-                )
+                usage = usage.merge(delta.usage)
             if delta.text:
                 text_parts.append(delta.text)
                 await self._send(

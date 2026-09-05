@@ -257,6 +257,7 @@ class OpenRouterAdapter(ProviderAdapter):
                 prompt_tokens=int(raw_usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(raw_usage.get("completion_tokens", 0) or 0),
                 total_tokens=int(raw_usage.get("total_tokens", 0) or 0),
+                cost=float(raw_usage.get("cost", 0.0) or 0.0),
             )
 
         choices = chunk.get("choices", [])

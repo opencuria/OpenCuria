@@ -140,6 +140,9 @@ async def test_start_run_persists_messages_parts_and_history(
     assistant.refresh_from_db()
     assert assistant.content == "hello"
     assert assistant.finish == "stop"
+    assert assistant.tokens.get("total") == 2
+    assert assistant.tokens.get("prompt") == 1
+    assert assistant.tokens.get("completion") == 1
 
     parts = HarnessPartRepository.list_for_session(session.id)
     assert any(p.type == "text" and "hello" in (p.output or "") for p in parts)
@@ -148,6 +151,7 @@ async def test_start_run_persists_messages_parts_and_history(
     session.refresh_from_db()
     assert session.status == "idle"
     assert session.tokens.get("total") == 2
+    assert session.tokens.get("total") == assistant.tokens.get("total")
 
     emitted = [e["event"] for e in events]
     assert "harness.part_updated" in emitted

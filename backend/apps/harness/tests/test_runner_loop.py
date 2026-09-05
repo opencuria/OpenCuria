@@ -56,7 +56,7 @@ class FakeProvider(ProviderAdapter):
 
 
 def _text_step(text: str, usage: Usage | None = None) -> list[Delta]:
-    return [Delta(text=text, usage=usage or Usage(1, 1, 2))]
+    return [Delta(text=text, usage=usage or Usage(1, 1, 2, 0.002))]
 
 
 def _tool_step(
@@ -77,7 +77,7 @@ def _tool_step(
                     "arguments": json.dumps(args),
                 },
             ),
-            usage=Usage(2, 3, 5),
+            usage=Usage(2, 3, 5, 0.01),
         )
     ]
 
@@ -132,6 +132,12 @@ async def test_multi_step_tool_then_tool_then_text() -> None:
     assert result.usage.prompt_tokens == 5
     assert result.usage.completion_tokens == 7
     assert len(provider.calls) == 3
+
+
+def test_usage_merge_adds_tokens_and_cost() -> None:
+    """Usage.merge sums token counts and billed cost."""
+    merged = Usage(1, 2, 3, 0.01).merge(Usage(4, 5, 9, 0.002))
+    assert merged == Usage(5, 7, 12, 0.012)
 
 
 async def test_streaming_deltas_emitted() -> None:
@@ -315,7 +321,7 @@ async def test_cost_tokens_summed_across_steps() -> None:
     provider = FakeProvider(
         [
             _tool_step("read", {"path": "a.txt"}, call_id="c1"),
-            _text_step("b", usage=Usage(7, 8, 15)),
+            _text_step("b", usage=Usage(7, 8, 15, 0.002)),
         ]
     )
     # First step carries usage(2,3,5); second carries usage(7,8,15).
@@ -326,6 +332,10 @@ async def test_cost_tokens_summed_across_steps() -> None:
     assert result.usage.prompt_tokens == 9
     assert result.usage.completion_tokens == 11
     assert result.usage.total_tokens == 20
+    assert result.usage.cost == pytest.approx(0.012)
+    assert result.cost == pytest.approx(0.012)
+    finishes = [event for event in events if event["type"] == "step_finish"]
+    assert [event["cost"] for event in finishes] == [pytest.approx(0.01), pytest.approx(0.002)]
 
 
 async def test_tool_error_fed_back_as_tool_message() -> None:

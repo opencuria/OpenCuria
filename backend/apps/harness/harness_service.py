@@ -736,13 +736,8 @@ class HarnessService:
                     await sync_to_async(self.messages.append_content)(
                         assistant, remainder
                     )
-            await sync_to_async(self.messages.add_usage)(
-                assistant,
-                prompt_tokens=result.usage.prompt_tokens,
-                completion_tokens=result.usage.completion_tokens,
-                total_tokens=result.usage.total_tokens,
-                cost=result.cost,
-            )
+            # Message usage is accumulated per step_finish so abort still
+            # keeps completed steps. Session usage is applied once here.
             await sync_to_async(self.sessions.add_usage)(
                 session,
                 prompt_tokens=result.usage.prompt_tokens,
@@ -919,6 +914,7 @@ class HarnessService:
                 prompt_tokens=int(tokens.get("prompt_tokens", 0)),
                 completion_tokens=int(tokens.get("completion_tokens", 0)),
                 total_tokens=int(tokens.get("total_tokens", 0)),
+                cost=float(event.get("cost", 0.0) or 0.0),
             )
             await sync_to_async(self.messages.add_usage)(
                 assistant,
@@ -942,7 +938,11 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
-                    "delta": {"step_finish": event.get("step")},
+                    "delta": {
+                        "step_finish": event.get("step"),
+                        "cost": event.get("cost", 0.0),
+                        "tokens": tokens,
+                    },
                     "step": event.get("step"),
                     "part_id": str(part.id),
                 },

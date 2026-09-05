@@ -173,6 +173,8 @@ export interface HarnessPartDelta {
   reasoning?: string
   step_start?: number
   step_finish?: number
+  cost?: number
+  tokens?: Record<string, number>
   tool_started?: string
   tool_completed?: string
   tool_error?: string

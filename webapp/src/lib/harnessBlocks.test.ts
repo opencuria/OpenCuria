@@ -58,7 +58,7 @@ describe('buildRenderBlocks', () => {
     }
   })
 
-  it('does not count step-finish toward the group threshold', () => {
+  it('skips step-finish and still renders a single work item', () => {
     const parts = [
       makePart('tool', { id: 'tool-1', tool: 'read' }),
       makePart('step-finish', { id: 'step-1', title: 'Step 1 finished' }),
@@ -66,12 +66,11 @@ describe('buildRenderBlocks', () => {
 
     const blocks = buildRenderBlocks(parts)
 
-    expect(blocks.map((block) => block.kind)).toEqual(['single', 'step'])
+    expect(blocks.map((block) => block.kind)).toEqual(['single'])
     expect(blocks[0]).toMatchObject({ kind: 'single', part: { id: 'tool-1' } })
-    expect(blocks[1]).toMatchObject({ kind: 'step', part: { id: 'step-1' } })
   })
 
-  it('keeps step-finish inside a group of two work items', () => {
+  it('skips step-finish inside a group of two work items', () => {
     const parts = [
       makePart('tool', { id: 'tool-1', tool: 'read' }),
       makePart('step-finish', { id: 'step-1' }),
@@ -83,11 +82,7 @@ describe('buildRenderBlocks', () => {
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.kind).toBe('group')
     if (blocks[0]?.kind === 'group') {
-      expect(blocks[0].parts.map((part) => part.id)).toEqual([
-        'tool-1',
-        'step-1',
-        'tool-2',
-      ])
+      expect(blocks[0].parts.map((part) => part.id)).toEqual(['tool-1', 'tool-2'])
     }
   })
 
@@ -127,12 +122,10 @@ describe('buildRenderBlocks', () => {
     expect(blocks[3]).toMatchObject({ kind: 'card', part: { id: 'patch-1' } })
   })
 
-  it('emits a standalone step-finish outside a work run', () => {
+  it('does not emit a standalone step-finish', () => {
     const parts = [makePart('step-finish', { id: 'step-1' })]
 
-    expect(buildRenderBlocks(parts)).toEqual([
-      { kind: 'step', part: parts[0] },
-    ])
+    expect(buildRenderBlocks(parts)).toEqual([])
   })
 
   it('skips empty text parts', () => {

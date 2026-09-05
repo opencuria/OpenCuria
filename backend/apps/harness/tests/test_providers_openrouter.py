@@ -85,6 +85,7 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
                     "total_tokens": 15,
+                    "cost": 0.0123,
                 },
             },
         ]
@@ -108,6 +109,7 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:
     usages = [d.usage for d in deltas if d.usage is not None]
     assert usages and usages[-1].total_tokens == 15
     assert usages[-1].prompt_tokens == 10
+    assert usages[-1].cost == pytest.approx(0.0123)
     assert deltas[-1].finish_reason == "tool_calls"
 
 

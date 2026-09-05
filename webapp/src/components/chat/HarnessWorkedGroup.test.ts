@@ -90,4 +90,25 @@ describe('HarnessWorkedGroup', () => {
     expect(rows).toHaveLength(2)
     expect(wrapper.find('.loading-stub').exists()).toBe(true)
   })
+
+  it('does not render step-finish rows inside the group', async () => {
+    const wrapper = mount(HarnessWorkedGroup, {
+      props: {
+        parts: [
+          makePart({ id: 'tool-1', title: 'Read index.ts' }),
+          makePart({
+            id: 'step-1',
+            type: 'step-finish',
+            title: 'Step 1 finished',
+            tool: undefined,
+          }),
+          makePart({ id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+        ],
+      },
+    })
+
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(wrapper.text()).not.toContain('Step 1 finished')
+    expect(wrapper.findAll('[data-testid="harness-work-row"]')).toHaveLength(2)
+  })
 })

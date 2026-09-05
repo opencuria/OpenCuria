@@ -4,10 +4,10 @@ import { User } from '@lucide/vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
+import { formatMessageUsage, resolveMessageUsage } from '@/lib/harnessUsage'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
-import HarnessStepFinish from './HarnessStepFinish.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import HarnessPatchCard from './HarnessPatchCard.vue'
 
@@ -26,6 +26,11 @@ const blocks = computed(() => buildRenderBlocks(props.message.parts))
 const lastBlockIsText = computed(() => {
   const last = blocks.value[blocks.value.length - 1]
   return last?.kind === 'text'
+})
+
+const usageLine = computed(() => {
+  if (props.streaming || props.message.role !== 'assistant') return null
+  return formatMessageUsage(resolveMessageUsage(props.message))
 })
 
 function childIdFor(part: HarnessPart): string | null {
@@ -61,7 +66,7 @@ function blockKey(index: number): string {
   </div>
 
   <!-- Assistant message: chronological blocks in left prose shell -->
-  <div v-else class="flex items-start gap-3">
+  <div v-else class="group flex items-start gap-3">
     <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
       <div
         v-if="streaming && blocks.length === 0"
@@ -97,13 +102,6 @@ function blockKey(index: number): string {
             <HarnessWorkedGroup :parts="block.parts" />
           </div>
           <div
-            v-else-if="block.kind === 'step'"
-            :data-block-kind="'step'"
-            :data-part-id="block.part.id"
-          >
-            <HarnessStepFinish :part="block.part" />
-          </div>
-          <div
             v-else-if="block.kind === 'card'"
             :data-block-kind="'card'"
             :data-part-id="block.part.id"
@@ -127,6 +125,13 @@ function blockKey(index: number): string {
           </div>
         </template>
       </div>
+      <p
+        v-if="usageLine"
+        data-testid="harness-message-usage"
+        class="mt-1 h-4 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+      >
+        {{ usageLine }}
+      </p>
       <p v-if="message.error" class="mt-2 text-xs text-destructive">{{ message.error }}</p>
     </div>
   </div>

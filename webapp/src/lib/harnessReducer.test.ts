@@ -80,6 +80,24 @@ describe('harnessReducer', () => {
     expect(failed?.output).toBe('boom')
   })
 
+  it('stores cost and tokens on step-finish parts', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(messages, 'session-1', {
+      step_finish: 1,
+      cost: 0.0123,
+      tokens: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    })
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const finish = assistant.parts.find((part) => part.type === 'step-finish')
+    expect(finish?.meta).toMatchObject({
+      step: 1,
+      cost: 0.0123,
+      tokens: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    })
+  })
+
   it('replaces the todo list on todo_updated', () => {
     const next = applyTodoUpdate(
       [{ id: 'old', content: 'old', status: 'pending', priority: 'medium', order: 0 }],

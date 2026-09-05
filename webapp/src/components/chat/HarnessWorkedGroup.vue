@@ -9,7 +9,6 @@ import { ChevronDown } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { countWorkItems, isWorkItem } from '@/lib/harnessBlocks'
 import HarnessWorkRow from './HarnessWorkRow.vue'
-import HarnessStepFinish from './HarnessStepFinish.vue'
 
 const props = defineProps<{
   parts: HarnessPart[]
@@ -53,9 +52,6 @@ const workCount = computed(() => countWorkItems(props.parts))
           :part="part"
           grouped
         />
-        <div v-else-if="part.type === 'step-finish'" class="py-0.5">
-          <HarnessStepFinish :part="part" />
-        </div>
       </template>
     </CollapsibleContent>
   </Collapsible>
