@@ -47,6 +47,11 @@ class DummyService:
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
 
+    async def inject_credentials(self, workspace_id, **kwargs):
+        return bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
+        )
+
 
 class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_prompt_handler_is_gone(self) -> None:
@@ -352,6 +357,55 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         forwarded = service.create_workspace_calls[0]
         self.assertEqual(forwarded["env_vars"], payload["env_vars"])
         self.assertEqual(forwarded["ssh_keys"], payload["ssh_keys"])
+
+
+class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inject_credentials_acks_presence_and_emits_event(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        task_id = "inject-task-1"
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:inject_credentials"]
+        result = await handler(
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "env_vars": {"GITHUB_TOKEN": "secret"},
+                "files": [],
+                "ssh_keys": [],
+            }
+        )
+
+        self.assertEqual(result, {"ok": True, "credentials_present": True})
+        interface._sio.emit.assert_awaited_with(
+            "workspace:credentials_injected",
+            {
+                "task_id": task_id,
+                "workspace_id": str(workspace_id),
+                "credentials_present": True,
+            },
+        )
+
+    async def test_inject_credentials_empty_set_acks_absent(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.emit = AsyncMock()
+        workspace_id = uuid.uuid4()
+
+        handler = interface._sio.handlers["/"]["task:inject_credentials"]
+        result = await handler(
+            {
+                "task_id": "inject-task-empty",
+                "workspace_id": str(workspace_id),
+                "env_vars": {},
+                "files": [],
+                "ssh_keys": [],
+            }
+        )
+
+        self.assertEqual(result, {"ok": True, "credentials_present": False})
 
 
 if __name__ == "__main__":

@@ -8,6 +8,25 @@ import {
   RuntimeType,
   type Workspace,
 } from '@/types'
+import * as workspacesApi from '@/services/workspaces.api'
+import { toast } from 'vue-sonner'
+
+vi.mock('vue-sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}))
+
+vi.mock('@/services/workspaces.api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/workspaces.api')>()
+  return {
+    ...actual,
+    updateWorkspace: vi.fn(),
+  }
+})
 
 
 
@@ -89,5 +108,72 @@ describe('workspace transition state', () => {
     ])
     expect(store.isWorkspaceTransitioning('workspace-remove')).toBe(true)
   })
+})
 
+describe('workspace credential updates', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('applies credentials_present from PATCH and toasts a live apply on running workspaces', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ credential_ids: [], credentials_present: false })]
+    vi.mocked(workspacesApi.updateWorkspace).mockResolvedValue({
+      id: 'workspace-1',
+      name: 'Workspace',
+      updated_at: '2026-03-29T11:00:00.000Z',
+      active_operation: null,
+      credential_ids: ['cred-1'],
+      credentials_present: true,
+      qemu_vcpus: null,
+      qemu_memory_mb: null,
+      qemu_disk_size_gb: null,
+    })
+
+    const success = await store.updateWorkspace('workspace-1', {
+      credential_ids: ['cred-1'],
+    })
+
+    expect(success).toBe(true)
+    expect(store.workspaces[0].credential_ids).toEqual(['cred-1'])
+    expect(store.workspaces[0].credentials_present).toBe(true)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Credentials updated',
+      expect.objectContaining({
+        description: 'Secrets were applied to the running workspace.',
+      }),
+    )
+  })
+
+  it('toasts a deferred apply when credentials change on a stopped workspace', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [
+      makeWorkspace({
+        status: WorkspaceStatus.STOPPED,
+        credential_ids: ['cred-1'],
+        credentials_present: false,
+      }),
+    ]
+    vi.mocked(workspacesApi.updateWorkspace).mockResolvedValue({
+      id: 'workspace-1',
+      name: 'Workspace',
+      updated_at: '2026-03-29T11:00:00.000Z',
+      active_operation: null,
+      credential_ids: [],
+      credentials_present: false,
+      qemu_vcpus: null,
+      qemu_memory_mb: null,
+      qemu_disk_size_gb: null,
+    })
+
+    await store.updateWorkspace('workspace-1', { credential_ids: [] })
+
+    expect(toast.success).toHaveBeenCalledWith(
+      'Workspace updated',
+      expect.objectContaining({
+        description: 'Credentials will be applied the next time the workspace starts.',
+      }),
+    )
+  })
 })

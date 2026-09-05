@@ -649,7 +649,7 @@ class WebSocketInterface(Interface):
                 log.exception("update_workspace_failed")
 
         @sio.on("task:inject_credentials")
-        async def on_inject_credentials(data: dict) -> None:
+        async def on_inject_credentials(data: dict) -> dict:
             task_id = data.get("task_id", str(uuid.uuid4()))
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
@@ -672,12 +672,17 @@ class WebSocketInterface(Interface):
                     "workspace_credentials_injected",
                     credentials_present=credentials_present,
                 )
+                return {
+                    "ok": True,
+                    "credentials_present": credentials_present,
+                }
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
                     {"task_id": task_id, "error": str(exc)},
                 )
                 log.exception("inject_credentials_failed")
+                return {"ok": False, "error": str(exc)}
 
         @sio.on("task:remove_workspace")
         async def on_remove_workspace(data: dict) -> None:

@@ -301,6 +301,9 @@ class WorkspaceRepository:
         """Replace the credentials attached to a workspace."""
         workspace.credentials.set(credentials)
         workspace.save(update_fields=["updated_at"])
+        cache = getattr(workspace, "_prefetched_objects_cache", None)
+        if cache is not None:
+            cache.pop("credentials", None)
         return workspace
 
     @staticmethod

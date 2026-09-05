@@ -887,10 +887,12 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
             return
 
-        await sync_to_async(service.handle_heartbeat)(
+        credential_sync_ids = await sync_to_async(service.handle_heartbeat)(
             runner=runner,
             workspaces=data.get("workspaces", []),
         )
+        if credential_sync_ids:
+            await service.dispatch_credential_reconcile(credential_sync_ids)
 
 
 def _extract_bearer_token(environ: dict) -> str | None:

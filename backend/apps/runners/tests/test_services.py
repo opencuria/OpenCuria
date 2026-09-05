@@ -14,7 +14,11 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.credentials.models import CredentialService
-from apps.credentials.services import CredentialSvc, ResolvedCredentialFile
+from apps.credentials.services import (
+    CredentialSvc,
+    ResolvedCredentialFile,
+    ResolvedCredentials,
+)
 from apps.runners.enums import (
     RunnerStatus,
     TaskStatus,
@@ -2672,3 +2676,307 @@ class TestPersistentWorkspaceCredentials:
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:resume_workspace"
         assert payload["env_vars"]["GITHUB_TOKEN"] == "resume-token"
+
+    @staticmethod
+    def _org_env_credential(runner, user, *, name: str, env_var: str, value: str):
+        credential_service = CredentialService.objects.create(
+            name=name,
+            slug=f"{env_var.lower()}-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name=env_var,
+            label=name,
+        )
+        return CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name=name,
+            value=value,
+            user=user,
+        )
+
+    @pytest.mark.asyncio
+    async def test_running_add_dispatches_credential_inject(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        env_cred = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="live-token",
+        )
+        file_service = CredentialService.objects.create(
+            name="Codex Auth",
+            slug=f"codex-{uuid.uuid4().hex[:6]}",
+            credential_type="file",
+            target_path="~/.codex/auth.json",
+            label="Codex",
+        )
+        file_cred = CredentialSvc().create_org_credential(
+            organization_id=workspace.runner.organization_id,
+            service_id=file_service.id,
+            name="Codex Auth",
+            value='{"access_token":"abc"}',
+            user=user,
+        )
+        ssh_service = CredentialService.objects.create(
+            name="Deploy Key",
+            slug=f"ssh-{uuid.uuid4().hex[:6]}",
+            credential_type="ssh_key",
+            label="SSH",
+        )
+        ssh_cred = CredentialSvc().create_org_credential(
+            organization_id=workspace.runner.organization_id,
+            service_id=ssh_service.id,
+            name="Deploy Key",
+            value=None,
+            user=user,
+        )
+        resolved = CredentialSvc()._build_resolved_credentials(
+            [env_cred, file_cred, ssh_cred]
+        )
+
+        updated = await service.update_workspace(
+            workspace.id,
+            resolved_credentials=resolved,
+        )
+
+        assert updated is not None
+        assert updated.credentials_present is True
+        assert set(updated.credentials.values_list("id", flat=True)) == {
+            env_cred.id,
+            file_cred.id,
+            ssh_cred.id,
+        }
+        event, payload = sio_mock.call.await_args.args[:2]
+        assert event == "task:inject_credentials"
+        assert payload["env_vars"]["GITHUB_TOKEN"] == "live-token"
+        assert payload["files"][0]["target_path"] == "~/.codex/auth.json"
+        assert payload["files"][0]["content"] == '{"access_token":"abc"}'
+        assert payload["ssh_keys"]
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_running_remove_dispatches_empty_inject(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="remove-me",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        updated = await service.update_workspace(
+            workspace.id,
+            resolved_credentials=ResolvedCredentials(),
+        )
+
+        assert list(updated.credentials.values_list("id", flat=True)) == []
+        assert updated.credentials_present is False
+        event, payload = sio_mock.call.await_args.args[:2]
+        assert event == "task:inject_credentials"
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    async def test_running_replace_injects_new_set_not_old(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        old_cred = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Old Token",
+            env_var="OLD_TOKEN",
+            value="old-secret",
+        )
+        new_cred = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New Token",
+            env_var="NEW_TOKEN",
+            value="new-secret",
+        )
+        workspace.credentials.add(old_cred)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+        resolved = CredentialSvc()._build_resolved_credentials([new_cred])
+
+        await service.update_workspace(
+            workspace.id,
+            resolved_credentials=resolved,
+        )
+
+        event, payload = sio_mock.call.await_args.args[:2]
+        assert event == "task:inject_credentials"
+        assert payload["env_vars"] == {"NEW_TOKEN": "new-secret"}
+        assert "OLD_TOKEN" not in payload["env_vars"]
+
+    @pytest.mark.asyncio
+    async def test_stopped_change_updates_m2m_without_inject(
+        self, service, sio_mock, stopped_workspace, user
+    ):
+        credential = self._org_env_credential(
+            stopped_workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="stopped-token",
+        )
+        resolved = CredentialSvc()._build_resolved_credentials([credential])
+
+        updated = await service.update_workspace(
+            stopped_workspace.id,
+            resolved_credentials=resolved,
+        )
+
+        assert list(updated.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        sio_mock.call.assert_not_awaited()
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_offline_running_change_rejects_without_m2m_update(
+        self, service, offline_runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        credential = self._org_env_credential(
+            offline_runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="offline-token",
+        )
+        resolved = CredentialSvc()._build_resolved_credentials([credential])
+
+        with pytest.raises(RunnerOfflineError):
+            await service.update_workspace(
+                workspace.id,
+                resolved_credentials=resolved,
+            )
+
+        workspace.refresh_from_db()
+        assert list(workspace.credentials.values_list("id", flat=True)) == []
+
+    @pytest.mark.asyncio
+    async def test_name_only_same_credentials_skips_inject(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="same-token",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+        resolved = CredentialSvc()._build_resolved_credentials([credential])
+
+        await service.update_workspace(
+            workspace.id,
+            name="Renamed Workspace",
+            resolved_credentials=resolved,
+        )
+
+        sio_mock.call.assert_not_awaited()
+        sio_mock.emit.assert_not_called()
+        workspace.refresh_from_db()
+        assert workspace.name == "Renamed Workspace"
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+
+    def test_heartbeat_requests_inject_when_attached_but_not_present(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="heartbeat-token",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        sync_ids = service.handle_heartbeat(
+            runner=workspace.runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        assert workspace.id in sync_ids
+        assert not Task.objects.filter(
+            workspace=workspace,
+            type=TaskType.INJECT_CREDENTIALS,
+        ).exists()
+        sio_mock.emit.assert_not_called()
+
+    def test_heartbeat_requests_strip_when_present_but_unattached(
+        self, service, sio_mock, workspace
+    ):
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        sync_ids = service.handle_heartbeat(
+            runner=workspace.runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        assert workspace.id in sync_ids
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_credential_reconcile_emits_inject(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="GitHub Token",
+            env_var="GITHUB_TOKEN",
+            value="reconcile-token",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        await service.dispatch_credential_reconcile([workspace.id])
+
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "task:inject_credentials"
+        assert payload["env_vars"]["GITHUB_TOKEN"] == "reconcile-token"

@@ -113,6 +113,27 @@ async def test_inject_workspace_credentials_materializes_file_credentials() -> N
 
 
 @pytest.mark.asyncio
+async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
+    runtime = Mock()
+    runtime.exec_command_wait = AsyncMock(return_value=(0, ""))
+    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service.remove_workspace_credentials = AsyncMock()
+
+    present = await service.inject_workspace_credentials(
+        runtime,
+        "instance-1",
+        {},
+        [],
+        [],
+        log=Mock(),
+    )
+
+    assert present is False
+    service.remove_workspace_credentials.assert_awaited_once()
+    runtime.exec_command_wait.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stop_workspace_removes_credentials_before_runtime_stop() -> None:
     runtime = Mock()
     runtime.stop_workspace = AsyncMock()

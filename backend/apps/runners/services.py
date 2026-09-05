@@ -22,7 +22,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
-from apps.credentials.services import CredentialSvc
+from apps.credentials.services import CredentialSvc, ResolvedCredentials
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_uuid, hash_token, verify_token
 
@@ -52,6 +52,8 @@ from .repositories import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CREDENTIAL_INJECT_TIMEOUT_SECONDS = 30
 
 
 class RunnerService:
@@ -446,18 +448,44 @@ class RunnerService:
             "ssh_keys": list(getattr(resolved, "ssh_keys", None) or []),
         }
 
-    async def _dispatch_credential_inject(self, workspace: "Workspace") -> None:
-        """Replace persisted credentials on a running workspace."""
+    async def _dispatch_credential_inject(
+        self,
+        workspace: "Workspace",
+        *,
+        resolved: ResolvedCredentials | None = None,
+        wait: bool = False,
+    ) -> bool | None:
+        """Replace persisted credentials on a running workspace.
+
+        Args:
+            workspace: Workspace whose on-disk secrets should match the
+                desired attachment.
+            resolved: Pre-resolved secrets. When omitted, secrets are loaded
+                from the current workspace attachment (heartbeat path).
+            wait: When True, wait for the runner acknowledgement and return
+                whether credential material is present on disk.
+
+        Returns:
+            ``credentials_present`` when *wait* is True, otherwise ``None``.
+        """
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
         key = (str(runner.id), str(workspace.id))
-        if key in self._pending_credential_inject:
-            return
 
-        resolved = await sync_to_async(CredentialSvc().resolve_workspace_credentials)(
-            workspace
-        )
+        if resolved is None:
+            fresh = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
+            if fresh is None:
+                return None
+            workspace = fresh
+            runner = workspace.runner
+            resolved = await sync_to_async(
+                CredentialSvc().resolve_workspace_credentials
+            )(workspace)
+
+        if not wait and key in self._pending_credential_inject:
+            return None
+
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
             task_id=task_id,
@@ -466,21 +494,80 @@ class RunnerService:
             workspace=workspace,
         )
         self._pending_credential_inject.add(key)
+        payload = {
+            "task_id": str(task_id),
+            "workspace_id": str(workspace.id),
+            **self._resolved_credentials_payload(resolved),
+        }
         try:
+            if wait:
+                await sync_to_async(self.tasks.mark_in_progress)(task)
+                response = await self._call_runner(
+                    runner,
+                    "task:inject_credentials",
+                    payload,
+                    timeout=_CREDENTIAL_INJECT_TIMEOUT_SECONDS,
+                )
+                if response.get("ok") is False:
+                    error = str(response.get("error") or "Credential inject failed")
+                    self._pending_credential_inject.discard(key)
+                    await sync_to_async(self.tasks.fail)(task, error)
+                    raise ConflictError(error)
+                if "credentials_present" in response:
+                    credentials_present = bool(response["credentials_present"])
+                else:
+                    secrets = self._resolved_credentials_payload(resolved)
+                    credentials_present = bool(
+                        secrets["env_vars"]
+                        or secrets["files"]
+                        or secrets["ssh_keys"]
+                    )
+                workspace = await sync_to_async(
+                    self.workspaces.update_credentials_present
+                )(workspace, credentials_present)
+                await sync_to_async(self.tasks.complete)(task)
+                self._pending_credential_inject.discard(key)
+                self._forward_workspace_status(workspace, task_id=str(task_id))
+                return credentials_present
+
             await self._emit_to_runner(
                 runner,
                 "task:inject_credentials",
-                {
-                    "task_id": str(task_id),
-                    "workspace_id": str(workspace.id),
-                    **self._resolved_credentials_payload(resolved),
-                },
+                payload,
             )
             await sync_to_async(self.tasks.mark_in_progress)(task)
+            return None
+        except ConflictError:
+            raise
         except Exception as exc:
             self._pending_credential_inject.discard(key)
             await sync_to_async(self.tasks.fail)(task, str(exc))
+            if wait:
+                raise ConflictError(
+                    "Failed to apply credentials to the running workspace: "
+                    f"{exc}"
+                ) from exc
             raise
+
+    async def dispatch_credential_reconcile(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> None:
+        """Apply desired credentials onto running workspaces (heartbeat)."""
+        for workspace_id in workspace_ids:
+            try:
+                workspace = await sync_to_async(self.workspaces.get_by_id)(
+                    workspace_id
+                )
+                if workspace is None:
+                    continue
+                if workspace.status != WorkspaceStatus.RUNNING:
+                    continue
+                await self._dispatch_credential_inject(workspace, wait=False)
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile credentials for workspace %s",
+                    workspace_id,
+                )
 
     async def _set_workspace_operation(
         self,
@@ -834,6 +921,7 @@ class RunnerService:
         *,
         name: str | None = None,
         credentials: list | None = None,
+        resolved_credentials: ResolvedCredentials | None = None,
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -843,6 +931,8 @@ class RunnerService:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
+        self._ensure_workspace_available(workspace)
+
         if name is not None:
             trimmed = name.strip()
             if not trimmed:
@@ -851,18 +941,44 @@ class RunnerService:
                 workspace, trimmed
             )
 
-        if credentials is not None:
-            workspace = await sync_to_async(self.workspaces.set_credentials)(
-                workspace,
-                credentials,
+        credential_records = (
+            resolved_credentials.credentials
+            if resolved_credentials is not None
+            else credentials
+        )
+        if credential_records is not None:
+            current_ids = {
+                credential.id for credential in workspace.credentials.all()
+            }
+            new_ids = {credential.id for credential in credential_records}
+            ids_changed = current_ids != new_ids
+            desired_present = bool(new_ids)
+            needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
+                ids_changed
+                or bool(workspace.credentials_present) != desired_present
             )
-            if workspace.status == WorkspaceStatus.RUNNING:
+            if needs_disk_sync:
                 runner = workspace.runner
                 if not runner.is_online:
                     raise RunnerOfflineError(str(runner.id))
-                await self._dispatch_credential_inject(workspace)
 
-        self._ensure_workspace_available(workspace)
+            if ids_changed:
+                workspace = await sync_to_async(self.workspaces.set_credentials)(
+                    workspace,
+                    credential_records,
+                )
+
+            if needs_disk_sync:
+                resolved = resolved_credentials
+                if resolved is None:
+                    resolved = await sync_to_async(
+                        CredentialSvc().resolve_workspace_credentials
+                    )(workspace)
+                await self._dispatch_credential_inject(
+                    workspace,
+                    resolved=resolved,
+                    wait=True,
+                )
 
         qemu_fields_requested = any(
             value is not None
@@ -1276,6 +1392,13 @@ class RunnerService:
             return
 
         workspace = task.workspace
+        if task.status == TaskStatus.COMPLETED:
+            if workspace:
+                self._pending_credential_inject.discard(
+                    (str(workspace.runner_id), str(workspace.id))
+                )
+            return
+
         if workspace:
             self.workspaces.update_credentials_present(
                 workspace, bool(credentials_present)
@@ -2259,7 +2382,7 @@ class RunnerService:
         self,
         runner: "Runner",
         workspaces: list[dict],
-    ) -> None:
+    ) -> list[uuid.UUID]:
         """Handle runner:heartbeat event — reconcile workspace state.
 
         Compares the runner's reported container states with the backend's
@@ -2268,6 +2391,9 @@ class RunnerService:
         Args:
             runner: The Runner that sent the heartbeat.
             workspaces: List of dicts with workspace_id and status.
+
+        Returns:
+            Workspace IDs whose on-disk credentials need live reconciliation.
         """
         from django.utils import timezone as tz
 
@@ -2310,6 +2436,7 @@ class RunnerService:
                 reason="unknown_runtime_workspace",
             )
 
+        credential_sync_ids: list[uuid.UUID] = []
         for ws in backend_workspaces:
             ws_id_str = str(ws.id)
             cleanup_key = (runner_id_str, ws_id_str)
@@ -2385,14 +2512,11 @@ class RunnerService:
                     self._cleanup_desktop_state(ws_id_str)
                     continue
 
-                if not ws.credentials_present and ws.credentials.exists():
-                    try:
-                        async_to_sync(self._dispatch_credential_inject)(ws)
-                    except Exception:
-                        logger.exception(
-                            "Failed to reconcile credentials for workspace %s",
-                            ws_id_str,
-                        )
+                has_credentials = ws.credentials.exists()
+                if (not ws.credentials_present and has_credentials) or (
+                    ws.credentials_present and not has_credentials
+                ):
+                    credential_sync_ids.append(ws.id)
 
                 if "desktop" in runner_payload:
                     self._sync_desktop_state_from_heartbeat(
@@ -2402,6 +2526,7 @@ class RunnerService:
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
+        return credential_sync_ids
 
     def handle_unknown_workspace_cleanup_result(
         self,

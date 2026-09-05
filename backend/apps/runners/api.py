@@ -933,6 +933,7 @@ async def update_workspace(
                 if resolved_credentials is not None
                 else None
             ),
+            resolved_credentials=resolved_credentials,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,

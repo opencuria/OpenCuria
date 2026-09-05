@@ -322,6 +322,19 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       applyWorkspaceUpdate(id, updated)
       if (updated.active_operation === WorkspaceOperation.RESTARTING) {
         notifications.info('Workspace restarting', `${getWorkspaceName(id)} is restarting to apply the new resources.`)
+      } else if (data.credential_ids !== undefined) {
+        const ws = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
+        if (ws?.status === WorkspaceStatus.RUNNING) {
+          notifications.success(
+            'Credentials updated',
+            'Secrets were applied to the running workspace.',
+          )
+        } else {
+          notifications.success(
+            'Workspace updated',
+            'Credentials will be applied the next time the workspace starts.',
+          )
+        }
       } else {
         notifications.success('Workspace updated', 'The workspace settings were saved.')
       }
