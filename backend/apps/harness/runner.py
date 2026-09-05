@@ -1,0 +1,671 @@
+"""Agentic loop for the harness (M4).
+
+:func:`HarnessRunner.run` drives one agent turn: it composes the system
+prompt, calls the provider with permission-filtered tool schemas,
+streams deltas via an ``emit`` callback, gates ``ask`` tools through an
+``on_permission`` callback, executes approved tools, and repeats until
+a text-only answer, the step budget, an abort, or a doom-loop guard.
+
+Permission ``ask`` never hangs: the ``on_permission`` wait is wrapped
+in ``asyncio.wait_for`` with a configurable timeout and auto-denies on
+timeout. Cancellation (``asyncio.CancelledError``) is re-raised after
+emitting an ``aborted`` event so callers still observe cancellation.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+import structlog
+
+from .access.base import HARNESS_WORKSPACE_ROOT, WorkspaceAccessor
+from .agents.definitions import (
+    SMALL_MODEL,
+    AgentDefinition,
+    get_agent,
+    subagent_descriptions,
+)
+from .permissions.evaluator import ASK, DENY, PermissionEvaluator
+from .prompts.composer import compose_system_prompt
+from .providers.base import (
+    ChatOptions,
+    LLMMessage,
+    ProviderAdapter,
+    ToolSchema,
+    Usage,
+)
+from .tools.base import ToolContext, ToolRegistry
+
+log = structlog.get_logger(__name__)
+
+#: Default per-step tool schema source: deny-tools are never offered.
+DEFAULT_MAX_STEPS = 20
+
+#: Default wait for the ``on_permission`` callback before auto-deny.
+DEFAULT_PERMISSION_TIMEOUT = 120.0
+
+#: How many consecutive identical tool+input calls trigger doom-loop ask.
+DOOM_LOOP_REPEATS = 3
+
+EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
+PermissionCallback = Callable[..., Awaitable[str]]
+
+
+@dataclass
+class RunOptions:
+    """Per-run settings for :meth:`HarnessRunner.run`."""
+
+    max_steps: int | None = None
+    history: list[LLMMessage] = field(default_factory=list)
+    session_id: str = ""
+    workspace_id: str = ""
+    organization_id: str = ""
+    cwd: str = HARNESS_WORKSPACE_ROOT
+    small_model: str = ""
+    permission_timeout: float = DEFAULT_PERMISSION_TIMEOUT
+    auto_approve: bool = False
+    on_permission: PermissionCallback | None = None
+
+
+@dataclass
+class RunResult:
+    """Outcome of one :meth:`HarnessRunner.run` call."""
+
+    output: str
+    steps: int
+    usage: Usage
+    cost: float
+    finish_reason: str
+
+
+@dataclass
+class _PendingToolCall:
+    """One accumulated tool call for the current step."""
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+    raw_arguments: str = ""
+
+
+def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
+    """Derive the permission action string for a tool invocation."""
+    key = (tool_name or "").strip().lower()
+    if key == "bash":
+        return str(args.get("command", ""))
+    if key in ("read", "edit", "write", "list"):
+        return str(args.get("path", ""))
+    if key in ("glob", "grep"):
+        path = str(args.get("path", "") or "")
+        pattern = str(args.get("pattern", "") or "")
+        return path or pattern
+    if key == "webfetch":
+        return str(args.get("url", ""))
+    if key == "task":
+        return str(args.get("description", ""))
+    return ""
+
+
+def _combine_decisions(*decisions: str) -> str:
+    """Combine decisions with deny > ask > allow precedence."""
+    if DENY in decisions:
+        return DENY
+    if ASK in decisions:
+        return ASK
+    return "allow"
+
+
+def _parse_arguments(raw: Any) -> dict[str, Any]:
+    """Parse raw tool arguments (JSON string or dict) into a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+class HarnessRunner:
+    """Agentic loop: provider + tools + permissions + streaming events."""
+
+    def __init__(
+        self,
+        *,
+        provider: ProviderAdapter,
+        tools: ToolRegistry,
+        evaluator: PermissionEvaluator | None = None,
+        accessor: WorkspaceAccessor | None = None,
+        emit: EmitCallback | None = None,
+        chat_options: ChatOptions | None = None,
+    ) -> None:
+        """Create a runner.
+
+        Args:
+            provider: LLM provider adapter for chat streaming.
+            tools: Registry of executable tools.
+            evaluator: Base (global/org) permission evaluator.
+            accessor: Workspace accessor for tools and context files.
+            emit: Async callback receiving streaming event dicts.
+            chat_options: Optional per-request provider settings.
+        """
+        self.provider = provider
+        self.tools = tools
+        self.evaluator = evaluator or PermissionEvaluator()
+        self.accessor = accessor
+        self.chat_options = chat_options or ChatOptions()
+        self._emit = emit or self._noop_emit
+
+    @staticmethod
+    async def _noop_emit(event: dict[str, Any]) -> None:
+        """Drop events when no emitter was provided."""
+        return None
+
+    async def _send(self, event: dict[str, Any]) -> None:
+        """Emit *event* without breaking the loop on emitter errors."""
+        try:
+            await self._emit(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("emit_failed", error=str(exc), event=event.get("type"))
+
+    def _filtered_schemas(self, agent: AgentDefinition, mode: str) -> list[ToolSchema]:
+        """Return tool schemas excluding permission-denied tools."""
+        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+        schemas: list[ToolSchema] = []
+        for tool in self.tools.list():
+            key = tool.permission_key or tool.name
+            decision = _combine_decisions(
+                self.evaluator.evaluate(key, "", mode=mode),
+                agent_eval.evaluate(key, "", mode=mode),
+            )
+            if decision == DENY:
+                continue
+            schemas.append(
+                ToolSchema(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=tool.args_schema.model_json_schema(),
+                )
+            )
+        return schemas
+
+    def _decide(
+        self,
+        agent: AgentDefinition,
+        tool_name: str,
+        action: str,
+        mode: str,
+        *,
+        doom_loop: bool = False,
+    ) -> str:
+        """Combine base and agent permission layers (deny wins).
+
+        The permission *key* (not the tool name) is evaluated: ``write``
+        and ``list`` share keys with ``edit``/``read`` (see tools), so
+        key-level rules apply to them as well.
+        """
+        key = self._permission_key(tool_name)
+        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+        if doom_loop:
+            return _combine_decisions(
+                self.evaluator.evaluate(key, action, mode=mode, doom_loop=True),
+                agent_eval.evaluate(key, action, mode=mode, doom_loop=True),
+            )
+        return _combine_decisions(
+            self.evaluator.evaluate(key, action, mode=mode),
+            agent_eval.evaluate(key, action, mode=mode),
+        )
+
+    def _permission_key(self, tool_name: str) -> str:
+        """Return the permission key for *tool_name* (falls back to name)."""
+        try:
+            return self.tools.get(tool_name).permission_key or tool_name
+        except KeyError:
+            return tool_name
+
+    async def _resolve_ask(
+        self,
+        *,
+        tool_name: str,
+        action: str,
+        title: str,
+        call_id: str,
+        step: int,
+        doom_loop: bool,
+        opts: RunOptions,
+    ) -> bool:
+        """Resolve an ``ask`` gate via ``on_permission`` (True = approved).
+
+        Auto-denies when no callback is configured (unless
+        ``auto_approve``) and on callback timeout — the loop never hangs.
+        """
+        key = "doom_loop" if doom_loop else "permission"
+        await self._send(
+            {
+                "type": "permission_required",
+                "step": step,
+                "call_id": call_id,
+                "tool": tool_name,
+                "action": action,
+                "title": title,
+                "key": key,
+            }
+        )
+        if opts.auto_approve:
+            log.info("permission_auto_approved", tool=tool_name, action=action)
+            return True
+        callback = opts.on_permission
+        if callback is None:
+            log.info("permission_auto_denied_no_callback", tool=tool_name)
+            return False
+        try:
+            response = await asyncio.wait_for(
+                callback(
+                    tool=tool_name,
+                    action=action,
+                    title=title,
+                    call_id=call_id,
+                    key=key,
+                ),
+                timeout=opts.permission_timeout,
+            )
+        except asyncio.TimeoutError:
+            log.warning("permission_timeout_auto_deny", tool=tool_name)
+            return False
+        normalized = str(response or "").strip().lower()
+        return normalized in ("once", "always", "allow", "approved", "yes")
+
+    async def run(
+        self,
+        prompt: str,
+        agent_name: str,
+        model: str,
+        mode: str = "build",
+        opts: RunOptions | None = None,
+    ) -> RunResult:
+        """Run one agent turn and return the aggregated result.
+
+        Args:
+            prompt: User prompt for this turn.
+            agent_name: Static agent definition name (unknown raises).
+            model: Provider model identifier.
+            mode: ``plan`` or ``build``.
+            opts: Run settings (steps, history, permission callback).
+
+        Returns:
+            The final text, step count, summed usage/cost, and a finish
+            reason (``stop`` | ``max_steps``).
+
+        Raises:
+            KeyError: For unknown agent names.
+            ValueError: For invalid modes or empty prompts.
+            asyncio.CancelledError: On abort (after emitting ``aborted``).
+        """
+        options = opts or RunOptions()
+        if mode not in ("plan", "build"):
+            raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        agent = get_agent(agent_name)  # raises KeyError for unknown agents
+        effective_model = model
+        if agent.model_override == SMALL_MODEL and options.small_model:
+            effective_model = options.small_model
+        max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+        cwd = options.cwd or HARNESS_WORKSPACE_ROOT
+
+        try:
+            return await self._run_inner(
+                prompt=prompt,
+                agent=agent,
+                model=effective_model,
+                mode=mode,
+                opts=options,
+                cwd=cwd,
+                max_steps=max_steps,
+            )
+        except asyncio.CancelledError:
+            await self._send({"type": "aborted", "reason": "cancelled"})
+            raise
+
+    async def _run_inner(
+        self,
+        *,
+        prompt: str,
+        agent: AgentDefinition,
+        model: str,
+        mode: str,
+        opts: RunOptions,
+        cwd: str,
+        max_steps: int,
+    ) -> RunResult:
+        """Execute the step loop (cancellation handled by :meth:`run`)."""
+        schemas = self._filtered_schemas(agent, mode)
+        composed = await compose_system_prompt(
+            agent=agent,
+            mode=mode,
+            tools=schemas,
+            subagents=subagent_descriptions(),
+            accessor=self.accessor,
+            cwd=cwd,
+        )
+        messages: list[LLMMessage] = [
+            LLMMessage(role="system", content=composed.system),
+            *list(opts.history or []),
+            LLMMessage(role="user", content=prompt),
+        ]
+        ctx = ToolContext(
+            session_id=opts.session_id or "session",
+            workspace_id=opts.workspace_id or "workspace",
+            accessor=self.accessor
+            or _MissingAccessor(workspace_id=opts.workspace_id or "workspace"),
+            agent_name=agent.name,
+            directory=cwd,
+        )
+
+        total_usage = Usage()
+        total_cost = 0.0
+        last_text = ""
+        recent_calls: list[str] = []
+
+        for step in range(1, max_steps + 1):
+            await self._send({"type": "step_start", "step": step})
+            text, calls, usage = await self._provider_step(
+                model=model, messages=messages, schemas=schemas, step=step
+            )
+            total_usage = Usage(
+                prompt_tokens=total_usage.prompt_tokens + usage.prompt_tokens,
+                completion_tokens=(
+                    total_usage.completion_tokens + usage.completion_tokens
+                ),
+                total_tokens=total_usage.total_tokens + usage.total_tokens,
+            )
+            await self._send(
+                {
+                    "type": "step_finish",
+                    "step": step,
+                    "tokens": {
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens,
+                    },
+                    "cost": 0.0,
+                }
+            )
+            if not calls:
+                last_text = text
+                messages.append(LLMMessage(role="assistant", content=text))
+                return RunResult(
+                    output=text,
+                    steps=step,
+                    usage=total_usage,
+                    cost=total_cost,
+                    finish_reason="stop",
+                )
+            last_text = text
+            messages.append(
+                LLMMessage(
+                    role="assistant",
+                    content=text or None,
+                    tool_calls=[
+                        {
+                            "id": call.call_id,
+                            "name": call.name,
+                            "arguments": call.raw_arguments,
+                        }
+                        for call in calls
+                    ],
+                )
+            )
+            for call in calls:
+                fingerprint = (
+                    f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
+                )
+                recent_calls.append(fingerprint)
+                doom_loop = (
+                    len(recent_calls) >= DOOM_LOOP_REPEATS
+                    and len(set(recent_calls[-DOOM_LOOP_REPEATS:])) == 1
+                )
+                action = _action_for_tool(call.name, call.arguments)
+                title = self._tool_title(call.name, call.arguments)
+                decision = self._decide(
+                    agent, call.name, action, mode, doom_loop=doom_loop
+                )
+                approved = True
+                if decision == DENY:
+                    approved = False
+                elif decision == ASK or doom_loop:
+                    approved = await self._resolve_ask(
+                        tool_name=call.name,
+                        action=action,
+                        title=title,
+                        call_id=call.call_id,
+                        step=step,
+                        doom_loop=doom_loop,
+                        opts=opts,
+                    )
+                if not approved:
+                    if doom_loop:
+                        reason = "doom-loop guard denied"
+                    else:
+                        reason = "denied by permissions"
+                    await self._send(
+                        {
+                            "type": "tool_error",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "error": f"Permission {reason}: {title}",
+                        }
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content=f"Permission {reason}: {title}",
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
+                await self._send(
+                    {
+                        "type": "tool_started",
+                        "step": step,
+                        "call_id": call.call_id,
+                        "tool": call.name,
+                        "title": title,
+                    }
+                )
+                try:
+                    result = await self.tools.execute(call.name, call.arguments, ctx)
+                except KeyError as exc:
+                    await self._send(
+                        {
+                            "type": "tool_error",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "error": str(exc),
+                        }
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content=f"Unknown tool '{call.name}'",
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
+                except Exception as exc:
+                    await self._send(
+                        {
+                            "type": "tool_error",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "error": str(exc),
+                        }
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content=f"Tool '{call.name}' failed: {exc}",
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
+                await self._send(
+                    {
+                        "type": "tool_completed",
+                        "step": step,
+                        "call_id": call.call_id,
+                        "tool": call.name,
+                        "output": result.output,
+                    }
+                )
+                messages.append(
+                    LLMMessage(
+                        role="tool",
+                        content=result.output,
+                        tool_call_id=call.call_id,
+                    )
+                )
+
+        summary = (
+            f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
+            "exhausted. Summarize progress and continue in a follow-up run.]"
+            if last_text
+            else (
+                f"[Stopped after {max_steps} steps: step budget exhausted "
+                "without a final answer.]"
+            )
+        )
+        return RunResult(
+            output=summary,
+            steps=max_steps,
+            usage=total_usage,
+            cost=total_cost,
+            finish_reason="max_steps",
+        )
+
+    async def _provider_step(
+        self,
+        *,
+        model: str,
+        messages: list[LLMMessage],
+        schemas: list[ToolSchema],
+        step: int,
+    ) -> tuple[str, list[_PendingToolCall], Usage]:
+        """Stream one provider step and accumulate text/tool calls/usage."""
+        fragments: dict[int, dict[str, Any]] = {}
+        text_parts: list[str] = []
+        usage = Usage()
+        async for delta in self.provider.chat_stream(
+            model, messages, schemas, self.chat_options
+        ):
+            if delta.usage is not None:
+                usage = Usage(
+                    prompt_tokens=usage.prompt_tokens + delta.usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens
+                    + delta.usage.completion_tokens,
+                    total_tokens=usage.total_tokens + delta.usage.total_tokens,
+                )
+            if delta.text:
+                text_parts.append(delta.text)
+                await self._send(
+                    {
+                        "type": "part_updated",
+                        "step": step,
+                        "delta": {"text": delta.text},
+                    }
+                )
+            if delta.reasoning:
+                await self._send(
+                    {
+                        "type": "part_updated",
+                        "step": step,
+                        "delta": {"reasoning": delta.reasoning},
+                    }
+                )
+            for fragment in delta.tool_calls or ():
+                index = int(fragment.get("index", 0) or 0)
+                slot = fragments.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""}
+                )
+                if fragment.get("id"):
+                    slot["id"] = fragment["id"]
+                if fragment.get("name"):
+                    slot["name"] = fragment["name"]
+                args = fragment.get("arguments", "")
+                if isinstance(args, dict):
+                    args = json.dumps(args)
+                if args:
+                    slot["arguments"] += str(args)
+        calls: list[_PendingToolCall] = []
+        for index in sorted(fragments):
+            slot = fragments[index]
+            name = str(slot.get("name", "") or "")
+            if not name:
+                continue
+            raw = str(slot.get("arguments", "") or "")
+            calls.append(
+                _PendingToolCall(
+                    call_id=str(slot.get("id", "") or f"call-{step}-{index}"),
+                    name=name,
+                    arguments=_parse_arguments(raw),
+                    raw_arguments=raw,
+                )
+            )
+        return "".join(text_parts), calls, usage
+
+    def _tool_title(self, tool_name: str, args: dict[str, Any]) -> str:
+        """Best-effort human title for a tool invocation."""
+        try:
+            tool = self.tools.get(tool_name)
+        except KeyError:
+            return tool_name
+        try:
+            return tool.title(tool.coerce_args(args))
+        except Exception:  # pragma: no cover - title must never break loop
+            return tool_name
+
+
+class _MissingAccessor(WorkspaceAccessor):
+    """Fallback accessor that fails loudly when no accessor is wired."""
+
+    async def exec_stream(self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None,
+                          timeout=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+        yield  # pragma: no cover - keeps the method an iterator
+
+    async def exec_wait(self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None,
+                        timeout=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def read_file(self, path, max_size=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def write_file(self, path, content, mode=0o644):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def list_dir(self, path):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def stat(self, path):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+
+#: Backwards-friendly alias (brief allows ``AgentRunner``).
+AgentRunner = HarnessRunner
