@@ -135,7 +135,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 <div v-if="editingId === imageArtifact.id" class="flex items-center gap-1.5 mb-1">
                     <input
                       v-model="editName"
-                      class="text-sm font-medium text-foreground bg-muted border border-border rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-accent min-w-0 w-full sm:w-48"
+                      class="text-sm font-medium text-foreground bg-muted border border-border rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-primary min-w-0 w-full sm:w-48"
                       @keydown.enter="confirmRename(imageArtifact)"
                       @keydown.escape="cancelRename"
                       autofocus

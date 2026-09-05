@@ -662,7 +662,7 @@ watch(canManageFiles, (allowed) => {
           :disabled="!canSend"
           size="icon"
           class="h-9 w-9 rounded-full transition-all shrink-0"
-          :class="canSend ? 'bg-primary text-primary-fg hover:bg-primary-hover' : 'bg-muted text-muted-foreground'"
+          :class="canSend ? 'bg-primary text-primary-foreground hover:bg-primary-hover' : 'bg-muted text-muted-foreground'"
           @click="handleSend"
         >
           <Send :size="18" />
@@ -689,7 +689,7 @@ watch(canManageFiles, (allowed) => {
                   class="w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors"
                   :class="
                     selectedSkillIds.includes(skill.id)
-                      ? 'bg-primary border-primary text-primary-fg'
+                      ? 'bg-primary border-primary text-primary-foreground'
                       : 'border-border'
                   "
                 >

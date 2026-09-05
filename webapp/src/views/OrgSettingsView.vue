@@ -478,7 +478,7 @@ function runCommand(agent: OrgAgentDefinition) {
           class="flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors"
           :class="
             activeTab === tab.key
-              ? 'border-accent text-accent'
+              ? 'border-primary text-primary'
               : 'border-transparent text-muted-foreground hover:text-foreground'
           "
           @click="activeTab = tab.key as 'workspace-policies' | 'agents' | 'image-definitions' | 'credential-services'"
@@ -514,7 +514,7 @@ function runCommand(agent: OrgAgentDefinition) {
               <input
                 v-model="autoStopEnabled"
                 type="checkbox"
-                class="h-4 w-4 accent-[var(--color-accent)]"
+                class="h-4 w-4 accent-primary"
               />
             </label>
 
@@ -615,7 +615,7 @@ function runCommand(agent: OrgAgentDefinition) {
                   <span class="font-medium text-sm text-foreground truncate">{{ agent.name }}</span>
                   <span
                     class="text-xs px-1.5 py-0.5 rounded font-medium"
-                    :class="agent.is_standard ? 'bg-muted/20 text-muted-foreground' : 'bg-accent/10 text-accent'"
+                    :class="agent.is_standard ? 'bg-muted/20 text-muted-foreground' : 'bg-primary/10 text-primary'"
                   >
                     {{ agent.is_standard ? 'standard' : 'custom' }}
                   </span>
@@ -726,7 +726,7 @@ function runCommand(agent: OrgAgentDefinition) {
                   </div>
                   <!-- Run command -->
                   <div v-if="runCommand(agent)" class="flex items-center gap-2 text-xs">
-                    <span class="px-1.5 py-0.5 rounded-sm bg-accent/10 text-accent font-mono w-20 text-center shrink-0">
+                    <span class="px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary font-mono w-20 text-center shrink-0">
                       run
                     </span>
                     <code class="text-muted-foreground font-mono truncate">

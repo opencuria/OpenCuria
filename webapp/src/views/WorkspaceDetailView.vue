@@ -800,7 +800,7 @@ function handleToggleSessionReadState(sessionId: string): void {
 <template>
   <div class="flex flex-col -m-6 lg:-m-8 h-[calc(100%+3rem)] lg:h-[calc(100%+4rem)]">
     <!-- Workspace header -->
-    <div class="border-b border-border bg-card px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
+    <div class="border-b border-border bg-header px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
       <div class="flex items-center justify-between gap-2 min-w-0">
         <!-- Left: back + workspace info -->
         <div class="flex items-center gap-2 min-w-0 flex-1">

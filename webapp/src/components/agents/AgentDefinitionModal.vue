@@ -711,7 +711,7 @@ function close() {
           class="px-3 py-1.5 text-sm font-medium rounded-t border-b-2 transition-colors"
           :class="
             activeTab === tab.key
-              ? 'border-accent text-accent'
+              ? 'border-primary text-primary'
               : 'border-transparent text-muted-foreground hover:text-foreground'
           "
           @click="activeTab = tab.key as 'definition' | 'credentials'"
@@ -719,7 +719,7 @@ function close() {
           {{ tab.label }}
           <span
             v-if="tab.key === 'credentials' && credentialRelations.length > 0"
-            class="ml-1.5 text-xs px-1 rounded-full bg-accent/15 text-accent"
+            class="ml-1.5 text-xs px-1 rounded-full bg-primary/10 text-primary"
           >{{ credentialRelations.length }}</span>
         </button>
       </div>
@@ -761,7 +761,7 @@ function close() {
                 class="relative w-10 h-6 rounded-full transition-colors cursor-pointer shrink-0 border"
                 :class="
                   supportsMultiChat
-                    ? 'bg-accent border-accent'
+                    ? 'bg-primary border-primary'
                     : 'bg-zinc-400 dark:bg-zinc-600 border-zinc-400 dark:border-zinc-600'
                 "
                 @click="supportsMultiChat = !supportsMultiChat"
@@ -818,7 +818,7 @@ function close() {
               <div>
                 <label class="text-xs font-medium text-muted-foreground">Available Options</label>
                 <p class="text-xs text-muted-foreground/70 mt-0.5">
-                  Selectable per-session options. Keys become <code class="font-mono bg-muted/40 px-0.5 rounded text-accent">{key}</code> placeholders in commands.
+                  Selectable per-session options. Keys become <code class="font-mono bg-muted/40 px-0.5 rounded text-primary">{key}</code> placeholders in commands.
                 </p>
               </div>
               <Button size="icon-sm" variant="ghost" title="Add option" @click="addOption">
@@ -936,7 +936,7 @@ function close() {
                         <span
                           v-for="p in validatePlaceholders(row.commandText).valid"
                           :key="p"
-                          class="text-xs px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono"
+                          class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono"
                         >{{ p }}</span>
                         <span
                           v-for="p in validatePlaceholders(row.commandText).invalid"
@@ -1045,7 +1045,7 @@ function close() {
                       <span
                         v-for="p in validatePlaceholders(runFirstCommand.commandText).valid"
                         :key="p"
-                        class="text-xs px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono"
+                        class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono"
                       >{{ p }}</span>
                       <span
                         v-for="p in validatePlaceholders(runFirstCommand.commandText).invalid"
@@ -1090,14 +1090,14 @@ function close() {
           <!-- ── Run Phase ── -->
           <div
             class="rounded-md border overflow-hidden bg-muted/30"
-            :class="runCommands.length === 0 ? 'border-destructive/30' : 'border-accent/20'"
+            :class="runCommands.length === 0 ? 'border-destructive/30' : 'border-primary/20'"
           >
             <div
               class="flex items-center justify-between px-3 py-2.5 border-b"
-              :class="runCommands.length === 0 ? 'border-destructive/20' : 'border-accent/10'"
+              :class="runCommands.length === 0 ? 'border-destructive/20' : 'border-primary/10'"
             >
               <div class="flex items-center gap-2">
-                <Bot :size="14" class="text-accent" />
+                <Bot :size="14" class="text-primary" />
                 <span class="text-xs font-medium text-foreground">Run Phase</span>
                 <span class="text-xs text-muted-foreground">(executed for each prompt — exactly 1)</span>
               </div>
@@ -1124,10 +1124,10 @@ function close() {
                 <div
                   v-for="row in runCommands"
                   :key="row._dragId"
-                  class="rounded-sm border border-accent/20 p-2.5 space-y-1.5 bg-muted/50"
+                  class="rounded-sm border border-primary/20 p-2.5 space-y-1.5 bg-muted/50"
                 >
                   <div class="flex items-start gap-2">
-                    <Bot :size="14" class="text-accent mt-2 shrink-0" />
+                    <Bot :size="14" class="text-primary mt-2 shrink-0" />
                     <div class="flex-1 space-y-1.5">
                       <Input
                         v-model="row.commandText"
@@ -1138,7 +1138,7 @@ function close() {
                         <span
                           v-for="p in validatePlaceholders(row.commandText).valid"
                           :key="p"
-                          class="text-xs px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono"
+                          class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono"
                         >{{ p }}</span>
                         <span
                           v-for="p in validatePlaceholders(row.commandText).invalid"
@@ -1207,8 +1207,8 @@ function close() {
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-colors"
               :class="
                 linkedCredentialServiceIds.includes(svc.id)
-                  ? 'border-accent/40 bg-accent/10 text-accent cursor-default'
-                  : 'border-border text-muted-foreground hover:border-accent/40 hover:text-foreground cursor-pointer'
+                  ? 'border-primary/40 bg-primary/10 text-primary cursor-default'
+                  : 'border-border text-muted-foreground hover:border-primary/40 hover:text-foreground cursor-pointer'
               "
               :disabled="linkedCredentialServiceIds.includes(svc.id)"
               @click="addCredentialRelation(svc)"
@@ -1341,7 +1341,7 @@ function close() {
                           <span
                             v-for="p in validatePlaceholders(row.commandText).valid"
                             :key="p"
-                            class="text-xs px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono"
+                            class="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono"
                           >{{ p }}</span>
                           <span
                             v-for="p in validatePlaceholders(row.commandText).invalid"

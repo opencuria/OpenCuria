@@ -15,7 +15,7 @@ const pageTitle = computed(() => {
 </script>
 
 <template>
-  <header class="flex h-14 shrink-0 items-center justify-between border-b bg-background/80 px-6 backdrop-blur-sm lg:px-8">
+  <header class="flex h-14 shrink-0 items-center justify-between border-b border-border bg-header px-6 lg:px-8">
     <div class="flex items-center gap-3">
       <div class="flex size-8 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground lg:hidden">
         K

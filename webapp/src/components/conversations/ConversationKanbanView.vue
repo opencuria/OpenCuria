@@ -52,7 +52,7 @@ defineEmits<{
         <button
           v-for="conv in idleConvs"
           :key="`idle-${conv.workspace_id}-${conv.chat_id ?? 'ws'}`"
-          class="w-full text-left p-3 rounded-lg border border-border bg-background hover:bg-muted transition-colors"
+          class="w-full text-left p-3 rounded-lg border border-border bg-header hover:bg-muted transition-colors"
           @click="$emit('conversationClick', conv)"
         >
           <div class="flex items-start gap-2.5">
@@ -110,7 +110,7 @@ defineEmits<{
         <button
           v-for="conv in workingConvs"
           :key="`working-${conv.workspace_id}-${conv.chat_id ?? 'ws'}`"
-          class="w-full text-left p-3 rounded-lg border border-warning/40 bg-warning/5 hover:bg-warning/10 transition-colors"
+          class="w-full text-left p-3 rounded-lg border border-warning/40 bg-header hover:bg-warning/10 transition-colors"
           @click="$emit('conversationClick', conv)"
         >
           <div class="flex items-start gap-2.5">
@@ -168,7 +168,7 @@ defineEmits<{
         <button
           v-for="conv in doneConvs"
           :key="`done-${conv.workspace_id}-${conv.chat_id ?? 'ws'}`"
-          class="w-full text-left p-3 rounded-lg border border-success/30 bg-success/5 hover:bg-success/10 transition-colors relative overflow-hidden"
+          class="w-full text-left p-3 rounded-lg border border-success/30 bg-header hover:bg-success/10 transition-colors relative overflow-hidden"
           @click="$emit('conversationClick', conv)"
         >
           <!-- Unread accent -->

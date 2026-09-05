@@ -444,7 +444,7 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
       <div class="flex flex-col items-end gap-1.5">
         <div class="max-w-[80%] sm:max-w-[70%]">
           <div
-            class="prose-output overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-fg px-4 py-3 text-sm break-words prose prose-invert prose-sm prose-p:my-0 prose-headings:my-1 prose-pre:bg-primary/20 prose-pre:text-primary-fg"
+            class="prose-output overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-4 py-3 text-sm break-words prose prose-invert prose-sm prose-p:my-0 prose-headings:my-1 prose-pre:bg-primary/20 prose-pre:text-primary-foreground"
             v-html="renderedPrompt"
             @click="onOutputClick"
           ></div>
@@ -454,7 +454,7 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
           <Button
             variant="ghost"
             size="icon-sm"
-            class="chat-action-btn text-primary-fg/75 hover:text-primary-fg"
+            class="chat-action-btn text-primary-foreground/75 hover:text-primary-foreground"
             :title="copiedPrompt ? 'Copied!' : 'Copy message'"
             @click="copyMessage(session.prompt, 'prompt')"
           >
@@ -463,7 +463,7 @@ const hasSkills = computed(() => props.session.skills && props.session.skills.le
           <Button
             variant="ghost"
             size="icon-sm"
-            class="chat-action-btn text-primary-fg/75 hover:text-primary-fg"
+            class="chat-action-btn text-primary-foreground/75 hover:text-primary-foreground"
             :title="speakingSource === 'prompt' ? 'Stop reading' : 'Read aloud'"
             @click="toggleSpeak(session.prompt, 'prompt')"
           >
