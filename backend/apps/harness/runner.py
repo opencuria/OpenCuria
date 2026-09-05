@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from asgiref.sync import sync_to_async
 
 from .access.base import HARNESS_WORKSPACE_ROOT, WorkspaceAccessor
 from .agents.definitions import (
@@ -155,7 +156,7 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
+async def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
     """Best-effort todo list for the ``todo_updated`` event."""
     try:
         repository = None
@@ -169,7 +170,7 @@ def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
             from .tools.todos import repository_for_session
 
             repository = repository_for_session(ctx.session_id)
-        stored = repository.list(ctx.session_id)
+        stored = await sync_to_async(repository.list)(ctx.session_id)
         return [
             {
                 "content": item.content,
@@ -676,7 +677,7 @@ class HarnessRunner:
                             "type": "todo_updated",
                             "step": step,
                             "call_id": call.call_id,
-                            "todos": _todos_payload(ctx),
+                            "todos": await _todos_payload(ctx),
                         }
                     )
                 messages.append(

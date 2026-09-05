@@ -13,7 +13,7 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessSession
+from apps.harness.models import HarnessSession, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
@@ -330,6 +330,66 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "stop"
     assert assistant.content == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_execute_run_todowrite_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """todowrite through the Django repo must not hit ORM from asyncio."""
+    org_id = harness_workspace.runner.organization_id
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="todo-orm-safe run",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    todos = [
+        {"content": "first", "status": "in_progress"},
+        {"content": "second", "status": "pending"},
+    ]
+    provider = FakeProvider(
+        [
+            _tool_step("todowrite", {"todos": todos}),
+            _text_step("noted"),
+        ]
+    )
+    collected: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        collected.append({"event": event, **data})
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+        provider_factory=lambda _org: provider,
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        await service.start_run(
+            session,
+            "track work",
+            organization_id=org_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        await service._tasks[str(session.id)]
+    except SynchronousOnlyOperation:
+        pytest.fail("todowrite called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+    assert Todo.objects.filter(session_id=session.id).count() == 2
+    parts = HarnessPartRepository.list_for_session(session.id)
+    tool_parts = [part for part in parts if part.type == "tool"]
+    assert len(tool_parts) == 1
+    assert tool_parts[0].state == "completed"
+    updated = [e for e in collected if e["event"] == "harness.todo_updated"]
+    assert updated
+    assert [item["content"] for item in updated[0]["todos"]] == ["first", "second"]
 
 
 @pytest.mark.django_db(transaction=True)

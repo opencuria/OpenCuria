@@ -13,6 +13,7 @@ import abc
 from dataclasses import dataclass, field
 
 import structlog
+from asgiref.sync import sync_to_async
 from pydantic import BaseModel, Field
 
 from .base import Tool, ToolContext, ToolError, ToolResult
@@ -167,7 +168,7 @@ class TodoWriteTool(Tool):
                     order=order,
                 )
             )
-        stored = self._repository.save(ctx.session_id, items)
+        stored = await sync_to_async(self._repository.save)(ctx.session_id, items)
         lines = [f"[{item.status}] {item.content}" for item in stored.items]
         return ToolResult(
             output="\n".join(lines) if lines else "Todo list cleared.",
