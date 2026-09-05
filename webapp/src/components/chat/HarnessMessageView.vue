@@ -40,7 +40,7 @@ function childIdFor(part: HarnessPart): string | null {
 <template>
   <!-- User message -->
   <div v-if="message.role === 'user'" class="flex items-start gap-3 justify-end">
-    <div class="max-w-3xl">
+    <div class="min-w-0 max-w-3xl">
       <div
         class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-4 py-3 text-sm break-words"
       >

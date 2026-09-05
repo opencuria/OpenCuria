@@ -39,7 +39,7 @@ const router = createRouter({
           path: '',
           name: 'dashboard',
           component: () => import('@/views/DashboardView.vue'),
-          meta: { title: 'Dashboard' },
+          meta: { title: 'Dashboard', fullBleed: true },
         },
         {
           path: 'runners',
@@ -57,7 +57,7 @@ const router = createRouter({
           path: 'workspaces/:id',
           name: 'workspace-detail',
           component: () => import('@/views/WorkspaceDetailView.vue'),
-          meta: { title: 'Workspace', hideTopBar: true },
+          meta: { title: 'Workspace', hideTopBar: true, fullBleed: true },
         },
         {
           path: 'images',
@@ -93,7 +93,7 @@ const router = createRouter({
           path: 'docs/:slug(.*)*',
           name: 'docs-detail',
           component: () => import('@/views/DocsView.vue'),
-          meta: { title: 'Docs' },
+          meta: { title: 'Docs', fullBleed: true },
         },
       ],
     },

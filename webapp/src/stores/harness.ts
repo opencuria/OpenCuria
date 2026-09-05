@@ -38,6 +38,7 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureAssistantMessage,
+  mergeBusyFetchedMessages,
 } from '@/lib/harnessReducer'
 import { useNotificationStore } from './notifications'
 
@@ -138,11 +139,16 @@ export const useHarnessStore = defineStore('harness', () => {
   async function fetchParts(sessionId: string): Promise<void> {
     try {
       const response = await listHarnessParts(sessionId)
-      messagesBySession.value[sessionId] = response.messages.map((message) => ({
+      const incoming = response.messages.map((message) => ({
         ...message,
         session_id: sessionId,
         parts: message.parts ?? [],
       }))
+      const session = sessions.value.find((item) => item.id === sessionId)
+      messagesBySession.value[sessionId] =
+        session?.status === 'busy'
+          ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
+          : incoming
     } catch (e: unknown) {
       const notifications = useNotificationStore()
       notifications.error(
@@ -185,6 +191,7 @@ export const useHarnessStore = defineStore('harness', () => {
           role: 'user',
           content: prompt,
           parts: [],
+          created_at: new Date().toISOString(),
         },
       ]
       await fetchParts(session.id)
@@ -219,6 +226,7 @@ export const useHarnessStore = defineStore('harness', () => {
         role: 'user',
         content: prompt,
         parts: [],
+        created_at: new Date().toISOString(),
       })
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')

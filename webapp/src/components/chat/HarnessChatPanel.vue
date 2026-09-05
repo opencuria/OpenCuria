@@ -374,7 +374,7 @@ const desktopButtonTitle = computed(() => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 w-full flex-col">
+  <div class="flex h-full min-h-0 w-full flex-col overflow-x-hidden">
     <HarnessChatContainer
       :messages="harness.activeMessages"
       :todos="harness.activeTodos"
@@ -392,7 +392,7 @@ const desktopButtonTitle = computed(() => {
     />
     <div
       v-if="!isSubagentSession"
-      class="flex min-w-0 items-center gap-0 overflow-x-hidden"
+      class="flex min-w-0 shrink-0 items-center gap-0 overflow-x-hidden"
     >
       <HarnessChatInput
         class="min-w-0 flex-1"

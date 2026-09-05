@@ -379,7 +379,7 @@ function onDragStart(e: MouseEvent): void {
 </script>
 
 <template>
-  <div class="flex flex-col -m-6 lg:-m-8 h-[calc(100%+3rem)] lg:h-[calc(100%+4rem)]">
+  <div class="flex h-full min-h-0 flex-col">
     <!-- Workspace header -->
     <div class="border-b border-border bg-header px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
       <div class="flex items-center justify-between gap-2 min-w-0">

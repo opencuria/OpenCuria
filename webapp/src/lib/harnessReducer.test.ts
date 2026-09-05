@@ -8,6 +8,7 @@ import {
   applyTodoUpdate,
   ensureAssistantMessage,
   findPart,
+  mergeBusyFetchedMessages,
   resetHarnessPartCounter,
 } from './harnessReducer'
 
@@ -118,5 +119,143 @@ describe('harnessReducer', () => {
     })
     expect(finished?.state).toBe('completed')
     expect(finished?.output).toBe('found it')
+  })
+
+  it('starts a new assistant message after a completed turn', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'first',
+        parts: [],
+      },
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [
+          {
+            id: 'part-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'completed',
+            title: '',
+            output: 'done',
+          },
+        ],
+        completed_at: '2026-03-29T10:00:00.000Z',
+      },
+      {
+        id: 'msg-user-2',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'second',
+        parts: [],
+      },
+    ]
+
+    applyPartDelta(messages, 'session-1', { text: 'new reply' })
+
+    const assistants = messages.filter((message) => message.role === 'assistant')
+    expect(assistants).toHaveLength(2)
+    expect(assistants[0]!.content).toBe('done')
+    expect(assistants[1]!.content).toBe('new reply')
+    expect(messages[messages.length - 1]!.role).toBe('assistant')
+  })
+
+  it('keeps appending deltas to a running last assistant message', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hel',
+        parts: [
+          {
+            id: 'part-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hel',
+          },
+        ],
+        completed_at: null,
+      },
+    ]
+
+    applyPartDelta(messages, 'session-1', { text: 'lo' })
+
+    expect(messages.filter((message) => message.role === 'assistant')).toHaveLength(1)
+    expect(messages[1]!.content).toBe('Hello')
+    expect(messages[1]!.parts[0]!.output).toBe('Hello')
+  })
+
+  it('keeps local streaming content when a busy fetch snapshot is behind', () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello world',
+        parts: [
+          {
+            id: 'local-part',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello world',
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          {
+            id: 'server-part',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello',
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const last = merged[merged.length - 1]
+    expect(last!.id).toBe('server-assistant')
+    expect(last!.content).toBe('Hello world')
+    expect(last!.parts[0]!.output).toBe('Hello world')
   })
 })

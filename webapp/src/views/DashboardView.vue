@@ -178,7 +178,7 @@ function navigateToConversation(conv: HarnessConversation): void {
 </script>
 
 <template>
-  <div class="flex flex-col h-full -m-6 lg:-m-8">
+  <div class="flex h-full min-h-0 flex-col">
     <div class="border-b border-border bg-header px-4 py-3 lg:px-6 shrink-0">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">

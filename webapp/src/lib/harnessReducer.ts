@@ -35,14 +35,17 @@ export function ensureAssistantMessage(
   messages: HarnessMessage[],
   sessionId: string,
 ): HarnessMessage {
-  const existing = [...messages].reverse().find((m) => m.role === 'assistant')
-  if (existing) return existing
+  const last = messages[messages.length - 1]
+  if (last?.role === 'assistant' && last.completed_at == null) {
+    return last
+  }
   const created: HarnessMessage = {
     id: `local-msg-${sessionId}-${messages.length}`,
     session_id: sessionId,
     role: 'assistant',
     content: '',
     parts: [],
+    created_at: new Date().toISOString(),
   }
   messages.push(created)
   return created
@@ -307,4 +310,30 @@ export function applySubtaskFinished(
   }
   if (event.summary) part.output = event.summary
   return part
+}
+
+function streamLength(message: HarnessMessage): number {
+  return message.content.length + message.parts.reduce((n, p) => n + p.output.length, 0)
+}
+
+/**
+ * Keep a locally streamed assistant turn when a mid-run `fetchParts` snapshot
+ * is behind the live deltas. Idle fetches should skip this and replace fully.
+ */
+export function mergeBusyFetchedMessages(
+  previous: HarnessMessage[],
+  incoming: HarnessMessage[],
+): HarnessMessage[] {
+  const prevLast = [...previous].reverse().find((m) => m.role === 'assistant')
+  const nextLast = [...incoming].reverse().find((m) => m.role === 'assistant')
+  if (
+    prevLast &&
+    nextLast &&
+    prevLast.completed_at == null &&
+    streamLength(prevLast) > streamLength(nextLast)
+  ) {
+    nextLast.parts = prevLast.parts
+    nextLast.content = prevLast.content
+  }
+  return incoming
 }

@@ -154,9 +154,7 @@ const toc = computed<TocEntry[]>(() => {
 </script>
 
 <template>
-  <!-- Escape AppLayout's padding so the panels stretch edge-to-edge.
-       p-6 = 1.5rem each side → total 3rem; lg:p-8 = 2rem each side → total 4rem -->
-  <div class="flex -m-6 lg:-m-8 h-[calc(100%+3rem)] lg:h-[calc(100%+4rem)]">
+  <div class="flex h-full min-h-0">
     <!-- Left: file navigation -->
     <aside class="w-52 shrink-0 border-r border-border bg-card flex flex-col overflow-y-auto">
       <div class="px-4 py-4 border-b border-border">
