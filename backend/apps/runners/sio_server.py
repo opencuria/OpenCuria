@@ -464,6 +464,91 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
+    # --- Harness workspace-access replies from runner ---
+
+    @sio.on("harness:exec_chunk")
+    async def on_harness_exec_chunk(sid: str, data: dict):
+        """Route exec stream chunks to the owning harness accessor."""
+        runner_id = await _require_runner_id(sio, sid, "harness:exec_chunk")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:exec_chunk", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:exec_done")
+    async def on_harness_exec_done(sid: str, data: dict):
+        """Route exec completion to the owning harness accessor."""
+        runner_id = await _require_runner_id(sio, sid, "harness:exec_done")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:exec_done", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:exec_wait_result")
+    async def on_harness_exec_wait_result(sid: str, data: dict):
+        """Route buffered exec results to the owning harness accessor."""
+        runner_id = await _require_runner_id(
+            sio, sid, "harness:exec_wait_result"
+        )
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:exec_wait_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:read_file_result")
+    async def on_harness_read_file_result(sid: str, data: dict):
+        """Route file content results to the owning harness accessor."""
+        runner_id = await _require_runner_id(
+            sio, sid, "harness:read_file_result"
+        )
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:read_file_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:write_file_result")
+    async def on_harness_write_file_result(sid: str, data: dict):
+        """Route file write results to the owning harness accessor."""
+        runner_id = await _require_runner_id(
+            sio, sid, "harness:write_file_result"
+        )
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:write_file_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:list_result")
+    async def on_harness_list_result(sid: str, data: dict):
+        """Route directory listing results to the owning harness accessor."""
+        runner_id = await _require_runner_id(sio, sid, "harness:list_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:list_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:stat_result")
+    async def on_harness_stat_result(sid: str, data: dict):
+        """Route stat results to the owning harness accessor."""
+        runner_id = await _require_runner_id(sio, sid, "harness:stat_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:stat_result", data, runner_id=runner_id
+        )
+
     # --- Terminal events from runner ---
 
     @sio.on("terminal:started")

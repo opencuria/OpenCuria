@@ -1965,6 +1965,229 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             "is_archive": is_dir,
         }
 
+    async def stat_path(
+        self,
+        workspace_id: uuid.UUID,
+        path: str,
+    ) -> dict:
+        """Stat a path inside the workspace container.
+
+        Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
+        """
+        safe_path = self._sanitize_path(path)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+
+        shell_cmd = (
+            f"if [ -e '{safe_path}' ]; then "
+            f"if [ -d '{safe_path}' ]; then echo 'dir'; "
+            f"du -sb '{safe_path}' | cut -f1; "
+            f"echo 'inode/directory'; "
+            f"else stat -c '%s' '{safe_path}'; "
+            f"file --mime-type -b '{safe_path}' 2>/dev/null "
+            "|| echo 'application/octet-stream'; "
+            f"fi; else echo 'missing'; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["sh", "-c", shell_cmd],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to stat path: {output}")
+        lines = output.strip().splitlines()
+        if not lines or lines[0].strip() == "missing":
+            raise FileNotFoundError(f"No such file or directory: {path}")
+        is_dir = lines[0].strip() == "dir"
+        size = int(lines[1].strip()) if len(lines) > 1 else 0
+        mime_type = (
+            lines[2].strip() if len(lines) > 2 else "application/octet-stream"
+        )
+        return {
+            "path": safe_path,
+            "is_dir": is_dir,
+            "size": size,
+            "mime_type": mime_type,
+        }
+
+    async def write_file_content(
+        self,
+        workspace_id: uuid.UUID,
+        path: str,
+        content_b64: str,
+        mode: int = 0o644,
+    ) -> None:
+        """Write file content atomically inside the workspace container.
+
+        Args:
+            workspace_id: Target workspace.
+            path: Absolute path under ``/workspace``.
+            content_b64: Base64-encoded file content.
+            mode: File permission bits applied after the write.
+        """
+        safe_path = self._sanitize_path(path)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        try:
+            decoded = base64.b64decode(content_b64, validate=True)
+        except Exception as exc:
+            raise ValueError("Invalid base64 file payload") from exc
+        if mode < 0 or mode > 0o777:
+            raise ValueError(f"Invalid file mode: {mode!r}")
+
+        archive = self._build_single_file_tar(
+            os.path.basename(safe_path), decoded
+        )
+        await runtime.put_archive(
+            info.instance_id,
+            os.path.dirname(safe_path) or "/workspace",
+            archive,
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["chmod", format(mode, "o"), safe_path],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to set file mode: {output}")
+        logger.info(
+            "file_written",
+            workspace_id=str(workspace_id),
+            path=safe_path,
+        )
+
+    async def exec_harness_command(
+        self,
+        workspace_id: uuid.UUID,
+        command: list[str] | str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        """Execute a harness command with separated stdout and stderr.
+
+        Runs the command via a shell wrapper that multiplexes the two
+        streams into tagged base64 frames, then decodes them back into
+        separate buffers. Returns ``(exit_code, stdout, stderr)``.
+        """
+        safe_workdir = self._sanitize_path(workdir)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if isinstance(command, str):
+            argv: list[str] = ["bash", "-lc", command]
+        else:
+            argv = [str(arg) for arg in command]
+            if not argv:
+                raise ValueError("command must not be empty")
+        marker_out = "OPENCURIA_STDOUT"
+        marker_err = "OPENCURIA_STDERR"
+        inner = " ".join(shlex.quote(arg) for arg in argv)
+        wrapper = (
+            f"__oc_out=$(mktemp); __oc_err=$(mktemp); "
+            f"sh -c {shlex.quote(inner)} >\"$__oc_out\" 2>\"$__oc_err\"; "
+            f"__oc_code=$?; "
+            f"echo {marker_out}; base64 \"$__oc_out\"; "
+            f"echo {marker_err}; base64 \"$__oc_err\"; "
+            f"echo \"EXIT:$__oc_code\"; rm -f \"$__oc_out\" \"$__oc_err\"; "
+            f"exit $__oc_code"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["sh", "-lc", wrapper],
+            workdir=safe_workdir,
+            env=env,
+        )
+        stdout, stderr = self._parse_harness_exec_output(output)
+        return exit_code, stdout, stderr
+
+    async def exec_harness_command_stream(
+        self,
+        workspace_id: uuid.UUID,
+        command: list[str] | str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+    ):
+        """Execute a harness command and yield ``(stream, data)`` chunks.
+
+        Yields ``("stdout", text)`` / ``("stderr", text)`` tuples while the
+        command runs, then a final ``("exit", str(exit_code))`` tuple.
+        """
+        safe_workdir = self._sanitize_path(workdir)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if isinstance(command, str):
+            argv: list[str] = ["bash", "-lc", command]
+        else:
+            argv = [str(arg) for arg in command]
+            if not argv:
+                raise ValueError("command must not be empty")
+        marker_out = "OPENCURIA_LINE_STDOUT:"
+        marker_err = "OPENCURIA_LINE_STDERR:"
+        inner = " ".join(shlex.quote(arg) for arg in argv)
+        # Portable fifo-based streaming wrapper: multiplexes the child
+        # stdout/stderr into tagged lines on the combined output stream,
+        # then reports the exit code on the last line.
+        portable = (
+            "__oc_dir=$(mktemp -d); "
+            "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
+            "mkfifo \"$__oc_o\" \"$__oc_e\"; "
+            f"(sh -c {shlex.quote(inner)} "
+            ">\"$__oc_o\" 2>\"$__oc_e\"; echo $? >\"$__oc_dir/code\") & "
+            "__oc_pid=$!; "
+            "(while IFS= read -r __oc_l; do "
+            f"printf '{marker_out}%s\\n' \"$__oc_l\"; "
+            "done <\"$__oc_o\" & "
+            "while IFS= read -r __oc_m; do "
+            f"printf '{marker_err}%s\\n' \"$__oc_m\"; "
+            "done <\"$__oc_e\" & wait); "
+            "wait $__oc_pid; __oc_code=$(cat \"$__oc_dir/code\"); "
+            "rm -rf \"$__oc_dir\"; "
+            "echo \"OPENCURIA_EXIT:$__oc_code\""
+        )
+        exit_code = 0
+        async for line in runtime.exec_command(
+            info.instance_id,
+            command=["sh", "-lc", portable],
+            workdir=safe_workdir,
+            env=env,
+        ):
+            if line.startswith(marker_out):
+                yield ("stdout", line[len(marker_out):])
+            elif line.startswith(marker_err):
+                yield ("stderr", line[len(marker_err):])
+            elif line.startswith("OPENCURIA_EXIT:"):
+                exit_code = int(line.split(":", 1)[1].strip() or 0)
+                yield ("exit", str(exit_code))
+            else:
+                yield ("stdout", line)
+
+    @staticmethod
+    def _parse_harness_exec_output(output: str) -> tuple[str, str]:
+        """Split tagged exec wrapper output into (stdout, stderr)."""
+        marker_out = "OPENCURIA_STDOUT"
+        marker_err = "OPENCURIA_STDERR"
+        if marker_out not in output or marker_err not in output:
+            return output, ""
+        stdout_b64 = output.split(marker_out, 1)[1].split(marker_err, 1)[0]
+        remainder = output.split(marker_err, 1)[1]
+        stderr_b64 = remainder.split("EXIT:", 1)[0]
+        import base64 as _b64
+
+        def _decode(payload: str) -> str:
+            cleaned = "".join(payload.split())
+            if not cleaned:
+                return ""
+            return _b64.b64decode(cleaned).decode("utf-8", errors="replace")
+
+        return _decode(stdout_b64), _decode(stderr_b64)
+
     # ── Image artifact operations ─────────────────────────────────────
 
     async def build_image(

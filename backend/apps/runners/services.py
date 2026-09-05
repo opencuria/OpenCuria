@@ -2712,6 +2712,9 @@ class RunnerService:
         runner_id: str | None = None,
     ) -> None:
         """Forward a file result event from runner to subscribed frontends."""
+        routed = self._route_harness_reply(event, data, runner_id=runner_id)
+        if routed is not None:
+            return
         from .sio_server import emit_to_frontend
 
         workspace_id = data.get("workspace_id", "")
@@ -3340,8 +3343,108 @@ class RunnerService:
             return response
         return {"result": response}
 
-    def _forward_to_frontend(
+    def _route_harness_reply(
         self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> bool | None:
+        """Route harness reply events to the owning accessor.
+
+        Returns None when *event* is not a harness reply, True when the
+        payload was routed to an accessor (or dropped after validation),
+        in which case callers must not forward it to the frontend.
+        """
+        harness_events = {
+            "harness:exec_chunk",
+            "harness:exec_done",
+            "harness:exec_wait_result",
+            "harness:read_file_result",
+            "harness:write_file_result",
+            "harness:list_result",
+            "harness:stat_result",
+        }
+        if event not in harness_events:
+            return None
+        from apps.harness.access.runner_accessor import (
+            route_harness_chunk,
+            route_harness_done,
+            route_harness_result,
+        )
+
+        workspace_id = data.get("workspace_id", "")
+        if runner_id and workspace_id:
+            try:
+                workspace_id_uuid = uuid.UUID(workspace_id)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "%s rejected: invalid workspace_id %s",
+                    event,
+                    workspace_id,
+                )
+                return True
+            if not self._validate_harness_workspace_runner(
+                workspace_id_uuid, runner_id
+            ):
+                return True
+        if event == "harness:exec_chunk":
+            route_harness_chunk(data)
+        elif event == "harness:exec_done":
+            route_harness_done(data)
+        else:
+            route_harness_result(data)
+        return True
+
+    def _validate_harness_workspace_runner(
+        self,
+        workspace_id: uuid.UUID,
+        runner_id: str,
+    ) -> bool:
+        """Return True when *workspace_id* belongs to *runner_id* (sync)."""
+        from django.db import connection
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT runner_id FROM runners_workspace WHERE id = %s",
+                    [str(workspace_id)],
+                )
+                row = cursor.fetchone()
+        except Exception:
+            logger.exception("harness reply workspace lookup failed")
+            return False
+        if row is None or str(row[0]) != runner_id:
+            logger.warning(
+                "harness reply rejected: workspace %s not owned by %s",
+                workspace_id,
+                runner_id,
+            )
+            return False
+        return True
+
+    async def emit_harness_event(
+        self,
+        runner: "Runner",
+        event: str,
+        payload: dict,
+    ) -> None:
+        """Emit a harness RPC event to the runner owning a workspace."""
+        await self._emit_to_runner(runner, event, payload)
+
+    def handle_harness_reply(
+        self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> None:
+        """Route a harness reply from a runner to its accessor (sync).
+
+        Called from Socket.IO handlers via ``sync_to_async``. Harness
+        operations never touch the frontend event bus.
+        """
+        self._route_harness_reply(event, data, runner_id=runner_id)
+
+    def _forward_to_frontend(        self,
         event: str,
         data: dict,
         workspace_id: str,
