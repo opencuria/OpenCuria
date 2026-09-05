@@ -80,9 +80,32 @@ class InMemoryTodoRepository(TodoRepository):
         return todo_list
 
 
-# Module-level default store: one per backend process. M6 swaps this for
-# a persistent repository behind the same interface.
+# Module-level default store: one per backend process. It resolves to
+# the persistent Django repository whenever the tool context carries a
+# real session UUID (M6); otherwise it falls back to the volatile
+# in-memory store (unit tests, sessions without persistence).
 default_todo_repository: TodoRepository = InMemoryTodoRepository()
+
+
+def repository_for_session(session_id: str) -> TodoRepository:
+    """Return the Django repo for real session UUIDs, else in-memory.
+
+    This is the M6 seam switch: no tool code changes were needed —
+    the runner builds ``TodoWriteTool`` with
+    ``repository_for_session(ctx.session_id)`` semantics by swapping
+    the module default resolution (see ``HarnessService._tools``).
+    ``TodoWriteTool`` still accepts an explicit repository override,
+    which always wins over this resolution.
+    """
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(str(session_id))
+    except (TypeError, ValueError):
+        return default_todo_repository
+    from apps.harness.repositories import TodoRepositoryDjango
+
+    return TodoRepositoryDjango()
 
 
 class TodoEntryArgs(BaseModel):

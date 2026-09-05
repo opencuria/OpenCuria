@@ -130,3 +130,35 @@ class FakeAccessor(WorkspaceAccessor):
 def fake_accessor() -> FakeAccessor:
     """Default fake accessor with one text file."""
     return FakeAccessor(files={"/workspace/a.txt": b"hello\nworld\n"})
+
+
+@pytest.fixture
+def harness_workspace(db, organization):
+    """A running runners.Workspace for harness persistence tests."""
+    import uuid as _uuid
+
+    from django.contrib.auth import get_user_model
+
+    from apps.runners.enums import RunnerStatus, WorkspaceStatus
+    from apps.runners.models import Runner, Workspace
+    from common.utils import hash_token
+
+    user_model = get_user_model()
+    user = user_model.objects.create_user(
+        email=f"harness-{_uuid.uuid4().hex[:8]}@example.com",
+        password="secret",
+    )
+    runner = Runner.objects.create(
+        name="harness-runner",
+        api_token_hash=hash_token(f"harness-{_uuid.uuid4().hex}"),
+        status=RunnerStatus.ONLINE,
+        sid=f"harness-sid-{_uuid.uuid4().hex[:8]}",
+        organization=organization,
+        available_runtimes=["docker"],
+    )
+    return Workspace.objects.create(
+        runner=runner,
+        name="Harness Workspace",
+        status=WorkspaceStatus.RUNNING,
+        created_by=user,
+    )

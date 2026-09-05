@@ -73,6 +73,11 @@ class APIKeyPermission(str, enum.Enum):
     SKILLS_READ = "skills:read"
     SKILLS_WRITE = "skills:write"
 
+    # Harness (M6, additive; existing keys are never auto-granted these)
+    HARNESS_READ = "harness:read"
+    HARNESS_RUN = "harness:run"
+    HARNESS_PERMISSIONS = "harness:permissions"
+
     # MCP
     MCP_ACCESS = "mcp:access"
 

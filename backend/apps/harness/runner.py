@@ -150,9 +150,9 @@ def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
                 tool = None
             repository = getattr(tool, "_repository", None)
         if repository is None:
-            from .tools.todos import default_todo_repository
+            from .tools.todos import repository_for_session
 
-            repository = default_todo_repository
+            repository = repository_for_session(ctx.session_id)
         stored = repository.list(ctx.session_id)
         return [
             {
