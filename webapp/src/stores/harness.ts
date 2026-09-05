@@ -40,6 +40,7 @@ import {
   ensureAssistantMessage,
   mergeBusyFetchedMessages,
 } from '@/lib/harnessReducer'
+import { collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
 import { useNotificationStore } from './notifications'
 
 export const useHarnessStore = defineStore('harness', () => {
@@ -138,7 +139,10 @@ export const useHarnessStore = defineStore('harness', () => {
     activeSessionId.value = sessionId
   }
 
-  async function fetchParts(sessionId: string): Promise<void> {
+  async function fetchParts(
+    sessionId: string,
+    hydrateChildren = true,
+  ): Promise<void> {
     try {
       const response = await listHarnessParts(sessionId)
       const incoming = response.messages.map((message) => ({
@@ -151,6 +155,12 @@ export const useHarnessStore = defineStore('harness', () => {
         session?.status === 'busy'
           ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
           : incoming
+      if (hydrateChildren) {
+        const childIds = collectRunningChildSessionIds(
+          messagesBySession.value[sessionId] ?? [],
+        )
+        await Promise.all(childIds.map((childId) => fetchParts(childId, false)))
+      }
     } catch (e: unknown) {
       const notifications = useNotificationStore()
       notifications.error(

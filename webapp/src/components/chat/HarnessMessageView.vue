@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { User } from '@lucide/vue'
-import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
+import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { formatMessageUsage, resolveMessageUsage } from '@/lib/harnessUsage'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import HarnessPatchCard from './HarnessPatchCard.vue'
+import HarnessThinking from './HarnessThinking.vue'
 
 const props = defineProps<{
   message: HarnessMessage
@@ -27,6 +28,11 @@ const lastBlockIsText = computed(() => {
   const last = blocks.value[blocks.value.length - 1]
   return last?.kind === 'text'
 })
+
+/** Thinking only in idle gaps: busy turn, no live tool/subtask. */
+const showThinking = computed(
+  () => props.streaming === true && !hasRunningToolOrSubtask(props.message.parts),
+)
 
 const usageLine = computed(() => {
   if (props.streaming || props.message.role !== 'assistant') return null
@@ -68,14 +74,7 @@ function blockKey(index: number): string {
   <!-- Assistant message: chronological blocks in left prose shell -->
   <div v-else class="group flex items-start gap-3">
     <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
-      <div
-        v-if="streaming && blocks.length === 0"
-        class="flex items-center gap-2 text-muted-foreground"
-      >
-        <LoadingSpinner :size="14" />
-        <span class="text-xs">Agent is thinking…</span>
-      </div>
-      <div v-else class="flex flex-col gap-2">
+      <div v-if="blocks.length" class="flex flex-col gap-2">
         <template v-for="(block, index) in blocks" :key="blockKey(index)">
           <div
             v-if="block.kind === 'text'"
@@ -125,6 +124,7 @@ function blockKey(index: number): string {
           </div>
         </template>
       </div>
+      <HarnessThinking v-if="showThinking" :class="blocks.length ? 'mt-2' : ''" />
       <p
         v-if="usageLine"
         data-testid="harness-message-usage"

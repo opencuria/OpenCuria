@@ -6,10 +6,6 @@ import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
 import type { HarnessPart } from '@/types/harness'
 
-vi.mock('@/components/common/LoadingSpinner.vue', () => ({
-  default: { template: '<span class="loading-stub" />' },
-}))
-
 function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: 'part-sub-1',
@@ -17,7 +13,7 @@ function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
     session_id: 'session-parent',
     type: 'subtask',
     state: 'completed',
-    title: 'research the codebase',
+    title: 'Find desktop VNC renderer',
     output: 'found it',
     meta: { subtask_id: 'sub-1', agent: 'explore' },
     ...overrides,
@@ -30,29 +26,86 @@ describe('HarnessSubtaskCard', () => {
     vi.clearAllMocks()
   })
 
-  it('renders the subtask title and agent badge', () => {
+  it('renders a completed timeline row with type and Completed', () => {
     const wrapper = mount(HarnessSubtaskCard, {
       props: { part: makeSubtaskPart() },
     })
 
-    expect(wrapper.text()).toContain('research the codebase')
-    expect(wrapper.text()).toContain('explore')
-    expect(wrapper.text()).toContain('completed')
+    expect(wrapper.get('[data-testid="harness-subtask-row"]').text()).toContain(
+      'Find desktop VNC renderer',
+    )
+    expect(wrapper.get('[data-testid="harness-subtask-type"]').text()).toBe('Explorer')
+    expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe(
+      'Completed',
+    )
+    expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
+      '0',
+    )
+    expect(wrapper.text()).not.toContain('explore')
   })
 
-  it('emits openSubtask with the linked child session id', async () => {
+  it('shows a running indicator and no activity without a child tool', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart({ state: 'running', output: '' }) },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
+      '1',
+    )
+    expect(wrapper.find('[data-testid="harness-subtask-activity"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Completed')
+  })
+
+  it('shows the running child tool title as activity', () => {
+    const store = useHarnessStore()
+    store.messagesBySession['session-child'] = [
+      {
+        id: 'child-msg',
+        session_id: 'session-child',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'child-tool',
+            session_id: 'session-child',
+            type: 'tool',
+            state: 'running',
+            tool: 'read',
+            title: 'Read renderer.ts',
+            output: '',
+          },
+        ],
+      },
+    ]
+
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({ state: 'running', output: '' }),
+        childSessionId: 'session-child',
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe(
+      'Read renderer.ts',
+    )
+  })
+
+  it('emits openSubtask when the row is clicked', async () => {
     const wrapper = mount(HarnessSubtaskCard, {
       props: { part: makeSubtaskPart(), childSessionId: 'session-child' },
     })
 
-    // Open the collapsible, then click the child-session link.
-    const trigger = wrapper.find('[data-slot="collapsible-trigger"]')
-    await trigger.trigger('click')
-    const link = wrapper.find('button.mt-2')
-    expect(link.exists()).toBe(true)
-    await link.trigger('click')
+    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
 
     expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+  })
+
+  it('shows Failed when the subtask errored', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart({ state: 'error', output: 'boom' }) },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe('Failed')
   })
 
   it('store keeps the parent/child link for navigation', () => {
@@ -99,7 +152,6 @@ describe('HarnessSubtaskCard', () => {
 
     const parts = store.messagesFor('session-parent')[0]!.parts
     expect(parts[0]!.state).toBe('completed')
-    // The child links back via parent_id — navigation target exists.
     const child = store.sessions.find((s) => s.parent_id === 'session-parent')
     expect(child?.id).toBe('session-child')
   })

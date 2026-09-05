@@ -162,6 +162,7 @@ function setupSocketListeners(): void {
         })
         if (data.child_session_id) {
           void harness.fetchSessions(props.workspaceId)
+          void harness.fetchParts(data.child_session_id)
         }
       }
     }),

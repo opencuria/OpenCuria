@@ -149,6 +149,37 @@ describe('buildRenderBlocks', () => {
     const blocks = buildRenderBlocks(parts)
     expect(blocks.map((block) => block.kind)).toEqual(['group', 'text', 'single'])
   })
+
+  it('hides the parent task tool when a subtask part exists', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'task-1',
+        tool: 'task',
+        title: 'Subagent: Find renderer',
+      }),
+      makePart('subtask', { id: 'sub-1', title: 'Find renderer' }),
+      makePart('tool', { id: 'read-1', tool: 'read', title: 'Read a.ts' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['card', 'single'])
+    expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'sub-1' } })
+    expect(blocks[1]).toMatchObject({ kind: 'single', part: { id: 'read-1' } })
+  })
+
+  it('keeps a task tool row when no subtask part exists', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'task-1',
+        tool: 'task',
+        title: 'Subagent: Find renderer',
+      }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single'])
+    expect(blocks[0]).toMatchObject({ kind: 'single', part: { id: 'task-1' } })
+  })
 })
 
 describe('work item helpers', () => {

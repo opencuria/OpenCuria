@@ -239,3 +239,39 @@
   background: color-mix(in oklch, var(--primary) 20%, transparent);
   color: var(--foreground);
 }
+
+@keyframes harness-thinking-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: -100% 50%;
+  }
+}
+
+.harness-thinking {
+  width: fit-content;
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 35%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 65%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: harness-thinking-shimmer 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harness-thinking {
+    animation: none;
+    background-image: none;
+    color: var(--muted-foreground);
+    -webkit-background-clip: unset;
+    background-clip: unset;
+  }
+}

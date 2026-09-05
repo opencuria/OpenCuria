@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessMessageView from './HarnessMessageView.vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
@@ -38,6 +39,9 @@ function makeAssistant(parts: HarnessPart[]): HarnessMessage {
 }
 
 describe('HarnessMessageView', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
   it('renders text and a single tool in chronological order', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
@@ -113,7 +117,7 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
   })
 
-  it('shows the thinking placeholder while streaming with no parts', () => {
+  it('shows Thinking while streaming with no parts', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         streaming: true,
@@ -121,7 +125,67 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('Agent is thinking')
+    expect(wrapper.get('[data-testid="harness-thinking"]').text()).toBe('Thinking')
+    expect(wrapper.text()).not.toContain('Agent is thinking')
+  })
+
+  it('hides Thinking while a tool is running', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'tool-1',
+            type: 'tool',
+            state: 'running',
+            tool: 'read',
+            title: 'Read index.ts',
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Read index.ts')
+  })
+
+  it('shows Thinking again after tools complete while still streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'tool-1',
+            type: 'tool',
+            state: 'completed',
+            tool: 'read',
+            title: 'Read index.ts',
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-thinking"]').text()).toBe('Thinking')
+    expect(wrapper.text()).toContain('Read index.ts')
+  })
+
+  it('hides Thinking while a subtask is running', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'sub-1',
+            type: 'subtask',
+            state: 'running',
+            title: 'Find renderer',
+            meta: { agent: 'explore', subtask_id: 'sub-1' },
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
   })
 
   it('does not render step-finish markers', () => {

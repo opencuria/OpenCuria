@@ -6,6 +6,7 @@
  */
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
+import { isTaskToolPart } from '@/lib/harnessSubtaskActivity'
 
 const WORK_ITEM_TYPES = new Set<HarnessPartType>(['tool', 'reasoning'])
 const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch', 'agent'])
@@ -43,6 +44,7 @@ function isEmptyText(part: HarnessPart): boolean {
 export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
   const blocks: RenderBlock[] = []
   let run: HarnessPart[] = []
+  const hasSubtask = parts.some((part) => part.type === 'subtask')
 
   function flushRun(): void {
     if (run.length === 0) return
@@ -56,6 +58,9 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
 
   for (const part of parts) {
     if (SKIP_TYPES.has(part.type) || isEmptyText(part)) {
+      continue
+    }
+    if (hasSubtask && isTaskToolPart(part)) {
       continue
     }
     if (part.type === 'text') {
