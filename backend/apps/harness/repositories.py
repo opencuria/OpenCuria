@@ -147,6 +147,15 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def list_children(parent_id: uuid.UUID) -> list[HarnessSession]:
+        """Return child sessions spawned from *parent_id*."""
+        return list(
+            HarnessSession.objects.filter(parent_id=parent_id).order_by(
+                "created_at"
+            )
+        )
+
+    @staticmethod
     def list_for_workspaces(workspace_ids: list[uuid.UUID]) -> list[HarnessSession]:
         """Return root sessions across *workspace_ids* (newest first)."""
         if not workspace_ids:

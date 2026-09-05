@@ -18,7 +18,7 @@ function makeRequest() {
 describe('HarnessPermissionSheet', () => {
   it('shows tool, title and pattern preview for the pending request', () => {
     const wrapper = mount(HarnessPermissionSheet, {
-      props: { request: makeRequest() },
+      props: { requests: [makeRequest()] },
     })
 
     expect(wrapper.text()).toContain('bash')
@@ -28,7 +28,7 @@ describe('HarnessPermissionSheet', () => {
 
   it('emits the chosen resolution', async () => {
     const wrapper = mount(HarnessPermissionSheet, {
-      props: { request: makeRequest() },
+      props: { requests: [makeRequest()] },
     })
 
     const buttons = wrapper.findAll('button')
@@ -36,6 +36,33 @@ describe('HarnessPermissionSheet', () => {
     expect(approveOnce).toBeTruthy()
     await approveOnce!.trigger('click')
 
-    expect(wrapper.emitted('resolve')).toEqual([['once']])
+    expect(wrapper.emitted('resolve')).toEqual([['req-1', 'once']])
+  })
+
+  it('pages through multiple pending permission requests', async () => {
+    const wrapper = mount(HarnessPermissionSheet, {
+      props: {
+        requests: [
+          makeRequest(),
+          {
+            ...makeRequest(),
+            request_id: 'req-2',
+            call_id: 'call-10',
+            title: '$ git diff',
+            pattern: 'git diff',
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="composer-permission-page"]').text()).toBe('1 of 2')
+    expect(wrapper.text()).toContain('$ rm -rf /tmp/x')
+    await wrapper.get('[data-testid="composer-permission-next"]').trigger('click')
+    expect(wrapper.get('[data-testid="composer-permission-page"]').text()).toBe('2 of 2')
+    expect(wrapper.text()).toContain('$ git diff')
+    const buttons = wrapper.findAll('button')
+    const always = buttons.find((button) => button.text().includes('Always allow'))
+    await always!.trigger('click')
+    expect(wrapper.emitted('resolve')).toEqual([['req-2', 'always']])
   })
 })

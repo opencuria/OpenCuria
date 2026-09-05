@@ -200,6 +200,10 @@ function setupSocketListeners(): void {
     onEvent('harness.permission_required', (data) => {
       if (data.workspace_id === props.workspaceId) {
         if (!data.request_id) return
+        if (data.decision) {
+          harness.handlePermissionResolved(data.request_id, data.decision)
+          return
+        }
         harness.handlePermissionRequired({
           request_id: data.request_id,
           session_id: data.session_id,
@@ -330,8 +334,11 @@ async function handleStop(): Promise<void> {
   await harness.abortSession(harness.activeSessionId)
 }
 
-async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<void> {
-  const request = activeRequests.value[0]
+async function handleResolve(
+  requestId: string,
+  response: 'once' | 'always' | 'reject',
+): Promise<void> {
+  const request = activeRequests.value.find((item) => item.request_id === requestId)
   if (!request) return
   resolving.value = true
   try {

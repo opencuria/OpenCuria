@@ -19,7 +19,7 @@ const emit = defineEmits<{
   'mention-hover': [index: number]
   'question-submit': [requestId: string, answers: string[]]
   'question-skip': [requestId: string]
-  resolve: [response: HarnessPermissionResponse]
+  resolve: [requestId: string, response: HarnessPermissionResponse]
 }>()
 
 const todoOpen = ref(true)
@@ -75,11 +75,11 @@ function peekOffset(index: number): number {
             @skip="(requestId) => emit('question-skip', requestId)"
           />
         </template>
-        <template v-else-if="sheets[0]?.kind === 'permission' && sheets[0]?.permission">
+        <template v-else-if="sheets[0]?.kind === 'permission' && sheets[0]?.permissions">
           <HarnessPermissionSheet
-            :request="sheets[0].permission!"
+            :requests="sheets[0].permissions!"
             :resolving="permissionResolving"
-            @resolve="emit('resolve', $event)"
+            @resolve="(requestId, response) => emit('resolve', requestId, response)"
           />
         </template>
         <template v-else-if="sheets[0]?.kind === 'todos' && sheets[0]?.todos">

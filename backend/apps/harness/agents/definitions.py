@@ -144,7 +144,10 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
     "general": AgentDefinition(
         name="general",
         mode="subagent",
-        description="General-purpose subagent for delegated subtasks.",
+        description=(
+            "General-purpose subagent for delegated subtasks. Use this "
+            "agent to execute multiple units of work in parallel."
+        ),
         system_prompt=(
             "You are opencuria general, a helpful subagent. Complete the "
             "delegated subtask and return a concise result with file paths "

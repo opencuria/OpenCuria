@@ -91,6 +91,31 @@ describe('HarnessWorkedGroup', () => {
     expect(wrapper.find('.loading-stub').exists()).toBe(true)
   })
 
+  it('shows a running count when several parts run at once', () => {
+    const wrapper = mount(HarnessWorkedGroup, {
+      props: {
+        parts: [
+          makePart({
+            id: 'tool-1',
+            title: 'Read a.ts',
+            state: 'running',
+            output: '',
+          }),
+          makePart({
+            id: 'tool-2',
+            tool: 'grep',
+            title: 'Grep foo',
+            state: 'running',
+            output: '',
+          }),
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-worked-running"]').text()).toBe('2 running')
+    expect(wrapper.findAll('.loading-stub')).toHaveLength(2)
+  })
+
   it('does not render step-finish rows inside the group', async () => {
     const wrapper = mount(HarnessWorkedGroup, {
       props: {

@@ -21,8 +21,8 @@ vi.mock('@/components/chat/HarnessQuestionSheet.vue', () => ({
 
 vi.mock('@/components/chat/HarnessPermissionSheet.vue', () => ({
   default: {
-    props: ['request', 'resolving'],
-    template: '<div data-testid="permission-stub">{{ request.tool }}</div>',
+    props: ['requests', 'resolving'],
+    template: '<div data-testid="permission-stub">{{ requests.length }}:{{ requests[0]?.tool }}</div>',
   },
 }))
 
@@ -73,6 +73,16 @@ function makeSheets(): ComposerSheet[] {
         pattern: 'ls',
         title: 'Run ls',
       },
+      permissions: [
+        {
+          request_id: 'p-1',
+          session_id: 's-1',
+          workspace_id: 'ws-1',
+          tool: 'bash',
+          pattern: 'ls',
+          title: 'Run ls',
+        },
+      ],
     },
     { kind: 'todos', todos: [makeTodo('t1')] },
   ]

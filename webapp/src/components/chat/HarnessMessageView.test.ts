@@ -149,6 +149,63 @@ describe('HarnessMessageView', () => {
     expect(wrapper.text()).toContain('Read index.ts')
   })
 
+  it('hides Thinking while any of several tools is still running', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'tool-1',
+            type: 'tool',
+            state: 'running',
+            tool: 'read',
+            title: 'Read a.ts',
+            output: '',
+          }),
+          makePart({
+            id: 'tool-2',
+            type: 'tool',
+            state: 'running',
+            tool: 'read',
+            title: 'Read b.ts',
+            output: '',
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="harness-worked-running"]').text()).toBe('2 running')
+  })
+
+  it('renders two running subtask cards at once', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'sub-1',
+            type: 'subtask',
+            state: 'running',
+            title: 'Explore renderer',
+            meta: { agent: 'explore', subtask_id: 'sub-1' },
+          }),
+          makePart({
+            id: 'sub-2',
+            type: 'subtask',
+            state: 'running',
+            title: 'General research',
+            meta: { agent: 'general', subtask_id: 'sub-2' },
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="harness-subtask-row"]')).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid="harness-subtask-indicator"]').every((node) => node.attributes('data-running') === '1')).toBe(true)
+  })
+
   it('shows Thinking again after tools complete while still streaming', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {

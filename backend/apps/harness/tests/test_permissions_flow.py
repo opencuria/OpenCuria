@@ -11,7 +11,10 @@ from apps.harness.permissions.models import (
     PermissionAllowlist,
     PermissionRequest,
 )
-from apps.harness.permissions.service import PermissionService
+from apps.harness.permissions.service import (
+    PermissionRequestRepository,
+    PermissionService,
+)
 
 
 def _service(**kwargs) -> PermissionService:
@@ -191,3 +194,35 @@ def test_resolve_missing_or_resolved_raises() -> None:
     service.resolve(request.id, "once")
     with pytest.raises(LookupError, match="not found"):
         service.resolve(request.id, "once")
+
+
+@pytest.mark.django_db
+def test_list_pending_for_session_filters_by_tool() -> None:
+    """Pending asks for one session can be listed and filtered by tool."""
+    service = _service()
+    org_id, session_id = _ids()
+    service.check_or_request(
+        organization_id=org_id,
+        session_id=session_id,
+        tool="bash",
+        pattern="git status",
+    )
+    service.check_or_request(
+        organization_id=org_id,
+        session_id=session_id,
+        tool="bash",
+        pattern="git diff",
+    )
+    service.check_or_request(
+        organization_id=org_id,
+        session_id=session_id,
+        tool="edit",
+        pattern="/workspace/a.py",
+    )
+    bash_pending = PermissionRequestRepository.list_pending_for_session(
+        session_id, tool="bash"
+    )
+    all_pending = PermissionRequestRepository.list_pending_for_session(session_id)
+    assert len(bash_pending) == 2
+    assert {item.pattern for item in bash_pending} == {"git status", "git diff"}
+    assert len(all_pending) == 3

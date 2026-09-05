@@ -99,6 +99,7 @@ class HarnessService:
         self._tasks: dict[str, asyncio.Task] = {}
         self._pending_permissions: dict[str, asyncio.Future[str]] = {}
         self._pending_questions: dict[str, asyncio.Future[list[Any]]] = {}
+        self._event_locks: dict[str, asyncio.Lock] = {}
         # run context kept in memory: session_id -> dict
         self._runs: dict[str, dict[str, Any]] = {}
 
@@ -476,6 +477,7 @@ class HarnessService:
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run task and mark message/parts aborted."""
         session = await sync_to_async(self.get_session)(session_id)
+        children = await sync_to_async(self.sessions.list_children)(session_id)
         key = str(session.id)
         task = self._tasks.get(key)
         if task is None or task.done():
@@ -485,24 +487,26 @@ class HarnessService:
                     session, HarnessSessionStatus.IDLE
                 )
                 session.status = HarnessSessionStatus.IDLE
-            return session
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # pragma: no cover - abort must not raise
-            log.exception("harness_abort_run_error", session_id=key)
-        # Belt-and-braces: _execute_run's finally already marked idle;
-        # ensure state even if cancellation raced.
-        fresh = await sync_to_async(self.sessions.get_by_id)(session.id)
-        if fresh is not None:
-            session = fresh
-        if session.status != HarnessSessionStatus.IDLE:
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
-            )
-            session.status = HarnessSessionStatus.IDLE
+        else:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # pragma: no cover - abort must not raise
+                log.exception("harness_abort_run_error", session_id=key)
+            # Belt-and-braces: _execute_run's finally already marked idle;
+            # ensure state even if cancellation raced.
+            fresh = await sync_to_async(self.sessions.get_by_id)(session.id)
+            if fresh is not None:
+                session = fresh
+            if session.status != HarnessSessionStatus.IDLE:
+                await sync_to_async(self.sessions.mark_status)(
+                    session, HarnessSessionStatus.IDLE
+                )
+                session.status = HarnessSessionStatus.IDLE
+        for child in children:
+            await self.abort_run(child.id)
         return session
 
     async def resolve_permission(
@@ -529,6 +533,14 @@ class HarnessService:
             },
             str(session.workspace_id),
         )
+        if str(response).strip().lower() == "always":
+            await self._resolve_sibling_permissions(
+                session=session,
+                tool=record.tool,
+                skip_id=request_id,
+                decision=result.decision,
+                remember=result.remember,
+            )
         return {"decision": result.decision, "remember": result.remember}
 
     async def resolve_question(
@@ -801,6 +813,7 @@ class HarnessService:
         finally:
             self._runs.pop(key, None)
             self._tasks.pop(key, None)
+            self._event_locks.pop(key, None)
             await sync_to_async(self.sessions.mark_status)(
                 session, HarnessSessionStatus.IDLE
             )
@@ -910,6 +923,16 @@ class HarnessService:
         event: dict[str, Any],
     ) -> None:
         """Persist a runner streaming event and forward it to frontend."""
+        async with self._event_lock(str(session.id)):
+            await self._persist_runner_event(session, assistant, event)
+
+    async def _persist_runner_event(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        event: dict[str, Any],
+    ) -> None:
+        """Persist a runner streaming event and forward it to frontend."""
         etype = str(event.get("type", ""))
         workspace_id = str(session.workspace_id)
         session_id = str(session.id)
@@ -1009,6 +1032,7 @@ class HarnessService:
                     "delta": {
                         "tool_started": event.get("tool", ""),
                         "title": event.get("title", ""),
+                        "call_id": event.get("call_id", ""),
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -1016,26 +1040,35 @@ class HarnessService:
                 workspace_id,
             )
         elif etype == "tool_completed":
-            await self._finish_tool_part(assistant, event, state="completed")
+            part = await self._finish_tool_part(assistant, event, state="completed")
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
-                    "delta": {"tool_completed": event.get("tool", "")},
+                    "delta": {
+                        "tool_completed": event.get("tool", ""),
+                        "call_id": event.get("call_id", ""),
+                        "output": event.get("output", ""),
+                    },
                     "step": event.get("step"),
+                    "part_id": str(part.id) if part is not None else None,
                 },
                 workspace_id,
             )
         elif etype == "tool_error":
-            await self._finish_tool_part(assistant, event, state="error")
+            part = await self._finish_tool_part(assistant, event, state="error")
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
-                    "delta": {"tool_error": event.get("error", "")},
+                    "delta": {
+                        "tool_error": event.get("error", ""),
+                        "call_id": event.get("call_id", ""),
+                    },
                     "step": event.get("step"),
+                    "part_id": str(part.id) if part is not None else None,
                 },
                 workspace_id,
             )
@@ -1178,7 +1211,7 @@ class HarnessService:
 
     async def _finish_tool_part(
         self, assistant: HarnessMessage, event: dict[str, Any], *, state: str
-    ) -> None:
+    ) -> HarnessPart:
         """Transition the matching tool part to completed/error."""
         call_id = str(event.get("call_id", ""))
         output = str(event.get("output", "") or event.get("error", "") or "")
@@ -1209,6 +1242,7 @@ class HarnessService:
         await sync_to_async(self.parts.mark_state)(
             part, state, output=output or part.output
         )
+        return part
 
     async def _finish_subtask_part(
         self,
@@ -1239,6 +1273,49 @@ class HarnessService:
                 "status": status,
             },
         )
+
+    def _event_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session lock for runner-event persistence."""
+        lock = self._event_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._event_locks[session_id] = lock
+        return lock
+
+    async def _resolve_sibling_permissions(
+        self,
+        *,
+        session: HarnessSession,
+        tool: str,
+        skip_id: uuid.UUID,
+        decision: str,
+        remember: str,
+    ) -> None:
+        """Approve remaining pending asks for the same tool in this session."""
+        pending = await sync_to_async(
+            self.permissions.requests.list_pending_for_session
+        )(session.id, tool=tool)
+        for sibling in pending:
+            if sibling.id == skip_id:
+                continue
+            await sync_to_async(self.permissions.requests.mark_resolved)(
+                sibling, approved=True, remember="always"
+            )
+            sid = str(sibling.id)
+            future = self._pending_permissions.pop(sid, None)
+            if future is not None and not future.done():
+                future.set_result(decision)
+            await self._emit_frontend(
+                FRONTEND_EVENT_PERMISSION,
+                {
+                    "workspace_id": str(session.workspace_id),
+                    "session_id": str(session.id),
+                    "request_id": sid,
+                    "decision": decision,
+                    "remember": remember,
+                },
+                str(session.workspace_id),
+            )
 
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
@@ -1361,6 +1438,7 @@ class HarnessService:
             },
         )
         status = "completed"
+        child_task: asyncio.Task[None] | None = None
         try:
             assistant = await self.start_run(
                 child,
@@ -1368,15 +1446,24 @@ class HarnessService:
                 organization_id=organization_id,
                 workspace_id=str(parent.workspace_id),
             )
-            task = self._tasks.get(str(child.id))
-            if task is not None:
-                await task
+            child_task = self._tasks.get(str(child.id))
+            if child_task is not None:
+                await child_task
             assistant = await sync_to_async(self.messages.model.objects.get)(
                 id=assistant.id
             )
             output = assistant.content or ""
             if assistant.finish in ("error", "aborted"):
                 status = "error"
+        except asyncio.CancelledError:
+            tracked = child_task or self._tasks.get(str(child.id))
+            if tracked is not None and not tracked.done():
+                tracked.cancel()
+                try:
+                    await tracked
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
         except Exception as exc:
             await self._on_runner_event(
                 parent,

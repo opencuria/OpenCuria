@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -12,7 +13,11 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 
-from apps.harness.harness_service import HarnessService
+from apps.harness.harness_service import (
+    FRONTEND_EVENT_PART,
+    FRONTEND_EVENT_PERMISSION,
+    HarnessService,
+)
 from apps.harness.models import HarnessSession, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
@@ -841,3 +846,179 @@ async def test_start_run_without_accessor_factory_errors_list_tool(
     tool_parts = [part for part in parts if part.type == "tool"]
     assert tool_parts and tool_parts[0].state == "error"
     assert "No workspace accessor configured" in (tool_parts[0].output or "")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
+    harness_workspace,
+) -> None:
+    """Concurrent tool_started/completed events keep separate parts per call_id."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+
+    async def start(call_id: str, title: str) -> None:
+        await service._on_runner_event(
+            session,
+            assistant,
+            {
+                "type": "tool_started",
+                "step": 1,
+                "call_id": call_id,
+                "tool": "read",
+                "title": title,
+                "arguments": "{}",
+            },
+        )
+
+    await asyncio.gather(start("c1", "read a"), start("c2", "read b"))
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "c2",
+            "tool": "read",
+            "output": "b-content",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "c1",
+            "tool": "read",
+            "output": "a-content",
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "tool"
+    ]
+    by_call = {part.call_id: part for part in parts}
+    assert set(by_call) == {"c1", "c2"}
+    assert by_call["c1"].state == "completed"
+    assert by_call["c1"].output == "a-content"
+    assert by_call["c2"].state == "completed"
+    assert by_call["c2"].output == "b-content"
+    started = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_started" in (item.get("delta") or {})
+    ]
+    completed = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_completed" in (item.get("delta") or {})
+    ]
+    assert {item["delta"]["call_id"] for item in started} == {"c1", "c2"}
+    assert {item["part_id"] for item in started} == {
+        str(by_call["c1"].id),
+        str(by_call["c2"].id),
+    }
+    assert {item["delta"]["call_id"] for item in completed} == {"c1", "c2"}
+    assert all(item.get("part_id") for item in completed)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_always_allow_resolves_sibling_pending_asks(
+    harness_workspace,
+) -> None:
+    """Always-allow auto-approves remaining pending asks for the same tool."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    first = asyncio.create_task(
+        service._on_permission(
+            session,
+            assistant,
+            tool="bash",
+            action="git status",
+            title="$ git status",
+            call_id="c1",
+        )
+    )
+    second = asyncio.create_task(
+        service._on_permission(
+            session,
+            assistant,
+            tool="bash",
+            action="git diff",
+            title="$ git diff",
+            call_id="c2",
+        )
+    )
+    request_ids: list[str] = []
+    for _ in range(50):
+        request_ids = [
+            str(item["request_id"])
+            for item in emitted
+            if item.get("event") == FRONTEND_EVENT_PERMISSION
+        ]
+        if len(request_ids) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    assert len(request_ids) >= 2
+    await service.resolve_permission(
+        session=session,
+        request_id=uuid.UUID(request_ids[0]),
+        response="always",
+    )
+    decisions = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
+    assert set(decisions) == {"once"}
+    resolved_events = [
+        item
+        for item in emitted
+        if item.get("event") == FRONTEND_EVENT_PERMISSION and item.get("decision")
+    ]
+    assert len(resolved_events) == 2
+    assert {item["request_id"] for item in resolved_events} == set(request_ids[:2])
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_run_cancels_child_session_task(
+    harness_workspace,
+) -> None:
+    """Aborting a parent also cancels in-flight child session tasks."""
+    service, _, _ = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=parent.workspace_id,
+        organization_id=parent.organization_id,
+        title="child",
+        parent_id=parent.id,
+        agent_name="explore",
+        mode="build",
+        model="fake-model",
+    )
+    hang = asyncio.Event()
+
+    async def never() -> None:
+        await hang.wait()
+
+    child_task = asyncio.create_task(never())
+    service._tasks[str(child.id)] = child_task
+    await service.abort_run(parent.id)
+    assert child_task.done()

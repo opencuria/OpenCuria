@@ -197,6 +197,11 @@ async def compose_system_prompt(
         tool_lines = ["# Available tools"]
         for schema in tools:
             tool_lines.append(f"- {schema.name}: {schema.description}")
+        tool_lines.append(
+            "Independent tool calls in one assistant message run in parallel. "
+            "Issue multiple tool calls in a single step for independent work; "
+            "wait for results before dependent follow-ups."
+        )
         sections.append("\n".join(tool_lines))
 
     if subagents:
@@ -206,6 +211,8 @@ async def compose_system_prompt(
                 f"- {name}: {description}"
                 for name, description in sorted(subagents.items())
             ],
+            "Launch independent subagents in one message with multiple task "
+            "tool calls so they run in parallel.",
         ]
         sections.append("\n".join(sub_lines))
 

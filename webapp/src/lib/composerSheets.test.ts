@@ -63,6 +63,17 @@ describe('buildComposerSheets', () => {
 
     expect(sheets.map((sheet) => sheet.kind)).toEqual(['todos'])
   })
+
+  it('keeps multiple pending permissions on one sheet for the pager', () => {
+    const sheets = buildComposerSheets({
+      permissions: [makePermission('p1'), makePermission('p2')],
+    })
+
+    expect(sheets).toHaveLength(1)
+    expect(sheets[0]?.kind).toBe('permission')
+    expect(sheets[0]?.permissions).toHaveLength(2)
+    expect(sheets[0]?.permission?.request_id).toBe('p1')
+  })
 })
 
 describe('optionLetter', () => {

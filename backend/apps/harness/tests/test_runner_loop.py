@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, Field
 
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import (
@@ -25,6 +26,7 @@ from apps.harness.runner import (
 )
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import default_tool_registry
+from apps.harness.tools.base import Tool, ToolResult
 
 
 class FakeProvider(ProviderAdapter):
@@ -82,6 +84,80 @@ def _tool_step(
             usage=Usage(2, 3, 5, 0.01),
         )
     ]
+
+
+def _multi_tool_step(
+    calls: list[tuple[str, dict[str, Any], str]],
+) -> list[Delta]:
+    return [
+        Delta(
+            tool_calls=tuple(
+                {
+                    "index": index,
+                    "id": call_id,
+                    "name": name,
+                    "arguments": json.dumps(args),
+                }
+                for index, (name, args, call_id) in enumerate(calls)
+            ),
+            usage=Usage(2, 3, 5, 0.01),
+        )
+    ]
+
+
+class ProbeArgs(BaseModel):
+    """Arguments for the parallel probe tool."""
+
+    key: str = Field(default="")
+
+
+class ProbeTool(Tool):
+    """Test tool that can overlap concurrent executions."""
+
+    name = "probe"
+    description = "Parallel probe"
+    args_schema = ProbeArgs
+
+    def __init__(self) -> None:
+        self.started: dict[str, asyncio.Event] = {}
+        self.release: dict[str, asyncio.Event] = {}
+        self.running = 0
+        self.max_running = 0
+        self.finish_order: list[str] = []
+
+    def events_for(self, key: str) -> tuple[asyncio.Event, asyncio.Event]:
+        """Return started/release events for *key*."""
+        started = self.started.setdefault(key, asyncio.Event())
+        release = self.release.setdefault(key, asyncio.Event())
+        return started, release
+
+    async def execute(self, args: BaseModel | dict[str, object], ctx) -> ToolResult:  # type: ignore[no-untyped-def]
+        """Wait until released; track overlap."""
+        validated = self.coerce_args(args)
+        assert isinstance(validated, ProbeArgs)
+        key = validated.key or ctx.call_id
+        started, release = self.events_for(key)
+        self.running += 1
+        self.max_running = max(self.max_running, self.running)
+        started.set()
+        try:
+            await release.wait()
+        finally:
+            self.running -= 1
+        self.finish_order.append(key)
+        return ToolResult(output=f"done-{key}")
+
+
+class BoomTool(Tool):
+    """Test tool that always fails."""
+
+    name = "boom"
+    description = "Always fails"
+    args_schema = ProbeArgs
+
+    async def execute(self, args: BaseModel | dict[str, object], ctx) -> ToolResult:  # type: ignore[no-untyped-def]
+        """Raise immediately."""
+        raise RuntimeError("boom")
 
 
 def _runner(
@@ -337,7 +413,10 @@ async def test_cost_tokens_summed_across_steps() -> None:
     assert result.usage.cost == pytest.approx(0.012)
     assert result.cost == pytest.approx(0.012)
     finishes = [event for event in events if event["type"] == "step_finish"]
-    assert [event["cost"] for event in finishes] == [pytest.approx(0.01), pytest.approx(0.002)]
+    assert [event["cost"] for event in finishes] == [
+        pytest.approx(0.01),
+        pytest.approx(0.002),
+    ]
 
 
 async def test_tool_error_fed_back_as_tool_message() -> None:
@@ -431,6 +510,169 @@ async def test_invalid_mode_rejected() -> None:
     runner, opts = _runner(provider, events)
     with pytest.raises(ValueError, match="Invalid mode"):
         await runner.run("p", "build", "m", "turbo", opts)
+
+
+async def test_parallel_tools_overlap_and_preserve_call_order() -> None:
+    """Independent calls in one step overlap; history stays in call order."""
+    probe = ProbeTool()
+    registry = default_tool_registry()
+    registry.register(probe)
+    provider = FakeProvider(
+        [
+            _multi_tool_step(
+                [
+                    ("probe", {"key": "a"}, "c1"),
+                    ("probe", {"key": "b"}, "c2"),
+                ]
+            ),
+            _text_step("both done"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    started_a, release_a = probe.events_for("a")
+    started_b, release_b = probe.events_for("b")
+    run_task = asyncio.create_task(runner.run("go", "build", "m", "build"))
+    await asyncio.wait_for(started_a.wait(), timeout=2)
+    await asyncio.wait_for(started_b.wait(), timeout=2)
+    assert probe.max_running == 2
+    release_b.set()
+    release_a.set()
+    result = await run_task
+    assert result.output == "both done"
+    assert probe.finish_order == ["b", "a"]
+    history = provider.messages[1]
+    tool_ids = [message.tool_call_id for message in history if message.role == "tool"]
+    assert tool_ids == ["c1", "c2"]
+
+
+async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
+    """One failing call still lets the sibling complete."""
+    probe = ProbeTool()
+    registry = default_tool_registry()
+    registry.register(probe)
+    registry.register(BoomTool())
+    provider = FakeProvider(
+        [
+            _multi_tool_step(
+                [
+                    ("boom", {"key": "x"}, "c1"),
+                    ("probe", {"key": "ok"}, "c2"),
+                ]
+            ),
+            _text_step("recovered"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    started_ok, release_ok = probe.events_for("ok")
+    run_task = asyncio.create_task(runner.run("go", "build", "m", "build"))
+    await asyncio.wait_for(started_ok.wait(), timeout=2)
+    release_ok.set()
+    result = await run_task
+    assert result.output == "recovered"
+    assert any(
+        event["type"] == "tool_error" and event.get("call_id") == "c1"
+        for event in events
+    )
+    assert any(
+        event["type"] == "tool_completed" and event.get("call_id") == "c2"
+        for event in events
+    )
+
+
+async def test_abort_cancels_in_flight_parallel_tools() -> None:
+    """Cancelling the run cancels every in-flight tool task."""
+    probe = ProbeTool()
+    registry = default_tool_registry()
+    registry.register(probe)
+    provider = FakeProvider(
+        [
+            _multi_tool_step(
+                [
+                    ("probe", {"key": "a"}, "c1"),
+                    ("probe", {"key": "b"}, "c2"),
+                ]
+            ),
+            _text_step("never"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    started_a, _release_a = probe.events_for("a")
+    started_b, _release_b = probe.events_for("b")
+    run_task = asyncio.create_task(runner.run("go", "build", "m", "build"))
+    await asyncio.wait_for(started_a.wait(), timeout=2)
+    await asyncio.wait_for(started_b.wait(), timeout=2)
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert any(event["type"] == "aborted" for event in events)
+
+
+async def test_parallel_permission_asks_are_independent() -> None:
+    """Two ASK gates in one step can be pending at the same time."""
+    pending: dict[str, asyncio.Future[str]] = {}
+    ready = asyncio.Event()
+
+    async def ask(**kwargs):  # type: ignore[no-untyped-def]
+        call_id = str(kwargs["call_id"])
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        pending[call_id] = future
+        if len(pending) >= 2:
+            ready.set()
+        return await future
+
+    provider = FakeProvider(
+        [
+            _multi_tool_step(
+                [
+                    ("bash", {"command": "git status"}, "c1"),
+                    ("bash", {"command": "git diff"}, "c2"),
+                ]
+            ),
+            _text_step("approved both"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "ask"}, on_permission=ask
+    )
+    run_task = asyncio.create_task(runner.run("go", "build", "m", "build", opts))
+    await asyncio.wait_for(ready.wait(), timeout=2)
+    assert set(pending) == {"c1", "c2"}
+    pending["c1"].set_result("once")
+    pending["c2"].set_result("once")
+    result = await run_task
+    assert result.output == "approved both"
 
 
 async def test_send_logs_emitter_errors_without_raising() -> None:

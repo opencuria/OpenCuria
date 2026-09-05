@@ -25,6 +25,10 @@ const open = computed({
   },
 })
 
+const runningCount = computed(
+  () => props.parts.filter((part) => part.state === 'running').length,
+)
+
 const workCount = computed(() => countWorkItems(props.parts))
 </script>
 
@@ -44,6 +48,13 @@ const workCount = computed(() => countWorkItems(props.parts))
       />
       <span>Worked</span>
       <span data-testid="harness-worked-count" class="opacity-70">{{ workCount }}</span>
+      <span
+        v-if="runningCount > 1"
+        data-testid="harness-worked-running"
+        class="opacity-70"
+      >
+        {{ runningCount }} running
+      </span>
     </CollapsibleTrigger>
     <CollapsibleContent class="pl-4">
       <template v-for="part in parts" :key="part.id">

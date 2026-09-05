@@ -70,6 +70,19 @@ class PermissionRequestRepository:
         return perm_models.PermissionRequest.objects.filter(id=request_id).first()
 
     @staticmethod
+    def list_pending_for_session(
+        session_id: uuid.UUID, *, tool: str | None = None
+    ) -> list[perm_models.PermissionRequest]:
+        """Return pending requests for *session_id*, optionally filtered by tool."""
+        query = perm_models.PermissionRequest.objects.filter(
+            session_id=session_id,
+            status=perm_models.PermissionRequestStatus.PENDING,
+        )
+        if tool:
+            query = query.filter(tool=tool)
+        return list(query.order_by("created_at"))
+
+    @staticmethod
     def mark_resolved(
         request: perm_models.PermissionRequest,
         *,

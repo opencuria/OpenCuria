@@ -58,8 +58,9 @@ class TaskTool(Tool):
     name = "task"
     description = (
         "Launch a subagent (general|explore|computeruse) for a subtask and "
-        "return its result text. Subagents cannot launch further subagents "
-        "beyond the depth limit and cannot use todowrite."
+        "return its result text. Launch multiple independent task calls in "
+        "one message to run them in parallel. Subagents cannot launch further "
+        "subagents beyond the depth limit and cannot use todowrite."
     )
     args_schema: type[BaseModel] = TaskArgs
     permission_key = "task"

@@ -23,7 +23,7 @@ export interface ComposerSheet {
   /** All pending question requests (for the `i of N` pager). */
   questions?: HarnessQuestionRequest[]
   permission?: HarnessPermissionRequest
-  /** All pending permission requests (reserved for a future pager). */
+  /** All pending permission requests (for the `i of N` pager). */
   permissions?: HarnessPermissionRequest[]
   todos?: HarnessTodo[]
 }

@@ -204,6 +204,8 @@ export interface HarnessPermissionRequiredEvent {
   pattern: string
   title: string
   call_id?: string
+  decision?: string
+  remember?: string
 }
 
 export interface HarnessPermissionResolvedEvent {

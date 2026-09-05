@@ -133,6 +133,12 @@ def _runner_with_events(
     )
 
 
+def test_task_tool_description_mentions_parallel_calls() -> None:
+    """Task tool tells the model to launch independent calls in one message."""
+    assert "one message" in TaskTool.description
+    assert "parallel" in TaskTool.description
+
+
 async def test_task_happy_path_returns_child_text(fake_accessor) -> None:
     """Parent task call returns the child run text as tool output."""
     events: list[dict[str, Any]] = []

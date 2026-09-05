@@ -124,6 +124,8 @@ async def test_composer_sections_and_metadata() -> None:
     assert "Mode: build" in composed.system
     assert "- read: Read a file." in composed.system
     assert "- general: Delegated subtasks." in composed.system
+    assert "Independent tool calls in one assistant message run in parallel" in composed.system
+    assert "Launch independent subagents in one message" in composed.system
     assert composed.truncated is False
 
 

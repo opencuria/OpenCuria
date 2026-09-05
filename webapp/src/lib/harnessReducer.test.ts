@@ -80,6 +80,34 @@ describe('harnessReducer', () => {
     expect(failed?.output).toBe('boom')
   })
 
+  it('completes parallel tools by call_id even when they finish out of order', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'read a.txt', call_id: 'call-1' },
+      { partId: 'part-1' },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'read b.txt', call_id: 'call-2' },
+      { partId: 'part-2' },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_completed: 'read', call_id: 'call-2', output: 'b' },
+      { partId: 'part-2' },
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    expect(findPart(assistant, { callId: 'call-1' })?.state).toBe('running')
+    expect(findPart(assistant, { callId: 'call-2' })?.state).toBe('completed')
+    expect(findPart(assistant, { callId: 'call-2' })?.output).toBe('b')
+  })
+
   it('stores cost and tokens on step-finish parts', () => {
     const messages = makeMessages()
 

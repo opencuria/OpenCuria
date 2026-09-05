@@ -10,6 +10,10 @@ Permission ``ask`` never hangs: the ``on_permission`` wait is wrapped
 in ``asyncio.wait_for`` with a configurable timeout and auto-denies on
 timeout. Cancellation (``asyncio.CancelledError``) is re-raised after
 emitting an ``aborted`` event so callers still observe cancellation.
+
+Independent tool calls in one step run concurrently. Results are fed
+back to the model in the original emitted call order. A single tool
+failure does not cancel its siblings.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
@@ -54,7 +58,7 @@ from .providers.base import (
     ToolSchema,
     Usage,
 )
-from .tools.base import ToolContext, ToolRegistry
+from .tools.base import ToolContext, ToolRegistry, ToolResult
 
 log = structlog.get_logger(__name__)
 
@@ -124,6 +128,14 @@ class _PendingToolCall:
     name: str
     arguments: dict[str, Any]
     raw_arguments: str = ""
+
+
+@dataclass
+class _ToolCallOutcome:
+    """Result of dispatching one tool call in a step."""
+
+    message: LLMMessage
+    result: ToolResult | None = None
 
 
 def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
@@ -350,6 +362,254 @@ class HarnessRunner:
         normalized = str(response or "").strip().lower()
         return normalized in ("once", "always", "allow", "approved", "yes")
 
+    def _tool_error_outcome(
+        self, call: _PendingToolCall, content: str
+    ) -> _ToolCallOutcome:
+        """Build a tool-role message for a rejected or failed call."""
+        return _ToolCallOutcome(
+            message=LLMMessage(
+                role="tool",
+                content=content,
+                tool_call_id=call.call_id,
+            )
+        )
+
+    async def _dispatch_tool_call(
+        self,
+        *,
+        call: _PendingToolCall,
+        ctx: ToolContext,
+        agent: AgentDefinition,
+        mode: str,
+        step: int,
+        depth: int,
+        max_depth: int,
+        doom_loop: bool,
+        opts: RunOptions,
+    ) -> _ToolCallOutcome:
+        """Permission-gate and execute one tool call (safe to run concurrently)."""
+        action = _action_for_tool(call.name, call.arguments)
+        title = self._tool_title(call.name, call.arguments)
+        tool_key = (call.name or "").strip().lower()
+        if tool_key == "task" and depth >= max_depth:
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": (
+                        f"Subagent depth limit reached (depth={depth}, "
+                        f"max_depth={max_depth})"
+                    ),
+                }
+            )
+            return self._tool_error_outcome(
+                call,
+                "Subagent depth limit reached; nested task calls are not allowed.",
+            )
+        if tool_key == "todowrite" and depth > 0:
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": "todowrite is not available to subagents.",
+                }
+            )
+            return self._tool_error_outcome(
+                call, "todowrite is not available to subagents."
+            )
+        decision = self._decide(
+            agent, call.name, action, mode, doom_loop=doom_loop
+        )
+        approved = True
+        if decision == DENY:
+            approved = False
+        elif decision == ASK or doom_loop:
+            approved = await self._resolve_ask(
+                tool_name=call.name,
+                action=action,
+                title=title,
+                call_id=call.call_id,
+                step=step,
+                doom_loop=doom_loop,
+                opts=opts,
+            )
+        if not approved:
+            if doom_loop:
+                reason = "doom-loop guard denied"
+            else:
+                reason = "denied by permissions"
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": f"Permission {reason}: {title}",
+                }
+            )
+            return self._tool_error_outcome(call, f"Permission {reason}: {title}")
+        await self._send(
+            {
+                "type": "tool_started",
+                "step": step,
+                "call_id": call.call_id,
+                "tool": call.name,
+                "title": title,
+                "arguments": call.raw_arguments,
+            }
+        )
+        call_ctx = replace(ctx, call_id=call.call_id)
+        try:
+            result = await self.tools.execute(call.name, call.arguments, call_ctx)
+        except asyncio.CancelledError:
+            raise
+        except KeyError as exc:
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": str(exc),
+                }
+            )
+            return self._tool_error_outcome(call, f"Unknown tool '{call.name}'")
+        except Exception as exc:
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": str(exc),
+                }
+            )
+            return self._tool_error_outcome(
+                call, f"Tool '{call.name}' failed: {exc}"
+            )
+        await self._send(
+            {
+                "type": "tool_completed",
+                "step": step,
+                "call_id": call.call_id,
+                "tool": call.name,
+                "output": result.output,
+            }
+        )
+        if result.metadata.get("unified_diff"):
+            await self._send(
+                {
+                    "type": "patch",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "title": f"Patch {result.metadata.get('path', call.name)}",
+                    "path": result.metadata.get("path", ""),
+                    "unified_diff": result.metadata.get("unified_diff", ""),
+                    "old_content": result.metadata.get("old_content", ""),
+                    "new_content": result.metadata.get("new_content", ""),
+                }
+            )
+        if tool_key == "todowrite":
+            await self._send(
+                {
+                    "type": "todo_updated",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "todos": await _todos_payload(call_ctx),
+                }
+            )
+        return _ToolCallOutcome(
+            message=LLMMessage(
+                role="tool",
+                content=result.output,
+                tool_call_id=call.call_id,
+            ),
+            result=result,
+        )
+
+    async def _run_step_tools(
+        self,
+        *,
+        calls: list[_PendingToolCall],
+        recent_calls: list[str],
+        ctx: ToolContext,
+        agent: AgentDefinition,
+        mode: str,
+        step: int,
+        depth: int,
+        max_depth: int,
+        opts: RunOptions,
+    ) -> list[_ToolCallOutcome]:
+        """Execute *calls* concurrently; return outcomes in original order."""
+        doom_flags: list[bool] = []
+        for call in calls:
+            fingerprint = (
+                f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
+            )
+            recent_calls.append(fingerprint)
+            doom_flags.append(
+                len(recent_calls) >= DOOM_LOOP_REPEATS
+                and len(set(recent_calls[-DOOM_LOOP_REPEATS:])) == 1
+            )
+        tasks = [
+            asyncio.create_task(
+                self._dispatch_tool_call(
+                    call=call,
+                    ctx=ctx,
+                    agent=agent,
+                    mode=mode,
+                    step=step,
+                    depth=depth,
+                    max_depth=max_depth,
+                    doom_loop=doom_loop,
+                    opts=opts,
+                ),
+                name=f"harness-tool-{call.call_id}",
+            )
+            for call, doom_loop in zip(calls, doom_flags)
+        ]
+        try:
+            raw = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        outcomes: list[_ToolCallOutcome] = []
+        for call, item in zip(calls, raw):
+            if isinstance(item, asyncio.CancelledError):
+                raise item
+            if isinstance(item, BaseException):
+                log.warning(
+                    "tool_dispatch_failed",
+                    tool=call.name,
+                    call_id=call.call_id,
+                    error=str(item),
+                )
+                await self._send(
+                    {
+                        "type": "tool_error",
+                        "step": step,
+                        "call_id": call.call_id,
+                        "tool": call.name,
+                        "error": str(item),
+                    }
+                )
+                outcomes.append(
+                    self._tool_error_outcome(
+                        call, f"Tool '{call.name}' failed: {item}"
+                    )
+                )
+                continue
+            outcomes.append(item)
+        return outcomes
+
     async def run(
         self,
         prompt: str,
@@ -536,186 +796,19 @@ class HarnessRunner:
                     ],
                 )
             )
-            for call in calls:
-                fingerprint = (
-                    f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
-                )
-                recent_calls.append(fingerprint)
-                doom_loop = (
-                    len(recent_calls) >= DOOM_LOOP_REPEATS
-                    and len(set(recent_calls[-DOOM_LOOP_REPEATS:])) == 1
-                )
-                action = _action_for_tool(call.name, call.arguments)
-                title = self._tool_title(call.name, call.arguments)
-                tool_key = (call.name or "").strip().lower()
-                if tool_key == "task" and depth >= max_depth:
-                    await self._send(
-                        {
-                            "type": "tool_error",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "error": (
-                                f"Subagent depth limit reached (depth={depth}, "
-                                f"max_depth={max_depth})"
-                            ),
-                        }
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content=(
-                                "Subagent depth limit reached; nested task "
-                                "calls are not allowed."
-                            ),
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    continue
-                if tool_key == "todowrite" and depth > 0:
-                    await self._send(
-                        {
-                            "type": "tool_error",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "error": "todowrite is not available to subagents.",
-                        }
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content="todowrite is not available to subagents.",
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    continue
-                decision = self._decide(
-                    agent, call.name, action, mode, doom_loop=doom_loop
-                )
-                approved = True
-                if decision == DENY:
-                    approved = False
-                elif decision == ASK or doom_loop:
-                    approved = await self._resolve_ask(
-                        tool_name=call.name,
-                        action=action,
-                        title=title,
-                        call_id=call.call_id,
-                        step=step,
-                        doom_loop=doom_loop,
-                        opts=opts,
-                    )
-                if not approved:
-                    if doom_loop:
-                        reason = "doom-loop guard denied"
-                    else:
-                        reason = "denied by permissions"
-                    await self._send(
-                        {
-                            "type": "tool_error",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "error": f"Permission {reason}: {title}",
-                        }
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content=f"Permission {reason}: {title}",
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    continue
-                await self._send(
-                    {
-                        "type": "tool_started",
-                        "step": step,
-                        "call_id": call.call_id,
-                        "tool": call.name,
-                        "title": title,
-                        "arguments": call.raw_arguments,
-                    }
-                )
-                try:
-                    ctx.call_id = call.call_id
-                    result = await self.tools.execute(call.name, call.arguments, ctx)
-                except KeyError as exc:
-                    await self._send(
-                        {
-                            "type": "tool_error",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "error": str(exc),
-                        }
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content=f"Unknown tool '{call.name}'",
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    continue
-                except Exception as exc:
-                    await self._send(
-                        {
-                            "type": "tool_error",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "error": str(exc),
-                        }
-                    )
-                    messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content=f"Tool '{call.name}' failed: {exc}",
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    continue
-                await self._send(
-                    {
-                        "type": "tool_completed",
-                        "step": step,
-                        "call_id": call.call_id,
-                        "tool": call.name,
-                        "output": result.output,
-                    }
-                )
-                if result.metadata.get("unified_diff"):
-                    await self._send(
-                        {
-                            "type": "patch",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "title": f"Patch {result.metadata.get('path', call.name)}",
-                            "path": result.metadata.get("path", ""),
-                            "unified_diff": result.metadata.get("unified_diff", ""),
-                            "old_content": result.metadata.get("old_content", ""),
-                            "new_content": result.metadata.get("new_content", ""),
-                        }
-                    )
-                if (call.name or "").strip().lower() == "todowrite":
-                    await self._send(
-                        {
-                            "type": "todo_updated",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "todos": await _todos_payload(ctx),
-                        }
-                    )
-                messages.append(
-                    LLMMessage(
-                        role="tool",
-                        content=result.output,
-                        tool_call_id=call.call_id,
-                    )
-                )
+            outcomes = await self._run_step_tools(
+                calls=calls,
+                recent_calls=recent_calls,
+                ctx=ctx,
+                agent=agent,
+                mode=mode,
+                step=step,
+                depth=depth,
+                max_depth=max_depth,
+                opts=opts,
+            )
+            for outcome in outcomes:
+                messages.append(outcome.message)
 
         summary = (
             f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
@@ -870,195 +963,25 @@ class HarnessRunner:
                         ],
                     )
                 )
-                for call in calls:
-                    fingerprint = (
-                        f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
-                    )
-                    recent_calls.append(fingerprint)
-                    doom_loop = (
-                        len(recent_calls) >= DOOM_LOOP_REPEATS
-                        and len(set(recent_calls[-DOOM_LOOP_REPEATS:])) == 1
-                    )
-                    action = _action_for_tool(call.name, call.arguments)
-                    title = self._tool_title(call.name, call.arguments)
-                    tool_key = (call.name or "").strip().lower()
-                    if tool_key == "task" and depth >= max_depth:
-                        await self._send(
-                            {
-                                "type": "tool_error",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "error": (
-                                    f"Subagent depth limit reached (depth={depth}, "
-                                    f"max_depth={max_depth})"
-                                ),
-                            }
-                        )
-                        cu_state.round_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content=(
-                                    "Subagent depth limit reached; nested task "
-                                    "calls are not allowed."
-                                ),
-                                tool_call_id=call.call_id,
-                            )
-                        )
-                        continue
-                    if tool_key == "todowrite" and depth > 0:
-                        await self._send(
-                            {
-                                "type": "tool_error",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "error": "todowrite is not available to subagents.",
-                            }
-                        )
-                        cu_state.round_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content="todowrite is not available to subagents.",
-                                tool_call_id=call.call_id,
-                            )
-                        )
-                        continue
-                    decision = self._decide(
-                        agent, call.name, action, mode, doom_loop=doom_loop
-                    )
-                    approved = True
-                    if decision == DENY:
-                        approved = False
-                    elif decision == ASK or doom_loop:
-                        approved = await self._resolve_ask(
-                            tool_name=call.name,
-                            action=action,
-                            title=title,
-                            call_id=call.call_id,
-                            step=step,
-                            doom_loop=doom_loop,
-                            opts=opts,
-                        )
-                    if not approved:
-                        if doom_loop:
-                            reason = "doom-loop guard denied"
-                        else:
-                            reason = "denied by permissions"
-                        await self._send(
-                            {
-                                "type": "tool_error",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "error": f"Permission {reason}: {title}",
-                            }
-                        )
-                        cu_state.round_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content=f"Permission {reason}: {title}",
-                                tool_call_id=call.call_id,
-                            )
-                        )
-                        continue
-                    await self._send(
-                        {
-                            "type": "tool_started",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "title": title,
-                            "arguments": call.raw_arguments,
-                        }
-                    )
-                    try:
-                        ctx.call_id = call.call_id
-                        result = await self.tools.execute(
-                            call.name, call.arguments, ctx
-                        )
-                    except KeyError as exc:
-                        await self._send(
-                            {
-                                "type": "tool_error",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "error": str(exc),
-                            }
-                        )
-                        cu_state.round_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content=f"Unknown tool '{call.name}'",
-                                tool_call_id=call.call_id,
-                            )
-                        )
-                        continue
-                    except Exception as exc:
-                        await self._send(
-                            {
-                                "type": "tool_error",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "error": str(exc),
-                            }
-                        )
-                        cu_state.round_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content=f"Tool '{call.name}' failed: {exc}",
-                                tool_call_id=call.call_id,
-                            )
-                        )
-                        continue
-                    await self._send(
-                        {
-                            "type": "tool_completed",
-                            "step": step,
-                            "call_id": call.call_id,
-                            "tool": call.name,
-                            "output": result.output,
-                        }
-                    )
-                    if result.metadata.get("unified_diff"):
-                        await self._send(
-                            {
-                                "type": "patch",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "tool": call.name,
-                                "title": (
-                                    f"Patch {result.metadata.get('path', call.name)}"
-                                ),
-                                "path": result.metadata.get("path", ""),
-                                "unified_diff": result.metadata.get(
-                                    "unified_diff", ""
-                                ),
-                                "old_content": result.metadata.get("old_content", ""),
-                                "new_content": result.metadata.get("new_content", ""),
-                            }
-                        )
-                    if (call.name or "").strip().lower() == "todowrite":
-                        await self._send(
-                            {
-                                "type": "todo_updated",
-                                "step": step,
-                                "call_id": call.call_id,
-                                "todos": await _todos_payload(ctx),
-                            }
-                        )
-                    cu_state.round_messages.append(
-                        LLMMessage(
-                            role="tool",
-                            content=result.output,
-                            tool_call_id=call.call_id,
-                        )
-                    )
-                    if result.image_jpeg:
+                outcomes = await self._run_step_tools(
+                    calls=calls,
+                    recent_calls=recent_calls,
+                    ctx=ctx,
+                    agent=agent,
+                    mode=mode,
+                    step=step,
+                    depth=depth,
+                    max_depth=max_depth,
+                    opts=opts,
+                )
+                for outcome in outcomes:
+                    cu_state.round_messages.append(outcome.message)
+                    if (
+                        outcome.result is not None
+                        and outcome.result.image_jpeg
+                    ):
                         cu_state.set_screenshot(
-                            FRESH_DESKTOP_TEXT, result.image_jpeg
+                            FRESH_DESKTOP_TEXT, outcome.result.image_jpeg
                         )
             summary = (
                 f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
