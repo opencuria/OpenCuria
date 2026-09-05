@@ -35,13 +35,35 @@ class ToolError(Exception):
 
 @dataclass
 class ToolContext:
-    """Runtime context handed to every tool execution."""
+    """Runtime context handed to every tool execution.
+
+    ``depth``/``max_depth`` implement the M5 subagent recursion limit
+    (OpenCode-style): the top-level turn runs at ``depth=0``; each
+    ``task`` child runs at ``depth+1``. When ``depth >= max_depth`` the
+    runner withholds the ``task`` tool (and denies direct calls), so
+    nesting cannot recurse without a bound. ``todowrite`` is additionally
+    withheld from any child (``depth > 0``).
+
+    ``model`` carries the parent's effective model for inheritance,
+    ``parent_emit`` forwards child events to the parent emitter,
+    ``provider``/``registry``/``evaluator`` give the ``task`` tool what
+    it needs to spawn a real :class:`HarnessRunner` child (kept as
+    ``Any`` here to avoid a tools<->runner import cycle; populated by
+    the runner, ``None`` for direct unit-test use).
+    """
 
     session_id: str
     workspace_id: str
     accessor: WorkspaceAccessor
     agent_name: str = ""
     directory: str = "/workspace"
+    depth: int = 0
+    max_depth: int = 1
+    model: str = ""
+    parent_emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    provider: Any | None = None
+    registry: ToolRegistry | None = None
+    evaluator: Any | None = None
 
 
 @dataclass

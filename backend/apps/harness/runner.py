@@ -45,6 +45,11 @@ log = structlog.get_logger(__name__)
 #: Default per-step tool schema source: deny-tools are never offered.
 DEFAULT_MAX_STEPS = 20
 
+#: Default subagent nesting limit (M5): depth 0 is the top-level turn,
+#: each ``task`` child runs at depth+1. ``task`` is withheld at
+#: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
+DEFAULT_MAX_DEPTH = 1
+
 #: Default wait for the ``on_permission`` callback before auto-deny.
 DEFAULT_PERMISSION_TIMEOUT = 120.0
 
@@ -69,6 +74,8 @@ class RunOptions:
     permission_timeout: float = DEFAULT_PERMISSION_TIMEOUT
     auto_approve: bool = False
     on_permission: PermissionCallback | None = None
+    depth: int = 0
+    max_depth: int = DEFAULT_MAX_DEPTH
 
 
 @dataclass
@@ -132,6 +139,34 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
+    """Best-effort todo list for the ``todo_updated`` event."""
+    try:
+        repository = None
+        if ctx.registry is not None:
+            try:
+                tool = ctx.registry.get("todowrite")
+            except KeyError:
+                tool = None
+            repository = getattr(tool, "_repository", None)
+        if repository is None:
+            from .tools.todos import default_todo_repository
+
+            repository = default_todo_repository
+        stored = repository.list(ctx.session_id)
+        return [
+            {
+                "content": item.content,
+                "status": item.status,
+                "priority": item.priority,
+                "order": item.order,
+            }
+            for item in stored.items
+        ]
+    except Exception:  # pragma: no cover - event must never break loop
+        return []
+
+
 class HarnessRunner:
     """Agentic loop: provider + tools + permissions + streaming events."""
 
@@ -176,12 +211,26 @@ class HarnessRunner:
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("emit_failed", error=str(exc), event=event.get("type"))
 
-    def _filtered_schemas(self, agent: AgentDefinition, mode: str) -> list[ToolSchema]:
-        """Return tool schemas excluding permission-denied tools."""
+    def _filtered_schemas(
+        self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
+    ) -> list[ToolSchema]:
+        """Return tool schemas excluding permission-denied tools.
+
+        Depth filtering (M5): ``task`` is withheld when
+        ``depth >= max_depth`` and ``todowrite`` is withheld from any
+        child run (``depth > 0``), mirroring OpenCode where subagents
+        get no todowrite. Filtering happens before permission checks
+        so nested tools never reach the provider.
+        """
         agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
         schemas: list[ToolSchema] = []
         for tool in self.tools.list():
             key = tool.permission_key or tool.name
+            tool_key = (tool.name or "").strip().lower()
+            if tool_key == "task" and depth >= max_depth:
+                continue
+            if tool_key == "todowrite" and depth > 0:
+                continue
             decision = _combine_decisions(
                 self.evaluator.evaluate(key, "", mode=mode),
                 agent_eval.evaluate(key, "", mode=mode),
@@ -319,6 +368,10 @@ class HarnessRunner:
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
         max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+        max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
+        depth = max(0, options.depth)
+        if depth > max_depth:
+            raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
         cwd = options.cwd or HARNESS_WORKSPACE_ROOT
 
         try:
@@ -330,6 +383,8 @@ class HarnessRunner:
                 opts=options,
                 cwd=cwd,
                 max_steps=max_steps,
+                depth=depth,
+                max_depth=max_depth,
             )
         except asyncio.CancelledError:
             await self._send({"type": "aborted", "reason": "cancelled"})
@@ -345,9 +400,11 @@ class HarnessRunner:
         opts: RunOptions,
         cwd: str,
         max_steps: int,
+        depth: int = 0,
+        max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> RunResult:
         """Execute the step loop (cancellation handled by :meth:`run`)."""
-        schemas = self._filtered_schemas(agent, mode)
+        schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
         composed = await compose_system_prompt(
             agent=agent,
             mode=mode,
@@ -368,6 +425,13 @@ class HarnessRunner:
             or _MissingAccessor(workspace_id=opts.workspace_id or "workspace"),
             agent_name=agent.name,
             directory=cwd,
+            depth=depth,
+            max_depth=max_depth,
+            model=model,
+            parent_emit=self._emit,
+            provider=self.provider,
+            registry=self.tools,
+            evaluator=self.evaluator,
         )
 
         total_usage = Usage()
@@ -435,6 +499,49 @@ class HarnessRunner:
                 )
                 action = _action_for_tool(call.name, call.arguments)
                 title = self._tool_title(call.name, call.arguments)
+                tool_key = (call.name or "").strip().lower()
+                if tool_key == "task" and depth >= max_depth:
+                    await self._send(
+                        {
+                            "type": "tool_error",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "error": (
+                                f"Subagent depth limit reached (depth={depth}, "
+                                f"max_depth={max_depth})"
+                            ),
+                        }
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content=(
+                                "Subagent depth limit reached; nested task "
+                                "calls are not allowed."
+                            ),
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
+                if tool_key == "todowrite" and depth > 0:
+                    await self._send(
+                        {
+                            "type": "tool_error",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "tool": call.name,
+                            "error": "todowrite is not available to subagents.",
+                        }
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content="todowrite is not available to subagents.",
+                            tool_call_id=call.call_id,
+                        )
+                    )
+                    continue
                 decision = self._decide(
                     agent, call.name, action, mode, doom_loop=doom_loop
                 )
@@ -529,6 +636,15 @@ class HarnessRunner:
                         "output": result.output,
                     }
                 )
+                if (call.name or "").strip().lower() == "todowrite":
+                    await self._send(
+                        {
+                            "type": "todo_updated",
+                            "step": step,
+                            "call_id": call.call_id,
+                            "todos": _todos_payload(ctx),
+                        }
+                    )
                 messages.append(
                     LLMMessage(
                         role="tool",
@@ -639,14 +755,16 @@ class HarnessRunner:
 class _MissingAccessor(WorkspaceAccessor):
     """Fallback accessor that fails loudly when no accessor is wired."""
 
-    async def exec_stream(self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None,
-                          timeout=None):  # type: ignore[no-untyped-def]
+    async def exec_stream(
+        self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
+    ):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
         yield  # pragma: no cover - keeps the method an iterator
 
-    async def exec_wait(self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None,
-                        timeout=None):  # type: ignore[no-untyped-def]
+    async def exec_wait(
+        self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
+    ):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 

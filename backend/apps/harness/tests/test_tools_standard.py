@@ -289,11 +289,12 @@ async def test_todowrite_invalid_status_rejected(fake_accessor) -> None:
         )
 
 
-async def test_task_tool_is_explicit_stub(fake_accessor) -> None:
-    """The task tool fails loudly with an M5 pointer (no partial loop)."""
-    with pytest.raises(ToolError, match="M5"):
+async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:
+    """TaskTool without provider/registry in ctx fails loudly (no wiring)."""
+    ctx = _ctx(fake_accessor)
+    with pytest.raises(ToolError, match="not wired"):
         await TaskTool().execute(
-            {"description": "d", "prompt": "p"}, _ctx(fake_accessor)
+            {"description": "d", "prompt": "p"}, ctx
         )
 
 

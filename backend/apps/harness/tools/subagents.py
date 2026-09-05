@@ -1,6 +1,9 @@
-"""Subagent (task) tool stub and optional webfetch tool."""
+"""Subagent (task) tool with real child-run execution (M5) and webfetch."""
 
 from __future__ import annotations
+
+import uuid
+from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field
@@ -13,6 +16,13 @@ log = structlog.get_logger(__name__)
 WEBFETCH_MAX_BYTES = 256 * 1024
 WEBFETCH_TIMEOUT = 15.0
 
+#: Max characters of a child result forwarded as the parent tool output.
+TASK_OUTPUT_MAX_CHARS = 8000
+
+#: Agents allowed as ``task`` targets. Anything else (notably primary
+#: agents like ``build``/``plan`` and hidden agents) is rejected.
+ALLOWED_SUBAGENT_TYPES = ("general", "explore")
+
 
 class TaskArgs(BaseModel):
     """Arguments for the task (subagent) tool."""
@@ -20,22 +30,34 @@ class TaskArgs(BaseModel):
     description: str = Field(description="Short task summary.")
     prompt: str = Field(description="Full instructions for the subagent.")
     subagent_type: str = Field(
-        default="general", description="Subagent kind (M5 defines these)."
+        default="general", description="Subagent kind: general|explore."
+    )
+    agent: str | None = Field(
+        default=None, description="Alias for subagent_type (general|explore)."
+    )
+    model_override: str | None = Field(
+        default=None, description="Optional model for the child run."
     )
 
 
 class TaskTool(Tool):
-    """Launch a subagent as a child session.
+    """Launch a subagent child run via a fresh HarnessRunner.
 
-    v1 is an explicit stub: M5 owns child-session creation, depth limits,
-    and result propagation. This stub fails loudly instead of running a
-    half-implemented loop, so callers (and tests) see a clear signal.
+    The tool spawns a child loop (in-memory history: just the sub-prompt)
+    with the ``explore``/``general`` agent definitions, one level deeper
+    than the parent. Depth is hard-capped via ``ToolContext``: calls at
+    ``depth >= max_depth`` are rejected, and the runner withholds the
+    ``task`` tool from children at the limit (see ``runner``). The model
+    is inherited from the parent unless ``model_override`` is given.
+    Child events propagate as ``subtask_started``/``subtask_finished``
+    via ``ctx.parent_emit``; the child result returns as truncated text.
     """
 
     name = "task"
     description = (
-        "Launch a subagent for a subtask. Not available yet "
-        "(implemented in M5: child sessions with depth limits)."
+        "Launch a subagent (general|explore) for a subtask and return "
+        "its result text. Subagents cannot launch further subagents "
+        "beyond the depth limit and cannot use todowrite."
     )
     args_schema: type[BaseModel] = TaskArgs
     permission_key = "task"
@@ -48,20 +70,175 @@ class TaskTool(Tool):
     async def execute(
         self, args: BaseModel | dict[str, object], ctx: ToolContext
     ) -> ToolResult:
-        """Reject with a clear M5 pointer instead of a partial loop."""
+        """Run the child agent loop and return its result text."""
         validated = self.coerce_args(args)
         assert isinstance(validated, TaskArgs)
         args = validated
+        requested = args.agent or args.subagent_type or "general"
+        agent = requested.strip().lower()
+        if agent not in ALLOWED_SUBAGENT_TYPES:
+            raise ToolError(
+                f"Unknown subagent '{requested}'; "
+                f"expected one of {', '.join(ALLOWED_SUBAGENT_TYPES)}.",
+                tool=self.name,
+            )
+        if ctx.depth >= ctx.max_depth:
+            raise ToolError(
+                f"Subagent depth limit reached (depth={ctx.depth}, "
+                f"max_depth={ctx.max_depth}); nested task calls are "
+                "not allowed.",
+                tool=self.name,
+            )
+        if ctx.provider is None or ctx.registry is None:
+            raise ToolError(
+                "Subagent execution is not wired (no provider/registry "
+                "in ToolContext).",
+                tool=self.name,
+            )
+        from ..runner import HarnessRunner, RunOptions
+
+        subtask_id = uuid.uuid4().hex[:12]
+        model = (args.model_override or ctx.model or "").strip()
+        if not model:
+            raise ToolError(
+                "No model available for subagent run (parent model "
+                "missing and no model_override given).",
+                tool=self.name,
+            )
         log.info(
-            "task_tool_stub_called",
+            "task_child_started",
             session_id=ctx.session_id,
-            agent=ctx.agent_name,
+            agent=agent,
+            subtask_id=subtask_id,
+            depth=ctx.depth + 1,
         )
-        raise ToolError(
-            "Subagents are not available yet (milestone M5 will add "
-            "child sessions, depth limits, and result propagation).",
-            tool=self.name,
+        await self._emit_parent(
+            ctx,
+            {
+                "type": "subtask_started",
+                "subtask_id": subtask_id,
+                "agent": agent,
+                "description": args.description,
+            },
         )
+        child_registry = _child_registry(ctx.registry)
+        child = HarnessRunner(
+            provider=ctx.provider,
+            tools=child_registry,
+            evaluator=ctx.evaluator,
+            accessor=ctx.accessor,
+            emit=self._child_emit(ctx),
+        )
+        child_opts = RunOptions(
+            history=[],
+            session_id=f"{ctx.session_id}/sub-{subtask_id}",
+            workspace_id=ctx.workspace_id,
+            cwd=ctx.directory,
+            auto_approve=True,
+            depth=ctx.depth + 1,
+            max_depth=ctx.max_depth,
+        )
+        try:
+            result = await child.run(args.prompt, agent, model, "build", child_opts)
+        except Exception as exc:
+            await self._emit_parent(
+                ctx,
+                {
+                    "type": "subtask_finished",
+                    "subtask_id": subtask_id,
+                    "agent": agent,
+                    "status": "error",
+                    "summary": str(exc)[:500],
+                },
+            )
+            log.warning(
+                "task_child_failed",
+                session_id=ctx.session_id,
+                subtask_id=subtask_id,
+                error=str(exc),
+            )
+            raise ToolError(f"Subagent '{agent}' failed: {exc}", tool=self.name)
+        output = result.output or ""
+        truncated = len(output) > TASK_OUTPUT_MAX_CHARS
+        if truncated:
+            output = (
+                output[:TASK_OUTPUT_MAX_CHARS]
+                + f"\n…[truncated {len(result.output)} chars total]"
+            )
+        await self._emit_parent(
+            ctx,
+            {
+                "type": "subtask_finished",
+                "subtask_id": subtask_id,
+                "agent": agent,
+                "status": "completed",
+                "summary": output[:500],
+            },
+        )
+        log.info(
+            "task_child_finished",
+            session_id=ctx.session_id,
+            subtask_id=subtask_id,
+            status="completed",
+        )
+        return ToolResult(
+            output=output,
+            truncated=truncated,
+            metadata={
+                "subtask_id": subtask_id,
+                "agent": agent,
+                "status": "completed",
+                "steps": result.steps,
+            },
+        )
+
+    async def _emit_parent(self, ctx: ToolContext, event: dict[str, Any]) -> None:
+        """Forward *event* to the parent emitter (never breaks the tool)."""
+        if ctx.parent_emit is None:
+            return
+        try:
+            await ctx.parent_emit(event)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("subtask_emit_failed", error=str(exc))
+
+    def _child_emit(self, ctx: ToolContext):  # type: ignore[no-untyped-def]
+        """Build the child emitter (deltas wrapped, never breaking)."""
+
+        async def _emit(event: dict[str, Any]) -> None:
+            if ctx.parent_emit is None:
+                return
+            try:
+                wrapped = dict(event)
+                wrapped.setdefault("subtask", True)
+                await ctx.parent_emit(wrapped)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("subtask_child_emit_failed", error=str(exc))
+
+        return _emit
+
+
+def _child_registry(registry: Any) -> Any:
+    """Return a child registry without ``task``/``todowrite`` tools.
+
+    Depth enforcement is belt-and-braces: the runner also withholds
+    ``task`` at the depth limit and ``TaskTool`` rejects direct calls.
+    Filtering here keeps nested ``task`` and ``todowrite`` out of the
+    child tool schemas entirely (OpenCode parity: subagents get no
+    todowrite).
+    """
+    from .base import ToolRegistry
+
+    child = ToolRegistry()
+    for tool in registry.list():
+        key = (tool.name or "").strip().lower()
+        if key in ("task", "todowrite"):
+            continue
+        child.register(tool)
+    for hook in getattr(registry, "before_hooks", []):
+        child.add_before_hook(hook)
+    for hook in getattr(registry, "after_hooks", []):
+        child.add_after_hook(hook)
+    return child
 
 
 class WebfetchArgs(BaseModel):
