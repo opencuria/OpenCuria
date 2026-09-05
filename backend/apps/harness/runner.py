@@ -4,7 +4,8 @@
 prompt, calls the provider with permission-filtered tool schemas,
 streams deltas via an ``emit`` callback, gates ``ask`` tools through an
 ``on_permission`` callback, executes approved tools, and repeats until
-a text-only answer, the step budget, an abort, or a doom-loop guard.
+a text-only answer, an optional last step, an abort, or a doom-loop
+guard.
 
 Permission ``ask`` never hangs: the ``on_permission`` wait is wrapped
 in ``asyncio.wait_for`` with a configurable timeout and auto-denies on
@@ -44,14 +45,15 @@ from .compaction import (
     select,
 )
 from .computeruse_loop import (
-    ComputerUseLoopState,
     FRESH_DESKTOP_TEXT,
     INITIAL_DESKTOP_TEXT,
+    ComputerUseLoopState,
     append_video_to_output,
     default_recording_path,
     sanitize_run_id,
 )
 from .images import hydrate_workspace_images
+from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import ASK, DENY, PermissionEvaluator
 from .prompts.composer import compose_system_prompt
 from .providers.base import (
@@ -64,9 +66,6 @@ from .providers.base import (
 from .tools.base import ToolContext, ToolRegistry, ToolResult
 
 log = structlog.get_logger(__name__)
-
-#: Default per-step tool schema source: deny-tools are never offered.
-DEFAULT_MAX_STEPS = 20
 
 #: Default subagent nesting limit (M5): depth 0 is the top-level turn,
 #: each ``task`` child runs at depth+1. ``task`` is withheld at
@@ -184,6 +183,11 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _is_last_step(step: int, max_steps: int | None) -> bool:
+    """Return True when *step* is the optional configured last step."""
+    return max_steps is not None and step >= max_steps
 
 
 async def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
@@ -643,7 +647,7 @@ class HarnessRunner:
         effective_model = model
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
-        max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+        max_steps = options.max_steps or agent.steps
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
         depth = max(0, options.depth)
         if depth > max_depth:
@@ -675,7 +679,7 @@ class HarnessRunner:
         mode: str,
         opts: RunOptions,
         cwd: str,
-        max_steps: int,
+        max_steps: int | None,
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> RunResult:
@@ -743,7 +747,6 @@ class HarnessRunner:
 
         total_usage = Usage()
         total_cost = 0.0
-        last_text = ""
         recent_calls: list[str] = []
         limits = ModelLimits(
             context_length=opts.context_length,
@@ -753,7 +756,10 @@ class HarnessRunner:
         last_step_completion = opts.last_step_completion_tokens
         last_step_total = opts.last_step_total_tokens
 
-        for step in range(1, max_steps + 1):
+        step = 0
+        while True:
+            step += 1
+            is_last = _is_last_step(step, max_steps)
             if step == 1 and is_overflow(
                 prompt_tokens=last_step_prompt,
                 completion_tokens=last_step_completion,
@@ -770,7 +776,12 @@ class HarnessRunner:
                     limits=limits,
                 )
             await self._send({"type": "step_start", "step": step})
-            text, calls, usage, messages = await self._provider_step_with_overflow_retry(
+            (
+                text,
+                calls,
+                usage,
+                messages,
+            ) = await self._provider_step_with_overflow_retry(
                 model=model,
                 messages=messages,
                 schemas=schemas,
@@ -778,6 +789,7 @@ class HarnessRunner:
                 agent=agent,
                 mode=mode,
                 opts=opts,
+                is_last_step=is_last,
             )
             last_step_prompt = usage.prompt_tokens
             last_step_completion = usage.completion_tokens
@@ -796,8 +808,17 @@ class HarnessRunner:
                     "cost": usage.cost,
                 }
             )
+            if is_last:
+                if calls:
+                    await self._reject_last_step_tools(calls, step)
+                return RunResult(
+                    output=text,
+                    steps=step,
+                    usage=total_usage,
+                    cost=total_cost,
+                    finish_reason="max_steps",
+                )
             if not calls:
-                last_text = text
                 messages.append(LLMMessage(role="assistant", content=text))
                 if is_overflow(
                     prompt_tokens=usage.prompt_tokens,
@@ -821,7 +842,6 @@ class HarnessRunner:
                     cost=total_cost,
                     finish_reason="stop",
                 )
-            last_text = text
             messages.append(
                 LLMMessage(
                     role="assistant",
@@ -865,23 +885,6 @@ class HarnessRunner:
                     limits=limits,
                 )
 
-        summary = (
-            f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
-            "exhausted. Summarize progress and continue in a follow-up run.]"
-            if last_text
-            else (
-                f"[Stopped after {max_steps} steps: step budget exhausted "
-                "without a final answer.]"
-            )
-        )
-        return RunResult(
-            output=summary,
-            steps=max_steps,
-            usage=total_usage,
-            cost=total_cost,
-            finish_reason="max_steps",
-        )
-
     async def _run_computeruse_inner(
         self,
         *,
@@ -891,7 +894,7 @@ class HarnessRunner:
         mode: str,
         opts: RunOptions,
         cwd: str,
-        max_steps: int,
+        max_steps: int | None,
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> RunResult:
@@ -940,7 +943,6 @@ class HarnessRunner:
         run_id = sanitize_run_id(opts.session_id or "session")
         total_usage = Usage()
         total_cost = 0.0
-        last_text = ""
         recent_calls: list[str] = []
         record_started = False
         held = False
@@ -969,14 +971,22 @@ class HarnessRunner:
                 )
             cu_state.set_screenshot(INITIAL_DESKTOP_TEXT, initial.image_jpeg)
 
-            for step in range(1, max_steps + 1):
+            step = 0
+            while True:
+                step += 1
+                is_last = _is_last_step(step, max_steps)
                 await self._send({"type": "step_start", "step": step})
-                provider_messages = cu_state.build_provider_messages()
+                request_messages, request_schemas, request_opts = (
+                    self._last_step_request(
+                        cu_state.build_provider_messages(), schemas, is_last
+                    )
+                )
                 text, calls, usage = await self._provider_step(
                     model=model,
-                    messages=provider_messages,
-                    schemas=schemas,
+                    messages=request_messages,
+                    schemas=request_schemas,
                     step=step,
+                    chat_options=request_opts,
                 )
                 total_usage = total_usage.merge(usage)
                 total_cost = total_usage.cost
@@ -992,8 +1002,18 @@ class HarnessRunner:
                         "cost": usage.cost,
                     }
                 )
+                if is_last:
+                    if calls:
+                        await self._reject_last_step_tools(calls, step)
+                    return self._computeruse_result(
+                        output=append_video_to_output(text, run_id),
+                        steps=step,
+                        usage=total_usage,
+                        cost=total_cost,
+                        finish_reason="max_steps",
+                        recording_path=recording_path,
+                    )
                 if not calls:
-                    last_text = text
                     return self._computeruse_result(
                         output=append_video_to_output(text, run_id),
                         steps=step,
@@ -1002,7 +1022,6 @@ class HarnessRunner:
                         finish_reason="stop",
                         recording_path=recording_path,
                     )
-                last_text = text
                 if cu_state.round_messages:
                     cu_state.flush_round_to_ledger()
                 cu_state.round_messages.append(
@@ -1036,23 +1055,6 @@ class HarnessRunner:
                         cu_state.set_screenshot(
                             FRESH_DESKTOP_TEXT, outcome.result.image_jpeg
                         )
-            summary = (
-                f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
-                "exhausted. Summarize progress and continue in a follow-up run.]"
-                if last_text
-                else (
-                    f"[Stopped after {max_steps} steps: step budget exhausted "
-                    "without a final answer.]"
-                )
-            )
-            return self._computeruse_result(
-                output=append_video_to_output(summary, run_id),
-                steps=max_steps,
-                usage=total_usage,
-                cost=total_cost,
-                finish_reason="max_steps",
-                recording_path=recording_path,
-            )
         finally:
             if record_started:
                 try:
@@ -1100,6 +1102,36 @@ class HarnessRunner:
             metadata={"recording_path": recording_path},
         )
 
+    def _last_step_request(
+        self,
+        messages: list[LLMMessage],
+        schemas: list[ToolSchema],
+        is_last: bool,
+    ) -> tuple[list[LLMMessage], list[ToolSchema], ChatOptions]:
+        """Build provider inputs for a normal or last-step turn."""
+        if not is_last:
+            return messages, schemas, self.chat_options
+        return (
+            [*messages, LLMMessage(role="assistant", content=MAX_STEPS_PROMPT)],
+            [],
+            replace(self.chat_options, tool_choice="none"),
+        )
+
+    async def _reject_last_step_tools(
+        self, calls: list[_PendingToolCall], step: int
+    ) -> None:
+        """Fail leaked last-step tool calls without executing them."""
+        for call in calls:
+            await self._send(
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "error": MAX_STEPS_TOOL_ERROR,
+                }
+            )
+
     async def _provider_step_with_overflow_retry(
         self,
         *,
@@ -1110,14 +1142,19 @@ class HarnessRunner:
         agent: AgentDefinition,
         mode: str,
         opts: RunOptions,
+        is_last_step: bool = False,
     ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage]]:
         """Run one provider step, compacting and retrying once on overflow errors."""
+        request_messages, request_schemas, request_opts = self._last_step_request(
+            messages, schemas, is_last_step
+        )
         try:
             text, calls, usage = await self._provider_step(
                 model=model,
-                messages=messages,
-                schemas=schemas,
+                messages=request_messages,
+                schemas=request_schemas,
                 step=step,
+                chat_options=request_opts,
             )
             return text, calls, usage, messages
         except Exception as exc:
@@ -1135,11 +1172,15 @@ class HarnessRunner:
                 ),
                 overflow=True,
             )
+            retry_messages, retry_schemas, retry_opts = self._last_step_request(
+                compacted, schemas, is_last_step
+            )
             text, calls, usage = await self._provider_step(
                 model=model,
-                messages=compacted,
-                schemas=schemas,
+                messages=retry_messages,
+                schemas=retry_schemas,
                 step=step,
+                chat_options=retry_opts,
             )
             return text, calls, usage, compacted
 
@@ -1150,13 +1191,14 @@ class HarnessRunner:
         messages: list[LLMMessage],
         schemas: list[ToolSchema],
         step: int,
+        chat_options: ChatOptions | None = None,
     ) -> tuple[str, list[_PendingToolCall], Usage]:
         """Stream one provider step and accumulate text/tool calls/usage."""
         fragments: dict[int, dict[str, Any]] = {}
         text_parts: list[str] = []
         usage = Usage()
         async for delta in self.provider.chat_stream(
-            model, messages, schemas, self.chat_options
+            model, messages, schemas, chat_options or self.chat_options
         ):
             if delta.usage is not None:
                 usage = usage.merge(delta.usage)
@@ -1259,7 +1301,6 @@ class HarnessRunner:
                 mode,
                 RunOptions(
                     auto_approve=True,
-                    max_steps=1,
                     history=[],
                     auto_compact=False,
                     session_id=opts.session_id,

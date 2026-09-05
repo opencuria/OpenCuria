@@ -52,11 +52,11 @@ class FakeProvider(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions | None = None,
     ) -> AsyncIterator[Delta]:
-        """Yield the next canned step; repeat the last when exhausted."""
+        """Yield the next canned step; then a text-only done reply."""
         if not self._steps:
             yield Delta(text="done", usage=Usage(0, 0, 0))
             return
-        step = self._steps.pop(0) if len(self._steps) > 1 else self._steps[0]
+        step = self._steps.pop(0)
         for delta in step:
             yield delta
 

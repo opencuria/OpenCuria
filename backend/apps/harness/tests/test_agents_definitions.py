@@ -29,7 +29,7 @@ def test_all_agents_defined() -> None:
     assert get_agent("general").mode == "subagent"
     assert get_agent("explore").mode == "subagent"
     assert get_agent("computeruse").mode == "subagent"
-    assert get_agent("computeruse").steps == 25
+    assert get_agent("computeruse").steps is None
     assert get_agent("computeruse").permissions == {"*": "allow"}
     assert get_agent("title").mode == "hidden"
     assert get_agent("compaction").mode == "hidden"
@@ -68,15 +68,15 @@ def test_explore_is_read_only() -> None:
     assert evaluator.evaluate("bash", "sudo reboot") == "deny"
     assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
     assert evaluator.evaluate("grep", "/workspace") == "allow"
-    assert get_agent("explore").steps == 10
+    assert get_agent("explore").steps is None
 
 
-def test_hidden_agents_deny_tools_and_single_step() -> None:
+def test_hidden_agents_deny_tools() -> None:
     """Hidden agents deny tools; only title uses the small model."""
     for name in ("title", "compaction"):
         agent = get_agent(name)
         assert agent.permissions == {"*": "deny"}
-        assert agent.steps == 1
+        assert agent.steps is None
     assert get_agent("title").model_override == "small"
     assert get_agent("compaction").model_override is None
 
@@ -120,4 +120,5 @@ def test_agent_fields_present() -> None:
     for agent in AGENT_DEFINITIONS.values():
         assert agent.name and agent.description and agent.system_prompt
         assert agent.color
+        assert agent.steps is None
         assert agent.model_override is None or agent.model_override == "small"

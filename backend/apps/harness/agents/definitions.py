@@ -176,7 +176,6 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "write": "deny",
             "bash": dict(EXPLORE_BASH_RULES),
         },
-        steps=10,
         color="green",
     ),
     "title": AgentDefinition(
@@ -189,7 +188,6 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         ),
         permissions={"*": "deny"},
         model_override=SMALL_MODEL,
-        steps=1,
         color="gray",
     ),
     "compaction": AgentDefinition(
@@ -211,7 +209,6 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "Respond in the same language as the conversation."
         ),
         permissions={"*": "deny"},
-        steps=1,
         color="magenta",
     ),
     "computeruse": AgentDefinition(
@@ -260,7 +257,6 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "completed."
         ),
         permissions={"*": "allow"},
-        steps=25,
         color="purple",
     ),
 }

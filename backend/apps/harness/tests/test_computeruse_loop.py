@@ -9,6 +9,12 @@ from typing import Any
 
 import pytest
 
+from apps.harness.computeruse_loop import (
+    append_video_to_output,
+    count_image_url_parts,
+    truncate_task_output,
+)
+from apps.harness.max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
@@ -20,11 +26,6 @@ from apps.harness.providers.base import (
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import computeruse_tool_registry, default_tool_registry
-from apps.harness.computeruse_loop import (
-    append_video_to_output,
-    count_image_url_parts,
-    truncate_task_output,
-)
 from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS
 
 
@@ -46,12 +47,18 @@ class FakeProvider(ProviderAdapter):
         opts: ChatOptions | None = None,
     ) -> AsyncIterator[Delta]:
         """Yield the next canned step."""
-        self.calls.append({"model": model, "tools": [tool.name for tool in tools]})
+        self.calls.append(
+            {
+                "model": model,
+                "tools": [tool.name for tool in tools],
+                "tool_choice": None if opts is None else opts.tool_choice,
+            }
+        )
         self.messages.append(list(messages))
         if not self._steps:
             yield Delta(text="done", usage=Usage(0, 0, 0))
             return
-        step = self._steps.pop(0) if len(self._steps) > 1 else self._steps[0]
+        step = self._steps.pop(0)
         for delta in step:
             yield delta
 
@@ -264,3 +271,48 @@ async def test_record_start_failure_still_releases_desktop_hold() -> None:
     assert "record_start" in actions
     assert "record_stop" not in actions
     assert actions[-1] == "release"
+
+
+async def test_computeruse_last_step_disables_tools() -> None:
+    """Computer-use last step offers no tools and does not execute leaked calls."""
+    provider = FakeProvider(
+        [
+            _tool_step("left_click", {"x": 100, "y": 200}, call_id="c1"),
+            _tool_step("left_click", {"x": 300, "y": 400}, call_id="c2"),
+        ]
+    )
+    accessor = FakeAccessor()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=computeruse_tool_registry(),
+        accessor=accessor,
+        emit=emit,
+    )
+    result = await runner.run(
+        "click twice",
+        "computeruse",
+        "m",
+        "build",
+        RunOptions(
+            auto_approve=True,
+            session_id="cu-last-step",
+            workspace_id="ws-1",
+            max_steps=2,
+        ),
+    )
+    assert result.finish_reason == "max_steps"
+    assert result.steps == 2
+    assert provider.calls[0]["tools"]
+    assert provider.calls[1]["tools"] == []
+    assert provider.calls[1]["tool_choice"] == "none"
+    assert provider.messages[1][-1].content == MAX_STEPS_PROMPT
+    clicks = [call for call in accessor.desktop_calls if call[0] == "click"]
+    assert len(clicks) == 1
+    errors = [event for event in events if event.get("type") == "tool_error"]
+    assert [event.get("call_id") for event in errors] == ["c2"]
+    assert errors[0]["error"] == MAX_STEPS_TOOL_ERROR

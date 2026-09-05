@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
+from apps.harness.max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import (
     ChatOptions,
@@ -46,15 +47,19 @@ class FakeProvider(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions | None = None,
     ) -> AsyncIterator[Delta]:
-        """Yield the next canned step; last step repeats when exhausted."""
+        """Yield the next canned step; then a text-only done reply."""
         self.calls.append(
-            {"model": model, "tools": [tool.name for tool in tools]}
+            {
+                "model": model,
+                "tools": [tool.name for tool in tools],
+                "tool_choice": None if opts is None else opts.tool_choice,
+            }
         )
         self.messages.append(list(messages))
         if not self._steps:
             yield Delta(text="done", usage=Usage(0, 0, 0))
             return
-        step = self._steps.pop(0) if len(self._steps) > 1 else self._steps[0]
+        step = self._steps.pop(0)
         for delta in step:
             yield delta
 
@@ -382,16 +387,32 @@ async def test_doom_loop_triggers_permission_flow() -> None:
     assert "doom_loop" in decisions
 
 
-async def test_steps_budget_returns_max_steps() -> None:
-    """Exhausting the budget stops with finish_reason max_steps."""
-    provider = FakeProvider([_tool_step("read", {"path": "a.txt"}, call_id="c1")])
+async def test_steps_budget_forces_text_only_last_step() -> None:
+    """The last configured step disables tools and injects MAX_STEPS_PROMPT."""
+    provider = FakeProvider(
+        [
+            _tool_step("read", {"path": "a.txt"}, call_id="c1"),
+            _tool_step("read", {"path": "forbidden.txt"}, call_id="c2"),
+        ]
+    )
     events: list[dict[str, Any]] = []
-    runner, opts = _runner(provider, events)
+    runner, opts = _runner(provider, events, auto_approve=True)
     opts.max_steps = 2
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.finish_reason == "max_steps"
     assert result.steps == 2
-    assert "step budget" in result.output
+    assert provider.calls[0]["tools"]
+    assert provider.calls[0]["tool_choice"] is None
+    assert provider.calls[1]["tools"] == []
+    assert provider.calls[1]["tool_choice"] == "none"
+    last_messages = provider.messages[1]
+    assert last_messages[-1].role == "assistant"
+    assert last_messages[-1].content == MAX_STEPS_PROMPT
+    completed = [e for e in events if e.get("type") == "tool_completed"]
+    errors = [e for e in events if e.get("type") == "tool_error"]
+    assert [e.get("call_id") for e in completed] == ["c1"]
+    assert [e.get("call_id") for e in errors] == ["c2"]
+    assert errors[0]["error"] == MAX_STEPS_TOOL_ERROR
 
 
 async def test_cost_tokens_summed_across_steps() -> None:

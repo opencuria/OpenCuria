@@ -154,6 +154,8 @@ class OpenRouterAdapter(ProviderAdapter):
                 }
                 for t in tools
             ]
+        if opts.tool_choice:
+            payload["tool_choice"] = opts.tool_choice
         if opts.temperature is not None:
             payload["temperature"] = opts.temperature
         if opts.max_tokens is not None:

@@ -106,6 +106,7 @@ class ChatOptions:
     max_tokens: int | None = None
     timeout_seconds: float = 60.0
     reasoning_effort: str | None = None
+    tool_choice: str | None = None
 
 
 class ProviderAdapter(abc.ABC):

@@ -1548,7 +1548,7 @@ class HarnessService:
                 "title",
                 small_model,
                 "build",
-                RunOptions(auto_approve=True, max_steps=1),
+                RunOptions(auto_approve=True),
             )
             title = _normalize_generated_title(result.output or "")
             if not title:

@@ -45,7 +45,10 @@ class ScriptProvider(ProviderAdapter):
         opts=None,
     ) -> AsyncIterator[Delta]:
         self.calls += 1
-        step = self._steps.pop(0) if len(self._steps) > 1 else self._steps[0]
+        if not self._steps:
+            yield Delta(text="done", usage=Usage(0, 0, 0))
+            return
+        step = self._steps.pop(0)
         for delta in step:
             yield delta
 

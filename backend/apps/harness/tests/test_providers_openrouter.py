@@ -179,6 +179,25 @@ def test_build_payload_omits_reasoning_when_unset() -> None:
     assert "reasoning" not in payload
 
 
+def test_build_payload_includes_tool_choice_when_set() -> None:
+    """tool_choice is forwarded when ChatOptions sets it."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [],
+        [],
+        ChatOptions(tool_choice="none"),
+    )
+    assert payload["tool_choice"] == "none"
+
+
+def test_build_payload_omits_tool_choice_when_unset() -> None:
+    """No tool_choice is sent when ChatOptions leaves it empty."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload("m", [], [], ChatOptions())
+    assert "tool_choice" not in payload
+
+
 def test_message_to_dict_preserves_multimodal_content() -> None:
     """Image parts are serialized into the OpenAI request payload."""
     adapter = OpenRouterAdapter(api_key="k")
