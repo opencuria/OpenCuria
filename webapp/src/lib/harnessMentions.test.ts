@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   HARNESS_AGENT_NAMES,
+  MENTION_FILE_LIMIT,
+  MENTION_TOTAL_LIMIT,
   applyMentionCandidate,
   consumeSlashQuery,
   detectMentionQuery,
@@ -8,6 +10,9 @@ import {
   filterMentionCandidates,
   filterSkillCandidates,
   flattenFilePaths,
+  mentionFileSearchQuery,
+  mergeMentionFilePaths,
+  workspaceRelativePath,
 } from './harnessMentions'
 import type { FileNode } from '@/types'
 
@@ -42,7 +47,44 @@ describe('harnessMentions', () => {
 
     const filesOnly = filterMentionCandidates('file:src', ['/workspace/src/a.ts', '/workspace/README.md'])
     expect(filesOnly.length).toBe(1)
-    expect(filesOnly[0]).toMatchObject({ kind: 'file', insert: 'file:/workspace/src/a.ts' })
+    expect(filesOnly[0]).toMatchObject({
+      kind: 'file',
+      label: 'src/a.ts',
+      insert: 'file:/workspace/src/a.ts',
+    })
+  })
+
+  it('ranks basename matches first and caps the file list', () => {
+    const ranked = filterMentionCandidates('util', [
+      '/workspace/src/utility/readme.md',
+      '/workspace/notes-util.md',
+      '/workspace/src/utils.ts',
+    ]).filter((candidate) => candidate.kind === 'file')
+    expect(ranked.map((candidate) => candidate.label)).toEqual([
+      'src/utils.ts',
+      'notes-util.md',
+      'src/utility/readme.md',
+    ])
+
+    const many = Array.from({ length: 20 }, (_, index) => `/workspace/f${index}.ts`)
+    const capped = filterMentionCandidates('', many)
+    const files = capped.filter((candidate) => candidate.kind === 'file')
+    expect(files.length).toBeLessThanOrEqual(MENTION_FILE_LIMIT)
+    expect(capped.length).toBe(MENTION_TOTAL_LIMIT)
+    expect(capped.filter((candidate) => candidate.kind === 'agent').length).toBe(
+      HARNESS_AGENT_NAMES.length,
+    )
+  })
+
+  it('strips file: for search and keeps agent: from fetching files', () => {
+    expect(mentionFileSearchQuery('file:src/a')).toBe('src/a')
+    expect(mentionFileSearchQuery('agent:plan')).toBeNull()
+    expect(mentionFileSearchQuery('src')).toBe('src')
+    expect(workspaceRelativePath('/workspace/src/a.ts')).toBe('src/a.ts')
+    expect(mergeMentionFilePaths(['/workspace/a.ts'], ['/workspace/a.ts', '/workspace/b.ts'])).toEqual([
+      '/workspace/a.ts',
+      '/workspace/b.ts',
+    ])
   })
 
   it('detects the @ query before the cursor', () => {

@@ -27,6 +27,8 @@ import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
+import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   applyMentionCandidate,
   consumeSlashQuery,
@@ -35,9 +37,11 @@ import {
   filterMentionCandidates,
   filterSkillCandidates,
   flattenFilePaths,
+  mentionFileSearchQuery,
+  mergeMentionFilePaths,
+  MENTION_FIND_LIMIT,
   type MentionCandidate,
 } from '@/lib/harnessMentions'
-import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
   disabled?: boolean
@@ -179,6 +183,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   saveToCache(prompt.value)
+  if (mentionFindTimer) {
+    clearTimeout(mentionFindTimer)
+    mentionFindTimer = null
+  }
 })
 
 watch(
@@ -277,10 +285,18 @@ function clearInput(): void {
   clearCache()
 }
 
+const fileExplorer = useFileExplorerStore()
 const mentionOpen = ref(false)
 const mentionIndex = ref(0)
 const mentionQuery = ref('')
 const composerKind = ref<'mention' | 'skill' | null>(null)
+const mentionSearchPaths = ref<string[]>([])
+const mentionPopupListRef = ref<HTMLElement | null>(null)
+let mentionFindTimer: ReturnType<typeof setTimeout> | null = null
+let mentionFindGeneration = 0
+let mentionSearchStarted = false
+
+const MENTION_FIND_DEBOUNCE_MS = 150
 
 /**
  * Locally filtered mention/skill candidates. In controlled (sheet-stack) mode the
@@ -291,7 +307,10 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
   if (composerKind.value === 'skill') {
     return filterSkillCandidates(mentionQuery.value, props.skillOptions ?? [])
   }
-  return filterMentionCandidates(mentionQuery.value, flattenFilePaths(props.files ?? []))
+  return filterMentionCandidates(
+    mentionQuery.value,
+    mergeMentionFilePaths(mentionSearchPaths.value, flattenFilePaths(props.files ?? [])),
+  )
 })
 
 const mentionPopupCandidates = computed<MentionCandidate[]>(() =>
@@ -329,6 +348,27 @@ watch(
   },
 )
 
+watch(mentionCandidates, (candidates) => {
+  if (mentionIndex.value >= candidates.length) {
+    mentionIndex.value = Math.max(0, candidates.length - 1)
+  }
+})
+
+watch(
+  () => [mentionIndex.value, mentionPopupCandidates.value.length] as const,
+  () => {
+    if (props.mentionControlled || mentionPopupCandidates.value.length === 0) return
+    void nextTick(() => {
+      const active = mentionPopupListRef.value?.querySelector<HTMLElement>(
+        `[data-mention-index="${mentionIndex.value}"]`,
+      )
+      if (typeof active?.scrollIntoView === 'function') {
+        active.scrollIntoView({ block: 'nearest' })
+      }
+    })
+  },
+)
+
 function requestMentionSelect(candidate: MentionCandidate): void {
   if (props.mentionControlled) {
     emit('mention-select', candidate)
@@ -349,6 +389,42 @@ function closeComposerQuery(): void {
   mentionIndex.value = 0
   mentionQuery.value = ''
   composerKind.value = null
+  mentionSearchPaths.value = []
+  mentionSearchStarted = false
+  mentionFindGeneration += 1
+  if (mentionFindTimer) {
+    clearTimeout(mentionFindTimer)
+    mentionFindTimer = null
+  }
+}
+
+async function runMentionFileSearch(workspaceId: string, query: string): Promise<void> {
+  const generation = ++mentionFindGeneration
+  const paths = await fileExplorer.findFiles(workspaceId, query, MENTION_FIND_LIMIT)
+  if (generation !== mentionFindGeneration) return
+  mentionSearchPaths.value = paths
+}
+
+function scheduleMentionFileSearch(rawQuery: string): void {
+  const fileQuery = mentionFileSearchQuery(rawQuery)
+  if (fileQuery === null || !props.workspaceId) {
+    mentionSearchPaths.value = []
+    return
+  }
+  if (mentionFindTimer) {
+    clearTimeout(mentionFindTimer)
+    mentionFindTimer = null
+  }
+  const workspaceId = props.workspaceId
+  const run = () => {
+    void runMentionFileSearch(workspaceId, fileQuery)
+  }
+  if (!mentionSearchStarted) {
+    mentionSearchStarted = true
+    run()
+    return
+  }
+  mentionFindTimer = setTimeout(run, MENTION_FIND_DEBOUNCE_MS)
 }
 
 function refreshComposerQuery(): void {
@@ -361,6 +437,7 @@ function refreshComposerQuery(): void {
     mentionQuery.value = mention
     mentionIndex.value = 0
     mentionOpen.value = true
+    scheduleMentionFileSearch(mention)
     return
   }
   const slash = detectSlashQuery(el.value, cursor)
@@ -503,6 +580,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
         />
         <div
           v-if="mentionPopupCandidates.length > 0"
+          ref="mentionPopupListRef"
           class="absolute bottom-full left-4 right-4 z-10 mb-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-md"
           role="listbox"
           :aria-label="composerKind === 'skill' ? 'Skill suggestions' : 'Mention suggestions'"
@@ -513,6 +591,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             type="button"
             role="option"
             :aria-selected="idx === mentionIndex"
+            :data-mention-index="idx"
             class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
             :class="
               idx === mentionIndex

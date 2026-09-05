@@ -14,6 +14,7 @@ import { getConfig } from './config'
 import { tryRefreshToken } from './api'
 import type {
   FilesListResultEvent,
+  FilesFindResultEvent,
   FilesContentResultEvent,
   FilesUploadResultEvent,
   FilesDownloadResultEvent,
@@ -160,6 +161,7 @@ type EventMap = {
   'desktop:stopped': DesktopStoppedEvent
   'desktop:viewer_released': DesktopViewerReleasedEvent
   'files:list_result': FilesListResultEvent
+  'files:find_result': FilesFindResultEvent
   'files:content_result': FilesContentResultEvent
   'files:upload_result': FilesUploadResultEvent
   'files:download_result': FilesDownloadResultEvent
@@ -411,6 +413,28 @@ export function sendFilesList(
     request_id: requestId,
     path,
   })
+}
+
+/**
+ * Search workspace files for `@` mention autocomplete.
+ *
+ * Returns false when the socket is not connected so callers can resolve
+ * immediately instead of waiting for a result that will never arrive.
+ */
+export function sendFilesFind(
+  workspaceId: string,
+  requestId: string,
+  query: string,
+  limit: number,
+): boolean {
+  if (!socket) return false
+  socket.emit('frontend:files_find', {
+    workspace_id: workspaceId,
+    request_id: requestId,
+    query,
+    limit,
+  })
+  return true
 }
 
 /**

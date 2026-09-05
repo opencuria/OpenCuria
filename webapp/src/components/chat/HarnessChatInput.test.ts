@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import HarnessChatInput from './HarnessChatInput.vue'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -224,6 +225,38 @@ describe('HarnessChatInput', () => {
 
     expect(wrapper.emitted('mention-select')?.length).toBeGreaterThan(0)
     expect((wrapper.emitted('send') ?? []).length).toBe(0)
+  })
+
+  it('fetches workspace files when @ is typed', async () => {
+    const store = useFileExplorerStore()
+    const findFiles = vi.spyOn(store, 'findFiles').mockResolvedValue(['/workspace/src/a.ts'])
+    const wrapper = mountInput()
+    const textarea = wrapper.find('textarea')
+    await textarea.setValue('@src')
+    textarea.element.setSelectionRange(4, 4)
+    await textarea.trigger('input')
+    expect(findFiles).toHaveBeenCalledWith('ws-1', 'src', 50)
+  })
+
+  it('moves mention selection with arrow keys', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'findFiles').mockResolvedValue([])
+    const wrapper = mountInput({
+      files: [
+        { name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 },
+        { name: 'b.ts', path: '/workspace/b.ts', type: 'file', size: 1 },
+      ],
+    })
+    const textarea = wrapper.find('textarea')
+    await textarea.setValue('@')
+    textarea.element.setSelectionRange(1, 1)
+    await textarea.trigger('input')
+    const options = wrapper.findAll('[role="option"]')
+    expect(options.length).toBeGreaterThan(1)
+    expect(options[0]!.attributes('aria-selected')).toBe('true')
+    await textarea.trigger('keydown', { key: 'ArrowDown' })
+    const moved = wrapper.findAll('[role="option"]')
+    expect(moved[1]!.attributes('aria-selected')).toBe('true')
   })
 
   it('emits toggle-context when the usage ring is clicked', async () => {

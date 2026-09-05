@@ -24,6 +24,7 @@ class _FakeService:
         self.exec_calls: list[dict] = []
         self.stream_payloads: list[tuple[str, object, object, object]] = []
         self.list_calls: list[tuple[str, str]] = []
+        self.find_calls: list[tuple[object, str, object]] = []
         self.read_calls: list[tuple[str, str, object]] = []
         self.write_calls: list[tuple[str, str, str, int]] = []
         self.stat_calls: list[tuple[str, str]] = []
@@ -90,6 +91,15 @@ class _FakeService:
                 "size": 2,
             }
         ]
+
+    async def find_files(self, workspace_id, query="", limit=50):
+        self.find_calls.append((workspace_id, query, limit))
+        if ".." in str(query):
+            raise ValueError("Invalid find query")
+        return {
+            "paths": [{"name": "a.txt", "path": "/workspace/a.txt"}],
+            "truncated": False,
+        }
 
     async def stat_path(self, workspace_id, path):
         self.stat_calls.append((workspace_id, path))
@@ -309,6 +319,31 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         event, payload = interface._sio.emit.await_args.args
         self.assertEqual(event, "harness:read_file_result")
         self.assertIn("/workspace", payload["error"])
+
+    async def test_files_find_emits_capped_paths(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        await interface._sio.handlers["/"]["files:find"](
+            _payload(workspace_id, "f1", query="a.txt", limit=50)
+        )
+        event, payload = interface._sio.emit.await_args.args
+        self.assertEqual(event, "files:find_result")
+        self.assertEqual(payload["paths"][0]["path"], "/workspace/a.txt")
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(service.find_calls[0][1], "a.txt")
+
+    async def test_files_find_invalid_query_reports_error(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        await interface._sio.handlers["/"]["files:find"](
+            _payload(workspace_id, "f-evil", query="..")
+        )
+        event, payload = interface._sio.emit.await_args.args
+        self.assertEqual(event, "files:find_result")
+        self.assertEqual(payload["paths"], [])
+        self.assertIn("Invalid find query", payload["error"])
 
 
 class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):

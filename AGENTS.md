@@ -500,6 +500,10 @@ The composer shows a context-usage ring (left of the paperclip) and a Context
 Usage sheet in the todos/questions stack; compaction renders as a “Session
 compacted” divider in chat.
 
+**@ mentions:** typing `@` searches workspace files via Socket.IO `files:find`
+(capped at 50, prunes `.git`/`node_modules`/etc.). The mention sheet ranks
+basename matches (8 files / 10 total rows) and scrolls the active row into view.
+
 **Security:** computer-use session recordings capture the workspace display;
 credentials or other sensitive content visible on screen may appear in the mp4.
 
@@ -666,6 +670,8 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `files:find` | `{request_id, workspace_id, query, limit}` |
+| Runner -> Backend | `files:find_result` | `{request_id, workspace_id, query, paths, truncated}` |
 | Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` |
 | Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
 | Runner -> Backend | `desktop:started` | viewer lease acquired (`task_id`, routing, `viewer`, `computer_use`) |
@@ -695,6 +701,8 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Frontend -> Backend | `frontend:terminal_input` | `{workspace_id, terminal_id, data}` (base64) |
 | Frontend -> Backend | `frontend:terminal_resize` | `{workspace_id, terminal_id, cols, rows}` |
 | Frontend -> Backend | `frontend:terminal_close` | `{workspace_id, terminal_id}` |
+| Frontend -> Backend | `frontend:files_find` | `{workspace_id, request_id, query, limit}` |
+| Backend -> Frontend | `files:find_result` | `{workspace_id, request_id, query, paths, truncated}` |
 | Backend -> Frontend | `terminal:started` | `{workspace_id, terminal_id, task_id}` |
 | Backend -> Frontend | `terminal:output` | `{workspace_id, terminal_id, data}` (base64) |
 | Backend -> Frontend | `terminal:closed` | `{workspace_id, terminal_id}` |

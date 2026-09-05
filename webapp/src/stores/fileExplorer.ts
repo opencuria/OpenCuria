@@ -8,6 +8,7 @@ import { ref, computed } from 'vue'
 import type { FileNode, FileEntryRaw } from '@/types'
 import {
   sendFilesList,
+  sendFilesFind,
   sendFilesRead,
   sendFilesDownload,
 } from '@/services/socket'
@@ -43,6 +44,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // Pending request callbacks: request_id → resolver
   const pendingRequests = ref<Map<string, (data: unknown) => void>>(new Map())
+  const pendingFindRequests = ref<Map<string, (paths: string[]) => void>>(new Map())
 
   // -- getters --------------------------------------------------------------
 
@@ -292,6 +294,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     isLoadingContent.value = false
     loadingPaths.value = new Set()
     pendingRequests.value.clear()
+    pendingFindRequests.value.clear()
   }
 
   // -- socket request helpers -----------------------------------------------
@@ -305,6 +308,19 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
         resolve()
       })
       sendFilesList(workspaceId, requestId, path)
+    })
+  }
+
+  function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
+    const requestId = nextRequestId()
+    return new Promise((resolve) => {
+      pendingFindRequests.value.set(requestId, (paths) => {
+        resolve(paths)
+      })
+      if (!sendFilesFind(workspaceId, requestId, query, limit)) {
+        pendingFindRequests.value.delete(requestId)
+        resolve([])
+      }
     })
   }
 
@@ -355,6 +371,13 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
 
     setTree(path, entries)
+  }
+
+  function handleFindResult(requestId: string, paths: string[], error?: string): void {
+    const callback = pendingFindRequests.value.get(requestId)
+    if (!callback) return
+    pendingFindRequests.value.delete(requestId)
+    callback(error ? [] : paths)
   }
 
   function handleContentResult(
@@ -482,11 +505,13 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     closeFileViewer,
     reset,
     fetchDirectory,
+    findFiles,
     downloadFile,
     refreshAll,
     trackAndUpload,
     // event handlers
     handleListResult,
+    handleFindResult,
     handleContentResult,
     handleUploadResult,
     handleDownloadResult,

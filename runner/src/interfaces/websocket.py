@@ -1306,6 +1306,40 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("files_list_failed")
 
+        @sio.on("files:find")
+        async def on_files_find(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            query = data.get("query", "")
+            limit = data.get("limit", 50)
+            try:
+                result = await self._service.find_files(
+                    workspace_id, query=query, limit=limit
+                )
+                await sio.emit(
+                    "files:find_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "query": query,
+                        "paths": result.get("paths", []),
+                        "truncated": result.get("truncated", False),
+                    },
+                )
+            except Exception as exc:
+                await sio.emit(
+                    "files:find_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "query": query,
+                        "paths": [],
+                        "truncated": False,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("files_find_failed")
+
         @sio.on("files:read")
         async def on_files_read(data: dict) -> None:
             workspace_id = uuid.UUID(data["workspace_id"])

@@ -647,6 +647,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "files:list_result", data, runner_id=runner_id
         )
 
+    @sio.on("files:find_result")
+    async def on_files_find_result(sid: str, data: dict):
+        """Forward files:find_result from runner to frontend."""
+        runner_id = await _require_runner_id(sio, sid, "files:find_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_files_result(
+            "files:find_result", data, runner_id=runner_id
+        )
+
     @sio.on("files:content_result")
     async def on_files_content_result(sid: str, data: dict):
         """Forward files:content_result from runner to frontend."""
@@ -1040,6 +1051,21 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         await service.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:list",
+            data=data,
+        )
+
+    @sio.on("frontend:files_find", namespace="/frontend")
+    async def on_frontend_files_find(sid: str, data: dict):
+        """Forward workspace file search from frontend to the runner."""
+        if not await _ensure_frontend_workspace_access(
+            sio, sid, data.get("workspace_id")
+        ):
+            return
+
+        service = get_runner_service()
+        await service.forward_files_event(
+            workspace_id=data["workspace_id"],
+            event="files:find",
             data=data,
         )
 

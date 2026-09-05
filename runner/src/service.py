@@ -37,6 +37,18 @@ logger = structlog.get_logger(__name__)
 FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+FIND_FILES_DEFAULT_LIMIT = 50
+FIND_FILES_PRUNE_NAMES = (
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    ".next",
+)
+_FIND_FILES_QUERY_RE = re.compile(r"^[A-Za-z0-9_/:.+-]*$")
+_FIND_FILES_SUCCESS_EXIT_CODES = {0, 1, 141}
 _SHELL_OPERATOR_TOKENS = {
     "|",
     "||",
@@ -2084,6 +2096,86 @@ class WorkspaceService:
         # Sort: directories first, then alphabetically
         entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
         return entries
+
+    @staticmethod
+    def sanitize_find_query(query: str) -> str:
+        """Return a safe ``find -ipath`` query fragment.
+
+        Only characters that the chat ``@`` mention regex allows are accepted.
+        ``..`` is rejected even though ``.`` is otherwise valid.
+        """
+        cleaned = (query or "").strip()
+        if ".." in cleaned or not _FIND_FILES_QUERY_RE.fullmatch(cleaned):
+            raise ValueError("Invalid find query")
+        return cleaned
+
+    @classmethod
+    def build_find_files_command(cls, query: str, limit: int) -> list[str]:
+        """Build ``bash -lc`` argv that finds workspace files up to *limit*.
+
+        Prunes common junk directories. An empty *query* lists shallower paths
+        first; a non-empty query uses case-insensitive ``-ipath``.
+        """
+        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
+        prune = " -o ".join(
+            f"-name {shlex.quote(name)}" for name in FIND_FILES_PRUNE_NAMES
+        )
+        match = ""
+        if query:
+            match = f"-ipath {shlex.quote(f'*{query}*')} "
+        pipeline = (
+            f"find {shlex.quote('/workspace')} \\( {prune} \\) -prune "
+            f"-o -type f {match}-printf '%d\\t%p\\n' "
+            f"| sort -n | head -n {capped + 1}"
+        )
+        return ["bash", "-lc", pipeline]
+
+    async def find_files(
+        self,
+        workspace_id: uuid.UUID,
+        query: str = "",
+        limit: int = FIND_FILES_DEFAULT_LIMIT,
+    ) -> dict:
+        """Search workspace files for mention autocomplete.
+
+        Returns ``{"paths": [{"path", "name"}], "truncated": bool}``. Results
+        are capped at ``FIND_FILES_DEFAULT_LIMIT``.
+        """
+        safe_query = self.sanitize_find_query(query)
+        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+
+        command = self.build_find_files_command(safe_query, capped)
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=command,
+            workdir="/workspace",
+        )
+        if exit_code not in _FIND_FILES_SUCCESS_EXIT_CODES:
+            raise RuntimeError(f"Failed to find files: {output}")
+
+        paths: list[dict] = []
+        for line in output.strip().splitlines():
+            parts = line.split("\t", 1)
+            file_path = parts[-1].strip()
+            if not file_path:
+                continue
+            if file_path != "/workspace" and not file_path.startswith(
+                "/workspace/"
+            ):
+                continue
+            paths.append(
+                {
+                    "name": os.path.basename(file_path),
+                    "path": file_path,
+                }
+            )
+
+        truncated = len(paths) > capped
+        return {"paths": paths[:capped], "truncated": truncated}
 
     async def read_file(
         self,

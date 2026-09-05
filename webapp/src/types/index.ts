@@ -359,6 +359,20 @@ export interface FilesListResultEvent {
   error?: string
 }
 
+export interface FilesFindPath {
+  name: string
+  path: string
+}
+
+export interface FilesFindResultEvent {
+  workspace_id: string
+  request_id: string
+  query: string
+  paths: FilesFindPath[]
+  truncated?: boolean
+  error?: string
+}
+
 export interface FilesContentResultEvent {
   workspace_id: string
   request_id: string

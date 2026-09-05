@@ -1919,6 +1919,56 @@ class TestAutoStopInactiveWorkspaces:
         workspace.refresh_from_db()
         assert workspace.last_activity_at >= after_terminal
 
+
+@pytest.mark.django_db(transaction=True)
+class TestForwardFilesFind:
+    @pytest.mark.asyncio
+    async def test_forwards_files_find_to_online_runner(
+        self, service, sio_mock, workspace
+    ):
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:find",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "find-1",
+                "query": "src/a",
+                "limit": 50,
+            },
+        )
+        sio_mock.emit.assert_awaited()
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "files:find"
+        assert payload["query"] == "src/a"
+
+    @pytest.mark.asyncio
+    async def test_offline_runner_returns_empty_paths(
+        self, service, offline_runner, user, monkeypatch
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:find",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "find-off",
+                "query": "readme",
+            },
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:find_result"
+        assert payload["paths"] == []
+        assert payload["error"] == "Runner is offline"
+        assert payload["query"] == "readme"
+
     def test_terminal_state_cleanup_is_deduplicated_while_pending(
         self, service, sio_mock
     ):

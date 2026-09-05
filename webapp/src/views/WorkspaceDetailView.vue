@@ -203,6 +203,18 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('files:find_result', (data) => {
+      if (data.workspace_id === workspaceId.value) {
+        fileExplorerStore.handleFindResult(
+          data.request_id,
+          (data.paths ?? []).map((entry) => entry.path),
+          data.error,
+        )
+      }
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('files:content_result', (data) => {
       if (data.workspace_id === workspaceId.value) {
         fileExplorerStore.handleContentResult(

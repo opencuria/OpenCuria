@@ -6,6 +6,15 @@ import type { FileNode } from '@/types'
  */
 export const HARNESS_AGENT_NAMES = ['build', 'plan', 'general', 'explore'] as const
 
+/** Max file rows shown in the `@` picker. */
+export const MENTION_FILE_LIMIT = 8
+/** Max combined agent+file rows shown in the `@` picker. */
+export const MENTION_TOTAL_LIMIT = 10
+/** Runner search cap requested when typing `@`. */
+export const MENTION_FIND_LIMIT = 50
+
+const WORKSPACE_ROOT = '/workspace'
+
 export interface MentionCandidate {
   kind: 'file' | 'agent' | 'skill'
   /** Display label (rendered in the suggestion list). */
@@ -30,6 +39,50 @@ export function flattenFilePaths(nodes: FileNode[]): string[] {
   return out
 }
 
+/** Strip `/workspace/` so mention labels stay readable. */
+export function workspaceRelativePath(path: string): string {
+  if (path === WORKSPACE_ROOT) return path
+  const prefix = `${WORKSPACE_ROOT}/`
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path
+}
+
+/**
+ * File search string sent to `files:find`, or `null` when the query is
+ * agent-only (`agent:` prefix).
+ */
+export function mentionFileSearchQuery(query: string): string | null {
+  const lower = query.toLowerCase()
+  if (lower.startsWith('agent:')) return null
+  if (lower.startsWith('file:')) return query.slice('file:'.length)
+  return query
+}
+
+/** Deduplicate search hits and already-loaded explorer paths. */
+export function mergeMentionFilePaths(
+  searchPaths: string[],
+  treePaths: string[],
+): string[] {
+  const merged: string[] = []
+  const seen = new Set<string>()
+  for (const path of [...searchPaths, ...treePaths]) {
+    if (seen.has(path)) continue
+    seen.add(path)
+    merged.push(path)
+  }
+  return merged
+}
+
+function fileMatchScore(path: string, query: string): number {
+  if (!query) return 3
+  const q = query.toLowerCase()
+  const name = (path.split('/').pop() ?? '').toLowerCase()
+  const relative = workspaceRelativePath(path).toLowerCase()
+  if (name.startsWith(q)) return 0
+  if (name.includes(q)) return 1
+  if (relative.includes(q) || path.toLowerCase().includes(q)) return 2
+  return 99
+}
+
 /**
  * Filter mention candidates for the current `@` query.
  *
@@ -49,16 +102,34 @@ export function filterMentionCandidates(
 
   const files: MentionCandidate[] = wantsFiles
     ? filePaths
-        .filter((path) => path.toLowerCase().includes(fileQuery))
-        .slice(0, 8)
-        .map((path) => ({ kind: 'file', label: path, insert: `file:${path}` }))
+        .filter((path) => {
+          if (!fileQuery) return true
+          const relative = workspaceRelativePath(path).toLowerCase()
+          const name = (path.split('/').pop() ?? '').toLowerCase()
+          return (
+            name.includes(fileQuery) ||
+            relative.includes(fileQuery) ||
+            path.toLowerCase().includes(fileQuery)
+          )
+        })
+        .sort((left, right) => {
+          const scoreDelta = fileMatchScore(left, fileQuery) - fileMatchScore(right, fileQuery)
+          if (scoreDelta !== 0) return scoreDelta
+          return workspaceRelativePath(left).localeCompare(workspaceRelativePath(right))
+        })
+        .slice(0, MENTION_FILE_LIMIT)
+        .map((path) => ({
+          kind: 'file' as const,
+          label: workspaceRelativePath(path),
+          insert: `file:${path}`,
+        }))
     : []
   const agents: MentionCandidate[] = wantsAgents
     ? HARNESS_AGENT_NAMES.filter((name) => name.toLowerCase().includes(agentQuery))
         .slice(0, 8)
         .map((name) => ({ kind: 'agent', label: `@agent:${name}`, insert: `agent:${name}` }))
     : []
-  return [...agents, ...files].slice(0, 10)
+  return [...agents, ...files].slice(0, MENTION_TOTAL_LIMIT)
 }
 
 /** Extract the `@` query directly before `cursor`, or null when absent. */

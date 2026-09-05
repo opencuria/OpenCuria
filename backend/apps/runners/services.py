@@ -2108,6 +2108,7 @@ class RunnerService:
         _result_event: dict[str, str] = {
             "files:read": "files:content_result",
             "files:list": "files:list_result",
+            "files:find": "files:find_result",
             "files:upload": "files:upload_result",
             "files:download": "files:download_result",
         }
@@ -2132,6 +2133,10 @@ class RunnerService:
                     error_payload.update({"content": "", "size": 0, "truncated": False})
                 elif result_event == "files:list_result":
                     error_payload["entries"] = []
+                elif result_event == "files:find_result":
+                    error_payload["paths"] = []
+                    error_payload["query"] = data.get("query", "")
+                    error_payload["truncated"] = False
                 elif result_event == "files:upload_result":
                     error_payload["status"] = "error"
                 await emit_to_frontend(result_event, error_payload, workspace_id)

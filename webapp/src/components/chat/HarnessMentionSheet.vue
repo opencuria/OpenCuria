@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 
-defineProps<{
+const props = defineProps<{
   candidates: MentionCandidate[]
   activeIndex: number
 }>()
@@ -10,6 +11,24 @@ const emit = defineEmits<{
   select: [candidate: MentionCandidate]
   hover: [index: number]
 }>()
+
+const listRef = ref<HTMLElement | null>(null)
+
+function scrollActiveIntoView(): void {
+  const active = listRef.value?.querySelector<HTMLElement>(
+    `[data-mention-index="${props.activeIndex}"]`,
+  )
+  if (typeof active?.scrollIntoView === 'function') {
+    active.scrollIntoView({ block: 'nearest' })
+  }
+}
+
+watch(
+  () => [props.activeIndex, props.candidates.length] as const,
+  () => {
+    void nextTick(scrollActiveIntoView)
+  },
+)
 </script>
 
 <template>
@@ -19,13 +38,14 @@ const emit = defineEmits<{
     aria-label="Mention suggestions"
     data-testid="composer-mention-sheet"
   >
-    <div class="max-h-48 overflow-y-auto py-1">
+    <div ref="listRef" class="max-h-48 overflow-y-auto py-1">
       <button
         v-for="(candidate, idx) in candidates"
         :key="`${candidate.kind}:${candidate.insert}`"
         type="button"
         role="option"
         :aria-selected="idx === activeIndex"
+        :data-mention-index="idx"
         class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-xs transition-colors"
         :class="
           idx === activeIndex
