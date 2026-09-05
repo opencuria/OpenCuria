@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from asgiref.sync import sync_to_async
+from django.core.exceptions import SynchronousOnlyOperation
 
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
@@ -196,6 +198,28 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "aborted"
     assert [e["event"] for e in events][-1] == "harness.session_status"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_run_does_not_call_orm_from_async_context(
+    harness_workspace, monkeypatch
+) -> None:
+    """Idle abort must wrap session lookup so Daphne does not 500."""
+    service, _, _ = _service()
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="idle abort",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        aborted = await service.abort_run(session.id)
+    except SynchronousOnlyOperation:
+        pytest.fail("abort_run called Django ORM from an async context")
+    assert aborted.status == "idle"
 
 
 @pytest.mark.django_db(transaction=True)

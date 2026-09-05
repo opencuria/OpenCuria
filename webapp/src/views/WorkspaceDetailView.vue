@@ -588,9 +588,6 @@ function onDragStart(e: MouseEvent): void {
       </div>
     </template>
 
-    <!-- Error -->      </div>
-    </template>
-
     <!-- Error -->
     <div
       v-else-if="workspaceStore.error"

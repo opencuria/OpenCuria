@@ -270,7 +270,7 @@ class HarnessService:
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run task and mark message/parts aborted."""
-        session = self.get_session(session_id)
+        session = await sync_to_async(self.get_session)(session_id)
         key = str(session.id)
         task = self._tasks.get(key)
         if task is None or task.done():
@@ -304,7 +304,7 @@ class HarnessService:
         self, *, session: HarnessSession, request_id: uuid.UUID, response: str
     ) -> dict[str, Any]:
         """Resolve a permission request via the M3 service + wake the loop."""
-        record = self.permissions.requests.get_by_id(request_id)
+        record = await sync_to_async(self.permissions.requests.get_by_id)(request_id)
         if record is None or record.status != "pending":
             raise NotFoundError("PermissionRequest", str(request_id))
         if str(record.session_id) != str(session.id):
