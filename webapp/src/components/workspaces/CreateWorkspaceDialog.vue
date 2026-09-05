@@ -25,6 +25,7 @@ import { useCredentialStore } from '@/stores/credentials'
 import { useImageStore } from '@/stores/images'
 import { RuntimeType } from '@/types'
 import { filterRunnersByRuntime, runnerSupportsRuntime } from '@/lib/runtimeSupport'
+import { isDefinitionSelectableForWorkspace } from '@/components/images/imageDefinitionLifecycle'
 import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
 import { X, Check, Key, Camera } from '@lucide/vue'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
@@ -65,7 +66,7 @@ const selectedImageValue = ref('')
 const imageOptions = computed(() => {
   const definitionOptions: SelectableImageOption[] = []
   for (const definition of imageStore.imageDefinitions) {
-    if (!definition.is_active) continue
+    if (!isDefinitionSelectableForWorkspace(definition)) continue
     const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || [])
       .filter((build) => {
         if (build.status !== 'active' || !build.image_artifact_id) return false

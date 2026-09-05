@@ -42,6 +42,7 @@ from .schemas import (
     ImageArtifactUpdateIn,
     ImageDefinitionCreateIn,
     ImageDefinitionDuplicateIn,
+    ImageDefinitionBuildSummaryOut,
     ImageDefinitionOut,
     ImageDefinitionUpdateIn,
     RunnerCreateIn,
@@ -305,7 +306,7 @@ def _get_build_job_for_org(
             Q(image_definition__organization_id=org_id)
             | Q(image_definition__organization__isnull=True)
         )
-        .select_related("image_definition", "runner", "build_task")
+        .select_related("image_definition", "runner", "build_task", "image_instance")
         .first()
     )
 
@@ -1310,6 +1311,9 @@ image_definition_router = Router(tags=["image-definitions"])
 
 
 def _image_definition_to_out(defn) -> ImageDefinitionOut:
+    from .repositories import ImageDefinitionRepository
+
+    summary = ImageDefinitionRepository.build_summary(defn)
     return ImageDefinitionOut(
         id=defn.id,
         organization_id=defn.organization_id,
@@ -1325,6 +1329,7 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         custom_init_script=defn.custom_init_script or "",
         is_active=defn.is_active,
         status=getattr(defn, "status", "active"),
+        runner_build_summary=ImageDefinitionBuildSummaryOut(**summary),
         delete_requested_at=getattr(defn, "delete_requested_at", None),
         delete_started_at=getattr(defn, "delete_started_at", None),
         delete_confirmed_at=getattr(defn, "delete_confirmed_at", None),
@@ -1673,25 +1678,41 @@ async def update_image_definition_runner_build(
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
 
     action = payload.action.strip().lower()
+    service = _get_service()
     if action == "deactivate":
+        try:
+            service._ensure_definition_mutable(build.image_definition)
+        except ConflictError as e:
+            return 409, ErrorOut(detail=e.message, code=e.code)
         build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
         await sync_to_async(build.save)(update_fields=["status", "deactivated_at", "updated_at"])
         return 200, _build_job_to_out(build)
 
-    service = _get_service()
+    if action not in {"activate", "rebuild"}:
+        return 409, ErrorOut(
+            detail="action must be one of: deactivate, activate, rebuild",
+            code="conflict",
+        )
+
     definition = build.image_definition
     runner = build.runner
     try:
-        rebuilt = await service.trigger_build_job(
-            image_definition=definition,
-            runner=runner,
-            activate=True,
-            created_by=request.user,
-        )
+        if action == "activate":
+            updated = await service.activate_build_job(
+                build,
+                created_by=request.user,
+            )
+        else:
+            updated = await service.trigger_build_job(
+                image_definition=definition,
+                runner=runner,
+                activate=True,
+                created_by=request.user,
+            )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-    return 200, _build_job_to_out(rebuilt)
+    return 200, _build_job_to_out(updated)
 
 
 @image_definition_router.delete(

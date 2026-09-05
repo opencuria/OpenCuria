@@ -934,6 +934,33 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
         return _error(str(e))
 
 
+def _image_definition_payload(definition) -> dict:
+    """Serialize an image definition the same way REST list responses do."""
+    from apps.runners.repositories import ImageDefinitionRepository
+
+    return {
+        "id": str(definition.id),
+        "organization_id": (
+            str(definition.organization_id) if definition.organization_id else None
+        ),
+        "name": definition.name,
+        "description": definition.description,
+        "is_standard": definition.organization_id is None,
+        "runtime_type": definition.runtime_type,
+        "base_distro": definition.base_distro,
+        "packages": list(definition.packages or []),
+        "env_vars": dict(definition.env_vars or {}),
+        "custom_dockerfile": definition.custom_dockerfile or "",
+        "custom_init_script": definition.custom_init_script or "",
+        "is_active": bool(definition.is_active),
+        "status": getattr(definition, "status", "active"),
+        "runner_build_summary": ImageDefinitionRepository.build_summary(definition),
+        "delete_last_error": getattr(definition, "delete_last_error", "") or "",
+        "created_at": definition.created_at.isoformat(),
+        "updated_at": definition.updated_at.isoformat(),
+    }
+
+
 def _call_list_image_definitions(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.sio_server import get_runner_service
@@ -942,31 +969,7 @@ def _call_list_image_definitions(api_key, org_id, args: dict) -> list[TextConten
     org_service.require_membership(api_key.user, org_id)
     svc = get_runner_service()
     definitions = svc.list_image_definitions(org_id)
-    return _text(
-        [
-            {
-                "id": str(definition.id),
-                "organization_id": (
-                    str(definition.organization_id)
-                    if definition.organization_id
-                    else None
-                ),
-                "name": definition.name,
-                "description": definition.description,
-                "is_standard": definition.organization_id is None,
-                "runtime_type": definition.runtime_type,
-                "base_distro": definition.base_distro,
-                "packages": list(definition.packages or []),
-                "env_vars": dict(definition.env_vars or {}),
-                "custom_dockerfile": definition.custom_dockerfile or "",
-                "custom_init_script": definition.custom_init_script or "",
-                "is_active": bool(definition.is_active),
-                "created_at": definition.created_at.isoformat(),
-                "updated_at": definition.updated_at.isoformat(),
-            }
-            for definition in definitions
-        ]
-    )
+    return _text([_image_definition_payload(definition) for definition in definitions])
 
 
 def _call_create_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1118,7 +1121,10 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
 def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import ConflictError
 
+    import asyncio
     import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
@@ -1137,8 +1143,26 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
     definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
     if definition is None:
         return _error("Image definition not found")
-    definition.delete()
-    return _text({"deleted": True})
+
+    svc = get_runner_service()
+
+    async def _delete():
+        await svc.delete_image_definition(definition_id)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_delete())
+    except ConflictError as e:
+        return _error(e.message)
+    except ValueError as e:
+        return _error(str(e))
+    finally:
+        loop.close()
+
+    updated = ImageDefinitionRepository.get_by_id(definition_id)
+    if updated is None or updated.status == "deleted":
+        return _text({"deleted": True, "status": "deleted"})
+    return _text(_image_definition_payload(updated))
 
 
 def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1247,6 +1271,7 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.runners.models import ImageBuildJob
     from apps.runners.repositories import ImageBuildJobRepository
     from apps.runners.sio_server import get_runner_service
+    from common.exceptions import ConflictError
     from django.utils import timezone
 
     import asyncio
@@ -1273,6 +1298,11 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
         return _error("Runner image build not found")
 
     if action == "deactivate":
+        try:
+            svc = get_runner_service()
+            svc._ensure_definition_mutable(build.image_definition)
+        except ConflictError as e:
+            return _error(e.message)
         build.status = ImageBuildJob.Status.DEACTIVATED
         build.deactivated_at = timezone.now()
         build.save(update_fields=["status", "deactivated_at", "updated_at"])
@@ -1283,7 +1313,12 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
     svc = get_runner_service()
 
-    async def _rebuild():
+    async def _update():
+        if action == "activate":
+            return await svc.activate_build_job(
+                build,
+                created_by=api_key.user,
+            )
         return await svc.trigger_build_job(
             image_definition=build.image_definition,
             runner=build.runner,
@@ -1292,15 +1327,22 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
         )
 
     loop = asyncio.new_event_loop()
-    updated = loop.run_until_complete(_rebuild())
-    loop.close()
+    try:
+        updated = loop.run_until_complete(_update())
+    except ConflictError as e:
+        return _error(e.message)
+    finally:
+        loop.close()
     return _text({"id": str(updated.id), "status": updated.status})
 
 
 def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageBuildJobRepository
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import ConflictError
 
+    import asyncio
     import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
@@ -1318,9 +1360,24 @@ def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     if org_service.get_user_role(api_key.user, org_id) != "admin":
         return _error("Admin role required")
 
-    deleted = ImageBuildJobRepository.delete_for_org(definition_id, runner_id, org_id)
-    if not deleted:
+    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
+    if build is None:
         return _error("Runner image build not found")
+
+    svc = get_runner_service()
+
+    async def _delete():
+        await svc.delete_build_job(build.id)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_delete())
+    except ConflictError as e:
+        return _error(e.message)
+    except ValueError as e:
+        return _error(str(e))
+    finally:
+        loop.close()
     return _text({"deleted": True})
 
 

@@ -136,6 +136,8 @@ class RunnerService:
         """
         from .models import ImageBuildJob
 
+        await sync_to_async(self.timeout_stale_image_operations)()
+
         pending_builds = await sync_to_async(
             lambda: list(
                 ImageBuildJob.objects.filter(
@@ -546,6 +548,14 @@ class RunnerService:
         if selected_build_job is not None:
             if selected_build_job.status != "active":
                 raise ConflictError("Selected image artifact is not active on runner")
+            origin_definition = selected_build_job.image_definition
+            if origin_definition is not None and (
+                not origin_definition.is_active
+                or origin_definition.status != origin_definition.Status.ACTIVE
+            ):
+                raise ConflictError(
+                    "Selected image definition is not available for new workspaces"
+                )
             if (
                 organization_id
                 and selected_build_job.runner.organization_id != organization_id
@@ -2613,6 +2623,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
 
     def list_image_definitions(self, organization_id: uuid.UUID) -> list:
         """List image definitions for an organization."""
+        self.timeout_stale_image_operations()
         return list(self.image_definitions.list_by_org(organization_id))
 
     def list_build_jobs(
@@ -2621,12 +2632,121 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         organization_id: uuid.UUID,
     ) -> list:
         """List runner build records for an image definition."""
+        self.timeout_stale_image_operations()
         return list(
             self.build_jobs.list_for_definition(
                 image_definition_id,
                 organization_id=organization_id,
             )
         )
+
+    def timeout_stale_image_operations(self, *, timeout_hours: int = 1) -> None:
+        """Fail hung builds and stuck deletions so the UI can retry."""
+        from .models import ImageDefinition, ImageInstance
+
+        cutoff = timezone.now() - timedelta(hours=timeout_hours)
+        stale_message = f"Timed out after {timeout_hours}h without progress"
+
+        def _instance_or_none(build):
+            try:
+                return build.image_instance
+            except ImageInstance.DoesNotExist:
+                return None
+
+        for build in self.build_jobs.list_stale_builds(cutoff=cutoff):
+            self.build_jobs.mark_failed(build.id, error=stale_message)
+            instance = _instance_or_none(build)
+            if instance is not None and instance.status in {
+                ImageInstance.Status.BUILDING,
+                ImageInstance.Status.CAPTURING,
+            }:
+                self.image_instances.mark_failed(instance.id)
+
+        for build in self.build_jobs.list_stale_deletes(cutoff=cutoff):
+            self.build_jobs.mark_delete_failed(build.id, error=stale_message)
+            instance = _instance_or_none(build)
+            if instance is not None and instance.status in {
+                ImageInstance.Status.PENDING_DELETION,
+                ImageInstance.Status.DELETING,
+            }:
+                self.image_instances.mark_delete_failed(
+                    instance.id, error=stale_message
+                )
+            self._mark_definition_delete_failed(
+                build.image_definition_id,
+                error=stale_message,
+            )
+
+        deleting_definitions = ImageDefinition.objects.filter(
+            status__in=[
+                ImageDefinition.Status.PENDING_DELETION,
+                ImageDefinition.Status.DELETING,
+            ]
+        )
+        for definition in deleting_definitions:
+            self._check_definition_deletion_complete(definition.id)
+            definition.refresh_from_db()
+            if definition.status not in {
+                ImageDefinition.Status.PENDING_DELETION,
+                ImageDefinition.Status.DELETING,
+            }:
+                continue
+            if self.build_jobs.list_in_progress_deletes_for_definition(
+                definition.id
+            ).exists():
+                continue
+            self._mark_definition_delete_failed(
+                definition.id,
+                error=stale_message,
+            )
+
+    def _ensure_definition_mutable(self, definition) -> None:
+        """Reject runner mutations while a definition is deleted or being removed."""
+        from .models import ImageDefinition
+
+        if definition.status in {
+            ImageDefinition.Status.PENDING_DELETION,
+            ImageDefinition.Status.DELETING,
+            ImageDefinition.Status.DELETED,
+            ImageDefinition.Status.DELETE_FAILED,
+        }:
+            raise ConflictError(
+                f"Cannot modify image definition in state '{definition.status}'"
+            )
+
+    async def activate_build_job(self, build, *, created_by=None):
+        """Make an existing runner image selectable, or build it if none exists."""
+        from .models import ImageBuildJob, ImageInstance
+
+        self._ensure_definition_mutable(build.image_definition)
+        instance = await sync_to_async(self.image_instances.get_by_build_job_id)(
+            build.id
+        )
+        has_ready_image = (
+            build.built_at is not None
+            and instance is not None
+            and instance.status
+            in {ImageInstance.Status.READY, ImageInstance.Status.RETIRED}
+            and bool(instance.runner_ref)
+        )
+        if not has_ready_image:
+            return await self.trigger_build_job(
+                image_definition=build.image_definition,
+                runner=build.runner,
+                activate=True,
+                created_by=created_by,
+            )
+
+        build.status = ImageBuildJob.Status.ACTIVE
+        build.deactivated_at = None
+        await sync_to_async(build.save)(
+            update_fields=["status", "deactivated_at", "updated_at"]
+        )
+        if instance.status == ImageInstance.Status.RETIRED:
+            await sync_to_async(self.image_instances.mark_ready_from_retired)(
+                instance.id
+            )
+        return build
 
     async def trigger_build_job(
         self,
@@ -2643,10 +2763,19 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             runner=runner,
             runtime_type=image_definition.runtime_type,
         )
+        self._ensure_definition_mutable(image_definition)
 
         existing = await sync_to_async(self.build_jobs.get)(
             image_definition.id, runner.id
         )
+        if existing is not None and existing.status in {
+            ImageBuildJob.Status.PENDING_DELETION,
+            ImageBuildJob.Status.DELETING,
+        }:
+            raise ConflictError(
+                f"Build job is already in deletion state '{existing.status}'"
+            )
+
         if existing is None:
             build = await sync_to_async(ImageBuildJob.objects.create)(
                 image_definition=image_definition,
@@ -2655,10 +2784,29 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             )
         else:
             build = existing
-            build.status = ImageBuildJob.Status.PENDING
-            if not activate:
-                build.status = ImageBuildJob.Status.DEACTIVATED
-            await sync_to_async(build.save)(update_fields=["status", "updated_at"])
+            build.status = (
+                ImageBuildJob.Status.DEACTIVATED
+                if not activate
+                else ImageBuildJob.Status.PENDING
+            )
+            build.build_task = None
+            build.deleting_task_id = None
+            build.delete_requested_at = None
+            build.delete_started_at = None
+            build.delete_confirmed_at = None
+            build.delete_last_error = ""
+            await sync_to_async(build.save)(
+                update_fields=[
+                    "status",
+                    "build_task",
+                    "deleting_task_id",
+                    "delete_requested_at",
+                    "delete_started_at",
+                    "delete_confirmed_at",
+                    "delete_last_error",
+                    "updated_at",
+                ]
+            )
 
         if not activate:
             existing_image = await sync_to_async(
@@ -2666,6 +2814,14 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             )(build.id)
             if existing_image is not None:
                 await sync_to_async(self.image_instances.mark_retired)(existing_image.id)
+            return build
+
+        if not runner.sid:
+            logger.info(
+                "Runner %s is offline; leaving image build %s pending",
+                runner.id,
+                build.id,
+            )
             return build
 
         if image_definition.runtime_type == RuntimeType.QEMU:
@@ -3361,10 +3517,21 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
         if definition.status not in (
             ImageDefinition.Status.DEACTIVATED,
             ImageDefinition.Status.ACTIVE,
+            ImageDefinition.Status.DELETE_FAILED,
         ):
             raise ConflictError(
                 f"Cannot activate definition in state '{definition.status}'"
             )
+        if definition.status == ImageDefinition.Status.DELETE_FAILED:
+            in_progress = await sync_to_async(
+                lambda: self.build_jobs.list_in_progress_deletes_for_definition(
+                    definition_id
+                ).exists()
+            )()
+            if in_progress:
+                raise ConflictError(
+                    "Cannot restore while runner image removal is still in progress"
+                )
         await sync_to_async(self.image_definitions.activate)(definition_id)
         logger.info("Image definition activated: %s", definition_id)
 

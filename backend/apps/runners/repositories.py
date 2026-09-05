@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Exists, F, OuterRef, Q, QuerySet, Value
+from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -734,6 +734,14 @@ class ImageInstanceRepository:
         ).update(status=ImageInstance.Status.RETIRED)
 
     @staticmethod
+    def mark_ready_from_retired(image_id: uuid.UUID) -> None:
+        """Mark a retired image instance ready again without changing its ref."""
+        ImageInstance.objects.filter(
+            id=image_id,
+            status=ImageInstance.Status.RETIRED,
+        ).update(status=ImageInstance.Status.READY)
+
+    @staticmethod
     def mark_deleting(image_id: uuid.UUID, *, deleting_task_id: str | None) -> None:
         """Mark an image instance as pending deletion."""
         now = timezone.now()
@@ -794,11 +802,96 @@ class ImageDefinitionRepository:
 
     @staticmethod
     def list_by_org(organization_id: uuid.UUID) -> QuerySet[ImageDefinition]:
-        return ImageDefinition.objects.filter(
-            Q(organization__isnull=True) | Q(organization_id=organization_id)
+        return ImageDefinitionRepository.annotate_build_summaries(
+            ImageDefinition.objects.filter(
+                Q(organization__isnull=True) | Q(organization_id=organization_id)
+            ).exclude(
+                status=ImageDefinition.Status.DELETED
+            )
         ).order_by(
             "name", "-updated_at", "-created_at"
         )
+
+    @staticmethod
+    def annotate_build_summaries(
+        queryset: QuerySet[ImageDefinition],
+    ) -> QuerySet[ImageDefinition]:
+        """Attach per-runner build counts used by the org-settings summary."""
+        return queryset.annotate(
+            summary_active=Count(
+                "runner_builds",
+                filter=Q(runner_builds__status=ImageBuildJob.Status.ACTIVE),
+            ),
+            summary_building=Count(
+                "runner_builds",
+                filter=Q(
+                    runner_builds__status__in=[
+                        ImageBuildJob.Status.PENDING,
+                        ImageBuildJob.Status.BUILDING,
+                    ]
+                ),
+            ),
+            summary_failed=Count(
+                "runner_builds",
+                filter=Q(runner_builds__status=ImageBuildJob.Status.FAILED),
+            ),
+            summary_inactive=Count(
+                "runner_builds",
+                filter=Q(runner_builds__status=ImageBuildJob.Status.DEACTIVATED),
+            ),
+            summary_removing=Count(
+                "runner_builds",
+                filter=Q(
+                    runner_builds__status__in=[
+                        ImageBuildJob.Status.PENDING_DELETION,
+                        ImageBuildJob.Status.DELETING,
+                    ]
+                ),
+            ),
+        )
+
+    @staticmethod
+    def build_summary(definition: ImageDefinition) -> dict[str, int]:
+        """Return runner-build counts for API/MCP list payloads."""
+        if hasattr(definition, "summary_active"):
+            return {
+                "active": int(getattr(definition, "summary_active", 0) or 0),
+                "building": int(getattr(definition, "summary_building", 0) or 0),
+                "failed": int(getattr(definition, "summary_failed", 0) or 0),
+                "inactive": int(getattr(definition, "summary_inactive", 0) or 0),
+                "removing": int(getattr(definition, "summary_removing", 0) or 0),
+            }
+
+        statuses = ImageBuildJob.objects.filter(
+            image_definition_id=definition.id,
+        ).exclude(
+            status=ImageBuildJob.Status.DELETED,
+        ).values_list("status", flat=True)
+        counts = {
+            "active": 0,
+            "building": 0,
+            "failed": 0,
+            "inactive": 0,
+            "removing": 0,
+        }
+        for status in statuses:
+            if status == ImageBuildJob.Status.ACTIVE:
+                counts["active"] += 1
+            elif status in {
+                ImageBuildJob.Status.PENDING,
+                ImageBuildJob.Status.BUILDING,
+            }:
+                counts["building"] += 1
+            elif status == ImageBuildJob.Status.FAILED:
+                counts["failed"] += 1
+            elif status == ImageBuildJob.Status.DEACTIVATED:
+                counts["inactive"] += 1
+            elif status in {
+                ImageBuildJob.Status.PENDING_DELETION,
+                ImageBuildJob.Status.DELETING,
+            }:
+                counts["removing"] += 1
+        return counts
 
     @staticmethod
     def get_by_id(image_definition_id: uuid.UUID) -> ImageDefinition | None:
@@ -827,11 +920,12 @@ class ImageDefinitionRepository:
 
     @staticmethod
     def activate(definition_id: uuid.UUID) -> None:
-        """Re-activate a deactivated definition."""
+        """Re-activate a deactivated or restore a failed-delete definition."""
         ImageDefinition.objects.filter(id=definition_id).update(
             is_active=True,
             status=ImageDefinition.Status.ACTIVE,
             deactivated_at=None,
+            delete_last_error="",
         )
 
     @staticmethod
@@ -887,7 +981,7 @@ class ImageBuildJobRepository:
         """List runner image builds, optionally scoped to an organization."""
         queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id
-        )
+        ).exclude(status=ImageBuildJob.Status.DELETED)
         if organization_id is not None:
             queryset = queryset.filter(
                 Q(image_definition__organization_id=organization_id)
@@ -1003,6 +1097,51 @@ class ImageBuildJobRepository:
             status=ImageBuildJob.Status.DELETE_FAILED,
             deleting_task_id=None,
             delete_last_error=error,
+        )
+
+    @staticmethod
+    def mark_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
+        """Mark a hung or failed build job as failed."""
+        ImageBuildJob.objects.filter(id=build_job_id).update(
+            status=ImageBuildJob.Status.FAILED,
+            delete_last_error=error or "",
+        )
+
+    @staticmethod
+    def list_stale_builds(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
+        """Return build jobs stuck in pending/building past the cutoff."""
+        return ImageBuildJob.objects.filter(
+            status__in=[
+                ImageBuildJob.Status.PENDING,
+                ImageBuildJob.Status.BUILDING,
+            ],
+            updated_at__lt=cutoff,
+        ).select_related("image_instance", "image_definition")
+
+    @staticmethod
+    def list_stale_deletes(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
+        """Return build jobs stuck in deletion past the cutoff."""
+        return ImageBuildJob.objects.filter(
+            status__in=[
+                ImageBuildJob.Status.PENDING_DELETION,
+                ImageBuildJob.Status.DELETING,
+            ],
+        ).filter(
+            Q(delete_requested_at__lt=cutoff)
+            | Q(delete_requested_at__isnull=True, updated_at__lt=cutoff)
+        ).select_related("image_instance", "image_definition")
+
+    @staticmethod
+    def list_in_progress_deletes_for_definition(
+        definition_id: uuid.UUID,
+    ) -> QuerySet[ImageBuildJob]:
+        """Return child jobs still waiting on runner-side deletion."""
+        return ImageBuildJob.objects.filter(
+            image_definition_id=definition_id,
+            status__in=[
+                ImageBuildJob.Status.PENDING_DELETION,
+                ImageBuildJob.Status.DELETING,
+            ],
         )
 
     @staticmethod

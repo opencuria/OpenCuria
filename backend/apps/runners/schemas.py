@@ -313,6 +313,16 @@ class WorkspaceFromImageArtifactOut(Schema):
     status: str
 
 
+class ImageDefinitionBuildSummaryOut(Schema):
+    """Per-runner build counts shown on collapsed image definition cards."""
+
+    active: int = 0
+    building: int = 0
+    failed: int = 0
+    inactive: int = 0
+    removing: int = 0
+
+
 class ImageBuildJobOut(Schema):
     """Response schema for runner-specific image build status."""
 
@@ -362,6 +372,9 @@ class ImageDefinitionOut(Schema):
     custom_init_script: str = ""
     is_active: bool
     status: str = "active"
+    runner_build_summary: ImageDefinitionBuildSummaryOut = (
+        ImageDefinitionBuildSummaryOut()
+    )
     delete_requested_at: datetime | None = None
     delete_started_at: datetime | None = None
     delete_confirmed_at: datetime | None = None

@@ -2122,3 +2122,163 @@ class TestDesktopSessionImageContent:
         assert backend_script.read_text(encoding="utf-8") == (
             packer_script.read_text(encoding="utf-8")
         )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestImageDefinitionLifecycle:
+    @pytest.mark.asyncio
+    async def test_activate_build_job_reuses_ready_image(self, service, runner, user):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Activate Ready",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.DEACTIVATED,
+            built_at=timezone.now(),
+        )
+        ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            created_by=user,
+            name="Ready Image",
+            runner_ref="opencuria/custom/activate-ready:1",
+            status=ImageInstance.Status.RETIRED,
+        )
+
+        updated = await service.activate_build_job(build, created_by=user)
+
+        build.refresh_from_db()
+        instance = ImageInstance.objects.get(build_job=build)
+        assert updated.status == ImageBuildJob.Status.ACTIVE
+        assert build.status == ImageBuildJob.Status.ACTIVE
+        assert instance.status == ImageInstance.Status.READY
+        service.sio.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_build_job_builds_when_never_built(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Activate Never Built",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.DEACTIVATED,
+        )
+
+        updated = await service.activate_build_job(build, created_by=user)
+
+        build.refresh_from_db()
+        assert updated.id == build.id
+        assert build.status == ImageBuildJob.Status.PENDING
+        service.sio.emit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_trigger_build_job_stays_pending_when_runner_offline(
+        self, service, offline_runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=offline_runner.organization,
+            created_by=user,
+            name="Offline Pending",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+
+        build = await service.trigger_build_job(
+            image_definition=definition,
+            runner=offline_runner,
+            activate=True,
+            created_by=user,
+        )
+
+        assert build.status == ImageBuildJob.Status.PENDING
+        assert build.build_task_id is None
+        service.sio.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_trigger_build_job_rejects_deleting_definition(
+        self, service, runner, user
+    ):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Deleting Definition",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+            status=ImageDefinition.Status.DELETING,
+        )
+
+        with pytest.raises(ConflictError, match="deleting"):
+            await service.trigger_build_job(
+                image_definition=definition,
+                runner=runner,
+                activate=True,
+            )
+
+    def test_timeout_stale_builds_marks_jobs_failed(self, service, runner, user):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Stale Build",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.BUILDING,
+        )
+        ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
+            origin_definition=definition,
+            build_job=build,
+            created_by=user,
+            name="Stale Instance",
+            status=ImageInstance.Status.BUILDING,
+        )
+        ImageBuildJob.objects.filter(id=build.id).update(
+            updated_at=timezone.now() - timedelta(hours=2)
+        )
+
+        service.timeout_stale_image_operations(timeout_hours=1)
+
+        build.refresh_from_db()
+        instance = ImageInstance.objects.get(build_job=build)
+        assert build.status == ImageBuildJob.Status.FAILED
+        assert instance.status == ImageInstance.Status.FAILED
+
+    @pytest.mark.asyncio
+    async def test_restore_delete_failed_definition(self, service, runner, user):
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Restore Definition",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+            status=ImageDefinition.Status.DELETE_FAILED,
+            is_active=False,
+            delete_last_error="still used by 1 workspace(s)",
+        )
+
+        await service.activate_image_definition(definition.id)
+
+        definition.refresh_from_db()
+        assert definition.status == ImageDefinition.Status.ACTIVE
+        assert definition.is_active is True
+        assert definition.delete_last_error == ""

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -81,6 +82,13 @@ def test_list_includes_global_and_org_image_definitions(client: Client):
     assert names["Global Base"]["organization_id"] is None
     assert names["Local Base"]["is_standard"] is False
     assert names["Local Base"]["organization_id"] == str(local.organization_id)
+    assert names["Local Base"]["runner_build_summary"] == {
+        "active": 0,
+        "building": 0,
+        "failed": 0,
+        "inactive": 0,
+        "removing": 0,
+    }
 
 
 @pytest.mark.django_db
@@ -838,3 +846,295 @@ def test_clone_workspace_from_image_sends_explicit_credential_ids(client: Client
             raise AssertionError(
                 f"Response is not valid JSON: {resp.content[:200]!r}"
             ) from exc
+
+
+@pytest.mark.django_db
+def test_list_image_definitions_excludes_deleted_and_counts_builds(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="image-list-deleted@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Deleted List Org", slug="deleted-list-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="summary-runner",
+        api_token_hash=hash_token("summary-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    second_runner = Runner.objects.create(
+        name="summary-runner-2",
+        api_token_hash=hash_token("summary-runner-token-2"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    visible = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Visible Recipe",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Gone Recipe",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+        status=ImageDefinition.Status.DELETED,
+    )
+    ImageBuildJob.objects.create(
+        image_definition=visible,
+        runner=runner,
+        status=ImageBuildJob.Status.ACTIVE,
+    )
+    ImageBuildJob.objects.create(
+        image_definition=visible,
+        runner=second_runner,
+        status=ImageBuildJob.Status.FAILED,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_READ.value],
+    )
+    response = client.get(
+        "/api/v1/image-definitions/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    names = {item["name"]: item for item in response.json()}
+    assert "Gone Recipe" not in names
+    assert names["Visible Recipe"]["runner_build_summary"] == {
+        "active": 1,
+        "building": 0,
+        "failed": 1,
+        "inactive": 0,
+        "removing": 0,
+    }
+
+
+@pytest.mark.django_db
+def test_list_runner_builds_excludes_deleted_jobs(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="build-list-deleted@test.com", password="secret"
+    )
+    org = Organization.objects.create(
+        name="Deleted Builds Org",
+        slug="deleted-builds-org",
+    )
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="deleted-build-runner",
+        api_token_hash=hash_token("deleted-build-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Deleted Build Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.DELETED,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_READ.value],
+    )
+    response = client.get(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.django_db
+def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="activate-action@test.com", password="secret"
+    )
+    org = Organization.objects.create(
+        name="Activate Action Org",
+        slug="activate-action-org",
+    )
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="activate-action-runner",
+        api_token_hash=hash_token("activate-action-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+        sid="activate-action-sid",
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Activate Action Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    build = ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.DEACTIVATED,
+        built_at=timezone.now(),
+    )
+
+    triggered = {"rebuild": False, "activate": False}
+
+    async def _trigger_build_job(**kwargs):
+        triggered["rebuild"] = True
+        return build
+
+    async def _activate_build_job(job, *, created_by=None):
+        triggered["activate"] = True
+        job.status = ImageBuildJob.Status.ACTIVE
+        return job
+
+    monkeypatch.setattr(
+        "apps.runners.api._get_service",
+        lambda: SimpleNamespace(
+            trigger_build_job=_trigger_build_job,
+            activate_build_job=_activate_build_job,
+            _ensure_definition_mutable=lambda definition: None,
+        ),
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
+    )
+    response = client.patch(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/{runner.id}/",
+        data=json.dumps({"action": "activate"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert triggered == {"rebuild": False, "activate": True}
+
+
+@pytest.mark.django_db
+def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="rebuild-action@test.com", password="secret"
+    )
+    org = Organization.objects.create(
+        name="Rebuild Action Org",
+        slug="rebuild-action-org",
+    )
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="rebuild-action-runner",
+        api_token_hash=hash_token("rebuild-action-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+        sid="rebuild-action-sid",
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Rebuild Action Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    build = ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.ACTIVE,
+    )
+
+    triggered = {"rebuild": False, "activate": False}
+
+    async def _trigger_build_job(**kwargs):
+        triggered["rebuild"] = True
+        return build
+
+    async def _activate_build_job(job, *, created_by=None):
+        triggered["activate"] = True
+        return job
+
+    monkeypatch.setattr(
+        "apps.runners.api._get_service",
+        lambda: SimpleNamespace(
+            trigger_build_job=_trigger_build_job,
+            activate_build_job=_activate_build_job,
+            _ensure_definition_mutable=lambda definition: None,
+        ),
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
+    )
+    response = client.patch(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/{runner.id}/",
+        data=json.dumps({"action": "rebuild"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert triggered == {"rebuild": True, "activate": False}
+
+
+@pytest.mark.django_db
+def test_runner_build_mutation_rejected_for_deleting_definition(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="locked-def@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Locked Def Org", slug="locked-def-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="locked-runner",
+        api_token_hash=hash_token("locked-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+        sid="locked-sid",
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Locked Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+        status=ImageDefinition.Status.DELETING,
+    )
+    ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.ACTIVE,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
+    )
+    response = client.patch(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/{runner.id}/",
+        data=json.dumps({"action": "deactivate"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 409
+    assert "deleting" in response.json()["detail"]

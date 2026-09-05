@@ -305,6 +305,12 @@ Desktop sessions (started on demand via `opencuria-desktop-start`, not at boot):
 The container runs with `tail -f /dev/null` (stays alive) and the runner
 executes commands via `docker exec`.
 
+Image definitions are recipes; per-runner builds make them selectable for
+**new** workspaces. `activate` is a status flip when a ready image exists,
+`rebuild` always builds, and delete is blocked while workspaces still use
+the image. Fully `deleted` definitions and builds are omitted from list
+APIs. Rebuild/delete never remove existing workspaces.
+
 ---
 
 ## 5. Backend — Detailed Architecture

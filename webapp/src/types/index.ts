@@ -514,6 +514,14 @@ export interface RunnerImageBuild {
   updated_at: string
 }
 
+export interface ImageDefinitionBuildSummary {
+  active: number
+  building: number
+  failed: number
+  inactive: number
+  removing: number
+}
+
 export interface ImageDefinition {
   id: string
   organization_id: string | null
@@ -529,6 +537,7 @@ export interface ImageDefinition {
   custom_init_script: string
   is_active: boolean
   status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
+  runner_build_summary?: ImageDefinitionBuildSummary
   delete_requested_at?: string | null
   delete_started_at?: string | null
   delete_confirmed_at?: string | null
