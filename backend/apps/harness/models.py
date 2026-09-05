@@ -230,6 +230,7 @@ class HarnessPartType(models.TextChoices):
     SUBTASK = "subtask", "Subtask"
     PATCH = "patch", "Patch"
     AGENT = "agent", "Agent"
+    COMPACTION = "compaction", "Compaction"
 
 
 class HarnessPartState(models.TextChoices):

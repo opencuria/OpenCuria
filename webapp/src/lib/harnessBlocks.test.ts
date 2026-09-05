@@ -180,6 +180,33 @@ describe('buildRenderBlocks', () => {
     expect(blocks.map((block) => block.kind)).toEqual(['single'])
     expect(blocks[0]).toMatchObject({ kind: 'single', part: { id: 'task-1' } })
   })
+
+  it('renders compaction as its own block kind', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Before' }),
+      makePart('compaction', {
+        id: 'compact-1',
+        title: 'Session compacted',
+        output: '## Objective\n- summary',
+      }),
+      makePart('text', { id: 't2', output: 'After' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['text', 'compaction', 'text'])
+    expect(blocks[1]).toMatchObject({ kind: 'compaction', part: { id: 'compact-1' } })
+  })
+
+  it('does not group compaction with work items', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('compaction', { id: 'compact-1', output: 'summary' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
+  })
 })
 
 describe('work item helpers', () => {

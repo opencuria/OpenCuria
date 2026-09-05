@@ -71,13 +71,14 @@ def test_explore_is_read_only() -> None:
     assert get_agent("explore").steps == 10
 
 
-def test_hidden_agents_use_small_model_and_deny_tools() -> None:
-    """Title/compaction target the small model and offer no tools."""
+def test_hidden_agents_deny_tools_and_single_step() -> None:
+    """Hidden agents deny tools; only title uses the small model."""
     for name in ("title", "compaction"):
         agent = get_agent(name)
-        assert agent.model_override == "small"
         assert agent.permissions == {"*": "deny"}
         assert agent.steps == 1
+    assert get_agent("title").model_override == "small"
+    assert get_agent("compaction").model_override is None
 
 
 def test_unknown_agent_raises() -> None:

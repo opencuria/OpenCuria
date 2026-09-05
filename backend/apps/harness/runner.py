@@ -35,10 +35,13 @@ from .agents.definitions import (
     subagent_descriptions,
 )
 from .compaction import (
-    COMPACTION_TOKEN_THRESHOLD,
-    apply_compaction_summary,
+    ModelLimits,
+    apply_compaction,
     build_compaction_prompt,
-    should_compact,
+    find_previous_summary,
+    is_context_overflow_error,
+    is_overflow,
+    select,
 )
 from .computeruse_loop import (
     ComputerUseLoopState,
@@ -104,8 +107,13 @@ class RunOptions:
     run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
-    session_tokens: dict[str, int] = field(default_factory=dict)
-    compaction_threshold: int = COMPACTION_TOKEN_THRESHOLD
+    context_length: int = 0
+    max_output_tokens: int = 0
+    auto_compact: bool = True
+    current_user_message_id: str = ""
+    last_step_prompt_tokens: int = 0
+    last_step_completion_tokens: int = 0
+    last_step_total_tokens: int = 0
 
 
 @dataclass
@@ -697,7 +705,11 @@ class HarnessRunner:
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=composed.system),
             *list(opts.history or []),
-            LLMMessage(role="user", content=prompt),
+            LLMMessage(
+                role="user",
+                content=prompt,
+                message_id=opts.current_user_message_id or "",
+            ),
         ]
         if self.accessor is not None:
             last = messages[-1]
@@ -708,6 +720,7 @@ class HarnessRunner:
                     content=hydrated,
                     tool_calls=last.tool_calls,
                     tool_call_id=last.tool_call_id,
+                    message_id=last.message_id,
                 )
         ctx = ToolContext(
             session_id=opts.session_id or "session",
@@ -732,19 +745,43 @@ class HarnessRunner:
         total_cost = 0.0
         last_text = ""
         recent_calls: list[str] = []
+        limits = ModelLimits(
+            context_length=opts.context_length,
+            max_output_tokens=opts.max_output_tokens,
+        )
+        last_step_prompt = opts.last_step_prompt_tokens
+        last_step_completion = opts.last_step_completion_tokens
+        last_step_total = opts.last_step_total_tokens
 
         for step in range(1, max_steps + 1):
-            messages = await self._maybe_compact_history(
-                messages=messages,
-                agent=agent,
+            if step == 1 and is_overflow(
+                prompt_tokens=last_step_prompt,
+                completion_tokens=last_step_completion,
+                total_tokens=last_step_total,
+                limits=limits,
+                auto=opts.auto_compact,
+            ):
+                messages = await self._maybe_compact_history(
+                    messages=messages,
+                    agent=agent,
+                    model=model,
+                    mode=mode,
+                    opts=opts,
+                    limits=limits,
+                )
+            await self._send({"type": "step_start", "step": step})
+            text, calls, usage, messages = await self._provider_step_with_overflow_retry(
                 model=model,
+                messages=messages,
+                schemas=schemas,
+                step=step,
+                agent=agent,
                 mode=mode,
                 opts=opts,
             )
-            await self._send({"type": "step_start", "step": step})
-            text, calls, usage = await self._provider_step(
-                model=model, messages=messages, schemas=schemas, step=step
-            )
+            last_step_prompt = usage.prompt_tokens
+            last_step_completion = usage.completion_tokens
+            last_step_total = usage.total_tokens
             total_usage = total_usage.merge(usage)
             total_cost = total_usage.cost
             await self._send(
@@ -762,6 +799,21 @@ class HarnessRunner:
             if not calls:
                 last_text = text
                 messages.append(LLMMessage(role="assistant", content=text))
+                if is_overflow(
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                    limits=limits,
+                    auto=opts.auto_compact,
+                ):
+                    await self._maybe_compact_history(
+                        messages=messages,
+                        agent=agent,
+                        model=model,
+                        mode=mode,
+                        opts=opts,
+                        limits=limits,
+                    )
                 return RunResult(
                     output=text,
                     steps=step,
@@ -797,6 +849,21 @@ class HarnessRunner:
             )
             for outcome in outcomes:
                 messages.append(outcome.message)
+            if is_overflow(
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                total_tokens=usage.total_tokens,
+                limits=limits,
+                auto=opts.auto_compact,
+            ):
+                messages = await self._maybe_compact_history(
+                    messages=messages,
+                    agent=agent,
+                    model=model,
+                    mode=mode,
+                    opts=opts,
+                    limits=limits,
+                )
 
         summary = (
             f"{last_text}\n\n[Stopped after {max_steps} steps: step budget "
@@ -1033,6 +1100,49 @@ class HarnessRunner:
             metadata={"recording_path": recording_path},
         )
 
+    async def _provider_step_with_overflow_retry(
+        self,
+        *,
+        model: str,
+        messages: list[LLMMessage],
+        schemas: list[ToolSchema],
+        step: int,
+        agent: AgentDefinition,
+        mode: str,
+        opts: RunOptions,
+    ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage]]:
+        """Run one provider step, compacting and retrying once on overflow errors."""
+        try:
+            text, calls, usage = await self._provider_step(
+                model=model,
+                messages=messages,
+                schemas=schemas,
+                step=step,
+            )
+            return text, calls, usage, messages
+        except Exception as exc:
+            if not is_context_overflow_error(exc):
+                raise
+            compacted = await self._maybe_compact_history(
+                messages=messages,
+                agent=agent,
+                model=model,
+                mode=mode,
+                opts=opts,
+                limits=ModelLimits(
+                    context_length=opts.context_length,
+                    max_output_tokens=opts.max_output_tokens,
+                ),
+                overflow=True,
+            )
+            text, calls, usage = await self._provider_step(
+                model=model,
+                messages=compacted,
+                schemas=schemas,
+                step=step,
+            )
+            return text, calls, usage, compacted
+
     async def _provider_step(
         self,
         *,
@@ -1117,18 +1227,20 @@ class HarnessRunner:
         model: str,
         mode: str,
         opts: RunOptions,
+        limits: ModelLimits,
+        overflow: bool = False,
     ) -> list[LLMMessage]:
-        """Summarize oversized history via the hidden compaction agent."""
-        threshold = opts.compaction_threshold or COMPACTION_TOKEN_THRESHOLD
-        if not should_compact(
-            messages,
-            session_tokens=opts.session_tokens,
-            threshold=threshold,
-        ):
+        """Summarize history via the hidden compaction agent."""
+        if agent.name == "compaction":
             return messages
-        if not opts.small_model:
+        selection = select(messages, limits)
+        if not selection.head:
             return messages
-        prompt = build_compaction_prompt(messages)
+        previous_summary = find_previous_summary(messages)
+        prompt = build_compaction_prompt(
+            selection.head,
+            previous_summary=previous_summary,
+        )
         if not prompt.strip():
             return messages
         try:
@@ -1137,28 +1249,35 @@ class HarnessRunner:
                 tools=self.tools,
                 evaluator=self.evaluator,
                 accessor=self.accessor,
-                emit=self._emit,
+                emit=None,
                 chat_options=self.chat_options,
             )
             result = await child.run(
                 prompt,
                 "compaction",
-                opts.small_model,
+                model,
                 mode,
                 RunOptions(
                     auto_approve=True,
                     max_steps=1,
                     history=[],
+                    auto_compact=False,
+                    session_id=opts.session_id,
+                    workspace_id=opts.workspace_id,
+                    organization_id=opts.organization_id,
                 ),
             )
             summary = (result.output or "").strip()
             if not summary:
                 return messages
-            compacted = apply_compaction_summary(messages, summary)
+            compacted, tail_start_id = apply_compaction(messages, summary, limits)
             await self._send(
                 {
                     "type": "compaction",
-                    "summary": summary[:2000],
+                    "summary": summary[:32_768],
+                    "auto": True,
+                    "overflow": overflow,
+                    "tail_start_id": tail_start_id,
                 }
             )
             return compacted

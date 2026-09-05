@@ -22,9 +22,9 @@ Permission design (OpenCode-like defaults):
   asks for anything else. Pure research tools (``read``, ``glob``,
   ``grep``, ``list``, ``webfetch``) stay allowed.
 - ``title`` / ``compaction`` (hidden): ``{"*": "deny"}`` so the loop
-  offers no tools at all and the small model answers text-only.
-  ``model_override`` is the ``"small"`` sentinel, resolved to
-  ``ProviderConfig.small_model`` at runtime (see ``runner``).
+  offers no tools at all and answers text-only. ``title`` uses the
+  ``"small"`` sentinel resolved to ``ProviderConfig.small_model`` at
+  runtime; ``compaction`` uses the session model (see ``runner``).
 """
 
 from __future__ import annotations
@@ -195,14 +195,22 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
     "compaction": AgentDefinition(
         name="compaction",
         mode="hidden",
-        description="Hidden: summarizes context for compaction (small model).",
+        description="Hidden: summarizes context for compaction.",
         system_prompt=(
-            "Summarize the conversation so far for context compaction: "
-            "goals, key decisions, modified files, and open todos. Reply "
-            "with the summary only, no tools."
+            "You are a context summarization agent. You are given a "
+            "conversation between a user and an agent. Your goal is to "
+            "produce a structured summary matching the format specified "
+            "so another coding agent can continue the work.\n\n"
+            "Always follow the exact output structure requested by the user "
+            "prompt. Keep every section, preserve exact file paths and "
+            "identifiers when known, and prefer terse bullets over "
+            "paragraphs.\n\n"
+            "Do not continue the conversation. Do not respond to any "
+            "questions in the conversation. Only output the structured "
+            "summary in the exact format requested by the user prompt. "
+            "Respond in the same language as the conversation."
         ),
         permissions={"*": "deny"},
-        model_override=SMALL_MODEL,
         steps=1,
         color="magenta",
     ),

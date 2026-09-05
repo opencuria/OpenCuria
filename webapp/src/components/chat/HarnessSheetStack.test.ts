@@ -26,6 +26,14 @@ vi.mock('@/components/chat/HarnessPermissionSheet.vue', () => ({
   },
 }))
 
+vi.mock('@/components/chat/HarnessContextSheet.vue', () => ({
+  default: {
+    props: ['context'],
+    template:
+      '<div data-testid="context-stub">{{ context.percent }}:{{ context.used }}/{{ context.limit }}</div>',
+  },
+}))
+
 vi.mock('@/components/chat/HarnessTodoSheet.vue', () => ({
   default: {
     props: ['todos', 'open'],
@@ -148,5 +156,27 @@ describe('HarnessSheetStack', () => {
 
     expect(wrapper.emitted('question-submit')).toEqual([['q-1', ['a']]])
     expect(wrapper.emitted('question-skip')).toEqual([['q-1']])
+  })
+
+  it('renders the context sheet on top of todos and forwards close', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [
+          {
+            kind: 'context',
+            context: { used: 32_000, limit: 100_000, percent: 32 },
+          },
+          { kind: 'todos', todos: [makeTodo('t1')] },
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'context',
+    )
+    expect(wrapper.find('[data-testid="context-stub"]').text()).toBe('32:32000/100000')
+    const context = wrapper.findComponent({ name: 'HarnessContextSheet' })
+    context.vm.$emit('close')
+    expect(wrapper.emitted('close-context')).toEqual([[]])
   })
 })

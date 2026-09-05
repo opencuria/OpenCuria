@@ -35,6 +35,7 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from common.exceptions import ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
+from .compaction import CHECKPOINT_PREFIX
 from .images import hydrate_user_messages
 from .models import (
     HarnessMessage,
@@ -432,6 +433,7 @@ class HarnessService:
             "workspace_id": workspace_id or str(session.workspace_id),
             "organization_id": str(org_id),
             "message_id": str(assistant.id),
+            "user_message_id": str(user_message.id),
             "text_part_id": None,
             "reasoning_part_id": None,
             "tool_parts": {},
@@ -607,16 +609,46 @@ class HarnessService:
         *,
         exclude_message_id: uuid.UUID | None = None,
     ) -> list[LLMMessage]:
-        """Build provider history from persisted messages and parts."""
+        """Build provider history from persisted messages and parts.
+
+        When a completed compaction part exists, only the checkpoint summary
+        plus messages from ``tail_start_id`` onward are sent to the provider
+        (OpenCode ``filterCompacted`` equivalent). Full history stays in the DB.
+        """
         import json
 
         stored = await sync_to_async(self.messages.list_for_session)(session.id)
+        if exclude_message_id is not None:
+            stored = [
+                message
+                for message in stored
+                if message.id != exclude_message_id
+            ]
+        compaction = await self._find_latest_compaction(stored)
+        checkpoint_summary = ""
+        compaction_msg_id: uuid.UUID | None = None
+        if compaction is not None:
+            compaction_msg, compaction_part = compaction
+            compaction_msg_id = compaction_msg.id
+            checkpoint_summary = str(compaction_part.output or "").strip()
+            stored = self._slice_messages_for_compaction(stored, compaction)
         history: list[LLMMessage] = []
+        if checkpoint_summary:
+            history.append(
+                LLMMessage(
+                    role="user",
+                    content=f"{CHECKPOINT_PREFIX}\n{checkpoint_summary}",
+                )
+            )
         for message in stored:
-            if exclude_message_id is not None and message.id == exclude_message_id:
-                continue
             if message.role == "user":
-                history.append(LLMMessage(role="user", content=message.content or ""))
+                history.append(
+                    LLMMessage(
+                        role="user",
+                        content=message.content or "",
+                        message_id=str(message.id),
+                    )
+                )
                 continue
             if message.role != "assistant":
                 continue
@@ -628,9 +660,18 @@ class HarnessService:
                 and part.state in ("completed", "error")
                 and part.call_id
             ]
+            assistant_content = self._assistant_history_content(
+                message,
+                parts,
+                summary=checkpoint_summary if message.id == compaction_msg_id else "",
+            )
             if not tool_parts:
                 history.append(
-                    LLMMessage(role="assistant", content=message.content or None)
+                    LLMMessage(
+                        role="assistant",
+                        content=assistant_content,
+                        message_id=str(message.id),
+                    )
                 )
                 continue
             tool_calls: list[dict[str, Any]] = []
@@ -650,8 +691,9 @@ class HarnessService:
             history.append(
                 LLMMessage(
                     role="assistant",
-                    content=message.content or None,
+                    content=assistant_content,
                     tool_calls=tool_calls,
+                    message_id=str(message.id),
                 )
             )
             for part in tool_parts:
@@ -663,6 +705,117 @@ class HarnessService:
                     )
                 )
         return history
+
+    async def _find_latest_compaction(
+        self, messages: list[HarnessMessage]
+    ) -> tuple[HarnessMessage, HarnessPart] | None:
+        """Return the latest completed compaction part among *messages*."""
+        latest: tuple[HarnessMessage, HarnessPart] | None = None
+        for message in messages:
+            if message.role != "assistant":
+                continue
+            parts = await sync_to_async(self.parts.list_for_message)(message.id)
+            for part in parts:
+                if part.type == "compaction" and part.state == "completed":
+                    latest = (message, part)
+        return latest
+
+    @staticmethod
+    def _slice_messages_for_compaction(
+        stored: list[HarnessMessage],
+        compaction: tuple[HarnessMessage, HarnessPart],
+    ) -> list[HarnessMessage]:
+        """Keep tail messages from the latest compaction checkpoint onward."""
+        compaction_msg, part = compaction
+        tail_start_id = str((part.meta or {}).get("tail_start_id", "") or "").strip()
+        if tail_start_id:
+            try:
+                tail_uuid = uuid.UUID(tail_start_id)
+            except ValueError:
+                tail_uuid = None
+            if tail_uuid is not None:
+                for index, message in enumerate(stored):
+                    if message.id == tail_uuid:
+                        return stored[index:]
+        for index, message in enumerate(stored):
+            if message.id == compaction_msg.id:
+                return stored[index:]
+        return stored
+
+    @staticmethod
+    def _assistant_history_content(
+        message: HarnessMessage,
+        parts: list[HarnessPart],
+        *,
+        summary: str = "",
+    ) -> str | None:
+        """Resolve assistant text for provider history (never the compaction summary)."""
+        text_output = "".join(
+            part.output for part in parts if part.type == "text" and part.output
+        )
+        if text_output:
+            return text_output
+        content = (message.content or "").strip()
+        if not content:
+            return None
+        if summary and content == summary.strip():
+            return None
+        return message.content
+
+    @staticmethod
+    def _resolve_run_model_limits(
+        organization_id: uuid.UUID, model_id: str
+    ) -> tuple[int, int]:
+        """Return ``(context_length, max_output_tokens)`` from the org catalog."""
+        from .services import ProviderConfigService
+
+        try:
+            models = ProviderConfigService().list_models(organization_id)
+        except Exception:
+            return 0, 0
+        for model in models:
+            if model.id == model_id:
+                return model.context_length, model.max_output_tokens
+        return 0, 0
+
+    @staticmethod
+    def _last_assistant_step_tokens(
+        session_id: uuid.UUID, exclude_message_id: uuid.UUID
+    ) -> tuple[int, int, int]:
+        """Return last-step prompt/completion/total from the prior assistant turn."""
+        prev = (
+            HarnessMessage.objects.filter(
+                session_id=session_id,
+                role="assistant",
+            )
+            .exclude(id=exclude_message_id)
+            .order_by("-created_at")
+            .first()
+        )
+        if prev is None:
+            return 0, 0, 0
+        part = (
+            HarnessPart.objects.filter(
+                message_id=prev.id,
+                type="step-finish",
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if part is not None:
+            meta = dict(part.meta or {})
+            tokens = dict(meta.get("tokens") or {})
+            return (
+                int(tokens.get("prompt_tokens", 0) or 0),
+                int(tokens.get("completion_tokens", 0) or 0),
+                int(tokens.get("total_tokens", 0) or 0),
+            )
+        message_tokens = dict(prev.tokens or {})
+        return (
+            int(message_tokens.get("prompt", 0) or 0),
+            int(message_tokens.get("completion", 0) or 0),
+            int(message_tokens.get("total", 0) or 0),
+        )
 
     def _spawn_background(self, coro: Awaitable[None]) -> asyncio.Task[None]:
         """Start *coro* detached from the HTTP request's asgiref executor.
@@ -736,6 +889,19 @@ class HarnessService:
                     raise ValueError("No model configured for harness run")
                 session.model = model_default
         model = session.model or "default"
+        context_length = 0
+        model_max_output_tokens = 0
+        last_step_prompt_tokens = 0
+        last_step_completion_tokens = 0
+        last_step_total_tokens = 0
+        context_length, model_max_output_tokens = await sync_to_async(
+            self._resolve_run_model_limits
+        )(organization_id, model)
+        last_step_prompt_tokens, last_step_completion_tokens, last_step_total_tokens = (
+            await sync_to_async(self._last_assistant_step_tokens)(
+                session.id, assistant.id
+            )
+        )
         accessor = None
         if self._accessor_factory is not None:
             accessor = await self._accessor_factory(str(session.workspace_id))
@@ -764,12 +930,15 @@ class HarnessService:
             workspace_id=str(session.workspace_id),
             organization_id=str(organization_id),
             small_model=small_model,
+            current_user_message_id=str(
+                self._runs.get(key, {}).get("user_message_id", "")
+            ),
             skills=list(self._runs.get(key, {}).get("skill_bodies", [])),
-            session_tokens={
-                key: int(value)
-                for key, value in dict(session.tokens or {}).items()
-                if isinstance(value, (int, float))
-            },
+            context_length=context_length,
+            max_output_tokens=model_max_output_tokens,
+            last_step_prompt_tokens=last_step_prompt_tokens,
+            last_step_completion_tokens=last_step_completion_tokens,
+            last_step_total_tokens=last_step_total_tokens,
             on_permission=lambda **kw: self._on_permission(session, assistant, **kw),
             on_question=lambda **kw: self._on_question(session, assistant, **kw),
             run_subagent=lambda args, ctx, subtask_id: self._run_subagent_tool(
@@ -1172,11 +1341,15 @@ class HarnessService:
         elif etype == "compaction":
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
-                type="agent",
+                type="compaction",
                 state="completed",
-                title="Context compacted",
+                title="Session compacted",
                 output=str(event.get("summary", "") or ""),
-                meta={"kind": "compaction"},
+                meta={
+                    "auto": bool(event.get("auto", True)),
+                    "overflow": bool(event.get("overflow", False)),
+                    "tail_start_id": str(event.get("tail_start_id", "") or ""),
+                },
             )
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,

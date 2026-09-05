@@ -488,6 +488,18 @@ Desktop images need `ffmpeg` and `xdotool` (rebuild image definitions after
 adding them). To add tooling to workspaces, extend the image definitions
 (packages / custom Dockerfile / init script).
 
+**Auto-compaction:** triggers when the last provider step exceeds the model's
+usable input budget (`is_overflow`: last-step tokens vs catalog `context_length`
+minus reserved max output; `context_length == 0` disables auto-compaction).
+The hidden `compaction` agent denies all tools and runs on the **session model**
+(`title` still uses `small_model`). Compaction uses an isolated emit path;
+the summary is persisted as a `compaction` part with `tail_start_id`, and
+`_build_history` sends only the in-memory checkpoint plus the retained tail.
+The current user prompt is kept; the summary is not re-sent as a user message.
+The composer shows a context-usage ring (left of the paperclip) and a Context
+Usage sheet in the todos/questions stack; compaction renders as a “Session
+compacted” divider in chat.
+
 **Security:** computer-use session recordings capture the workspace display;
 credentials or other sensitive content visible on screen may appear in the mp4.
 

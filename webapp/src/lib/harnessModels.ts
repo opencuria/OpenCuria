@@ -8,6 +8,8 @@ export interface ProviderModel {
   reasoning_efforts: string[]
   default_effort: string
   supports_tools: boolean
+  context_length: number
+  max_output_tokens: number
 }
 
 export const EFFORT_LABELS: Record<string, string> = {

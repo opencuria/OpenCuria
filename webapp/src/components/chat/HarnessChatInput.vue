@@ -23,7 +23,7 @@ import {
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
 import { getProviderConfig, listProviderModels } from '@/services/harness.api'
-import type { ProviderModel } from '@/lib/harnessModels'
+import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
@@ -63,6 +63,8 @@ const props = defineProps<{
    * the wrapper top padding so the sheet sits flush on the input card.
    */
   attached?: boolean
+  contextUsed?: number
+  contextOpen?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -75,6 +77,8 @@ const emit = defineEmits<{
   'mention-change': [open: boolean, query: string, candidates: MentionCandidate[], index: number]
   /** Emitted when the user picks a mention candidate from the sheet stack. */
   'mention-select': [candidate: MentionCandidate]
+  'toggle-context': []
+  'context-metrics': [metrics: { used: number; limit: number; percent: number }]
 }>()
 
 const prompt = ref('')
@@ -102,6 +106,46 @@ const canSend = computed(() => prompt.value.trim().length > 0 && !props.disabled
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
 const canManageFiles = computed(
   () => !props.disabled && !props.sending && Boolean(props.workspaceId),
+)
+
+const CONTEXT_RING_RADIUS = 6
+const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
+
+const contextLimit = computed(() => {
+  const catalogModel = resolveCatalogModel(
+    catalog.value,
+    localModel.value,
+    orgDefaultModel.value,
+  )
+  return catalogModel?.context_length ?? 0
+})
+
+const contextUsed = computed(() => Math.max(0, props.contextUsed ?? 0))
+
+const contextPercent = computed(() => {
+  if (contextLimit.value <= 0) return 0
+  return Math.round((contextUsed.value / contextLimit.value) * 100)
+})
+
+const contextRingOffset = computed(() =>
+  contextRingCircumference * (1 - Math.min(100, Math.max(0, contextPercent.value)) / 100),
+)
+
+const contextAriaLabel = computed(() => {
+  if (contextLimit.value <= 0) return 'Context usage unknown'
+  return `Context usage ${contextPercent.value}%`
+})
+
+watch(
+  [contextUsed, contextLimit, contextPercent],
+  () => {
+    emit('context-metrics', {
+      used: contextUsed.value,
+      limit: contextLimit.value,
+      percent: contextPercent.value,
+    })
+  },
+  { immediate: true },
 )
 
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
@@ -535,6 +579,48 @@ function onComposerKeydown(e: KeyboardEvent): void {
         />
 
         <div class="ml-auto flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            class="h-8 w-8 text-muted-foreground hover:text-foreground"
+            :class="contextOpen ? 'text-foreground' : ''"
+            :title="contextAriaLabel"
+            :aria-label="contextAriaLabel"
+            data-testid="composer-context-usage"
+            @click="emit('toggle-context')"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              class="shrink-0"
+            >
+              <circle
+                cx="8"
+                cy="8"
+                :r="CONTEXT_RING_RADIUS"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                class="text-muted-foreground/30"
+              />
+              <circle
+                cx="8"
+                cy="8"
+                :r="CONTEXT_RING_RADIUS"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                class="text-primary"
+                :stroke-dasharray="contextRingCircumference"
+                :stroke-dashoffset="contextRingOffset"
+                transform="rotate(-90 8 8)"
+              />
+            </svg>
+          </Button>
           <div v-if="workspaceId" class="relative">
             <Button
               type="button"

@@ -10,7 +10,8 @@ import { useTerminalStore } from '@/stores/terminal'
 import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
-import { buildComposerSheets } from '@/lib/composerSheets'
+import { buildComposerSheets, type ContextSheetState } from '@/lib/composerSheets'
+import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { Button } from '@/components/ui/button'
 import { FolderTree, Monitor, TerminalSquare } from '@lucide/vue'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
@@ -79,6 +80,23 @@ const mentionActive = ref(false)
 const mentionActiveIndex = ref(0)
 const mentionCandidates = ref<MentionCandidate[]>([])
 
+const contextOpen = ref(false)
+const contextMetrics = ref<Pick<ContextSheetState, 'used' | 'limit' | 'percent'> | null>(null)
+
+const contextUsed = computed(
+  () => resolveSessionUsedTokens(harness.activeMessages).used,
+)
+
+const contextSheet = computed<ContextSheetState | null>(() => {
+  if (!contextMetrics.value) return null
+  const breakdown = resolveSessionUsedTokens(harness.activeMessages)
+  return {
+    ...contextMetrics.value,
+    promptTokens: breakdown.promptTokens,
+    completionTokens: breakdown.completionTokens,
+  }
+})
+
 const composerSheets = computed(() =>
   buildComposerSheets({
     mention:
@@ -88,6 +106,8 @@ const composerSheets = computed(() =>
     questions: activeQuestions.value,
     permissions: activeRequests.value,
     todos: harness.activeTodos,
+    contextOpen: contextOpen.value,
+    context: contextSheet.value,
   }),
 )
 
@@ -111,6 +131,20 @@ function handleMentionSelect(candidate: MentionCandidate): void {
 
 function handleMentionHover(index: number): void {
   mentionActiveIndex.value = index
+}
+
+function handleToggleContext(): void {
+  contextOpen.value = !contextOpen.value
+}
+
+function handleCloseContext(): void {
+  contextOpen.value = false
+}
+
+function handleContextMetrics(
+  metrics: Pick<ContextSheetState, 'used' | 'limit' | 'percent'>,
+): void {
+  contextMetrics.value = metrics
 }
 
 const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
@@ -445,6 +479,7 @@ const desktopButtonTitle = computed(() => {
           @question-submit="handleQuestionSubmit"
           @question-skip="handleQuestionSkip"
           @resolve="handleResolve"
+          @close-context="handleCloseContext"
         />
         <HarnessChatInput
           ref="chatInputRef"
@@ -461,6 +496,8 @@ const desktopButtonTitle = computed(() => {
           :session-id="harness.activeSessionId"
           :files="fileExplorer.tree"
           :skill-options="skillStore.skills"
+          :context-used="contextUsed"
+          :context-open="contextOpen"
           mention-controlled
           :mention-active-index="mentionActiveIndex"
           @update:mode="composerMode = $event"
@@ -468,6 +505,8 @@ const desktopButtonTitle = computed(() => {
           @update:effort="harness.effortInput = $event"
           @send="handleSend"
           @stop="handleStop"
+          @toggle-context="handleToggleContext"
+          @context-metrics="handleContextMetrics"
           @mention-change="
             (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
           "

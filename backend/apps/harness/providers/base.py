@@ -22,6 +22,7 @@ class LLMMessage:
     content: str | list[dict[str, Any]] | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: str | None = None
+    message_id: str = ""
 
 
 @dataclass(frozen=True)

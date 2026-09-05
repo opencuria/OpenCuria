@@ -248,6 +248,8 @@ class ProviderModelOut(Schema):
     reasoning_efforts: list[str] = []
     default_effort: str = ""
     supports_tools: bool = False
+    context_length: int = 0
+    max_output_tokens: int = 0
 
 
 def _api_key_hint(config) -> str:  # type: ignore[no-untyped-def]
@@ -294,6 +296,8 @@ def _list_org_provider_models(org_id: uuid.UUID) -> list[ProviderModelOut]:
             reasoning_efforts=list(model.reasoning_efforts),
             default_effort=model.default_effort,
             supports_tools=model.supports_tools,
+            context_length=model.context_length,
+            max_output_tokens=model.max_output_tokens,
         )
         for model in models
     ]

@@ -26,12 +26,14 @@ export type TextRenderBlock = { kind: 'text'; part: HarnessPart }
 export type SingleRenderBlock = { kind: 'single'; part: HarnessPart }
 export type GroupRenderBlock = { kind: 'group'; parts: HarnessPart[] }
 export type CardRenderBlock = { kind: 'card'; part: HarnessPart }
+export type CompactionRenderBlock = { kind: 'compaction'; part: HarnessPart }
 
 export type RenderBlock =
   | TextRenderBlock
   | SingleRenderBlock
   | GroupRenderBlock
   | CardRenderBlock
+  | CompactionRenderBlock
 
 function isEmptyText(part: HarnessPart): boolean {
   return part.type === 'text' && !part.output
@@ -66,6 +68,11 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
     if (part.type === 'text') {
       flushRun()
       blocks.push({ kind: 'text', part })
+      continue
+    }
+    if (part.type === 'compaction') {
+      flushRun()
+      blocks.push({ kind: 'compaction', part })
       continue
     }
     if (isWorkItem(part)) {

@@ -11,6 +11,8 @@ const models: ProviderModel[] = [
     reasoning_efforts: ['low', 'high'],
     default_effort: 'high',
     supports_tools: true,
+    context_length: 128_000,
+    max_output_tokens: 8_192,
   },
   {
     id: 'acme/plain',
@@ -18,6 +20,8 @@ const models: ProviderModel[] = [
     reasoning_efforts: [],
     default_effort: '',
     supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
   },
 ]
 

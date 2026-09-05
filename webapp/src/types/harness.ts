@@ -20,6 +20,7 @@ export type HarnessPartType =
   | 'subtask'
   | 'patch'
   | 'agent'
+  | 'compaction'
 
 /** Lifecycle states of a part (`HarnessPartState` in the backend). */
 export type HarnessPartState = 'pending' | 'running' | 'completed' | 'error'

@@ -29,6 +29,25 @@ ALLOWED_REASONING_EFFORTS = frozenset(
 )
 
 
+def _coerce_nonneg_int(value: Any) -> int:
+    """Coerce *value* to a non-negative int; return 0 when invalid."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float) and value.is_integer():
+        return max(0, int(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return 0
+        try:
+            return max(0, int(stripped))
+        except ValueError:
+            return 0
+    return 0
+
+
 @dataclass(frozen=True)
 class ProviderModel:
     """Normalized catalog entry for the composer model picker."""
@@ -38,6 +57,8 @@ class ProviderModel:
     reasoning_efforts: tuple[str, ...]
     default_effort: str
     supports_tools: bool
+    context_length: int = 0
+    max_output_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable mapping."""
@@ -47,6 +68,8 @@ class ProviderModel:
             "reasoning_efforts": list(self.reasoning_efforts),
             "default_effort": self.default_effort,
             "supports_tools": self.supports_tools,
+            "context_length": self.context_length,
+            "max_output_tokens": self.max_output_tokens,
         }
 
 
@@ -143,12 +166,31 @@ def normalize_openrouter_model(raw: Any) -> ProviderModel | None:
     elif not default_effort and efforts:
         default_effort = efforts[0] if "medium" not in efforts else "medium"
 
+    top_provider = raw.get("top_provider")
+    top_provider_dict = top_provider if isinstance(top_provider, dict) else None
+
+    if "context_length" in raw:
+        context_length = _coerce_nonneg_int(raw.get("context_length"))
+    elif top_provider_dict is not None:
+        context_length = _coerce_nonneg_int(top_provider_dict.get("context_length"))
+    else:
+        context_length = 0
+
+    if top_provider_dict is not None:
+        max_output_tokens = _coerce_nonneg_int(
+            top_provider_dict.get("max_completion_tokens")
+        )
+    else:
+        max_output_tokens = 0
+
     return ProviderModel(
         id=model_id.strip(),
         name=name,
         reasoning_efforts=tuple(efforts),
         default_effort=default_effort,
         supports_tools=supports_tools,
+        context_length=context_length,
+        max_output_tokens=max_output_tokens,
     )
 
 

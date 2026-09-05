@@ -285,6 +285,7 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
     """Production path (no provider_factory) must not hit ORM from asyncio."""
+    from apps.harness.providers.models_catalog import ProviderModel
     from apps.harness.providers.openrouter import OpenRouterAdapter
     from apps.harness.services import ProviderConfigService
 
@@ -309,6 +310,22 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
         yield Delta(text="hello", usage=Usage(1, 1, 2))
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        assert organization_id == org_id
+        return [
+            ProviderModel(
+                id="fake-model",
+                name="Fake",
+                reasoning_efforts=("high",),
+                default_effort="high",
+                supports_tools=True,
+                context_length=128_000,
+                max_output_tokens=8_192,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
 
     collected: list[dict[str, Any]] = []
 
@@ -339,6 +356,113 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "stop"
     assert assistant.content == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
+    harness_workspace, monkeypatch
+) -> None:
+    """_execute_run always resolves model limits and prior step tokens."""
+    from apps.harness.providers.models_catalog import ProviderModel
+    from apps.harness.providers.openrouter import OpenRouterAdapter
+    from apps.harness.runner import HarnessRunner, RunOptions, RunResult
+    from apps.harness.services import ProviderConfigService
+
+    org_id = harness_workspace.runner.organization_id
+    ProviderConfigService().save_config(
+        organization_id=org_id,
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        default_model="org-default-model",
+        small_model="",
+    )
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="limits run",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    prev_assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id,
+        role="assistant",
+        content="prior answer",
+    )
+    await sync_to_async(HarnessPartRepository.create)(
+        message_id=prev_assistant.id,
+        type="step-finish",
+        state="completed",
+        meta={
+            "tokens": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            }
+        },
+    )
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        return [
+            ProviderModel(
+                id="fake-model",
+                name="Fake",
+                reasoning_efforts=("high",),
+                default_effort="high",
+                supports_tools=True,
+                context_length=128_000,
+                max_output_tokens=8_192,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
+
+    async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        yield Delta(text="hello", usage=Usage(1, 1, 2))
+
+    monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
+
+    captured: list[RunOptions] = []
+
+    def _runner_factory(*, provider, tools, accessor, emit):  # type: ignore[no-untyped-def]
+        runner = HarnessRunner(
+            provider=provider,
+            tools=tools,
+            accessor=accessor,
+            emit=emit,
+        )
+        original_run = runner.run
+
+        async def _capturing_run(prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
+            captured.append(opts)
+            return RunResult(
+                output="ok",
+                steps=1,
+                usage=Usage(),
+                cost=0.0,
+                finish_reason="stop",
+            )
+
+        runner.run = _capturing_run  # type: ignore[method-assign]
+        return runner
+
+    service = HarnessService(runner_factory=_runner_factory)
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    await service.start_run(
+        session,
+        "follow up",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    assert captured
+    opts = captured[0]
+    assert opts.context_length == 128_000
+    assert opts.max_output_tokens == 8_192
+    assert opts.last_step_prompt_tokens == 100
+    assert opts.last_step_completion_tokens == 50
+    assert opts.last_step_total_tokens == 150
 
 
 @pytest.mark.django_db(transaction=True)

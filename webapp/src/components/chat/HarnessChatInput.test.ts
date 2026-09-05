@@ -26,6 +26,8 @@ const catalog: ProviderModel[] = [
     reasoning_efforts: ['low', 'high'],
     default_effort: 'high',
     supports_tools: true,
+    context_length: 200_000,
+    max_output_tokens: 32_768,
   },
   {
     id: 'model-small',
@@ -33,6 +35,8 @@ const catalog: ProviderModel[] = [
     reasoning_efforts: [],
     default_effort: '',
     supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
   },
 ]
 
@@ -87,10 +91,16 @@ describe('HarnessChatInput', () => {
     expect(wrapper.text()).not.toContain('Fast')
   })
 
-  it('renders mode pill, paperclip, and send arrow', async () => {
+  it('renders mode pill, context ring, paperclip, and send arrow', async () => {
     const wrapper = mountInput()
     expect(wrapper.find('[data-testid="composer-mode-trigger"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="composer-attach"]').exists()).toBe(true)
+    const ring = wrapper.find('[data-testid="composer-context-usage"]')
+    const attach = wrapper.find('[data-testid="composer-attach"]')
+    expect(ring.exists()).toBe(true)
+    expect(attach.exists()).toBe(true)
+    expect(ring.element.compareDocumentPosition(attach.element)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
     expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').attributes('placeholder')).toContain(
       '/ for skills',
@@ -214,6 +224,44 @@ describe('HarnessChatInput', () => {
 
     expect(wrapper.emitted('mention-select')?.length).toBeGreaterThan(0)
     expect((wrapper.emitted('send') ?? []).length).toBe(0)
+  })
+
+  it('emits toggle-context when the usage ring is clicked', async () => {
+    const wrapper = mountInput({ contextUsed: 12_000 })
+    await wrapper.find('[data-testid="composer-context-usage"]').trigger('click')
+    expect(wrapper.emitted('toggle-context')).toEqual([[]])
+  })
+
+  it('fills the context ring from catalog limit and used tokens', async () => {
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
+    await vi.waitFor(() => {
+      expect(listProviderModelsMock).toHaveBeenCalled()
+    })
+    const rings = wrapper.findAll('[data-testid="composer-context-usage"] circle')
+    expect(rings).toHaveLength(2)
+    const circumference = 2 * Math.PI * 6
+    const progress = rings[1]!
+    expect(progress.attributes('stroke-dashoffset')).toBe(String(circumference * 0.75))
+    expect(wrapper.find('[data-testid="composer-context-usage"]').attributes('aria-label')).toBe(
+      'Context usage 25%',
+    )
+  })
+
+  it('emits context metrics when used tokens or catalog limit change', async () => {
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
+    await vi.waitFor(() => {
+      expect(listProviderModelsMock).toHaveBeenCalled()
+    })
+    const metrics = wrapper.emitted('context-metrics') ?? []
+    expect(metrics.length).toBeGreaterThan(0)
+    const last = metrics[metrics.length - 1]![0] as {
+      used: number
+      limit: number
+      percent: number
+    }
+    expect(last.used).toBe(50_000)
+    expect(last.limit).toBe(200_000)
+    expect(last.percent).toBe(25)
   })
 
   it('keeps rounded corners and an accent focus ring when a sheet is attached', () => {

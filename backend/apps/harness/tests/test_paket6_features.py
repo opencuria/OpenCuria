@@ -11,10 +11,11 @@ from typing import Any
 import pytest
 
 from apps.harness.compaction import (
-    COMPACTION_TOKEN_THRESHOLD,
-    apply_compaction_summary,
-    build_compaction_prompt,
-    should_compact,
+    CHECKPOINT_PREFIX,
+    ModelLimits,
+    apply_compaction,
+    is_overflow,
+    select,
 )
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import QuestionRequest
@@ -204,57 +205,163 @@ async def test_runner_emits_patch_event_after_write() -> None:
     assert patch_events[0].get("unified_diff")
 
 
-def test_compaction_threshold_helper() -> None:
-    """Compaction triggers when estimated tokens exceed threshold."""
-    messages = [
-        LLMMessage(role="system", content="sys"),
-        LLMMessage(role="user", content="x" * 400_000),
-    ]
-    assert should_compact(messages, threshold=1000)
-    assert not should_compact(messages, threshold=COMPACTION_TOKEN_THRESHOLD * 4)
+def test_is_overflow_helper() -> None:
+    """Overflow uses model limits, not message size estimates."""
+    limits = ModelLimits(context_length=1_000, max_output_tokens=100)
+    assert is_overflow(
+        prompt_tokens=500,
+        completion_tokens=500,
+        limits=limits,
+    )
+    assert not is_overflow(
+        prompt_tokens=400,
+        completion_tokens=400,
+        limits=limits,
+    )
 
 
-def test_apply_compaction_summary_replaces_history() -> None:
-    """Compaction summary becomes a single user note."""
+def test_apply_compaction_keeps_current_user_prompt() -> None:
+    """Compaction preserves the latest real user message in the tail."""
+    limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
     messages = [
         LLMMessage(role="system", content="sys"),
-        LLMMessage(role="user", content="old"),
+        LLMMessage(role="user", content="a" * 8_000, message_id="old-user"),
         LLMMessage(role="assistant", content="old answer"),
+        LLMMessage(role="user", content="current prompt", message_id="current-user"),
     ]
-    compacted = apply_compaction_summary(messages, "summary text")
+    compacted, tail_start_id = apply_compaction(
+        messages,
+        "## Objective\n- continue work",
+        limits,
+    )
     assert compacted[0].role == "system"
-    assert len(compacted) == 2
-    assert "summary text" in (compacted[1].content or "")
+    assert any(
+        message.role == "user"
+        and isinstance(message.content, str)
+        and message.content.startswith(CHECKPOINT_PREFIX)
+        for message in compacted
+    )
+    assert compacted[-1].content == "current prompt"
+    assert compacted[-1].message_id == "current-user"
+    assert tail_start_id == "current-user"
+
+
+def test_select_splits_head_and_tail() -> None:
+    """Older turns become head; recent tail including current user is kept."""
+    limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
+    messages = [
+        LLMMessage(role="user", content="a" * 8_000, message_id="old-user"),
+        LLMMessage(role="assistant", content="old answer"),
+        LLMMessage(role="user", content="current", message_id="current-user"),
+    ]
+    selection = select(messages, limits)
+    assert selection.head
+    assert selection.tail
+    assert selection.tail[-1].content == "current"
+    assert selection.tail_start_id == "current-user"
 
 
 @pytest.mark.asyncio
-async def test_compaction_runs_before_provider_when_threshold_low() -> None:
-    """Oversized history triggers compaction agent using small_model."""
-    big = "word " * 50_000
-    provider = ScriptProvider(
+async def test_compaction_runs_before_provider_when_overflow() -> None:
+    """Prior-step overflow triggers compaction on the session model."""
+    models_used: list[str] = []
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    class TrackingProvider(ScriptProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            models_used.append(model)
+            async for delta in super().chat_stream(model, messages, tools, opts):
+                yield delta
+
+    provider = TrackingProvider(
         [
-            [Delta(text="summary only", usage=Usage(1, 1, 2))],
+            [Delta(text="## Objective\n- summary", usage=Usage(1, 1, 2))],
             [Delta(text="final", usage=Usage(1, 1, 2))],
         ]
     )
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        emit=emit,
+    )
     result = await runner.run(
         "follow-up",
         "build",
-        "big-model",
+        "session-model",
         "build",
         RunOptions(
             auto_approve=True,
-            small_model="small-model",
-            compaction_threshold=100,
+            context_length=1_000,
+            max_output_tokens=100,
+            last_step_prompt_tokens=500,
+            last_step_completion_tokens=500,
+            current_user_message_id="current-user",
             history=[
-                LLMMessage(role="user", content=big),
-                LLMMessage(role="assistant", content=big),
+                LLMMessage(role="user", content="prior"),
+                LLMMessage(role="assistant", content="prior answer"),
             ],
         ),
     )
     assert result.output == "final"
     assert provider.calls >= 2
+    assert "session-model" in models_used
+    assert "small-model" not in models_used
+    compaction_events = [event for event in events if event.get("type") == "compaction"]
+    assert compaction_events
+    assert compaction_events[0].get("overflow") is False
+
+
+@pytest.mark.asyncio
+async def test_compaction_child_emit_does_not_leak_to_parent() -> None:
+    """Compaction summary text must not stream into parent assistant deltas."""
+    provider = ScriptProvider(
+        [
+            [Delta(text="## Objective\n- leaked summary", usage=Usage(1, 1, 2))],
+            [Delta(text="final", usage=Usage(1, 1, 2))],
+        ]
+    )
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        emit=emit,
+    )
+    result = await runner.run(
+        "follow-up",
+        "build",
+        "session-model",
+        "build",
+        RunOptions(
+            auto_approve=True,
+            context_length=1_000,
+            max_output_tokens=100,
+            last_step_prompt_tokens=500,
+            last_step_completion_tokens=500,
+            current_user_message_id="current-user",
+            history=[
+                LLMMessage(role="user", content="prior"),
+                LLMMessage(role="assistant", content="prior answer"),
+            ],
+        ),
+    )
+    assert result.output == "final"
+    text_deltas = [
+        event
+        for event in events
+        if event.get("type") == "part_updated"
+        and str((event.get("delta") or {}).get("text", ""))
+    ]
+    assert not any("leaked summary" in str(event.get("delta", {}).get("text", "")) for event in text_deltas)
+    compaction_events = [event for event in events if event.get("type") == "compaction"]
+    assert compaction_events
+    assert "leaked summary" in compaction_events[0].get("summary", "")
 
 
 @pytest.mark.django_db(transaction=True)

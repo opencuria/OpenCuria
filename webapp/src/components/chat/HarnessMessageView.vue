@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { User } from '@lucide/vue'
+import { computed, ref } from 'vue'
+import { User, ChevronDown } from '@lucide/vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { formatMessageUsage, resolveMessageUsage } from '@/lib/harnessUsage'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { Separator } from '@/components/ui/separator'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
@@ -52,7 +58,20 @@ function blockKey(index: number): string {
   if (block.kind === 'group') {
     return `group-${block.parts[0]?.id ?? index}`
   }
+  if (block.kind === 'compaction') {
+    return `compaction-${block.part.id}`
+  }
   return `${block.kind}-${block.part.id}`
+}
+
+const compactionOpen = ref<Record<string, boolean>>({})
+
+function isCompactionOpen(partId: string): boolean {
+  return compactionOpen.value[partId] === true
+}
+
+function setCompactionOpen(partId: string, open: boolean): void {
+  compactionOpen.value = { ...compactionOpen.value, [partId]: open }
 }
 </script>
 
@@ -121,6 +140,41 @@ function blockKey(index: number): string {
               </p>
               <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{{ block.part.output }}</pre>
             </div>
+          </div>
+          <div
+            v-else-if="block.kind === 'compaction'"
+            :data-block-kind="'compaction'"
+            :data-part-id="block.part.id"
+            data-testid="harness-compaction-divider"
+            class="py-1"
+          >
+            <Collapsible
+              :open="isCompactionOpen(block.part.id)"
+              class="min-w-0"
+              @update:open="setCompactionOpen(block.part.id, $event)"
+            >
+              <div class="flex items-center gap-2">
+                <Separator class="flex-1" />
+                <CollapsibleTrigger
+                  class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <ChevronDown
+                    :size="12"
+                    class="shrink-0 opacity-70 transition-transform"
+                    :class="isCompactionOpen(block.part.id) ? '' : '-rotate-90'"
+                  />
+                  <span>Session compacted</span>
+                </CollapsibleTrigger>
+                <Separator class="flex-1" />
+              </div>
+              <CollapsibleContent class="pt-2">
+                <div
+                  class="max-h-48 overflow-auto rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                >
+                  <HarnessMarkdown :text="block.part.output" compact />
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           </div>
         </template>
       </div>

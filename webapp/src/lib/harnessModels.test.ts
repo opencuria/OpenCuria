@@ -16,6 +16,8 @@ const withEffort: ProviderModel = {
   reasoning_efforts: ['low', 'medium', 'high'],
   default_effort: 'medium',
   supports_tools: true,
+  context_length: 128_000,
+  max_output_tokens: 16_384,
 }
 
 const plain: ProviderModel = {
@@ -24,6 +26,8 @@ const plain: ProviderModel = {
   reasoning_efforts: [],
   default_effort: '',
   supports_tools: true,
+  context_length: 0,
+  max_output_tokens: 0,
 }
 
 describe('harnessModels', () => {

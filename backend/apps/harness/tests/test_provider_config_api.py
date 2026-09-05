@@ -359,6 +359,8 @@ def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
                 reasoning_efforts=("high",),
                 default_effort="high",
                 supports_tools=True,
+                context_length=128000,
+                max_output_tokens=16384,
             )
         ]
 
@@ -372,6 +374,8 @@ def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
     assert body[0]["id"] == "acme/fast"
     assert body[0]["reasoning_efforts"] == ["high"]
     assert body[0]["supports_tools"] is True
+    assert body[0]["context_length"] == 128000
+    assert body[0]["max_output_tokens"] == 16384
 
 
 @pytest.mark.django_db(transaction=True)

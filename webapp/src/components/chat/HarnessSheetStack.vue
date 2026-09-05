@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import HarnessContextSheet from '@/components/chat/HarnessContextSheet.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
 import HarnessPermissionSheet from '@/components/chat/HarnessPermissionSheet.vue'
 import HarnessQuestionSheet from '@/components/chat/HarnessQuestionSheet.vue'
@@ -20,6 +21,7 @@ const emit = defineEmits<{
   'question-submit': [requestId: string, answers: string[]]
   'question-skip': [requestId: string]
   resolve: [requestId: string, response: HarnessPermissionResponse]
+  'close-context': []
 }>()
 
 const todoOpen = ref(true)
@@ -81,6 +83,9 @@ function peekOffset(index: number): number {
             :resolving="permissionResolving"
             @resolve="(requestId, response) => emit('resolve', requestId, response)"
           />
+        </template>
+        <template v-else-if="sheets[0]?.kind === 'context' && sheets[0]?.context">
+          <HarnessContextSheet :context="sheets[0].context!" @close="emit('close-context')" />
         </template>
         <template v-else-if="sheets[0]?.kind === 'todos' && sheets[0]?.todos">
           <HarnessTodoSheet v-model:open="todoOpen" :todos="sheets[0].todos!" />

@@ -45,6 +45,68 @@ def test_normalize_openrouter_catalog_extracts_effort_and_tools() -> None:
     assert models[1].supports_tools is False
 
 
+def test_normalize_openrouter_catalog_extracts_context_limits() -> None:
+    """Context length and max output tokens are parsed from OpenRouter fields."""
+    models = normalize_openrouter_catalog(
+        {
+            "data": [
+                {
+                    "id": "acme/full",
+                    "name": "Full",
+                    "context_length": 200000,
+                    "top_provider": {"max_completion_tokens": 32768},
+                },
+                {
+                    "id": "acme/fallback",
+                    "name": "Fallback",
+                    "top_provider": {
+                        "context_length": 128000,
+                        "max_completion_tokens": 8192,
+                    },
+                },
+                {
+                    "id": "acme/missing",
+                    "name": "Missing",
+                },
+            ]
+        }
+    )
+    assert len(models) == 3
+    assert models[0].context_length == 200000
+    assert models[0].max_output_tokens == 32768
+    assert models[1].context_length == 128000
+    assert models[1].max_output_tokens == 8192
+    assert models[2].context_length == 0
+    assert models[2].max_output_tokens == 0
+
+
+def test_normalize_openrouter_catalog_coerces_invalid_limits() -> None:
+    """Invalid limit values become 0; negatives are clamped."""
+    models = normalize_openrouter_catalog(
+        {
+            "data": [
+                {
+                    "id": "acme/bad",
+                    "name": "Bad",
+                    "context_length": "nope",
+                    "top_provider": {
+                        "max_completion_tokens": -100,
+                    },
+                },
+                {
+                    "id": "acme/top-wins",
+                    "name": "Top wins",
+                    "context_length": 50000,
+                    "top_provider": {"context_length": 99999},
+                },
+            ]
+        }
+    )
+    assert models[0].context_length == 0
+    assert models[0].max_output_tokens == 0
+    assert models[1].context_length == 50000
+
+
 def test_normalize_reasoning_effort_rejects_unknown() -> None:
     """Unknown effort tokens raise ValueError; empty stays empty."""
     assert normalize_reasoning_effort("") == ""

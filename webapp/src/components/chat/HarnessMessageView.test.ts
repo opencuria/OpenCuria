@@ -295,4 +295,25 @@ describe('HarnessMessageView', () => {
 
     expect(wrapper.find('[data-testid="harness-message-usage"]').exists()).toBe(false)
   })
+
+  it('renders compaction as a collapsed divider, not a user bubble', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'Hello' }),
+          makePart({
+            id: 'compact-1',
+            type: 'compaction',
+            title: 'Session compacted',
+            output: '## Objective\n- secret summary',
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-compaction-divider"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Session compacted')
+    expect(wrapper.text()).not.toContain('secret summary')
+    expect(wrapper.find('pre').exists()).toBe(false)
+  })
 })

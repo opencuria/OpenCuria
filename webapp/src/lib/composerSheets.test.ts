@@ -28,7 +28,39 @@ function makeTodo(id: string): HarnessTodo {
 }
 
 describe('buildComposerSheets', () => {
-  it('orders sheets by priority: mention > question > permission > todos', () => {
+  it('orders sheets by priority: mention > question > permission > context > todos', () => {
+    const sheets = buildComposerSheets({
+      todos: [makeTodo('t1')],
+      permissions: [makePermission('p1')],
+      questions: [makeQuestion('q1')],
+      mention: {
+        candidates: [{ kind: 'file', label: 'a.ts', insert: 'file:a.ts' }],
+        activeIndex: 0,
+      },
+      contextOpen: true,
+      context: { used: 1000, limit: 10_000, percent: 10 },
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual([
+      'mention',
+      'question',
+      'permission',
+      'context',
+      'todos',
+    ])
+  })
+
+  it('omits the context sheet when it is closed', () => {
+    const sheets = buildComposerSheets({
+      contextOpen: false,
+      context: { used: 1000, limit: 10_000, percent: 10 },
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['todos'])
+  })
+
+  it('orders sheets by priority: mention > question > permission > todos when context is closed', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
