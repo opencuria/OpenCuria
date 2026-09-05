@@ -29,4 +29,19 @@ describe('HarnessMentionSheet', () => {
     const active = wrapper.find('[aria-selected="true"]')
     expect(active.attributes('data-mention-index')).toBe('9')
   })
+
+  it('ignores hover while the pointer stays still', async () => {
+    const wrapper = mount(HarnessMentionSheet, {
+      props: {
+        candidates: Array.from({ length: 4 }, (_, index) => fileCandidate(index)),
+        activeIndex: 0,
+      },
+    })
+    const options = wrapper.findAll('[data-testid="composer-mention-option"]')
+    await options[1]!.trigger('mousemove', { clientX: 12, clientY: 40 })
+    await options[2]!.trigger('mousemove', { clientX: 12, clientY: 40 })
+    expect(wrapper.emitted('hover')).toEqual([[1]])
+    await options[2]!.trigger('mousemove', { clientX: 18, clientY: 40 })
+    expect(wrapper.emitted('hover')).toEqual([[1], [2]])
+  })
 })

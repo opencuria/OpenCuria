@@ -254,9 +254,13 @@ describe('HarnessChatInput', () => {
     const options = wrapper.findAll('[role="option"]')
     expect(options.length).toBeGreaterThan(1)
     expect(options[0]!.attributes('aria-selected')).toBe('true')
+    await options[0]!.trigger('mousemove', { clientX: 8, clientY: 8 })
     await textarea.trigger('keydown', { key: 'ArrowDown' })
-    const moved = wrapper.findAll('[role="option"]')
-    expect(moved[1]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.findAll('[role="option"]')[1]!.attributes('aria-selected')).toBe('true')
+    await options[0]!.trigger('mousemove', { clientX: 8, clientY: 8 })
+    expect(wrapper.findAll('[role="option"]')[1]!.attributes('aria-selected')).toBe('true')
+    await options[0]!.trigger('mousemove', { clientX: 14, clientY: 8 })
+    expect(wrapper.findAll('[role="option"]')[0]!.attributes('aria-selected')).toBe('true')
   })
 
   it('emits toggle-context when the usage ring is clicked', async () => {

@@ -5,6 +5,7 @@ import {
   MENTION_TOTAL_LIMIT,
   applyMentionCandidate,
   consumeSlashQuery,
+  createPointerHoverGate,
   detectMentionQuery,
   detectSlashQuery,
   filterMentionCandidates,
@@ -119,5 +120,14 @@ describe('harnessMentions', () => {
     expect(hits).toEqual([{ kind: 'skill', label: 'Lint rules', insert: 's1' }])
     const consumed = consumeSlashQuery('hello /lin', 10)
     expect(consumed.text).toBe('hello ')
+  })
+
+  it('ignores pointer hover until the cursor actually moves', () => {
+    const gate = createPointerHoverGate()
+    expect(gate.moved({ clientX: 10, clientY: 20 })).toBe(true)
+    expect(gate.moved({ clientX: 10, clientY: 20 })).toBe(false)
+    expect(gate.moved({ clientX: 11, clientY: 20 })).toBe(true)
+    gate.reset()
+    expect(gate.moved({ clientX: 11, clientY: 20 })).toBe(true)
   })
 })

@@ -183,3 +183,29 @@ export function consumeSlashQuery(
   const rewritten = text.slice(0, cursor).replace(/(^|\s)\/[a-zA-Z0-9_.+-]*$/, '$1')
   return { text: `${rewritten}${text.slice(cursor)}`, cursor: rewritten.length }
 }
+
+/**
+ * Ignore pointer hover until the cursor actually moves.
+ *
+ * Keyboard navigation (and the scroll it causes) can fire `mousemove` on the
+ * item under a stationary cursor; those events reuse the last client position.
+ */
+export function createPointerHoverGate(): {
+  moved: (event: { clientX: number; clientY: number }) => boolean
+  reset: () => void
+} {
+  let x = Number.NaN
+  let y = Number.NaN
+  return {
+    moved(event) {
+      if (event.clientX === x && event.clientY === y) return false
+      x = event.clientX
+      y = event.clientY
+      return true
+    },
+    reset() {
+      x = Number.NaN
+      y = Number.NaN
+    },
+  }
+}

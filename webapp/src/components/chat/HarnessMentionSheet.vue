@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+import {
+  createPointerHoverGate,
+  type MentionCandidate,
+} from '@/lib/harnessMentions'
 
 const props = defineProps<{
   candidates: MentionCandidate[]
@@ -13,6 +16,12 @@ const emit = defineEmits<{
 }>()
 
 const listRef = ref<HTMLElement | null>(null)
+const pointerHover = createPointerHoverGate()
+
+function onOptionMouseMove(event: MouseEvent, index: number): void {
+  if (!pointerHover.moved(event)) return
+  emit('hover', index)
+}
 
 function scrollActiveIntoView(): void {
   const active = listRef.value?.querySelector<HTMLElement>(
@@ -54,7 +63,7 @@ watch(
         "
         data-testid="composer-mention-option"
         @mousedown.prevent="emit('select', candidate)"
-        @mousemove="emit('hover', idx)"
+        @mousemove="onOptionMouseMove($event, idx)"
       >
         <span
           class="rounded px-1 py-0.5 text-[10px] font-medium"

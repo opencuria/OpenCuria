@@ -39,6 +39,7 @@ import {
   flattenFilePaths,
   mentionFileSearchQuery,
   mergeMentionFilePaths,
+  createPointerHoverGate,
   MENTION_FIND_LIMIT,
   type MentionCandidate,
 } from '@/lib/harnessMentions'
@@ -292,6 +293,7 @@ const mentionQuery = ref('')
 const composerKind = ref<'mention' | 'skill' | null>(null)
 const mentionSearchPaths = ref<string[]>([])
 const mentionPopupListRef = ref<HTMLElement | null>(null)
+const mentionPointerHover = createPointerHoverGate()
 let mentionFindTimer: ReturnType<typeof setTimeout> | null = null
 let mentionFindGeneration = 0
 let mentionSearchStarted = false
@@ -377,6 +379,11 @@ function requestMentionSelect(candidate: MentionCandidate): void {
   chooseMention(candidate)
 }
 
+function onMentionPopupMouseMove(event: MouseEvent, index: number): void {
+  if (!mentionPointerHover.moved(event)) return
+  mentionIndex.value = index
+}
+
 function textareaEl(): HTMLTextAreaElement | null {
   const root = textareaRef.value
   if (!root) return null
@@ -391,6 +398,7 @@ function closeComposerQuery(): void {
   composerKind.value = null
   mentionSearchPaths.value = []
   mentionSearchStarted = false
+  mentionPointerHover.reset()
   mentionFindGeneration += 1
   if (mentionFindTimer) {
     clearTimeout(mentionFindTimer)
@@ -599,7 +607,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 : 'text-muted-foreground hover:text-foreground'
             "
             @mousedown.prevent="requestMentionSelect(candidate)"
-            @mousemove="mentionIndex = idx"
+            @mousemove="onMentionPopupMouseMove($event, idx)"
           >
             <span
               class="rounded px-1 py-0.5 text-[10px] font-medium"
