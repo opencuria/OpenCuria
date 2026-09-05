@@ -307,6 +307,7 @@ export function applySubtaskFinished(
     ...part.meta,
     subtask_id: event.subtask_id,
     status: event.status,
+    ...(event.child_session_id ? { child_session_id: event.child_session_id } : {}),
   }
   if (event.summary) part.output = event.summary
   return part

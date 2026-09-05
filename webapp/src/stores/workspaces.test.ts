@@ -136,8 +136,9 @@ describe('workspace credential updates', () => {
     })
 
     expect(success).toBe(true)
-    expect(store.workspaces[0].credential_ids).toEqual(['cred-1'])
-    expect(store.workspaces[0].credentials_present).toBe(true)
+    const workspace = store.workspaces[0]
+    expect(workspace?.credential_ids).toEqual(['cred-1'])
+    expect(workspace?.credentials_present).toBe(true)
     expect(toast.success).toHaveBeenCalledWith(
       'Credentials updated',
       expect.objectContaining({

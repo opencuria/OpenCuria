@@ -152,9 +152,11 @@ describe('harnessReducer', () => {
       subtask_id: 'sub-1',
       agent: 'explore',
       description: 'research the codebase',
+      child_session_id: 'child-1',
     })
     expect(started.state).toBe('running')
     expect(started.meta?.['subtask_id']).toBe('sub-1')
+    expect(started.meta?.['child_session_id']).toBe('child-1')
 
     const finished = applySubtaskFinished(assistant, {
       workspace_id: 'workspace-1',
@@ -162,9 +164,11 @@ describe('harnessReducer', () => {
       subtask_id: 'sub-1',
       status: 'completed',
       summary: 'found it',
+      child_session_id: 'child-1',
     })
     expect(finished?.state).toBe('completed')
     expect(finished?.output).toBe('found it')
+    expect(finished?.meta?.['child_session_id']).toBe('child-1')
   })
 
   it('starts a new assistant message after a completed turn', () => {

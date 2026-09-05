@@ -350,7 +350,13 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function handleSubtaskFinished(
     sessionId: string,
-    event: { subtask_id: string; agent?: string; status: string; summary: string },
+    event: {
+      subtask_id: string
+      agent?: string
+      status: string
+      summary: string
+      child_session_id?: string
+    },
   ): void {
     const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
     applySubtaskFinished(message, {
@@ -360,6 +366,7 @@ export const useHarnessStore = defineStore('harness', () => {
       agent: event.agent,
       status: event.status,
       summary: event.summary,
+      child_session_id: event.child_session_id,
     })
   }
 

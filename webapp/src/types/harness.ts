@@ -263,4 +263,5 @@ export interface HarnessSubtaskFinishedEvent {
   agent?: string
   status: string
   summary: string
+  child_session_id?: string
 }

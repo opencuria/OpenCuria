@@ -213,6 +213,7 @@ function setupSocketListeners(): void {
           agent: data.agent,
           status: data.status,
           summary: data.summary,
+          child_session_id: data.child_session_id,
         })
       }
     }),
