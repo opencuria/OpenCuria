@@ -16,6 +16,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
@@ -2515,134 +2516,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
 
     @staticmethod
     def _desktop_session_init_script_block() -> str:
-        """Return shell script lines that install KasmVNC in a QEMU init script."""
-        return """
-# --- KasmVNC desktop session support ---
-apt-get update
-apt-get install -y xfonts-base openbox dbus-x11 x11-xserver-utils \\
-    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
-    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
-    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 wget ca-certificates
-(apt-get install -y libasound2t64 || apt-get install -y libasound2)
-
-wget -q -O /tmp/kasmvnc.deb \\
-    "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
-apt-get install -y /tmp/kasmvnc.deb || true
-apt-get install -f -y
-rm -f /tmp/kasmvnc.deb
-
-wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
-rm -f /tmp/google-chrome.deb
-
-# Pre-configure KasmVNC
-mkdir -p /root/.vnc
-touch /root/.vnc/.de-was-selected
-printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true
-
-cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
-desktop:
-  resolution:
-    width: 1920
-    height: 1080
-  allow_resize: true
-network:
-  protocol: http
-  interface: 0.0.0.0
-  websocket_port: 6901
-  ssl:
-    require_ssl: false
-    pem_certificate:
-    pem_key:
-KASMCFG
-
-cat >/usr/local/bin/opencuria-desktop-browser <<'BROWSER'
-#!/bin/bash
-set -eu
-for browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do
-  if [ "${browser#/}" != "$browser" ]; then
-    if [ -x "$browser" ]; then
-      exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
-    fi
-    continue
-  fi
-  if command -v "$browser" >/dev/null 2>&1; then
-    if [ "$browser" = "chromium-browser" ] && ! chromium-browser --version >/dev/null 2>&1; then
-      continue
-    fi
-    exec "$browser" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run
-  fi
-done
-echo "No supported browser binary found for desktop session" >&2
-BROWSER
-
-cat >/root/.vnc/xstartup <<'XSTARTUP'
-#!/bin/bash
-export DISPLAY=:1
-export HOME=/root
-openbox-session &
-sleep 1
-/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &
-wait
-XSTARTUP
-chmod +x /root/.vnc/xstartup
-chmod +x /usr/local/bin/opencuria-desktop-browser
-
-cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
-#!/bin/bash
-set -e
-export DISPLAY=:1
-export HOME=/root
-/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
-mkdir -p /root/.vnc
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-# Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
-/usr/bin/Xvnc :1 \
-    -geometry 1920x1080 \
-    -depth 24 \
-    -rfbport 5901 \
-    -SecurityTypes None \
-    -disableBasicAuth \
-    -websocketPort 6901 \
-    -httpd /usr/share/kasmvnc/www \
-    -interface 0.0.0.0 \
-    -AlwaysShared \
-    -AcceptKeyEvents \
-    -AcceptPointerEvents \
-    -AcceptSetDesktopSize \
-    -SendCutText \
-    -AcceptCutText \
-    >>/root/.vnc/server.log 2>&1 &
-
-for _ in $(seq 1 120); do
-  if [ -e /tmp/.X11-unix/X1 ]; then
-    # Start the window manager and browser via xstartup
-    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
-    echo "Desktop session started on :1 (ws port 6901)"
-    exit 0
-  fi
-  sleep 0.25
-done
-echo "Desktop session failed to start" >&2
-exit 1
-DESKSTART
-
-cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
-#!/bin/bash
-# Stop Xvnc and all desktop processes
-for pid in $(pgrep -f 'Xvnc.*:1' 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-done
-for pid in $(pgrep -f 'openbox' 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
-done
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-DESKSTOP
-
-chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
-rm -rf /var/lib/apt/lists/*
-"""
+        """Return shell script lines that install the QEMU KasmVNC desktop."""
+        script_path = (
+            Path(__file__).resolve().parent / "scripts" / "qemu_desktop_session.sh"
+        )
+        return "\n" + script_path.read_text(encoding="utf-8").strip() + "\n"
 
     @classmethod
     def _build_qemu_init_script_content(cls, definition) -> str:

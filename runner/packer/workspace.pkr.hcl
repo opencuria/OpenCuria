@@ -1,7 +1,7 @@
 # Packer template for building the QEMU/KVM workspace base image.
 #
 # Produces a QCOW2 image at /var/lib/opencuria/images/workspace-base.qcow2
-# with an identical software stack to the Docker workspace container.
+# with the QEMU workspace toolchain and an XFCE + WhiteSur desktop session.
 #
 # Usage:
 #   packer init workspace.pkr.hcl
@@ -103,7 +103,12 @@ build {
     timeout = "15m"
   }
 
-  # Copy the init script
+  # Copy the init script and QEMU desktop session provisioner
+  provisioner "file" {
+    source      = "desktop-session.sh"
+    destination = "/tmp/desktop-session.sh"
+  }
+
   provisioner "file" {
     source      = "init.sh"
     destination = "/tmp/init.sh"
@@ -160,7 +165,7 @@ build {
   provisioner "shell" {
     execute_command = "echo 'packer' | sudo -S env {{ .Vars }} {{ .Path }}"
     inline = [
-      "rm -f /tmp/init.sh",
+      "rm -f /tmp/init.sh /tmp/desktop-session.sh",
       "apt-get clean",
       "rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*",
       "cloud-init clean --logs",

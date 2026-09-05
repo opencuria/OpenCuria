@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -2036,3 +2037,88 @@ class TestHarnessReplyRouting:
         )
 
         assert routed == []
+
+
+@pytest.mark.django_db
+class TestDesktopSessionImageContent:
+    """QEMU images get XFCE+WhiteSur; Docker keeps Openbox + Chrome."""
+
+    def test_qemu_init_script_uses_xfce_whitesur_stack(
+        self, service, runner, user
+    ):
+        """QEMU image builds must provision XFCE, WhiteSur, Plank, and no Openbox."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="QEMU Desktop",
+            runtime_type="qemu",
+            base_distro="ubuntu:24.04",
+        )
+
+        script = service._build_qemu_init_script_content(definition)
+
+        assert "startxfce4" in script
+        assert "WhiteSur" in script
+        assert "plank" in script
+        assert "skippy-xd" in script
+        assert "rofi -show drun" in script
+        assert "button_layout" in script
+        assert "Ventura-light.jpg" in script
+        assert "opencuria-desktop-browser" in script
+        assert "--start-maximized" not in script
+        assert "openbox-session" not in script
+        assert "xfce4-session" in script
+
+    def test_qemu_init_script_skipped_for_alpine(self, service, runner, user):
+        """Alpine QEMU images must not receive the XFCE desktop block."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Alpine QEMU",
+            runtime_type="qemu",
+            base_distro="alpine:3.20",
+        )
+
+        script = service._build_qemu_init_script_content(definition)
+
+        assert "startxfce4" not in script
+        assert "kasmvnc" not in script.lower()
+        assert "WhiteSur" not in script
+
+    def test_docker_dockerfile_keeps_openbox(self, service, runner, user):
+        """Docker workspace images must keep the Openbox + Chrome desktop."""
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name="Docker Desktop",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+
+        dockerfile = service._generate_dockerfile_content(definition)
+
+        assert "openbox" in dockerfile
+        assert "openbox-session" in dockerfile
+        assert "startxfce4" not in dockerfile
+        assert "WhiteSur" not in dockerfile
+        assert "--start-maximized" in dockerfile
+
+    def test_qemu_and_packer_desktop_scripts_stay_in_sync(self):
+        """Backend and Packer QEMU desktop provisioners must stay identical."""
+        backend_script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "qemu_desktop_session.sh"
+        )
+        packer_script = (
+            Path(__file__).resolve().parents[4]
+            / "runner"
+            / "packer"
+            / "desktop-session.sh"
+        )
+
+        assert backend_script.is_file()
+        assert packer_script.is_file()
+        assert backend_script.read_text(encoding="utf-8") == (
+            packer_script.read_text(encoding="utf-8")
+        )

@@ -110,7 +110,9 @@ opencuria/
 │   │
 │   ├── packer/                    ← QEMU/KVM base image builder
 │   │   ├── workspace.pkr.hcl     ← Packer template (QCOW2 output)
-│   │   ├── init.sh               ← Provisioning script (mirrors Dockerfile)
+│   │   ├── init.sh               ← Provisioning script
+│   │   ├── desktop-session.sh    ← QEMU XFCE + WhiteSur desktop (keep in
+│   │   │                            sync with backend qemu_desktop_session.sh)
 │   │   └── http/                  ← cloud-init seed files
 │   │
 │   └── src/                       ← Python application
@@ -166,6 +168,7 @@ opencuria/
 │           ├── models.py           ← Runner, Workspace, Task (+ images/metrics)
 │           ├── repositories.py     ← Data access layer (static methods)
 │           ├── services.py         ← Business logic (RunnerService)
+│           ├── scripts/            ← QEMU desktop session provisioner
 │           ├── schemas.py          ← Pydantic v2 request/response schemas
 │           ├── api.py              ← Django Ninja REST endpoints
 │           ├── sio_server.py       ← Socket.IO server (runner comms)
@@ -290,6 +293,14 @@ Base: Ubuntu 22.04 with tooling only (no agent CLIs):
 - Python 3, pip, venv, git, openssh-client, build-essential, common tools
 - `git-wrapper.sh` — safety wrapper that blocks commits/pushes to `main`/`master`
 - `workspace-entrypoint.sh` — lightweight entrypoint that executes the container command
+
+Desktop sessions (started on demand via `opencuria-desktop-start`, not at boot):
+- **QEMU** — XFCE + WhiteSur theme, Plank dock, wallpaper, rofi (Super+Space),
+  skippy-xd Exposé (Super+Tab). Chrome is a dock launcher only. Provisioned
+  by `backend/apps/runners/scripts/qemu_desktop_session.sh` (keep in sync
+  with `runner/packer/desktop-session.sh`). Rebuild the QEMU image after
+  changing the desktop stack.
+- **Docker** — Openbox + auto-started maximized Chrome.
 
 The container runs with `tail -f /dev/null` (stays alive) and the runner
 executes commands via `docker exec`.
