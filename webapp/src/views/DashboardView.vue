@@ -16,14 +16,28 @@ import {
   Container,
 } from '@lucide/vue'
 import { useRouter } from 'vue-router'
+import { useHarnessStore } from '@/stores/harness'
+import { Button } from '@/components/ui/button'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspaceList from '@/components/workspaces/WorkspaceList.vue'
+import HarnessSessionSwitcher from '@/components/chat/HarnessSessionSwitcher.vue'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import type { Workspace } from '@/types'
+import type { HarnessSessionMode } from '@/types/harness'
 
 const router = useRouter()
 const runnerStore = useRunnerStore()
 const workspaceStore = useWorkspaceStore()
+const harnessStore = useHarnessStore()
 const searchQuery = ref('')
+const newChatWorkspace = ref<Workspace | null>(null)
+const newChatOpen = computed(() => newChatWorkspace.value !== null)
 
 // Poll runners + workspaces
 const { start: startRunnerPolling } = usePolling(() => runnerStore.fetchRunners(), 10000)
@@ -133,7 +147,25 @@ const filteredWorkspaces = computed(() => {
 })
 
 function openWorkspace(workspace: Workspace): void {
-  router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+  void router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+}
+
+function openNewChat(workspace: Workspace): void {
+  newChatWorkspace.value = workspace
+}
+
+async function handleCreateSession(
+  prompt: string,
+  mode: HarnessSessionMode,
+  model: string,
+): Promise<void> {
+  const workspace = newChatWorkspace.value
+  if (!workspace) return
+  const session = await harnessStore.createSession(workspace.id, prompt, mode, model)
+  newChatWorkspace.value = null
+  if (session) {
+    await router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+  }
 }
 
 function formatTimeAgo(isoString: string): string {
@@ -168,7 +200,7 @@ function formatTimeAgo(isoString: string): string {
             <span class="text-muted-foreground">active</span>
           </div>
         </div>
-        <div class="hidden sm:block">
+        <div class="hidden items-center gap-2 sm:flex">
           <CreateWorkspaceDialog />
         </div>
       </div>
@@ -189,8 +221,35 @@ function formatTimeAgo(isoString: string): string {
     </div>
 
     <div class="flex-1 overflow-y-auto px-4 py-4 lg:px-6">
-      <WorkspaceList :workspaces="filteredWorkspaces" @select="openWorkspace" />
+      <WorkspaceList :workspaces="filteredWorkspaces" @select="openWorkspace">
+        <template #actions="{ workspace }">
+          <Button
+            variant="outline"
+            size="sm"
+            title="Start a new harness chat"
+            @click.stop="openNewChat(workspace)"
+          >
+            New Chat
+          </Button>
+        </template>
+      </WorkspaceList>
+      <p v-if="!filteredWorkspaces.length" class="text-sm text-muted-foreground">
+        No workspaces — create one to get started.
+      </p>
     </div>
+
+    <Dialog :open="newChatOpen" @update:open="(open) => { if (!open) newChatWorkspace = null }">
+      <DialogContent v-if="newChatWorkspace" class="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New chat in {{ newChatWorkspace.name }}</DialogTitle>
+        </DialogHeader>
+        <HarnessSessionSwitcher
+          :workspace-id="newChatWorkspace.id"
+          @create="handleCreateSession"
+        />
+        <DialogFooter />
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 

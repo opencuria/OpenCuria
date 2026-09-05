@@ -11,6 +11,7 @@ import type { HarnessSessionMode } from '@/types/harness'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessPermissionDialog from '@/components/chat/HarnessPermissionDialog.vue'
+import HarnessSessionSwitcher from '@/components/chat/HarnessSessionSwitcher.vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -183,6 +184,15 @@ async function handleStop(): Promise<void> {
   await harness.abortSession(harness.activeSessionId)
 }
 
+async function handleCreateSession(prompt: string, mode: HarnessSessionMode, model: string): Promise<void> {
+  sending.value = true
+  try {
+    await harness.createSession(props.workspaceId, prompt, mode, model)
+  } finally {
+    sending.value = false
+  }
+}
+
 async function handleResolve(response: 'once' | 'always' | 'reject'): Promise<void> {
   const request = activeRequest.value
   if (!request) return
@@ -203,6 +213,7 @@ function handleOpenSubtask(childSessionId: string): void {
 
 <template>
   <div class="flex h-full min-h-0 w-full flex-col">
+    <HarnessSessionSwitcher :workspace-id="props.workspaceId" @create="handleCreateSession" />
     <HarnessChatContainer
       :messages="harness.activeMessages"
       :todos="harness.activeTodos"

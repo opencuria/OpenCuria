@@ -10,12 +10,15 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 
-const props = defineProps<{
-  workspace: Workspace
-  storageBytes?: number | null
-  showResourceWarning?: boolean
-  clickable?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    workspace: Workspace
+    storageBytes?: number | null
+    showResourceWarning?: boolean
+    clickable?: boolean
+  }>(),
+  { clickable: true },
+)
 
 defineEmits<{
   click: []
@@ -94,8 +97,8 @@ function formatStorage(bytes?: number | null): string {
 
 <template>
   <Card
-    :class="'transition-colors duration-150' + (clickable ? ' cursor-pointer hover:border-border' : '')"
-    @click="clickable ? $emit('click') : undefined"
+    :class="'transition-colors duration-150' + (props.clickable ? ' cursor-pointer hover:border-border' : '')"
+    @click="props.clickable ? $emit('click') : undefined"
   >
     <CardContent>
       <div class="flex items-start justify-between gap-3 mb-3">

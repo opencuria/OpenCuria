@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { usePolling } from '@/composables/usePolling'
 import { WorkspaceStatus } from '@/types'
-import type { VmSystemMetrics } from '@/types'
+import type { VmSystemMetrics, Workspace } from '@/types'
 import WorkspaceList from '@/components/workspaces/WorkspaceList.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -14,6 +15,11 @@ import { getRunnerMetricsLatest } from '@/services/runners.api'
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
+const router = useRouter()
+
+function openWorkspace(workspace: Workspace): void {
+  void router.push({ name: 'workspace-detail', params: { id: workspace.id } })
+}
 
 const searchQuery = ref('')
 const showDeleted = ref(false)
@@ -178,8 +184,7 @@ onMounted(async () => {
     <WorkspaceList
       v-else
       :workspaces="filteredWorkspaces"
-      :storage-bytes-by-workspace-id="storageBytesByWorkspaceId"
-      :warning-workspace-ids="warningWorkspaceIds"
+      @select="openWorkspace"
     />
   </div>
 </template>
