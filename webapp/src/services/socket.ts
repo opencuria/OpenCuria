@@ -82,6 +82,7 @@ export interface WorkspaceStatusEvent {
   workspace_id: string
   status: string
   task_id?: string
+  credentials_present?: boolean
 }
 
 export interface WorkspaceOperationEvent {

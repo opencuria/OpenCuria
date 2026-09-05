@@ -271,6 +271,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       updated_at: string
       active_operation: WorkspaceOperation | null
       credential_ids: string[]
+      credentials_present: boolean
       qemu_vcpus: number | null
       qemu_memory_mb: number | null
       qemu_disk_size_gb: number | null
@@ -282,6 +283,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ws.updated_at = updated.updated_at
       ws.active_operation = updated.active_operation
       ws.credential_ids = updated.credential_ids
+      ws.credentials_present = updated.credentials_present
       ws.qemu_vcpus = updated.qemu_vcpus
       ws.qemu_memory_mb = updated.qemu_memory_mb
       ws.qemu_disk_size_gb = updated.qemu_disk_size_gb
@@ -292,6 +294,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       activeWorkspace.value.updated_at = updated.updated_at
       activeWorkspace.value.active_operation = updated.active_operation
       activeWorkspace.value.credential_ids = updated.credential_ids
+      activeWorkspace.value.credentials_present = updated.credentials_present
       activeWorkspace.value.qemu_vcpus = updated.qemu_vcpus
       activeWorkspace.value.qemu_memory_mb = updated.qemu_memory_mb
       activeWorkspace.value.qemu_disk_size_gb = updated.qemu_disk_size_gb
@@ -462,7 +465,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   // --- Real-time handlers ---
 
-  function updateWorkspaceStatus(workspaceId: string, status: WorkspaceStatus): void {
+  function updateWorkspaceStatus(
+    workspaceId: string,
+    status: WorkspaceStatus,
+    credentialsPresent?: boolean,
+  ): void {
     // Update in list
     const ws = workspaces.value.find((w) => w.id === workspaceId)
     const previousStatus = ws?.status ?? (activeWorkspace.value?.id === workspaceId
@@ -470,6 +477,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       : undefined)
     if (ws) {
       ws.status = status
+      if (credentialsPresent !== undefined) {
+        ws.credentials_present = credentialsPresent
+      }
       if (status === WorkspaceStatus.STOPPED) {
         ws.auto_stop_at = null
       }
@@ -478,6 +488,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     // Update active workspace
     if (activeWorkspace.value?.id === workspaceId) {
       activeWorkspace.value.status = status
+      if (credentialsPresent !== undefined) {
+        activeWorkspace.value.credentials_present = credentialsPresent
+      }
       if (status === WorkspaceStatus.STOPPED) {
         activeWorkspace.value.auto_stop_at = null
       }

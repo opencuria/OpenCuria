@@ -162,6 +162,14 @@ class Workspace(models.Model):
             "SSH keys into the workspace runtime."
         ),
     )
+    credentials_present = models.BooleanField(
+        default=False,
+        help_text=(
+            "True if credential material is currently on the workspace disk. "
+            "Set after a successful inject; cleared only after a controlled stop "
+            "removes the secrets. External stops leave this true."
+        ),
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -562,15 +570,6 @@ class ImageInstance(models.Model):
     delete_attempt_count = models.PositiveIntegerField(
         default=0,
         help_text="Number of deletion attempts.",
-    )
-    credentials = models.ManyToManyField(
-        "credentials.Credential",
-        blank=True,
-        related_name="image_instances",
-        help_text=(
-            "Credentials associated with this image instance. "
-            "Workspace cloning must still supply credentials explicitly."
-        ),
     )
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

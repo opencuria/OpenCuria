@@ -1337,21 +1337,6 @@ class TestCreateWorkspaceFromImageArtifact:
             runner_ref="captured-artifact-2",
             status=ImageInstance.Status.READY,
         )
-        credential_service = CredentialService.objects.create(
-            name="GitHub Token",
-            slug=f"github-token-{uuid.uuid4().hex[:6]}",
-            credential_type="env",
-            env_var_name="GITHUB_TOKEN",
-            label="GitHub PAT",
-        )
-        credential = CredentialSvc().create_org_credential(
-            organization_id=runner.organization_id,
-            service_id=credential_service.id,
-            name="GitHub PAT",
-            value="secret-token",
-            user=user,
-        )
-        artifact.credentials.set([credential])
 
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
@@ -1389,12 +1374,14 @@ class TestHandleWorkspaceCreated:
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
+            credentials_present=True,
         )
 
         workspace.refresh_from_db()
         task.refresh_from_db()
         assert workspace.status == WorkspaceStatus.RUNNING
         assert workspace.active_operation is None
+        assert workspace.credentials_present is True
         assert task.status == TaskStatus.COMPLETED
 
 
@@ -1814,10 +1801,10 @@ class TestLegacyPromptPathRemoved:
 @pytest.mark.django_db(transaction=True)
 class TestStartTerminal:
     @pytest.mark.asyncio
-    async def test_dispatches_terminal_with_workspace_credentials(
+    async def test_dispatches_terminal_without_credential_payload(
         self, service, sio_mock, workspace, user
     ):
-        """start_terminal should inject workspace credentials without agent setup."""
+        """start_terminal must not send secrets; they are already on disk."""
         credential_service = CredentialService.objects.create(
             name="GitHub Token",
             slug=f"github-token-{uuid.uuid4().hex[:6]}",
@@ -1839,7 +1826,9 @@ class TestStartTerminal:
         assert task.type == TaskType.START_TERMINAL
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:start_terminal"
-        assert payload["env_vars"]["GITHUB_TOKEN"] == "terminal-token"
+        assert "env_vars" not in payload
+        assert "ssh_keys" not in payload
+        assert "files" not in payload
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2283,3 +2272,140 @@ class TestImageDefinitionLifecycle:
         assert definition.status == ImageDefinition.Status.ACTIVE
         assert definition.is_active is True
         assert definition.delete_last_error == ""
+
+
+@pytest.mark.django_db(transaction=True)
+class TestPersistentWorkspaceCredentials:
+    def test_created_event_persists_credentials_present(
+        self, service, runner, workspace
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.CREATE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace.status = WorkspaceStatus.CREATING
+        workspace.save()
+
+        service.handle_workspace_created(
+            task_id=str(task.id),
+            workspace_id=str(workspace.id),
+            status="created",
+            credentials_present=True,
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
+
+    def test_controlled_stop_clears_credentials_present(
+        self, service, runner, workspace
+    ):
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.STOP_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+
+        service.handle_workspace_stopped(str(task.id), str(workspace.id))
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.STOPPED
+        assert workspace.credentials_present is False
+
+    def test_heartbeat_stop_leaves_credentials_present(self, service, runner, workspace):
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
+
+        service.handle_heartbeat(
+            runner=runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "exited",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.status == WorkspaceStatus.STOPPED
+        assert workspace.credentials_present is True
+
+    @pytest.mark.asyncio
+    async def test_capture_rejected_when_credentials_present(
+        self, service, runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Secret Workspace",
+            status=WorkspaceStatus.STOPPED,
+            created_by=user,
+            runtime_type="qemu",
+            credentials_present=True,
+        )
+
+        with pytest.raises(ConflictError, match="credentials on disk"):
+            await service.create_image_artifact(
+                workspace_id=workspace.id,
+                name="blocked-capture",
+            )
+
+    @pytest.mark.asyncio
+    async def test_capture_allowed_when_credentials_absent(
+        self, service, sio_mock, runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Clean Workspace",
+            status=WorkspaceStatus.STOPPED,
+            created_by=user,
+            runtime_type="qemu",
+            credentials_present=False,
+        )
+
+        captured, task = await service.create_image_artifact(
+            workspace_id=workspace.id,
+            name="clean-capture",
+        )
+
+        assert captured.id == workspace.id
+        assert task.type == TaskType.CREATE_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_sends_workspace_credentials(
+        self, service, sio_mock, runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=runner,
+            name="Resume Creds",
+            status=WorkspaceStatus.STOPPED,
+            created_by=user,
+            runtime_type="docker",
+            credentials_present=False,
+        )
+        credential_service = CredentialService.objects.create(
+            name="GitHub Token",
+            slug=f"github-token-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="GITHUB_TOKEN",
+            label="GitHub PAT",
+        )
+        credential = CredentialSvc().create_org_credential(
+            organization_id=runner.organization_id,
+            service_id=credential_service.id,
+            name="GitHub PAT",
+            value="resume-token",
+            user=user,
+        )
+        workspace.credentials.add(credential)
+
+        await service.resume_workspace(workspace.id)
+
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "task:resume_workspace"
+        assert payload["env_vars"]["GITHUB_TOKEN"] == "resume-token"

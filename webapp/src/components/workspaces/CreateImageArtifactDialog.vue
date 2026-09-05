@@ -42,10 +42,20 @@ const snappableWorkspaces = computed(() =>
       const runner = runnerStore.runnerById(w.runner_id)
       return (
         w.runtime_type === RuntimeType.QEMU &&
-        w.status === WorkspaceStatus.RUNNING &&
+        !w.credentials_present &&
+        (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED) &&
         runnerSupportsRuntime(runner, RuntimeType.QEMU)
       )
     },
+  ),
+)
+
+const blockedByCredentials = computed(() =>
+  workspaceStore.workspaces.some(
+    (w) =>
+      w.runtime_type === RuntimeType.QEMU &&
+      w.credentials_present &&
+      (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED),
   ),
 )
 
@@ -105,7 +115,9 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Capture a point-in-time image of a running QEMU workspace. Credentials are selected separately when creating a workspace from the image.
+          Capture a point-in-time image of a QEMU workspace. Credentials must be
+          removed first — stop the workspace to strip them, then capture. If it
+          was stopped externally, resume and stop it again.
         </DialogDescription>
       </DialogHeader>
 
@@ -133,10 +145,14 @@ function handleClose(): void {
             </SelectContent>
           </Select>
           <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-foreground mt-1">
-            No running QEMU workspaces found. Only running QEMU/KVM workspaces can be captured.
+            No capturable QEMU workspaces found. Capture requires a running or
+            stopped QEMU workspace without credentials on disk.
           </p>
           <p v-else class="text-xs text-muted-foreground mt-1">
-            Only running QEMU/KVM workspaces are shown.
+            Only QEMU workspaces without credentials on disk are shown.
+          </p>
+          <p v-if="blockedByCredentials" class="text-xs text-muted-foreground mt-1">
+            Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.
           </p>
         </div>
 

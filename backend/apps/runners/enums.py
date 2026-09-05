@@ -67,6 +67,7 @@ class TaskType(models.TextChoices):
         "Create Workspace From Image Artifact",
     )
     BUILD_IMAGE = "build_image", "Build Image"
+    INJECT_CREDENTIALS = "inject_credentials", "Inject Credentials"
 
 
 class TaskStatus(models.TextChoices):

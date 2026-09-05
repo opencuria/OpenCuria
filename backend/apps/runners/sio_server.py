@@ -258,6 +258,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             workspace_id=data["workspace_id"],
             status=data.get("status", "created"),
             runner_id=runner_id,
+            credentials_present=data.get("credentials_present"),
         )
 
     @sio.on("workspace:stopped")
@@ -283,6 +284,23 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         await sync_to_async(service.handle_workspace_resumed)(
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
+            runner_id=runner_id,
+            credentials_present=data.get("credentials_present"),
+        )
+
+    @sio.on("workspace:credentials_injected")
+    async def on_workspace_credentials_injected(sid: str, data: dict):
+        """Handle persistent credential injection confirmation from runner."""
+        runner_id = await _require_runner_id(
+            sio, sid, "workspace:credentials_injected"
+        )
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_credentials_injected)(
+            task_id=data["task_id"],
+            workspace_id=data["workspace_id"],
+            credentials_present=bool(data.get("credentials_present")),
             runner_id=runner_id,
         )
 

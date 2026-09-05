@@ -118,6 +118,7 @@ class WorkspaceOut(Schema):
     has_active_session: bool = False
     runner_online: bool = False
     credential_ids: list[uuid.UUID] = []
+    credentials_present: bool = False
     base_image_name: str | None = None
 
 
@@ -153,6 +154,7 @@ class WorkspaceUpdateOut(Schema):
     updated_at: datetime
     active_operation: str | None = None
     credential_ids: list[uuid.UUID] = []
+    credentials_present: bool = False
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None

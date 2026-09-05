@@ -153,6 +153,7 @@ function setupSocketListeners(): void {
         workspaceStore.updateWorkspaceStatus(
           data.workspace_id,
           data.status as WorkspaceStatus,
+          data.credentials_present,
         )
       }
     }),

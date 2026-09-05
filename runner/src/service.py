@@ -58,49 +58,25 @@ _REDIRECTION_RE = re.compile(
     r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$"
 )
 
-
-@dataclass(frozen=True)
-class OperationCredentialContext:
-    """Per-operation credential material prepared inside a workspace."""
-
-    directory: str
-    bootstrap_script: str
-    cleanup_script: str
-    environment: dict[str, str]
-
-    def build_bootstrap_snippet(
-        self,
-        extra_env: dict[str, str] | None = None,
-    ) -> str:
-        """Return a shell snippet which activates this credential context."""
-
-        exports = [
-            f"export OPENCURIA_CREDENTIAL_CONTEXT_DIR={shlex.quote(self.directory)}",
-            f". {shlex.quote(self.bootstrap_script)}",
-        ]
-        for key, value in (extra_env or {}).items():
-            exports.append(f"export {key}={shlex.quote(str(value))}")
-        return "; ".join(exports)
+WORKSPACE_CREDENTIAL_DIR = "/root/.opencuria-credentials"
+WORKSPACE_CREDENTIAL_MANIFEST = "/root/.opencuria-credentials/manifest"
+WORKSPACE_CREDENTIAL_ENV_FILE = "/root/.opencuria-env.sh"
+WORKSPACE_CREDENTIAL_PROFILE_D = "/etc/profile.d/opencuria-env.sh"
+WORKSPACE_CREDENTIAL_BASHRC = "/root/.bashrc"
+WORKSPACE_CREDENTIAL_BASHRC_LINE = (
+    "test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh"
+)
+WORKSPACE_CREDENTIAL_ENVIRONMENT = "/etc/environment"
+WORKSPACE_CREDENTIAL_ENVIRONMENT_START = "# OPENCURIA_CREDENTIALS_START"
+WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
 
 
 @dataclass
 class TerminalSession:
-    """Runtime PTY handle plus optional credential context."""
+    """Runtime PTY handle for an interactive terminal session."""
 
     handle: PtyHandle
     runtime: RuntimeBackend
-    credential_context: OperationCredentialContext | None = None
-
-
-@dataclass
-class PreparedOperation:
-    """Resolved workspace target plus reusable credential context."""
-
-    workspace_id: uuid.UUID
-    instance_id: str
-    runtime: RuntimeBackend
-    log: Any
-    credential_context: OperationCredentialContext | None = None
 
 
 class WorkspaceService:
@@ -263,7 +239,6 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         command: dict,
-        credential_context: OperationCredentialContext | None = None,
     ) -> tuple[int, str]:
         """Execute a structured command dict inside a workspace.
 
@@ -276,10 +251,7 @@ class WorkspaceService:
         Returns:
             Tuple of (exit_code, output).
         """
-        wrapped_command = self._wrap_command_with_context(
-            command,
-            credential_context,
-        )
+        wrapped_command = self._wrap_command_with_persistent_env(command)
         command_args = self._normalise_command_args(wrapped_command["args"])
         return await runtime.exec_command_wait(
             instance_id,
@@ -293,7 +265,6 @@ class WorkspaceService:
         runtime: RuntimeBackend,
         instance_id: str,
         command: dict,
-        credential_context: OperationCredentialContext | None = None,
     ) -> AsyncIterator[str]:
         """Execute a structured command dict and stream output lines.
 
@@ -306,10 +277,7 @@ class WorkspaceService:
         Yields:
             Raw output lines from the command.
         """
-        wrapped_command = self._wrap_command_with_context(
-            command,
-            credential_context,
-        )
+        wrapped_command = self._wrap_command_with_persistent_env(command)
         command_args = self._normalise_command_args(wrapped_command["args"])
         async for line in runtime.exec_command(
             instance_id,
@@ -319,7 +287,7 @@ class WorkspaceService:
         ):
             yield line
 
-    # -- operation-scoped credentials -----------------------------------------
+    # -- persistent workspace credentials -------------------------------------
 
     @staticmethod
     def _build_tar_entries(
@@ -335,36 +303,11 @@ class WorkspaceService:
                 tar.addfile(info, io.BytesIO(content))
         return buffer.getvalue()
 
-    async def _create_operation_credential_context(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        env_vars: dict[str, str] | None,
-        files: list[dict[str, Any]] | None,
-        ssh_keys: list[str] | None,
-        log,
-    ) -> OperationCredentialContext | None:
-        """Create a temporary credential context for a single operation."""
+    @staticmethod
+    def _credential_path_helpers() -> list[str]:
+        """Return shell helper functions used by inject and remove scripts."""
 
-        env_vars = env_vars or {}
-        credential_files = files or []
-        ssh_keys = ssh_keys or []
-        if not env_vars and not credential_files and not ssh_keys:
-            return None
-
-        context_id = str(uuid.uuid4())
-        context_dir = f"/tmp/opencuria-op-{context_id}"
-        ssh_dir = f"{context_dir}/ssh"
-        bin_dir = f"{context_dir}/bin"
-        bootstrap_path = f"{context_dir}/bootstrap.sh"
-        cleanup_path = f"{context_dir}/cleanup.sh"
-        files_dir = f"{context_dir}/files"
-        archive_files: list[tuple[str, bytes, int]] = []
-        operation_env = {
-            "OPENCURIA_CREDENTIAL_CONTEXT_DIR": context_dir,
-        }
-
-        helper_lines = [
+        return [
             'opencuria_credential_home="${HOME:-/root}"',
             "opencuria_resolve_credential_path() {",
             '  raw_path="$1"',
@@ -388,243 +331,274 @@ class WorkspaceService:
             "  fi",
             '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
             "}",
+            "opencuria_strip_environment_block() {",
+            f"  env_file={shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
+            '  if [ ! -f "$env_file" ]; then',
+            "    return",
+            "  fi",
+            '  tmp_env=$(mktemp)',
+            f"  awk '/{WORKSPACE_CREDENTIAL_ENVIRONMENT_START}/{{skip=1}} "
+            f"/{WORKSPACE_CREDENTIAL_ENVIRONMENT_END}/{{skip=0; next}} !skip' "
+            '"$env_file" > "$tmp_env" || true',
+            '  cat "$tmp_env" > "$env_file"',
+            '  rm -f "$tmp_env"',
+            "}",
         ]
-        bootstrap_lines = [
-            "#!/bin/sh",
-            "set -eu",
-            'export PATH="/root/.local/bin:$PATH"',
-            *helper_lines,
-        ]
-        operation_env["PATH"] = (
-            "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
-        cleanup_lines = [
-            "#!/bin/sh",
-            "set -eu",
-            *helper_lines,
-        ]
-        for key, value in env_vars.items():
-            bootstrap_lines.append(
-                f"export {key}={shlex.quote(str(value))}"
-            )
-            operation_env[key] = str(value)
 
-        if credential_files:
-            for index, credential_file in enumerate(credential_files, start=1):
-                source_relpath = f"files/credential_{index}"
-                source_abspath = f"{files_dir}/credential_{index}"
-                target_path = str(credential_file["target_path"])
-                mode = int(credential_file.get("mode", 0o600))
-                content = str(credential_file.get("content", ""))
-                archive_files.append(
-                    (
-                        source_relpath,
-                        content.encode("utf-8"),
-                        0o600,
-                    )
-                )
-                bootstrap_lines.extend(
-                    [
-                        f'target_path=$(opencuria_resolve_credential_path {shlex.quote(target_path)})',
-                        'mkdir -p "$(dirname "$target_path")"',
-                        f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
-                    ]
-                )
-                cleanup_lines.append(
-                    f'rm -f "$(opencuria_resolve_credential_path {shlex.quote(target_path)})"'
-                )
-
-        if ssh_keys:
-            known_hosts_path = f"{ssh_dir}/known_hosts"
-            config_path = f"{ssh_dir}/config"
-            config_lines = [
-                "Host *",
-                "    StrictHostKeyChecking accept-new",
-                f"    UserKnownHostsFile {known_hosts_path}",
-                "    IdentitiesOnly yes",
-            ]
-            for index, key_pem in enumerate(ssh_keys):
-                key_name = "id_ed25519" if index == 0 else f"id_ed25519_{index + 1}"
-                key_relpath = f"ssh/{key_name}"
-                key_abspath = f"{ssh_dir}/{key_name}"
-                config_lines.append(f"    IdentityFile {key_abspath}")
-                archive_files.append(
-                    (key_relpath, key_pem.rstrip().encode("utf-8") + b"\n", 0o600)
-                )
-
-            archive_files.append(("ssh/known_hosts", b"", 0o600))
-            archive_files.append(
-                ("ssh/config", ("\n".join(config_lines) + "\n").encode("utf-8"), 0o600)
-            )
-
-            ssh_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/ssh -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            scp_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/scp -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            sftp_wrapper = (
-                "#!/bin/sh\n"
-                f"exec /usr/bin/sftp -F {shlex.quote(config_path)} \"$@\"\n"
-            ).encode("utf-8")
-            archive_files.extend(
-                [
-                    ("bin/ssh", ssh_wrapper, 0o755),
-                    ("bin/scp", scp_wrapper, 0o755),
-                    ("bin/sftp", sftp_wrapper, 0o755),
-                ]
-            )
-            bootstrap_lines.extend(
-                [
-                    f'export PATH={shlex.quote(bin_dir)}:"$PATH"',
-                    f"export GIT_SSH_COMMAND={shlex.quote(f'{bin_dir}/ssh')}",
-                    "export GIT_SSH_VARIANT=ssh",
-                ]
-            )
-            operation_env.update(
-                {
-                    "PATH": (
-                        f"{bin_dir}:/root/.local/bin:/usr/local/sbin:"
-                        "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                    ),
-                    "GIT_SSH_COMMAND": f"{bin_dir}/ssh",
-                    "GIT_SSH_VARIANT": "ssh",
-                }
-            )
-
-        bootstrap_content = ("\n".join(bootstrap_lines) + "\n").encode("utf-8")
-        cleanup_content = ("\n".join(cleanup_lines) + "\n").encode("utf-8")
-        archive_files.extend(
-            [
-                ("bootstrap.sh", bootstrap_content, 0o700),
-                ("cleanup.sh", cleanup_content, 0o700),
-            ]
-        )
-
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["mkdir", "-p", context_dir],
-            workdir="/tmp",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to create credential context: {output}")
-
-        archive_data = self._build_tar_entries(archive_files)
-        await runtime.put_archive(instance_id, context_dir, archive_data)
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", f". {shlex.quote(bootstrap_path)} >/dev/null"],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to materialize credential context: {output}")
-        log.info(
-            "operation_credential_context_created",
-            has_env=bool(env_vars),
-            file_count=len(credential_files),
-            ssh_key_count=len(ssh_keys),
-            context_dir=context_dir,
-        )
-        return OperationCredentialContext(
-            directory=context_dir,
-            bootstrap_script=bootstrap_path,
-            cleanup_script=cleanup_path,
-            environment=operation_env,
-        )
-
-    async def _cleanup_operation_credential_context(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        context: OperationCredentialContext | None,
-        log,
-    ) -> None:
-        """Best-effort cleanup of a temporary operation credential context."""
-
-        if context is None:
-            return
-
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=[
-                "sh",
-                "-lc",
-                f". {shlex.quote(context.cleanup_script)} >/dev/null 2>&1 || true; "
-                f"rm -rf {shlex.quote(context.directory)}",
-            ],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            log.warning(
-                "operation_credential_context_cleanup_failed",
-                context_dir=context.directory,
-                output=output,
-            )
-            return
-
-        log.info(
-            "operation_credential_context_removed",
-            context_dir=context.directory,
-        )
-
-    async def _cleanup_legacy_workspace_credentials(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        log,
-    ) -> None:
-        """Remove legacy persistent credential files left by older runners."""
-
-        cleanup_script = """
-rm -f /root/.opencuria-env.sh /etc/profile.d/opencuria-env.sh
-if [ -f /root/.bashrc ]; then
-  tmp_bashrc=$(mktemp)
-  grep -vxF 'test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh' /root/.bashrc > "$tmp_bashrc" || true
-  cat "$tmp_bashrc" > /root/.bashrc
-  rm -f "$tmp_bashrc"
-fi
-rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*
-rm -f /root/.ssh/config /root/.ssh/known_hosts
-find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-data.txt.i' -o -name 'cloud-config.txt' -o -path '*/scripts/runcmd' \\) -delete 2>/dev/null || true
-"""
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", cleanup_script],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            log.warning("legacy_credential_cleanup_failed", output=output)
-            return
-        log.info("legacy_credential_cleanup_complete")
-
-    def _wrap_command_with_context(
-        self,
-        command: dict,
-        credential_context: OperationCredentialContext | None,
-    ) -> dict:
-        """Wrap command execution so the credential context is sourced first."""
-
-        if credential_context is None:
-            return command
+    def _wrap_command_with_persistent_env(self, command: dict) -> dict:
+        """Source persistent workspace credentials before running a command."""
 
         normalised_args = self._normalise_command_args(command["args"])
-        wrapper = (
-            f"{credential_context.build_bootstrap_snippet(command.get('env') or {})}; "
-            "exec \"$@\""
+        extra_env = command.get("env") or {}
+        extra_exports = "; ".join(
+            f"export {key}={shlex.quote(str(value))}"
+            for key, value in extra_env.items()
         )
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi"
+        )
+        if extra_exports:
+            source = f"{source}; {extra_exports}"
+        wrapper = f'{source}; exec "$@"'
         return {
             **command,
             "args": [
                 "bash",
                 "-lc",
                 wrapper,
-                "opencuria-operation",
+                "opencuria-exec",
                 *normalised_args,
             ],
             "env": {},
         }
+
+    async def remove_workspace_credentials(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        log,
+    ) -> None:
+        """Idempotently remove persisted credential material from a workspace."""
+
+        cleanup_script = "\n".join(
+            [
+                "#!/bin/sh",
+                "set -eu",
+                *self._credential_path_helpers(),
+                f"manifest={shlex.quote(WORKSPACE_CREDENTIAL_MANIFEST)}",
+                'if [ -f "$manifest" ]; then',
+                '  while IFS= read -r file_path || [ -n "$file_path" ]; do',
+                '    [ -z "$file_path" ] && continue',
+                '    rm -f "$(opencuria_resolve_credential_path "$file_path")"',
+                "  done < \"$manifest\"",
+                "fi",
+                "opencuria_strip_environment_block",
+                f"rm -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
+                f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
+                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} ]; then",
+                "  tmp_bashrc=$(mktemp)",
+                f"  grep -vxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f"{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} > \"$tmp_bashrc\" || true",
+                f"  cat \"$tmp_bashrc\" > {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                '  rm -f "$tmp_bashrc"',
+                "fi",
+                "rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*",
+                "rm -f /root/.ssh/config /root/.ssh/known_hosts",
+                f"rm -rf {shlex.quote(WORKSPACE_CREDENTIAL_DIR)}",
+                "rm -rf /tmp/opencuria-op-*",
+                "find /var/lib/cloud/instances -type f "
+                "\\( -name 'user-data.txt' -o -name 'user-data.txt.i' "
+                "-o -name 'cloud-config.txt' -o -path '*/scripts/runcmd' \\) "
+                "-delete 2>/dev/null || true",
+            ]
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", cleanup_script],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to remove workspace credentials: {output}")
+        log.info("workspace_credentials_removed")
+
+    async def inject_workspace_credentials(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        env_vars: dict[str, str] | None,
+        files: list[dict[str, Any]] | None,
+        ssh_keys: list[str] | None,
+        log,
+    ) -> bool:
+        """Persist credentials on the workspace disk, replacing any previous set.
+
+        Returns True when credential material was written, False when the
+        workspace has no attached secrets after a clean remove.
+        """
+
+        await self.remove_workspace_credentials(runtime, instance_id, log)
+
+        env_vars = env_vars or {}
+        credential_files = files or []
+        ssh_keys = ssh_keys or []
+        if not env_vars and not credential_files and not ssh_keys:
+            return False
+
+        staging_dir = WORKSPACE_CREDENTIAL_DIR
+        files_dir = f"{staging_dir}/files"
+        ssh_dir = f"{staging_dir}/ssh"
+        install_path = f"{staging_dir}/install.sh"
+        archive_files: list[tuple[str, bytes, int]] = []
+        installed_paths: list[str] = [
+            WORKSPACE_CREDENTIAL_ENV_FILE,
+            WORKSPACE_CREDENTIAL_PROFILE_D,
+            WORKSPACE_CREDENTIAL_MANIFEST,
+        ]
+        helper_lines = self._credential_path_helpers()
+        install_lines = [
+            "#!/bin/sh",
+            "set -eu",
+            *helper_lines,
+            f"mkdir -p {shlex.quote(WORKSPACE_CREDENTIAL_DIR)} /root/.ssh /etc/profile.d",
+            f"install -m 600 {shlex.quote(staging_dir + '/env.sh')} "
+            f"{shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}",
+            f"install -m 644 {shlex.quote(staging_dir + '/profile.d.sh')} "
+            f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
+            "opencuria_strip_environment_block",
+            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_START)} "
+            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
+        ]
+
+        env_export_lines = [
+            "#!/bin/sh",
+            'export PATH="/root/.local/bin:$PATH"',
+        ]
+        for key, value in env_vars.items():
+            env_export_lines.append(f"export {key}={shlex.quote(str(value))}")
+            install_lines.append(
+                "printf '%s\\n' "
+                f"{shlex.quote(f'{key}={value}')} "
+                f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
+            )
+        install_lines.append(
+            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_END)} "
+            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
+        )
+        archive_files.append(
+            ("env.sh", ("\n".join(env_export_lines) + "\n").encode("utf-8"), 0o600)
+        )
+        archive_files.append(
+            (
+                "profile.d.sh",
+                (f"{WORKSPACE_CREDENTIAL_BASHRC_LINE}\n").encode("utf-8"),
+                0o644,
+            )
+        )
+
+        install_lines.extend(
+            [
+                f"touch {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                f"if ! grep -qxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f"{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}; then",
+                f"  printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
+                f">> {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
+                "fi",
+            ]
+        )
+
+        for index, credential_file in enumerate(credential_files, start=1):
+            source_relpath = f"files/credential_{index}"
+            source_abspath = f"{files_dir}/credential_{index}"
+            target_path = str(credential_file["target_path"])
+            mode = int(credential_file.get("mode", 0o600))
+            content = str(credential_file.get("content", ""))
+            archive_files.append((source_relpath, content.encode("utf-8"), 0o600))
+            install_lines.extend(
+                [
+                    "target_path=$(opencuria_resolve_credential_path "
+                    f"{shlex.quote(target_path)})",
+                    'mkdir -p "$(dirname "$target_path")"',
+                    f"install -m {mode:o} {shlex.quote(source_abspath)} "
+                    '"$target_path"',
+                ]
+            )
+            installed_paths.append(target_path)
+
+        if ssh_keys:
+            config_lines = [
+                "Host *",
+                "    StrictHostKeyChecking accept-new",
+                "    UserKnownHostsFile /root/.ssh/known_hosts",
+                "    IdentitiesOnly yes",
+            ]
+            for index, key_pem in enumerate(ssh_keys):
+                key_name = "id_ed25519" if index == 0 else f"id_ed25519_{index + 1}"
+                archive_files.append(
+                    (
+                        f"ssh/{key_name}",
+                        key_pem.rstrip().encode("utf-8") + b"\n",
+                        0o600,
+                    )
+                )
+                install_lines.append(
+                    f"install -m 600 {shlex.quote(ssh_dir + '/' + key_name)} "
+                    f"{shlex.quote('/root/.ssh/' + key_name)}"
+                )
+                config_lines.append(f"    IdentityFile /root/.ssh/{key_name}")
+                installed_paths.append(f"/root/.ssh/{key_name}")
+            archive_files.append(("ssh/known_hosts", b"", 0o600))
+            archive_files.append(
+                (
+                    "ssh/config",
+                    ("\n".join(config_lines) + "\n").encode("utf-8"),
+                    0o600,
+                )
+            )
+            install_lines.extend(
+                [
+                    f"install -m 600 {shlex.quote(ssh_dir + '/config')} /root/.ssh/config",
+                    f"install -m 600 {shlex.quote(ssh_dir + '/known_hosts')} "
+                    "/root/.ssh/known_hosts",
+                ]
+            )
+            installed_paths.extend(["/root/.ssh/config", "/root/.ssh/known_hosts"])
+
+        manifest = "".join(f"{path}\n" for path in installed_paths)
+        archive_files.append(
+            ("manifest", manifest.encode("utf-8"), 0o600)
+        )
+        archive_files.append(
+            ("install.sh", ("\n".join(install_lines) + "\n").encode("utf-8"), 0o700)
+        )
+
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["mkdir", "-p", staging_dir, f"{staging_dir}/files", f"{staging_dir}/ssh"],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Failed to create credential staging directory: {output}"
+            )
+
+        archive_data = self._build_tar_entries(archive_files)
+        await runtime.put_archive(instance_id, staging_dir, archive_data)
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", f". {shlex.quote(install_path)}"],
+            workdir="/root",
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to inject workspace credentials: {output}")
+
+        log.info(
+            "workspace_credentials_injected",
+            has_env=bool(env_vars),
+            file_count=len(credential_files),
+            ssh_key_count=len(ssh_keys),
+        )
+        return True
 
     # -- workspace lifecycle ---------------------------------------------------
 
@@ -641,21 +615,21 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         runtime_type: str = "docker",
         image_tag: str | None = None,
         base_image_path: str | None = None,
-    ) -> uuid.UUID:
-        """Create a new workspace, clone repos, run configure commands.
+    ) -> tuple[uuid.UUID, bool]:
+        """Create a new workspace, inject credentials, and clone repos.
 
         Args:
             repos: Git repository URLs to clone into the workspace.
-            env_vars: Optional environment variables available during initial
-                repository clone/configure steps.
-            files: Optional credential files available during initial
-                repository clone/configure steps.
-            ssh_keys: Optional SSH private keys available during initial
-                repository clone/configure steps.
+            env_vars: Environment variables persisted in the workspace
+                until a controlled stop.
+            files: Credential files persisted in the workspace until a
+                controlled stop.
+            ssh_keys: SSH private keys persisted in the workspace until a
+                controlled stop.
             workspace_id: Workspace ID assigned by the backend.
             runtime_type: Which runtime to use (``"docker"`` or ``"qemu"``).
 
-        Returns the workspace UUID.
+        Returns the workspace UUID and whether credentials were injected.
         """
         if workspace_id is None:
             workspace_id = uuid.uuid4()
@@ -723,13 +697,7 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime_type=runtime_type,
         )
 
-        await self._cleanup_legacy_workspace_credentials(
-            runtime,
-            instance_id,
-            log,
-        )
-
-        credential_context = await self._create_operation_credential_context(
+        credentials_present = await self.inject_workspace_credentials(
             runtime,
             instance_id,
             env_vars,
@@ -738,93 +706,35 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             log,
         )
 
-        try:
-            # Clone repositories
-            for repo_url in repos:
-                log.info("cloning_repo", repo=repo_url)
-                exit_code, output = await self._exec_command(
-                    runtime,
-                    instance_id,
-                    {
-                        "args": ["git", "clone", repo_url],
-                        "workdir": "/workspace",
-                        "env": {},
-                        "description": f"Clone repository: {repo_url}",
-                    },
-                    credential_context=credential_context,
-                )
-                if exit_code != 0:
-                    log.warning("repo_clone_failed", repo=repo_url, output=output)
-                else:
-                    log.info("repo_cloned", repo=repo_url)
-
-        finally:
-            await self._cleanup_operation_credential_context(
+        for repo_url in repos:
+            log.info("cloning_repo", repo=repo_url)
+            exit_code, output = await self._exec_command(
                 runtime,
                 instance_id,
-                credential_context,
-                log,
+                {
+                    "args": ["git", "clone", repo_url],
+                    "workdir": "/workspace",
+                    "env": {},
+                    "description": f"Clone repository: {repo_url}",
+                },
             )
+            if exit_code != 0:
+                log.warning("repo_clone_failed", repo=repo_url, output=output)
+            else:
+                log.info("repo_cloned", repo=repo_url)
 
-        # Update cache status
         self._cache[workspace_id].status = "running"
 
-        log.info("workspace_ready")
-        return workspace_id
+        log.info("workspace_ready", credentials_present=credentials_present)
+        return workspace_id, credentials_present
 
-    async def prepare_operation(
-        self,
-        workspace_id: uuid.UUID,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-    ) -> PreparedOperation:
-        """Resolve runtime target and create a reusable credential context."""
+    async def stop_workspace(self, workspace_id: uuid.UUID) -> bool:
+        """Remove credentials then stop a running workspace.
 
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if not await runtime.workspace_exists(info.instance_id):
-            self._cache.pop(workspace_id, None)
-            raise RuntimeError("Workspace instance no longer exists")
-
-        await self._cleanup_legacy_workspace_credentials(
-            runtime,
-            info.instance_id,
-            log,
-        )
-
-        credential_context = await self._create_operation_credential_context(
-            runtime,
-            info.instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
-        )
-        return PreparedOperation(
-            workspace_id=workspace_id,
-            instance_id=info.instance_id,
-            runtime=runtime,
-            log=log,
-            credential_context=credential_context,
-        )
-
-    async def cleanup_operation(self, prepared: PreparedOperation) -> None:
-        """Remove any temporary credential material for a prepared operation."""
-
-        await self._cleanup_operation_credential_context(
-            prepared.runtime,
-            prepared.instance_id,
-            prepared.credential_context,
-            prepared.log,
-        )
-
-    async def stop_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Stop a running workspace."""
+        Returns False because credentials are stripped before the instance
+        is stopped. Raises if credential removal fails so the workspace
+        stays running with secrets still present.
+        """
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -832,9 +742,11 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
 
+        await self.remove_workspace_credentials(runtime, info.instance_id, log)
         await runtime.stop_workspace(info.instance_id)
         info.status = "exited"
         log.info("workspace_stopped")
+        return False
 
     async def resume_workspace(
         self,
@@ -842,8 +754,11 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
-    ) -> None:
-        """Resume (start) a previously stopped workspace."""
+        env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        ssh_keys: list[str] | None = None,
+    ) -> bool:
+        """Resume a stopped workspace and re-inject persistent credentials."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -864,7 +779,38 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
 
         await runtime.start_workspace(info.instance_id)
         info.status = "running"
-        log.info("workspace_resumed")
+        credentials_present = await self.inject_workspace_credentials(
+            runtime,
+            info.instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
+        log.info("workspace_resumed", credentials_present=credentials_present)
+        return credentials_present
+
+    async def inject_credentials(
+        self,
+        workspace_id: uuid.UUID,
+        env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        ssh_keys: list[str] | None = None,
+    ) -> bool:
+        """Replace persistent credentials on a running workspace."""
+        log = logger.bind(workspace_id=str(workspace_id))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        return await self.inject_workspace_credentials(
+            runtime,
+            info.instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
 
     async def update_workspace_resources(
         self,
@@ -1199,54 +1145,44 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        prepared: PreparedOperation | None = None,
     ) -> str:
         """Open an interactive PTY shell in the workspace.
 
         Returns a ``terminal_id`` that identifies this PTY session.
+        Persistent workspace credentials are sourced via a login shell.
         """
-        prepared = prepared or await self.prepare_operation(
-            workspace_id,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-        log = prepared.log
-        terminal_command = ["/bin/bash", "-l"]
-        if prepared.credential_context is not None:
-            terminal_command = [
-                "/bin/bash",
-                "-lc",
-                (
-                    f". {shlex.quote(prepared.credential_context.bootstrap_script)} "
-                    ">/dev/null 2>&1; exec /bin/bash -l"
-                ),
-            ]
+        log = logger.bind(workspace_id=str(workspace_id))
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        if not await runtime.workspace_exists(info.instance_id):
+            self._cache.pop(workspace_id, None)
+            raise RuntimeError("Workspace instance no longer exists")
 
-        handle = await prepared.runtime.exec_pty(
-            prepared.instance_id,
+        terminal_command = [
+            "/bin/bash",
+            "-lc",
+            (
+                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+                f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
+                ">/dev/null 2>&1; fi; exec /bin/bash -l"
+            ),
+        ]
+
+        handle = await runtime.exec_pty(
+            info.instance_id,
             cols=cols,
             rows=rows,
             workdir="/workspace",
-            env={
-                "TERM": "xterm-256color",
-                **(
-                    prepared.credential_context.environment
-                    if prepared.credential_context
-                    else {}
-                ),
-            },
+            env={"TERM": "xterm-256color"},
             command=terminal_command,
         )
 
         terminal_id = str(uuid.uuid4())
         self._terminals[terminal_id] = TerminalSession(
             handle=handle,
-            runtime=prepared.runtime,
-            credential_context=prepared.credential_context,
+            runtime=runtime,
         )
         log.info("terminal_started", terminal_id=terminal_id)
         return terminal_id
@@ -1294,12 +1230,6 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         if entry is None:
             return
         await entry.runtime.pty_close(entry.handle)
-        await self._cleanup_operation_credential_context(
-            entry.runtime,
-            entry.handle.instance_id,
-            entry.credential_context,
-            logger.bind(terminal_id=terminal_id),
-        )
         logger.info("terminal_closed", terminal_id=terminal_id)
 
     # -- desktop session (KasmVNC) -----------------------------------------
@@ -1888,7 +1818,12 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         marker_out = "OPENCURIA_STDOUT"
         marker_err = "OPENCURIA_STDERR"
         inner = " ".join(shlex.quote(arg) for arg in argv)
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
+        )
         wrapper = (
+            f"{source}"
             f"__oc_out=$(mktemp); __oc_err=$(mktemp); "
             f"sh -c {shlex.quote(inner)} >\"$__oc_out\" 2>\"$__oc_err\"; "
             f"__oc_code=$?; "
@@ -1932,10 +1867,15 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         marker_out = "OPENCURIA_LINE_STDOUT:"
         marker_err = "OPENCURIA_LINE_STDERR:"
         inner = " ".join(shlex.quote(arg) for arg in argv)
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
+        )
         # Portable fifo-based streaming wrapper: multiplexes the child
         # stdout/stderr into tagged lines on the combined output stream,
         # then reports the exit code on the last line.
         portable = (
+            f"{source}"
             "__oc_dir=$(mktemp -d); "
             "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
             "mkfifo \"$__oc_o\" \"$__oc_e\"; "
@@ -2170,10 +2110,10 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
         env_vars: dict[str, str] | None = None,
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
-    ) -> uuid.UUID:
-        """Create a workspace from an image artifact.
+    ) -> tuple[uuid.UUID, bool]:
+        """Create a workspace from an image artifact and inject credentials.
 
-        Creates a new workspace backed by the artifact's disk state.
+        Credentials remain on disk until a controlled stop.
         """
         runtime = self._get_runtime_by_type(runtime_type)
         if not runtime.supports_image_artifacts:
@@ -2196,31 +2136,19 @@ find /var/lib/cloud/instances -type f \\( -name 'user-data.txt' -o -name 'user-d
             runtime_type=runtime_type,
         )
 
-        logger.info(
-            "workspace_created_from_image_artifact",
+        log = logger.bind(
             workspace_id=str(new_workspace_id),
             image_artifact_id=image_artifact_id,
             runtime_type=runtime_type,
         )
+        log.info("workspace_created_from_image_artifact")
 
-        if env_vars or files or ssh_keys:
-            log = logger.bind(
-                workspace_id=str(new_workspace_id),
-                image_artifact_id=image_artifact_id,
-                runtime_type=runtime_type,
-            )
-            credential_context = await self._create_operation_credential_context(
-                runtime,
-                instance_id,
-                env_vars,
-                files,
-                ssh_keys,
-                log,
-            )
-            await self._cleanup_operation_credential_context(
-                runtime,
-                instance_id,
-                credential_context,
-                log,
-            )
-        return new_workspace_id
+        credentials_present = await self.inject_workspace_credentials(
+            runtime,
+            instance_id,
+            env_vars,
+            files,
+            ssh_keys,
+            log,
+        )
+        return new_workspace_id, credentials_present

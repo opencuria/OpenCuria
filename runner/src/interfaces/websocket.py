@@ -487,7 +487,7 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="create_workspace")
 
             try:
-                ws_id = await self._service.create_workspace(
+                ws_id, credentials_present = await self._service.create_workspace(
                     repos=data.get("repos", []),
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
@@ -506,6 +506,7 @@ class WebSocketInterface(Interface):
                         "task_id": task_id,
                         "workspace_id": str(ws_id),
                         "status": "created",
+                        "credentials_present": credentials_present,
                     },
                 )
                 log.info("task_completed", workspace_id=str(ws_id))
@@ -575,12 +576,13 @@ class WebSocketInterface(Interface):
                 task_id=task_id, workspace_id=str(workspace_id)
             )
             try:
-                await self._service.stop_workspace(workspace_id)
+                credentials_present = await self._service.stop_workspace(workspace_id)
                 await sio.emit(
                     "workspace:stopped",
                     {
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
+                        "credentials_present": credentials_present,
                     },
                 )
                 log.info("workspace_stopped")
@@ -599,17 +601,21 @@ class WebSocketInterface(Interface):
                 task_id=task_id, workspace_id=str(workspace_id)
             )
             try:
-                await self._service.resume_workspace(
+                credentials_present = await self._service.resume_workspace(
                     workspace_id,
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
                     qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
+                    env_vars=data.get("env_vars", {}),
+                    files=data.get("files", []),
+                    ssh_keys=data.get("ssh_keys", []),
                 )
                 await sio.emit(
                     "workspace:resumed",
                     {
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
+                        "credentials_present": credentials_present,
                     },
                 )
                 log.info("workspace_resumed")
@@ -649,6 +655,39 @@ class WebSocketInterface(Interface):
                     {"task_id": task_id, "error": str(exc)},
                 )
                 log.exception("update_workspace_failed")
+
+        @sio.on("task:inject_credentials")
+        async def on_inject_credentials(data: dict) -> None:
+            task_id = data.get("task_id", str(uuid.uuid4()))
+            workspace_id = uuid.UUID(data["workspace_id"])
+            log = logger.bind(
+                task_id=task_id, workspace_id=str(workspace_id)
+            )
+            try:
+                credentials_present = await self._service.inject_credentials(
+                    workspace_id,
+                    env_vars=data.get("env_vars", {}),
+                    files=data.get("files", []),
+                    ssh_keys=data.get("ssh_keys", []),
+                )
+                await sio.emit(
+                    "workspace:credentials_injected",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "credentials_present": credentials_present,
+                    },
+                )
+                log.info(
+                    "workspace_credentials_injected",
+                    credentials_present=credentials_present,
+                )
+            except Exception as exc:
+                await sio.emit(
+                    "workspace:error",
+                    {"task_id": task_id, "error": str(exc)},
+                )
+                log.exception("inject_credentials_failed")
 
         @sio.on("task:remove_workspace")
         async def on_remove_workspace(data: dict) -> None:
@@ -718,19 +757,11 @@ class WebSocketInterface(Interface):
             )
             log.info("task_received", task="start_terminal")
 
-            prepared = None
             try:
-                prepared = await self._service.prepare_operation(
-                    workspace_id,
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
                 terminal_id = await self._service.start_terminal(
                     workspace_id,
                     cols=cols,
                     rows=rows,
-                    prepared=prepared,
                 )
                 await sio.emit(
                     "terminal:started",
@@ -780,11 +811,6 @@ class WebSocketInterface(Interface):
 
                 log.info("terminal_started", terminal_id=terminal_id)
             except Exception as exc:
-                if prepared is not None:
-                    try:
-                        await self._service.cleanup_operation(prepared)
-                    except Exception:
-                        log.exception("terminal_operation_context_cleanup_failed")
                 await sio.emit(
                     "workspace:error",
                     {"task_id": task_id, "error": str(exc)},
@@ -1508,7 +1534,7 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             log.info("task_received", task="create_workspace_from_image_artifact")
             try:
-                ws_id = await self._service.create_workspace_from_image_artifact(
+                ws_id, credentials_present = await self._service.create_workspace_from_image_artifact(
                     image_artifact_id=image_artifact_id,
                     new_workspace_id=new_workspace_id,
                     runtime_type=runtime_type,
@@ -1525,6 +1551,7 @@ class WebSocketInterface(Interface):
                         "task_id": task_id,
                         "workspace_id": str(ws_id),
                         "status": "created",
+                        "credentials_present": credentials_present,
                     },
                 )
                 log.info(

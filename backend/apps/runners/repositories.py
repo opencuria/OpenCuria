@@ -357,6 +357,16 @@ class WorkspaceRepository:
         return workspace
 
     @staticmethod
+    def update_credentials_present(
+        workspace: Workspace,
+        credentials_present: bool,
+    ) -> Workspace:
+        """Persist whether credential material is currently on workspace disk."""
+        workspace.credentials_present = credentials_present
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+        return workspace
+
+    @staticmethod
     def update_active_operation(
         workspace: Workspace,
         active_operation: WorkspaceOperation | None,

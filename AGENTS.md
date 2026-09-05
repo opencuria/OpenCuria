@@ -259,10 +259,11 @@ and executed there. The runner exposes plain operations the harness calls via
 
 `WorkspaceService` is the **only** place where container orchestration logic lives:
 - `sync_from_runtime()` — rebuilds the in-memory cache from Docker containers
-- `create_workspace(repos, env_vars, ssh_keys, files, workspace_id, ...) -> UUID`
-- `exec_harness_command[_stream](workspace_id, command, workdir, env)` — harness exec
-- `stop_workspace(workspace_id)`
-- `resume_workspace(workspace_id)`
+- `create_workspace(repos, env_vars, ssh_keys, files, workspace_id, ...) -> (UUID, credentials_present)`
+- `inject_workspace_credentials` / `remove_workspace_credentials` — persist secrets on disk while running; strip them before a controlled stop
+- `exec_harness_command[_stream](workspace_id, command, workdir, env)` — harness exec (sources persistent env)
+- `stop_workspace(workspace_id)` — removes credentials, then stops
+- `resume_workspace(workspace_id, ..., env_vars, files, ssh_keys)` — starts, then re-injects
 - `remove_workspace(workspace_id)`
 - `list_workspaces() -> list[WorkspaceInfo]`
 - `get_workspace(workspace_id) -> WorkspaceInfo`
@@ -353,7 +354,7 @@ The backend follows **Clean Architecture** with strict separation of concerns:
 | Model | Purpose |
 |-------|--------|
 | `Runner` | Registered runner instance. Tracks name, hashed API token, available runtimes, online/offline status, Socket.IO session ID. |
-| `Workspace` | A workspace on a runner. FK to Runner. Tracks status (`creating` → `running` → `stopped` / `failed`), runtime type (`docker`/`qemu`). |
+| `Workspace` | A workspace on a runner. FK to Runner. Tracks status (`creating` → `running` → `stopped` / `failed`), runtime type (`docker`/`qemu`), attached credentials, and `credentials_present` (secrets currently on disk). |
 | `Task` | A dispatched command to a runner. FK to Runner, optional FK to Workspace. Tracks type, status, error message. |
 | `HarnessSession`/`HarnessMessage`/`HarnessPart` | Agent conversation with streamed block parts (text/reasoning/tool/step/subtask/patch). |
 | `PermissionRequest` | Tool permission gate (`pending`/`approved`/`rejected`, once/always). |
@@ -418,7 +419,7 @@ Two types are supported:
 
 `CredentialService` records are admin-managed catalog entries (one type per service). `Credential` records are org-scoped instances with an encrypted value.
 
-When a workspace is created, `CredentialSvc.resolve_credentials()` decrypts all attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars`/`files`/`ssh_keys`. The backend sends them to the runner in the `task:create_workspace` payload. The runner materializes them as a per-operation credential context (bootstrap/cleanup scripts) **before** cloning repos and tears it down afterwards.
+When a workspace is created or resumed, `CredentialSvc.resolve_credentials()` decrypts attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars`/`files`/`ssh_keys`. The backend sends them to the runner in the create/resume payload. The runner persists them on the workspace disk (env file, SSH keys, credential files) for the whole running lifetime. A controlled stop removes them **before** the VM/container is stopped. `Workspace.credentials_present` records whether secrets are still on disk. Heartbeat/external stops do **not** clear the flag. Image capture is rejected while `credentials_present` is true.
 
 ---
 
@@ -625,16 +626,18 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `runner:register` | `{supported_runtimes: ["docker", "qemu"], status}` |
 | Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?}]}` |
 | Backend -> Runner | `task:create_workspace` | `{task_id, workspace_id, repos, runtime_type, env_vars, files, ssh_keys, image_tag/base_image_path}` |
-| Runner -> Backend | `workspace:created` | `{task_id, workspace_id, status}` |
+| Runner -> Backend | `workspace:created` | `{task_id, workspace_id, status, credentials_present}` |
+| Backend -> Runner | `task:resume_workspace` | `{task_id, workspace_id, qemu_*, env_vars, files, ssh_keys}` |
+| Runner -> Backend | `workspace:resumed` | `{task_id, workspace_id, credentials_present}` |
+| Backend -> Runner | `task:inject_credentials` | `{task_id, workspace_id, env_vars, files, ssh_keys}` |
+| Runner -> Backend | `workspace:credentials_injected` | `{task_id, workspace_id, credentials_present}` |
 | Backend -> Runner | `harness:exec_stream` / `harness:exec_wait` | `{request_id, workspace_id, command, workdir, env, timeout}` |
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
 | Backend -> Runner | `harness:cancel` | `{request_id}` |
 | Backend -> Runner | `task:stop_workspace` | `{task_id, workspace_id}` |
-| Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id}` |
-| Backend -> Runner | `task:resume_workspace` | `{task_id, workspace_id}` |
-| Runner -> Backend | `workspace:resumed` | `{task_id, workspace_id}` |
+| Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id, credentials_present}` |
 | Backend -> Runner | `task:remove_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:removed` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:error` | `{task_id, error}` |

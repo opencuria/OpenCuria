@@ -57,7 +57,9 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Save the current state of this workspace as an image. Credentials are selected separately when creating a workspace from the image.
+          Save the current state of this workspace as an image. Credentials must
+          be off disk first — stop the workspace to strip them, then capture.
+          If it was stopped externally, resume and stop it again.
         </DialogDescription>
       </DialogHeader>
 

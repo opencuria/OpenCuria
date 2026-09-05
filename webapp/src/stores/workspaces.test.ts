@@ -36,6 +36,7 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: overrides.has_active_session ?? false,
     runner_online: overrides.runner_online ?? true,
     credential_ids: overrides.credential_ids ?? [],
+    credentials_present: overrides.credentials_present ?? false,
   }
 }
 

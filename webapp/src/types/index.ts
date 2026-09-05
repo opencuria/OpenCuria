@@ -224,6 +224,7 @@ export interface Workspace {
   has_active_session: boolean
   runner_online: boolean
   credential_ids: string[]
+  credentials_present: boolean
   base_image_name?: string | null
 }
 
@@ -255,6 +256,7 @@ export interface WorkspaceUpdateOut {
   updated_at: string
   active_operation: WorkspaceOperation | null
   credential_ids: string[]
+  credentials_present: boolean
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null

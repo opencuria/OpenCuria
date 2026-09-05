@@ -151,6 +151,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         has_active_session=bool(getattr(workspace, "has_active_harness_session", False)),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
+        credentials_present=bool(getattr(workspace, "credentials_present", False)),
         base_image_name=_workspace_base_image_name(workspace),
     )
 
@@ -609,6 +610,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             has_active_session=False,
             runner_online=workspace.runner.status == RS.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
+            credentials_present=bool(workspace.credentials_present),
             base_image_name=_workspace_base_image_name(workspace),
         )
     except NotFoundError as e:
@@ -843,6 +845,7 @@ async def update_workspace(request: HttpRequest, workspace_id: uuid.UUID, payloa
             updated_at=workspace.updated_at,
             active_operation=workspace.active_operation,
             credential_ids=_workspace_credential_ids(workspace),
+            credentials_present=bool(workspace.credentials_present),
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=workspace.qemu_disk_size_gb,

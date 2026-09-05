@@ -19,11 +19,15 @@ class DummyService:
         self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
     async def create_workspace_from_image_artifact(self, **kwargs):
-        return kwargs["new_workspace_id"]
+        return kwargs["new_workspace_id"], bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
+        )
 
     async def create_workspace(self, **kwargs):
         self.create_workspace_calls.append(kwargs)
-        return kwargs.get("workspace_id") or uuid.uuid4()
+        return kwargs.get("workspace_id") or uuid.uuid4(), bool(
+            kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
+        )
 
 
 class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):

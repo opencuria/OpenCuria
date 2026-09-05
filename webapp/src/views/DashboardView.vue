@@ -66,7 +66,11 @@ function setupSocketListeners(): void {
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
-      workspaceStore.updateWorkspaceStatus(data.workspace_id, data.status as WorkspaceStatus)
+      workspaceStore.updateWorkspaceStatus(
+        data.workspace_id,
+        data.status as WorkspaceStatus,
+        data.credentials_present,
+      )
     }),
   )
 

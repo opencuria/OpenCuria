@@ -82,6 +82,7 @@ class RunnerService:
         # already been sent, to avoid emitting duplicate cleanup tasks on every
         # heartbeat while one is still in flight.
         self._pending_unknown_workspace_cleanup: set[tuple[str, str]] = set()
+        self._pending_credential_inject: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------
     # Runner lifecycle
@@ -376,6 +377,79 @@ class RunnerService:
             },
             workspace_id,
         )
+
+    def _forward_workspace_status(
+        self,
+        workspace: "Workspace",
+        *,
+        task_id: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """Forward workspace status and credential presence to the frontend."""
+        payload = {
+            "workspace_id": str(workspace.id),
+            "status": status or workspace.status,
+            "credentials_present": bool(workspace.credentials_present),
+        }
+        if task_id:
+            payload["task_id"] = task_id
+        self._forward_to_frontend(
+            "workspace:status_changed",
+            payload,
+            str(workspace.id),
+        )
+
+    @staticmethod
+    def _resolved_credentials_payload(resolved) -> dict:
+        """Serialize resolved credentials for a runner task payload."""
+        return {
+            "env_vars": dict(getattr(resolved, "env_vars", None) or {}),
+            "files": [
+                {
+                    "target_path": file.target_path,
+                    "content": file.content,
+                    "mode": file.mode,
+                }
+                for file in (getattr(resolved, "files", None) or [])
+            ],
+            "ssh_keys": list(getattr(resolved, "ssh_keys", None) or []),
+        }
+
+    async def _dispatch_credential_inject(self, workspace: "Workspace") -> None:
+        """Replace persisted credentials on a running workspace."""
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+        key = (str(runner.id), str(workspace.id))
+        if key in self._pending_credential_inject:
+            return
+
+        resolved = await sync_to_async(
+            CredentialSvc().resolve_workspace_credentials
+        )(workspace)
+        task_id = generate_uuid()
+        task = await sync_to_async(self.tasks.create)(
+            task_id=task_id,
+            runner=runner,
+            task_type=TaskType.INJECT_CREDENTIALS,
+            workspace=workspace,
+        )
+        self._pending_credential_inject.add(key)
+        try:
+            await self._emit_to_runner(
+                runner,
+                "task:inject_credentials",
+                {
+                    "task_id": str(task_id),
+                    "workspace_id": str(workspace.id),
+                    **self._resolved_credentials_payload(resolved),
+                },
+            )
+            await sync_to_async(self.tasks.mark_in_progress)(task)
+        except Exception as exc:
+            self._pending_credential_inject.discard(key)
+            await sync_to_async(self.tasks.fail)(task, str(exc))
+            raise
 
     async def _set_workspace_operation(
         self,
@@ -725,6 +799,11 @@ class RunnerService:
                 workspace,
                 credentials,
             )
+            if workspace.status == WorkspaceStatus.RUNNING:
+                runner = workspace.runner
+                if not runner.is_online:
+                    raise RunnerOfflineError(str(runner.id))
+                await self._dispatch_credential_inject(workspace)
 
         self._ensure_workspace_available(workspace)
 
@@ -904,6 +983,10 @@ class RunnerService:
             workspace=workspace,
         )
 
+        workspace_credentials = await sync_to_async(
+            CredentialSvc().resolve_workspace_credentials
+        )(workspace)
+
         await self._dispatch_workspace_task(
             runner=runner,
             event="task:resume_workspace",
@@ -916,6 +999,7 @@ class RunnerService:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
+                **self._resolved_credentials_payload(workspace_credentials),
             },
         )
         return task
@@ -1018,6 +1102,7 @@ class RunnerService:
         workspace_id: str,
         status: str,
         runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:created event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1035,14 +1120,14 @@ class RunnerService:
 
         self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
         self.workspaces.update_active_operation(workspace, None)
+        if credentials_present is not None:
+            self.workspaces.update_credentials_present(
+                workspace, bool(credentials_present)
+            )
         self.tasks.complete(task)
         logger.info("Workspace created: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "running", "task_id": task_id},
-            workspace_id,
-        )
+        self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_stopped(
@@ -1061,19 +1146,24 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.STOPPED)
             self.workspaces.update_active_operation(workspace, None)
+            self.workspaces.update_credentials_present(workspace, False)
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
         self._cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "stopped", "task_id": task_id},
-            workspace_id,
-        )
+        if workspace:
+            self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_resumed(
-        self, task_id: str, workspace_id: str, runner_id: str | None = None
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1088,15 +1178,51 @@ class RunnerService:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
             self.workspaces.update_active_operation(workspace, None)
+            if credentials_present is not None:
+                self.workspaces.update_credentials_present(
+                    workspace, bool(credentials_present)
+                )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)
 
-        self._forward_to_frontend(
-            "workspace:status_changed",
-            {"workspace_id": workspace_id, "status": "running", "task_id": task_id},
-            workspace_id,
-        )
+        if workspace:
+            self._forward_workspace_status(workspace, task_id=task_id)
         self._forward_workspace_operation(workspace_id, None)
+
+    def handle_credentials_injected(
+        self,
+        task_id: str,
+        workspace_id: str,
+        credentials_present: bool,
+        runner_id: str | None = None,
+    ) -> None:
+        """Handle workspace:credentials_injected event from a runner."""
+        task = self.tasks.get_by_id(uuid.UUID(task_id))
+        if task is None:
+            logger.warning(
+                "Received workspace:credentials_injected for unknown task: %s",
+                task_id,
+            )
+            return
+
+        if not self._validate_task_runner(task, runner_id):
+            return
+
+        workspace = task.workspace
+        if workspace:
+            self.workspaces.update_credentials_present(
+                workspace, bool(credentials_present)
+            )
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
+            self._forward_workspace_status(workspace, task_id=task_id)
+        self.tasks.complete(task)
+        logger.info(
+            "Workspace credentials injected: %s present=%s",
+            workspace_id,
+            credentials_present,
+        )
 
     def handle_workspace_updated(
         self, task_id: str, workspace_id: str, runner_id: str | None = None
@@ -1134,6 +1260,9 @@ class RunnerService:
         workspace_id = str(workspace.id) if workspace else None
         if workspace:
             self.workspaces.update_active_operation(workspace, None)
+            self._pending_credential_inject.discard(
+                (str(workspace.runner_id), str(workspace.id))
+            )
         if workspace and task.type in {
             TaskType.CREATE_WORKSPACE,
             TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
@@ -1270,10 +1399,6 @@ class RunnerService:
             workspace=workspace,
         )
 
-        workspace_credentials = await sync_to_async(
-            CredentialSvc().resolve_workspace_credentials
-        )(workspace)
-
         await self._emit_to_runner(
             runner,
             "task:start_terminal",
@@ -1282,16 +1407,6 @@ class RunnerService:
                 "workspace_id": str(workspace_id),
                 "cols": cols,
                 "rows": rows,
-                "env_vars": workspace_credentials.env_vars,
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in workspace_credentials.files
-                ],
-                "ssh_keys": workspace_credentials.ssh_keys,
             },
         )
 
@@ -2068,14 +2183,7 @@ class RunnerService:
                     self.workspaces.update_status(
                         ws, WorkspaceStatus.FAILED
                     )
-                    self._forward_to_frontend(
-                        "workspace:status_changed",
-                        {
-                            "workspace_id": ws_id_str,
-                            "status": "failed",
-                        },
-                        ws_id_str,
-                    )
+                    self._forward_workspace_status(ws, status="failed")
                 self._cleanup_desktop_state(ws_id_str)
             else:
                 # Map Docker container status to workspace status
@@ -2096,14 +2204,7 @@ class RunnerService:
                         new_status,
                     )
                     self.workspaces.update_status(ws, new_status)
-                    self._forward_to_frontend(
-                        "workspace:status_changed",
-                        {
-                            "workspace_id": ws_id_str,
-                            "status": new_status,
-                        },
-                        ws_id_str,
-                    )
+                    self._forward_workspace_status(ws, status=new_status)
 
                 if not (
                     new_status == WorkspaceStatus.RUNNING
@@ -2111,6 +2212,15 @@ class RunnerService:
                 ):
                     self._cleanup_desktop_state(ws_id_str)
                     continue
+
+                if not ws.credentials_present and ws.credentials.exists():
+                    try:
+                        async_to_sync(self._dispatch_credential_inject)(ws)
+                    except Exception:
+                        logger.exception(
+                            "Failed to reconcile credentials for workspace %s",
+                            ws_id_str,
+                        )
 
                 if "desktop" in runner_payload:
                     self._sync_desktop_state_from_heartbeat(
@@ -3033,6 +3143,21 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             raise WorkspaceNotFoundError(str(workspace_id))
         self._ensure_workspace_available(workspace)
 
+        if workspace.status not in (
+            WorkspaceStatus.RUNNING,
+            WorkspaceStatus.STOPPED,
+        ):
+            raise WorkspaceStateError(
+                f"Workspace '{workspace_id}' is '{workspace.status}', "
+                "must be running or stopped to capture an image"
+            )
+        if workspace.credentials_present:
+            raise ConflictError(
+                "Workspace still has credentials on disk and cannot be captured. "
+                "Stop the workspace to remove them first. If it was stopped "
+                "externally, resume it and stop it again."
+            )
+
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
@@ -3733,9 +3858,9 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
     ) -> tuple["Workspace", "Task"]:
         """Create a workspace from an image artifact.
 
-        Credentials are explicitly supplied by the caller and injected for the
-        create operation only. Captured artifacts do not retain credential
-        associations.
+        Credentials are explicitly supplied by the caller and persisted in
+        the new workspace until a controlled stop. Captured artifacts do
+        not retain credential associations.
         """
         credential_svc = CredentialSvc()
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
