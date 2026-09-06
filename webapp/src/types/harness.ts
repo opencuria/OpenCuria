@@ -103,6 +103,8 @@ export interface HarnessPermissionRequest {
   title: string
   call_id?: string
   status?: 'pending' | 'approved' | 'rejected'
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string
 }
 
 /** Permission resolution choice (M6 `HarnessPermissionResolveIn`). */
@@ -128,6 +130,8 @@ export interface HarnessQuestionRequest {
   questions: HarnessQuestionItem[]
   call_id?: string
   status?: 'pending' | 'answered' | 'rejected' | 'timed_out'
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string
 }
 
 // --- REST payloads (M6 `backend/apps/harness/api.py`) ----------------------
@@ -212,6 +216,7 @@ export interface HarnessPermissionRequiredEvent {
   call_id?: string
   decision?: string
   remember?: string
+  agent_name?: string
 }
 
 export interface HarnessPermissionResolvedEvent {
@@ -229,6 +234,7 @@ export interface HarnessQuestionRequiredEvent {
   questions: HarnessQuestionItem[]
   call_id?: string
   status?: string
+  agent_name?: string
 }
 
 export interface HarnessQuestionResolvedEvent {

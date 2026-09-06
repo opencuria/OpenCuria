@@ -42,7 +42,7 @@ import {
   mergeBusyFetchedMessages,
   settleOpenStreamParts,
 } from '@/lib/harnessReducer'
-import { collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
+import { collectDescendantSessionIds, collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
 import { useNotificationStore } from './notifications'
 import { useHarnessConversationStore } from './harnessConversations'
 
@@ -82,17 +82,31 @@ export const useHarnessStore = defineStore('harness', () => {
     () => (activeSessionId.value ? (todosBySession.value[activeSessionId.value] ?? []) : []),
   )
 
+  const activeLineageIds = computed(() => {
+    if (!activeSessionId.value) return new Set<string>()
+    return new Set(collectDescendantSessionIds(activeSessionId.value, sessions.value))
+  })
+
   const activePermissionRequests = computed<HarnessPermissionRequest[]>(() =>
-    Object.values(pendingPermissions.value).filter(
-      (request) => request.session_id === activeSessionId.value,
-    ),
+    Object.values(pendingPermissions.value)
+      .filter((request) => activeLineageIds.value.has(request.session_id))
+      .map((request) => enrichGateAgent(request)),
   )
 
   const activeQuestionRequests = computed<HarnessQuestionRequest[]>(() =>
-    Object.values(pendingQuestions.value).filter(
-      (request) => request.session_id === activeSessionId.value,
-    ),
+    Object.values(pendingQuestions.value)
+      .filter((request) => activeLineageIds.value.has(request.session_id))
+      .map((request) => enrichGateAgent(request)),
   )
+
+  function enrichGateAgent<T extends { session_id: string; agent_name?: string }>(
+    request: T,
+  ): T {
+    if (request.agent_name) return request
+    const session = sessions.value.find((item) => item.id === request.session_id)
+    if (!session?.agent_name) return request
+    return { ...request, agent_name: session.agent_name }
+  }
 
   const rootSessions = computed(() =>
     sessions.value.filter((session) => !session.parent_id),

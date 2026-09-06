@@ -1888,8 +1888,12 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 }
                 for message in messages
             ],
-            "permissions": service.list_pending_permissions(session.id),
-            "questions": service.list_pending_questions(session.id),
+            "permissions": service.list_pending_permissions(
+                session.id, include_descendants=True
+            ),
+            "questions": service.list_pending_questions(
+                session.id, include_descendants=True
+            ),
         }
     )
 

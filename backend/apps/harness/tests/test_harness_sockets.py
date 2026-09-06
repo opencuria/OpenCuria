@@ -256,6 +256,7 @@ async def test_permission_event_emitted_once_with_request_id(
     assert permission_events[0]["request_id"]
     assert permission_events[0]["tool"] == "bash"
     assert permission_events[0]["call_id"] == "call-9"
+    assert permission_events[0]["agent_name"] == session.agent_name
     await service.resolve_permission(
         session=session,
         request_id=uuid.UUID(permission_events[0]["request_id"]),

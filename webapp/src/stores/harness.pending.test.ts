@@ -117,4 +117,51 @@ describe('harness store pending gate hydration', () => {
     expect(store.pendingQuestions['q-1']?.questions[0]?.question).toBe('Which color?')
     expect(store.pendingPermissions['other-perm']?.session_id).toBe('session-2')
   })
+
+  it('surfaces descendant permission and question gates on the parent session', () => {
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'child-1',
+        parent_id: 'session-1',
+        agent_name: 'explore',
+        title: 'Explore backend',
+      }),
+      makeSession({ id: 'session-2', parent_id: null, title: 'Other' }),
+    ]
+    store.setActiveSession('session-1')
+    store.handlePermissionRequired(
+      makePermission({
+        request_id: 'child-perm',
+        session_id: 'child-1',
+        agent_name: 'explore',
+      }),
+    )
+    store.handleQuestionRequired(
+      makeQuestion({ request_id: 'child-q', session_id: 'child-1', agent_name: 'explore' }),
+    )
+    store.handlePermissionRequired(
+      makePermission({ request_id: 'sibling-perm', session_id: 'session-2' }),
+    )
+
+    expect(store.activePermissionRequests.map((row) => row.request_id)).toEqual(['child-perm'])
+    expect(store.activePermissionRequests[0]?.agent_name).toBe('explore')
+    expect(store.activeQuestionRequests.map((row) => row.request_id)).toEqual(['child-q'])
+    expect(store.activeQuestionRequests[0]?.agent_name).toBe('explore')
+  })
+
+  it('fills agent_name from the child session when the gate omits it', () => {
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({ id: 'child-1', parent_id: 'session-1', agent_name: 'explore' }),
+    ]
+    store.setActiveSession('session-1')
+    store.handlePermissionRequired(
+      makePermission({ request_id: 'child-perm', session_id: 'child-1' }),
+    )
+
+    expect(store.activePermissionRequests[0]?.agent_name).toBe('explore')
+  })
 })

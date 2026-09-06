@@ -731,8 +731,12 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                 }
                 for message in messages
             ],
-            "permissions": service.list_pending_permissions(session.id),
-            "questions": service.list_pending_questions(session.id),
+            "permissions": service.list_pending_permissions(
+                session.id, include_descendants=True
+            ),
+            "questions": service.list_pending_questions(
+                session.id, include_descendants=True
+            ),
         }
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

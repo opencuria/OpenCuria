@@ -15,12 +15,12 @@ Permission design (OpenCode-like defaults):
   (``rm``, ``sudo``, build commands, …) goes through the ask gate.
 - ``general`` (subagent): ``{"*": "allow"}`` — delegated subtasks may
   use every tool (M5 wires up child sessions).
-- ``explore`` (subagent, read-only): ``edit`` is ``deny`` (covers the
-  ``write`` and ``edit`` tools, which share the ``edit`` permission
-  key), ``bash`` allows the same read-only commands as ``plan``,
-  hard-denies destructive commands (``rm``, ``sudo``, ``mv``, …) and
-  asks for anything else. Pure research tools (``read``, ``glob``,
-  ``grep``, ``list``, ``webfetch``) stay allowed.
+- ``explore`` (subagent, read-only): ``edit``/``write`` are ``deny``.
+  ``bash`` is ``allow`` (OpenCode-like, so research commands such as
+  ``find``/``rg`` do not block on a hidden child ask) with a
+  last-match deny list for destructive commands (``rm``, ``sudo``,
+  ``mv``, …). Pure research tools (``read``, ``glob``, ``grep``,
+  ``list``, ``webfetch``) stay allowed.
 - ``title`` / ``compaction`` (hidden): ``{"*": "deny"}`` so the loop
   offers no tools at all and answers text-only. ``title`` uses the
   ``"small"`` sentinel resolved to ``ProviderConfig.small_model`` at
@@ -39,7 +39,7 @@ SMALL_MODEL = "small"
 
 VALID_MODES: tuple[str, ...] = ("primary", "subagent", "hidden")
 
-#: Read-only shell commands shared by ``plan`` and ``explore``.
+#: Read-only shell commands allowed by ``plan`` without prompting.
 #: Matched with fnmatch against the full command line (``*`` matches
 #: any suffix, including the empty string, so ``"ls*"`` allows ``ls``).
 READ_ONLY_BASH_RULES: dict[str, str] = {
@@ -60,12 +60,10 @@ READ_ONLY_BASH_RULES: dict[str, str] = {
 #: specific allows must come after ``"*"`` to take effect.
 PLAN_BASH_RULES: dict[str, str] = {"*": "ask", **READ_ONLY_BASH_RULES}
 
-#: ``explore`` bash rules: read-only allowed, destructive denied,
-#: anything else asks. Order matters (last-match-wins): catch-all
-#: first, read-only allows next, destructive denies last.
+#: ``explore`` bash rules: research commands allowed, destructive
+#: denied. Order matters (last-match-wins): catch-all first, denies last.
 EXPLORE_BASH_RULES: dict[str, str] = {
-    "*": "ask",
-    **READ_ONLY_BASH_RULES,
+    "*": "allow",
     "rm *": "deny",
     "rmdir *": "deny",
     "sudo *": "deny",

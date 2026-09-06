@@ -480,6 +480,9 @@ Agents are static code definitions in `backend/apps/harness/agents/definitions.p
 (`build`/`plan` primary, `general`/`explore`/hidden `title`+`compaction`
 subagents, plus `computeruse` for desktop automation) — no DB records. Modes
 (`plan`/`build`) and per-agent permission rules come from the same definitions.
+`explore` allows research bash (`find`/`rg`/…) and denies edits plus
+destructive shell (`rm`/`sudo`/…); pending permission/question gates of
+child sessions surface on the parent composer (and on `GET …/parts`).
 The `computeruse` subagent exposes desktop tools only (spawned via `task`);
 session recordings are written under `.opencuria/computeruse/` and appended to
 chat as markdown video refs. Computer-use acquires a desktop lease for the

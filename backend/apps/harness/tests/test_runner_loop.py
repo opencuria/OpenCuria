@@ -363,6 +363,61 @@ async def test_explore_agent_filters_edit_tools() -> None:
     assert "read" in offered
 
 
+async def test_explore_research_bash_skips_ask() -> None:
+    """Explore allows find/rg-style bash without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "find /workspace -name '*.py'"}),
+            _text_step("found"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, on_permission=on_permission)
+    result = await runner.run("research", "explore", "m", "build", opts)
+    assert result.output == "found"
+    assert called == []
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
+    """Combined ask is logged even when the global evaluator default-allows."""
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _capture(event: str, **kwargs: Any) -> None:
+        captured.append((event, kwargs))
+
+    monkeypatch.setattr("apps.harness.runner.log.debug", _capture)
+    monkeypatch.setattr("apps.harness.runner.log.info", _capture)
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "find /workspace"}),
+            _text_step("ok"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, on_permission=on_permission)
+    opts.session_id = "plan-1"
+    await runner.run("plan it", "plan", "m", "plan", opts)
+    decisions = [item for item in captured if item[0] == "permission_decision"]
+    pending = [item for item in captured if item[0] == "permission_ask_pending"]
+    assert decisions
+    assert decisions[0][1]["decision"] == "ask"
+    assert decisions[0][1]["tool"] == "bash"
+    assert decisions[0][1]["session_id"] == "plan-1"
+    assert pending
+    assert pending[0][1]["session_id"] == "plan-1"
+
+
 async def test_unknown_agent_raises() -> None:
     """Unknown agent names raise KeyError."""
     provider = FakeProvider([_text_step("x")])

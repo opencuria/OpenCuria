@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import type { HarnessMessage, HarnessPart, HarnessSession } from '@/types/harness'
 import {
+  collectDescendantSessionIds,
   collectRunningChildSessionIds,
   formatSubagentType,
+  gateSourceLabel,
   hasRunningToolOrSubtask,
   isTaskToolPart,
   latestRunningChildTool,
@@ -34,6 +36,22 @@ function makeMessage(parts: HarnessPart[]): HarnessMessage {
   }
 }
 
+function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
+  return {
+    id: 'session-1',
+    workspace_id: 'ws-1',
+    parent_id: null,
+    title: 'Chat',
+    mode: 'build',
+    agent_name: 'build',
+    model: 'm',
+    status: 'idle',
+    cost: 0,
+    tokens: {},
+    ...overrides,
+  }
+}
+
 describe('formatSubagentType', () => {
   it('maps known subagent ids to display labels', () => {
     expect(formatSubagentType('explore')).toBe('Explorer')
@@ -46,6 +64,37 @@ describe('formatSubagentType', () => {
     expect(formatSubagentType('research')).toBe('Research')
     expect(formatSubagentType('')).toBeNull()
     expect(formatSubagentType(null)).toBeNull()
+  })
+})
+
+describe('gateSourceLabel', () => {
+  it('returns display labels only for subagent types', () => {
+    expect(gateSourceLabel('explore')).toBe('Explorer')
+    expect(gateSourceLabel('general')).toBe('General')
+    expect(gateSourceLabel('computeruse')).toBe('Computer use')
+    expect(gateSourceLabel('build')).toBeNull()
+    expect(gateSourceLabel('plan')).toBeNull()
+    expect(gateSourceLabel('')).toBeNull()
+  })
+})
+
+describe('collectDescendantSessionIds', () => {
+  it('includes the root, children, and nested descendants', () => {
+    const sessions = [
+      makeSession({ id: 'root', parent_id: null }),
+      makeSession({ id: 'child-a', parent_id: 'root' }),
+      makeSession({ id: 'child-b', parent_id: 'root' }),
+      makeSession({ id: 'grand', parent_id: 'child-a' }),
+      makeSession({ id: 'other', parent_id: null }),
+      makeSession({ id: 'other-child', parent_id: 'other' }),
+    ]
+    expect(collectDescendantSessionIds('root', sessions)).toEqual([
+      'root',
+      'child-a',
+      'child-b',
+      'grand',
+    ])
+    expect(collectDescendantSessionIds('child-a', sessions)).toEqual(['child-a', 'grand'])
   })
 })
 

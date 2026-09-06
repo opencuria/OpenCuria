@@ -435,6 +435,86 @@ def test_parts_include_pending_permissions_and_questions(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_parts_include_descendant_pending_gates(
+    harness_setup, fake_harness_service
+):
+    """GET parts on a parent includes child gates, not sibling-tree gates."""
+    parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="parent",
+    )
+    child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="explore",
+        agent_name="explore",
+        parent_id=parent.id,
+        title="Explore backend",
+    )
+    other_parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="other",
+    )
+    other_child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="other child",
+        agent_name="explore",
+        parent_id=other_parent.id,
+    )
+    child_perm = PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=child.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="find /workspace",
+        title="$ find /workspace",
+    )
+    PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=other_child.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="rm -rf /tmp",
+        title="$ rm -rf /tmp",
+    )
+    child_question = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=child.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Which file?"}],
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    parent_body = client.get(
+        f"/api/v1/harness/sessions/{parent.id}/parts"
+    ).json()
+    assert [item["request_id"] for item in parent_body["permissions"]] == [
+        str(child_perm.id)
+    ]
+    assert parent_body["permissions"][0]["session_id"] == str(child.id)
+    assert parent_body["permissions"][0]["agent_name"] == "explore"
+    assert [item["request_id"] for item in parent_body["questions"]] == [
+        str(child_question.id)
+    ]
+    assert parent_body["questions"][0]["agent_name"] == "explore"
+
+    child_body = client.get(f"/api/v1/harness/sessions/{child.id}/parts").json()
+    assert [item["request_id"] for item in child_body["permissions"]] == [
+        str(child_perm.id)
+    ]
+    other_body = client.get(
+        f"/api/v1/harness/sessions/{other_parent.id}/parts"
+    ).json()
+    assert [item["session_id"] for item in other_body["permissions"]] == [
+        str(other_child.id)
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
 def test_double_message_is_409_while_busy(harness_setup, monkeypatch):
     """A second prompt while busy is rejected with 409 (no provider)."""
     service = HarnessService(emit=_drop_emit)

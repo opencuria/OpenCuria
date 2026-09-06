@@ -254,6 +254,7 @@ function setupSocketListeners(): void {
           pattern: data.pattern,
           title: data.title,
           call_id: data.call_id,
+          agent_name: data.agent_name,
         })
       }
     }),
@@ -274,6 +275,7 @@ function setupSocketListeners(): void {
           questions: data.questions ?? [],
           call_id: data.call_id,
           status: 'pending',
+          agent_name: data.agent_name,
         })
       }
     }),

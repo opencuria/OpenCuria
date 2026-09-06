@@ -356,6 +356,12 @@ class HarnessRunner:
         if callback is None:
             log.info("permission_auto_denied_no_callback", tool=tool_name)
             return False
+        log.info(
+            "permission_ask_pending",
+            tool=tool_name,
+            action=action,
+            session_id=opts.session_id,
+        )
         pending = callback(
             tool=tool_name,
             action=action,
@@ -435,6 +441,14 @@ class HarnessRunner:
                 call, "todowrite is not available to subagents."
             )
         decision = self._decide(agent, call.name, action, mode, doom_loop=doom_loop)
+        log.debug(
+            "permission_decision",
+            tool=call.name,
+            action=action,
+            decision=decision,
+            agent=agent.name,
+            session_id=opts.session_id,
+        )
         approved = True
         if decision == DENY:
             approved = False

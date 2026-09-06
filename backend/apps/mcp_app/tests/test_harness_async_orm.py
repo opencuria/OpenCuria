@@ -310,3 +310,58 @@ async def test_mcp_list_harness_parts_includes_pending_gates(monkeypatch) -> Non
     assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
     assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
     assert body["questions"][0]["questions"] == [{"question": "Which color?"}]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_list_harness_parts_includes_descendant_gates(
+    monkeypatch,
+) -> None:
+    """list_harness_parts on a parent includes child pending gates."""
+    from apps.harness.permissions.service import PermissionRequestRepository
+    from apps.harness.repositories import QuestionRequestRepository
+
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    parent = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="parent",
+        agent_name="build",
+        mode="build",
+        user_id=user.id,
+    )
+    child = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="explore",
+        agent_name="explore",
+        mode="build",
+        parent_id=parent.id,
+        user_id=user.id,
+        title="Explore backend",
+    )
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=org.id,
+        session_id=child.id,
+        workspace_id=workspace.id,
+        tool="bash",
+        pattern="find /workspace",
+        title="$ find /workspace",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=org.id,
+        session_id=child.id,
+        workspace_id=workspace.id,
+        questions=[{"question": "Which file?"}],
+    )
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    api_key = SimpleNamespace(user=user)
+    result = await sync_to_async(_call_list_harness_parts)(
+        api_key, org.id, {"session_id": str(parent.id)}
+    )
+    body = _parse(result)
+    assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
+    assert body["permissions"][0]["session_id"] == str(child.id)
+    assert body["permissions"][0]["agent_name"] == "explore"
+    assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
+    assert body["questions"][0]["agent_name"] == "explore"

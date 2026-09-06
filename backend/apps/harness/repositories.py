@@ -156,6 +156,34 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def list_descendant_ids(session_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return *session_id* followed by descendant ids (breadth-first)."""
+        ids: list[uuid.UUID] = [session_id]
+        queue: list[uuid.UUID] = [session_id]
+        seen: set[uuid.UUID] = {session_id}
+        while queue:
+            current = queue.pop(0)
+            children = list(
+                HarnessSession.objects.filter(parent_id=current).values_list(
+                    "id", flat=True
+                )
+            )
+            for child_id in children:
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                ids.append(child_id)
+                queue.append(child_id)
+        return ids
+
+    @staticmethod
+    def list_by_ids(session_ids: list[uuid.UUID]) -> list[HarnessSession]:
+        """Return sessions for *session_ids* (order not guaranteed)."""
+        if not session_ids:
+            return []
+        return list(HarnessSession.objects.filter(id__in=session_ids))
+
+    @staticmethod
     def list_busy_computeruse_for_workspace(
         workspace_id: uuid.UUID,
     ) -> list[HarnessSession]:
@@ -539,6 +567,20 @@ class QuestionRequestRepository:
         return list(
             QuestionRequest.objects.filter(
                 session_id=session_id,
+                status=QuestionRequestStatus.PENDING,
+            ).order_by("created_at")
+        )
+
+    @staticmethod
+    def list_pending_for_sessions(
+        session_ids: list[uuid.UUID],
+    ) -> list[QuestionRequest]:
+        """Return pending question requests for any of *session_ids*."""
+        if not session_ids:
+            return []
+        return list(
+            QuestionRequest.objects.filter(
+                session_id__in=session_ids,
                 status=QuestionRequestStatus.PENDING,
             ).order_by("created_at")
         )

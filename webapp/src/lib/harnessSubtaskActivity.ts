@@ -21,6 +21,39 @@ export function formatSubagentType(agent: string | null | undefined): string | n
   return key.charAt(0).toUpperCase() + key.slice(1)
 }
 
+/** Display label for the known subagent types that own child sessions. */
+export function gateSourceLabel(agentName: string | null | undefined): string | null {
+  const key = (agentName || '').trim().toLowerCase()
+  if (key === 'explore' || key === 'general' || key === 'computeruse') {
+    return formatSubagentType(key)
+  }
+  return null
+}
+
+/**
+ * *rootId* plus every descendant session id (parent_id chain), breadth-first.
+ */
+export function collectDescendantSessionIds(
+  rootId: string,
+  sessions: HarnessSession[],
+): string[] {
+  const ids: string[] = [rootId]
+  const seen = new Set<string>([rootId])
+  let added = true
+  while (added) {
+    added = false
+    for (const session of sessions) {
+      if (!session.parent_id || seen.has(session.id) || !seen.has(session.parent_id)) {
+        continue
+      }
+      seen.add(session.id)
+      ids.push(session.id)
+      added = true
+    }
+  }
+  return ids
+}
+
 /**
  * True when this tool part is the parent `task` invocation that duplicates
  * a sibling subtask card (`tool === 'task'` or title `Subagent: …`).

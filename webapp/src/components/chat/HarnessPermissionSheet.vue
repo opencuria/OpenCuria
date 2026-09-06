@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ChevronDown, ChevronUp, ShieldAlert } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
 import type { HarnessPermissionRequest, HarnessPermissionResponse } from '@/types/harness'
 
 const props = defineProps<{
@@ -19,6 +20,8 @@ const total = computed(() => props.requests.length)
 const request = computed<HarnessPermissionRequest | null>(
   () => props.requests[Math.min(page.value, Math.max(total.value - 1, 0))] ?? null,
 )
+
+const sourceLabel = computed(() => gateSourceLabel(request.value?.agent_name))
 
 watch(
   () => props.requests,
@@ -73,7 +76,13 @@ function handleResolve(response: HarnessPermissionResponse): void {
         </Button>
       </div>
     </div>
-    <p class="text-xs text-muted-foreground">The agent wants to run a tool that needs approval.</p>
+    <p class="text-xs text-muted-foreground">
+      {{
+        sourceLabel
+          ? `The ${sourceLabel} wants to run a tool that needs approval.`
+          : 'The agent wants to run a tool that needs approval.'
+      }}
+    </p>
     <div class="mt-2 flex flex-wrap items-center gap-1.5">
       <Badge variant="secondary">{{ request.tool }}</Badge>
       <Badge v-if="request.call_id" variant="outline" class="font-mono">{{

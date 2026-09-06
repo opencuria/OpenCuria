@@ -24,6 +24,22 @@ describe('HarnessPermissionSheet', () => {
     expect(wrapper.text()).toContain('bash')
     expect(wrapper.text()).toContain('$ rm -rf /tmp/x')
     expect(wrapper.text()).toContain('rm -rf /tmp/x')
+    expect(wrapper.text()).toContain('The agent wants to run a tool that needs approval.')
+  })
+
+  it('names the subagent that requested the permission', () => {
+    const wrapper = mount(HarnessPermissionSheet, {
+      props: {
+        requests: [
+          {
+            ...makeRequest(),
+            agent_name: 'explore',
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.text()).toContain('The Explorer wants to run a tool that needs approval.')
   })
 
   it('emits the chosen resolution', async () => {

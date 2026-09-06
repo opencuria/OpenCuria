@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ChevronDown, ChevronUp, MessageCircleQuestion } from '@lucide/vue'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { optionLetter } from '@/lib/composerSheets'
+import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
 import type { HarnessQuestionRequest } from '@/types/harness'
 
 /**
@@ -34,6 +36,8 @@ const total = computed(() => props.requests.length)
 const request = computed<HarnessQuestionRequest | null>(
   () => props.requests[Math.min(page.value, Math.max(total.value - 1, 0))] ?? null,
 )
+
+const sourceLabel = computed(() => gateSourceLabel(request.value?.agent_name))
 
 function answersFor(requestId: string, count: number): string[] {
   let answers = answersByRequest.value[requestId]
@@ -154,6 +158,13 @@ function onKeydown(event: KeyboardEvent): void {
     <div class="flex items-center gap-2 px-4 pt-3">
       <MessageCircleQuestion :size="14" class="shrink-0 text-muted-foreground" />
       <p class="text-sm font-medium text-foreground">Questions</p>
+      <Badge
+        v-if="sourceLabel"
+        variant="outline"
+        data-testid="composer-question-source"
+      >
+        {{ sourceLabel }}
+      </Badge>
       <div class="ml-auto flex items-center gap-0.5" data-testid="composer-question-pager">
         <Button
           variant="ghost"

@@ -378,10 +378,25 @@ class HarnessService:
             for row in rows
         ]
 
-    def list_pending_permissions(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
-        """Return pending permission gates for *session_id* as dicts."""
+    def list_pending_permissions(
+        self, session_id: uuid.UUID, *, include_descendants: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return pending permission gates for *session_id* as dicts.
+
+        When *include_descendants* is true, also include pending gates of
+        child (and nested) sessions so a parent parts fetch can surface
+        subagent asks.
+        """
         self.get_session(session_id)
-        rows = self.permissions.requests.list_pending_for_session(session_id)
+        session_ids = (
+            self.sessions.list_descendant_ids(session_id)
+            if include_descendants
+            else [session_id]
+        )
+        rows = self.permissions.requests.list_pending_for_sessions(session_ids)
+        names = {
+            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
+        }
         return [
             {
                 "request_id": str(row.id),
@@ -392,14 +407,29 @@ class HarnessService:
                 "title": row.title or "",
                 "call_id": row.call_id or "",
                 "status": "pending",
+                "agent_name": names.get(row.session_id, ""),
             }
             for row in rows
         ]
 
-    def list_pending_questions(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
-        """Return pending question gates for *session_id* as dicts."""
+    def list_pending_questions(
+        self, session_id: uuid.UUID, *, include_descendants: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return pending question gates for *session_id* as dicts.
+
+        When *include_descendants* is true, also include pending gates of
+        child (and nested) sessions.
+        """
         self.get_session(session_id)
-        rows = QuestionRequestRepository.list_pending_for_session(session_id)
+        session_ids = (
+            self.sessions.list_descendant_ids(session_id)
+            if include_descendants
+            else [session_id]
+        )
+        rows = QuestionRequestRepository.list_pending_for_sessions(session_ids)
+        names = {
+            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
+        }
         return [
             {
                 "request_id": str(row.id),
@@ -408,6 +438,7 @@ class HarnessService:
                 "questions": list(row.questions or []),
                 "call_id": row.call_id or "",
                 "status": "pending",
+                "agent_name": names.get(row.session_id, ""),
             }
             for row in rows
         ]
@@ -1158,6 +1189,7 @@ class HarnessService:
                 "pattern": action,
                 "title": title,
                 "call_id": call_id,
+                "agent_name": session.agent_name or "",
             },
             str(session.workspace_id),
         )
@@ -1193,6 +1225,7 @@ class HarnessService:
                 "questions": questions,
                 "call_id": call_id,
                 "status": "pending",
+                "agent_name": session.agent_name or "",
             },
             str(session.workspace_id),
         )

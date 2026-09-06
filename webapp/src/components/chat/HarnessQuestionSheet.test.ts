@@ -38,6 +38,14 @@ describe('HarnessQuestionSheet', () => {
     expect(options[0]!.text()).toContain('first')
   })
 
+  it('shows a source badge for subagent questions', () => {
+    const wrapper = mount(HarnessQuestionSheet, {
+      props: { requests: [makeRequest({ agent_name: 'explore' })] },
+    })
+
+    expect(wrapper.get('[data-testid="composer-question-source"]').text()).toBe('Explorer')
+  })
+
   it('selects an option via keyboard letter and continues', async () => {
     const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
 
