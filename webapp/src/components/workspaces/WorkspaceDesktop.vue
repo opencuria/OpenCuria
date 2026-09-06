@@ -11,6 +11,12 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { X, Monitor, RefreshCw, Minus, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  clampSidebarWidth,
+  loadSidebarWidth,
+  saveSidebarWidth,
+} from '@/lib/desktopSidebar'
 
 const props = defineProps<{
   workspaceId: string
@@ -30,6 +36,61 @@ const viewportHeight = ref(0)
 let resizeObserver: ResizeObserver | null = null
 let iframeKeydownCleanup: (() => void) | null = null
 let isDispatchingSyntheticPasteShortcut = false
+
+const sidebarWidth = ref(loadSidebarWidth())
+const isResizing = ref(false)
+const smQuery = window.matchMedia('(min-width: 640px)')
+const isWideLayout = ref(smQuery.matches)
+
+function onWideLayoutChange(event: MediaQueryListEvent): void {
+  isWideLayout.value = event.matches
+}
+
+function applySidebarWidth(width: number): void {
+  sidebarWidth.value = clampSidebarWidth(width, window.innerWidth)
+}
+
+function persistSidebarWidth(): void {
+  saveSidebarWidth(sidebarWidth.value)
+}
+
+function onWindowResize(): void {
+  applySidebarWidth(sidebarWidth.value)
+}
+
+function onResizePointerDown(event: PointerEvent): void {
+  if (!isWideLayout.value) return
+  event.preventDefault()
+  isResizing.value = true
+  const handle = event.currentTarget as HTMLElement
+  handle.setPointerCapture?.(event.pointerId)
+  applySidebarWidth(window.innerWidth - event.clientX)
+}
+
+function onResizePointerMove(event: PointerEvent): void {
+  if (!isResizing.value) return
+  applySidebarWidth(window.innerWidth - event.clientX)
+}
+
+function onResizePointerUp(event: PointerEvent): void {
+  if (!isResizing.value) return
+  isResizing.value = false
+  const handle = event.currentTarget as HTMLElement
+  if (handle.hasPointerCapture?.(event.pointerId)) {
+    handle.releasePointerCapture(event.pointerId)
+  }
+  persistSidebarWidth()
+}
+
+function onResizeDoubleClick(): void {
+  applySidebarWidth(DEFAULT_SIDEBAR_WIDTH)
+  persistSidebarWidth()
+}
+
+const sidebarStyle = computed<CSSProperties>(() => {
+  if (!isWideLayout.value) return {}
+  return { width: `${sidebarWidth.value}px` }
+})
 
 const desktopSize = computed(() => {
   const workspace =
@@ -363,6 +424,8 @@ onMounted(() => {
     startDesktop()
   }
   observeViewportHost()
+  smQuery.addEventListener('change', onWideLayoutChange)
+  window.addEventListener('resize', onWindowResize)
   window.addEventListener('keydown', onGlobalKeydown)
 })
 
@@ -381,6 +444,8 @@ onBeforeUnmount(() => {
   resizeObserver = null
   iframeKeydownCleanup?.()
   iframeKeydownCleanup = null
+  smQuery.removeEventListener('change', onWideLayoutChange)
+  window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('keydown', onGlobalKeydown)
 })
 
@@ -413,9 +478,18 @@ watch(
 </script>
 
 <template>
-  <div v-show="!desktopStore.isMinimized" class="fixed inset-0 z-[110] bg-card">
+  <div
+    v-show="!desktopStore.isMinimized"
+    class="fixed inset-0 z-(--z-desktop) bg-card"
+    :class="{ 'select-none': isResizing }"
+  >
     <div class="flex h-full flex-col bg-card sm:flex-row">
-      <div ref="viewportHostRef" class="order-2 min-h-0 flex-1 sm:order-1 relative">
+      <div
+        ref="viewportHostRef"
+        data-testid="desktop-viewport"
+        class="order-2 min-h-0 flex-1 sm:order-1 relative"
+        :class="{ 'pointer-events-none': isResizing }"
+      >
         <div
           v-if="desktopStore.isConnecting"
           class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
@@ -491,7 +565,24 @@ watch(
       </div>
 
       <div
-        class="order-1 flex shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-1.5 sm:order-2 sm:w-80 sm:border-b-0 sm:border-l sm:py-2 min-h-0"
+        data-testid="desktop-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        title="Drag to resize sidebar"
+        class="relative hidden w-1 shrink-0 cursor-col-resize touch-none bg-border hover:bg-primary sm:order-2 sm:block"
+        :class="{ 'bg-primary': isResizing }"
+        @pointerdown="onResizePointerDown"
+        @pointermove="onResizePointerMove"
+        @pointerup="onResizePointerUp"
+        @pointercancel="onResizePointerUp"
+        @dblclick="onResizeDoubleClick"
+      />
+
+      <div
+        data-testid="desktop-sidebar"
+        class="order-1 flex min-h-0 shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-1.5 sm:order-3 sm:border-b-0 sm:border-l sm:py-2"
+        :style="sidebarStyle"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">

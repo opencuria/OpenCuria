@@ -48,6 +48,10 @@
   --sidebar-accent-foreground: #433a93;
   --sidebar-border: #e4e4e7;
   --sidebar-ring: #534ab7;
+  /* Floating UI (dropdowns, selects, tooltips) must sit above the desktop overlay.
+     Dialogs/sheets stay at z-50; the lightbox (9999) and toasts stay above floating. */
+  --z-desktop: 110;
+  --z-floating: 120;
 }
 
 .dark {
