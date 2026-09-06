@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -29,6 +28,7 @@ import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
 import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   applyMentionCandidate,
@@ -156,6 +156,16 @@ watch(
 
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
 const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
+
+/**
+ * Öffnet das Provider-Tab direkt per Window-Event — bewusst OHNE Router-Navigation:
+ * Der Host hängt global in AppLayout, der `/?settings=`-Deep-Link bleibt für
+ * Redirects/e2e erhalten. So kann der Banner-Klick keine Navigation abbrechen
+ * oder eine Replace-Schleife auslösen (gemeldeter "Page Unresponsive"-Hänger).
+ */
+function openProviderSettings(): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
+}
 
 async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
@@ -593,13 +603,15 @@ function onComposerKeydown(e: KeyboardEvent): void {
       class="flex flex-col rounded-3xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary focus-within:shadow-md"
       data-testid="composer-card"
     >
-      <RouterLink
+      <button
         v-if="providerMissing"
-        to="/?settings=provider"
-        class="mx-4 mt-3 w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+        type="button"
+        data-testid="composer-provider-cta"
+        class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+        @click="openProviderSettings"
       >
         Configure OpenRouter in Org Settings
-      </RouterLink>
+      </button>
 
       <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">
         <span

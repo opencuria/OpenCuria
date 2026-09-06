@@ -116,7 +116,7 @@ watch(isAdmin, (admin) => {
   <Dialog v-model:open="open">
     <DialogContent
       aria-describedby="settings-sheet-description"
-      class="max-w-[80rem] w-[calc(100vw-2rem)] h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
+      class="max-w-[80rem] sm:max-w-[80rem] w-[calc(100vw-2rem)] h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
       data-testid="settings-sheet"
       @open-auto-focus.prevent
     >
@@ -199,7 +199,7 @@ watch(isAdmin, (admin) => {
           </h2>
         </div>
         <ScrollArea class="min-h-0 flex-1">
-          <div class="p-4 lg:p-6" role="tabpanel" :aria-label="activeLabel">
+          <div class="mx-auto w-full max-w-3xl p-4 lg:p-6" role="tabpanel" :aria-label="activeLabel">
             <WorkspacePolicyTab v-if="activeTab === 'general'" />
             <ProviderConfigTab v-else-if="activeTab === 'provider'" />
             <SkillsPanel v-else-if="activeTab === 'skills'" />
