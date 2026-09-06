@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ChevronRight, Loader2 } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { useHarnessStore } from '@/stores/harness'
@@ -9,11 +9,14 @@ import {
   buildChildSessionIdMap,
   resolveChildSessionId,
 } from '@/lib/harnessSubtaskActivity'
+import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
 const props = defineProps<{
   part: HarnessPart
   childSessionId?: string | null
+  models?: ProviderModel[]
 }>()
 
 const emit = defineEmits<{
@@ -35,6 +38,8 @@ const childId = computed(() => {
   return resolveChildSessionId(props.part, harness.sessions, { ...map, ...fromProp })
 })
 
+const catalog = ref<ProviderModel[]>(props.models ?? [])
+
 const agentLabel = computed(() => {
   const raw = props.part.meta?.['agent']
   return formatSubagentType(typeof raw === 'string' ? raw : null)
@@ -43,6 +48,41 @@ const agentLabel = computed(() => {
 const childMessages = computed(() => {
   if (!childId.value) return []
   return harness.messagesBySession[childId.value] ?? []
+})
+
+const childSession = computed(() => {
+  if (!childId.value) return null
+  return harness.sessions.find((session) => session.id === childId.value) ?? null
+})
+
+function metaString(key: string): string {
+  const raw = props.part.meta?.[key]
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+const modelLabel = computed(() => {
+  const lastAssistant = [...childMessages.value]
+    .reverse()
+    .find((message) => message.role === 'assistant')
+  const modelId =
+    metaString('model') ||
+    (childSession.value?.model ?? '').trim() ||
+    (lastAssistant?.model ?? '').trim()
+  const effort =
+    metaString('reasoning_effort') ||
+    (childSession.value?.reasoning_effort ?? '').trim() ||
+    (lastAssistant?.reasoning_effort ?? '').trim()
+  if (!modelId && !effort) return null
+  return formatHarnessModelEffort(modelId, effort, props.models ?? catalog.value)
+})
+
+onMounted(async () => {
+  if (props.models) return
+  try {
+    catalog.value = await loadProviderModelsCached()
+  } catch {
+    catalog.value = []
+  }
 })
 
 const activity = computed(() =>
@@ -97,6 +137,13 @@ function handleOpen(): void {
           class="shrink-0 text-xs font-normal text-muted-foreground"
         >
           {{ agentLabel }}
+        </span>
+        <span
+          v-if="modelLabel"
+          data-testid="harness-subtask-model"
+          class="shrink-0 text-xs font-normal text-muted-foreground"
+        >
+          {{ modelLabel }}
         </span>
         <ChevronRight
           v-if="childId"

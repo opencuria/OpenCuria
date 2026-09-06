@@ -198,6 +198,8 @@ function setupSocketListeners(): void {
           description: data.description,
           part_id: data.part_id,
           child_session_id: data.child_session_id,
+          model: data.model,
+          reasoning_effort: data.reasoning_effort,
         })
         if (data.child_session_id) {
           void harness.fetchSessions(props.workspaceId)
@@ -224,7 +226,10 @@ function setupSocketListeners(): void {
   cleanupFns.push(
     onEvent('harness.session_status', (data) => {
       if (data.workspace_id === props.workspaceId) {
-        harness.handleSessionStatus(data.session_id, data.status)
+        harness.handleSessionStatus(data.session_id, data.status, {
+          model: data.model,
+          reasoning_effort: data.reasoning_effort,
+        })
         if (data.status === 'idle') {
           void harness.fetchParts(data.session_id)
           void harness.fetchTodos(data.session_id)

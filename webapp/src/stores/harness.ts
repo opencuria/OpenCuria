@@ -362,6 +362,7 @@ export const useHarnessStore = defineStore('harness', () => {
       step: opts.step,
       partId: opts.partId,
     })
+    stampRunModel(sessionId)
   }
 
   function handleTodoUpdated(sessionId: string, todos: HarnessTodo[]): void {
@@ -379,6 +380,8 @@ export const useHarnessStore = defineStore('harness', () => {
       description: string
       part_id?: string
       child_session_id?: string
+      model?: string
+      reasoning_effort?: string
     },
   ): void {
     const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
@@ -390,7 +393,10 @@ export const useHarnessStore = defineStore('harness', () => {
       description: event.description,
       part_id: event.part_id,
       child_session_id: event.child_session_id,
+      model: event.model,
+      reasoning_effort: event.reasoning_effort,
     })
+    stampRunModel(sessionId)
   }
 
   function handleSubtaskFinished(
@@ -415,9 +421,37 @@ export const useHarnessStore = defineStore('harness', () => {
     })
   }
 
-  function handleSessionStatus(sessionId: string, status: HarnessSession['status']): void {
+  function stampRunModel(
+    sessionId: string,
+    extras?: { model?: string; reasoning_effort?: string },
+  ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
-    if (session) session.status = status
+    const messages = messagesBySession.value[sessionId]
+    const last = messages?.[messages.length - 1]
+    if (!last || last.role !== 'assistant' || last.completed_at != null) return
+    const model = extras?.model || session?.model || ''
+    const effort =
+      extras?.reasoning_effort !== undefined
+        ? extras.reasoning_effort
+        : (session?.reasoning_effort ?? '')
+    if (!last.model && model) last.model = model
+    if (!last.reasoning_effort && effort) last.reasoning_effort = effort
+  }
+
+  function handleSessionStatus(
+    sessionId: string,
+    status: HarnessSession['status'],
+    extras?: { model?: string; reasoning_effort?: string },
+  ): void {
+    const session = sessions.value.find((s) => s.id === sessionId)
+    if (session) {
+      session.status = status
+      if (extras?.model) session.model = extras.model
+      if (extras?.reasoning_effort !== undefined) {
+        session.reasoning_effort = extras.reasoning_effort
+      }
+    }
+    stampRunModel(sessionId, extras)
     if (status === 'idle') {
       if (viewingSessionId.value === sessionId) {
         void markSessionRead(sessionId)

@@ -155,10 +155,14 @@ describe('harnessReducer', () => {
       agent: 'explore',
       description: 'research the codebase',
       child_session_id: 'child-1',
+      model: 'acme/think',
+      reasoning_effort: 'high',
     })
     expect(started.state).toBe('running')
     expect(started.meta?.['subtask_id']).toBe('sub-1')
     expect(started.meta?.['child_session_id']).toBe('child-1')
+    expect(started.meta?.['model']).toBe('acme/think')
+    expect(started.meta?.['reasoning_effort']).toBe('high')
 
     const finished = applySubtaskFinished(assistant, {
       workspace_id: 'workspace-1',

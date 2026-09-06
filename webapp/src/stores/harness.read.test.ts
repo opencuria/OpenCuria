@@ -105,4 +105,28 @@ describe('harness store read tracking', () => {
     await store.fetchSessions('ws-1')
     expect(store.activeSessionId).toBeNull()
   })
+
+  it('stamps the running model onto the live assistant message', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ model: '', reasoning_effort: '', status: 'busy' })]
+    store.messagesBySession['session-1'] = [
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [],
+      },
+    ]
+
+    store.handleSessionStatus('session-1', 'busy', {
+      model: 'acme/think',
+      reasoning_effort: 'high',
+    })
+
+    expect(store.sessions[0]?.model).toBe('acme/think')
+    expect(store.sessions[0]?.reasoning_effort).toBe('high')
+    expect(store.messagesBySession['session-1']?.[0]?.model).toBe('acme/think')
+    expect(store.messagesBySession['session-1']?.[0]?.reasoning_effort).toBe('high')
+  })
 })

@@ -150,6 +150,8 @@ async def test_task_happy_path_returns_child_text(fake_accessor) -> None:
     kinds = [event["type"] for event in events]
     assert "subtask_started" in kinds
     assert "subtask_finished" in kinds
+    started = next(e for e in events if e["type"] == "subtask_started")
+    assert started["model"] == "parent-model"
     finished = next(e for e in events if e["type"] == "subtask_finished")
     assert finished["status"] == "completed"
     assert finished["agent"] == "general"

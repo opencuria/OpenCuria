@@ -10,6 +10,15 @@ vi.mock('./HarnessDesktopMini.vue', () => ({
   default: { template: '<div data-testid="harness-desktop-mini" />' },
 }))
 
+vi.mock('@/services/harness.api', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
+  return {
+    ...actual,
+    listProviderModels: vi.fn().mockResolvedValue([]),
+  }
+})
+
 function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: 'part-sub-1',
@@ -180,6 +189,35 @@ describe('HarnessSubtaskCard', () => {
     })
 
     expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe('Failed')
+  })
+
+  it('shows the child model next to the subagent type', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          meta: {
+            subtask_id: 'sub-1',
+            agent: 'explore',
+            model: 'acme/think',
+            reasoning_effort: 'high',
+          },
+        }),
+        models: [
+          {
+            id: 'acme/think',
+            name: 'Think',
+            reasoning_efforts: ['high'],
+            default_effort: 'high',
+            supports_tools: true,
+            context_length: 1,
+            max_output_tokens: 1,
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-type"]').text()).toBe('Explorer')
+    expect(wrapper.get('[data-testid="harness-subtask-model"]').text()).toBe('Think High')
   })
 
   it('store keeps the parent/child link for navigation', () => {

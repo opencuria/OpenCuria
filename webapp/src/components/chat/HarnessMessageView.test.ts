@@ -386,6 +386,35 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-testid="harness-message-usage"]').exists()).toBe(false)
   })
 
+  it('shows a visible model line while streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        models: [
+          {
+            id: 'acme/think',
+            name: 'Think',
+            reasoning_efforts: ['high'],
+            default_effort: 'high',
+            supports_tools: true,
+            context_length: 1,
+            max_output_tokens: 1,
+          },
+        ],
+        message: {
+          ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Working' })]),
+          model: 'acme/think',
+          reasoning_effort: 'high',
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-message-running-model"]').text()).toBe(
+      'Think High',
+    )
+    expect(wrapper.find('[data-testid="harness-message-usage"]').exists()).toBe(false)
+  })
+
   it('shows the model on the hover footer when usage is empty', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {

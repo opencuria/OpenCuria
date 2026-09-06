@@ -292,6 +292,8 @@ export function applySubtaskStarted(
       subtask_id: event.subtask_id,
       agent: event.agent,
       ...(event.child_session_id ? { child_session_id: event.child_session_id } : {}),
+      ...(event.model ? { model: event.model } : {}),
+      ...(event.reasoning_effort ? { reasoning_effort: event.reasoning_effort } : {}),
     },
   }
   message.parts.push(part)

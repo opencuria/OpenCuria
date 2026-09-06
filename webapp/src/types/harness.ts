@@ -242,6 +242,8 @@ export interface HarnessSessionStatusEvent {
   workspace_id: string
   session_id: string
   status: HarnessSessionStatus
+  model?: string
+  reasoning_effort?: string
 }
 
 export interface HarnessTodoUpdatedEvent {
@@ -259,6 +261,8 @@ export interface HarnessSubtaskStartedEvent {
   description: string
   part_id?: string
   child_session_id?: string
+  model?: string
+  reasoning_effort?: string
 }
 
 export interface HarnessSubtaskFinishedEvent {

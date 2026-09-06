@@ -423,3 +423,4 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
     started = [item for item in emitted if item.get("event") == "harness.subtask_started"]
     assert started
     assert started[0]["child_session_id"] == str(child.id)
+    assert started[0]["model"] == child.model

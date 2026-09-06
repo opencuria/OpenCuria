@@ -6,7 +6,7 @@ import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
-import type { ProviderModel } from '@/lib/harnessModels'
+import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
 import {
   Collapsible,
   CollapsibleContent,
@@ -48,6 +48,14 @@ const catalog = ref<ProviderModel[]>(props.models ?? [])
 const usageLine = computed(() => {
   if (props.streaming || props.message.role !== 'assistant') return null
   return formatMessageHoverLine(props.message, props.models ?? catalog.value)
+})
+
+const streamingModelLine = computed(() => {
+  if (!props.streaming || props.message.role !== 'assistant') return null
+  const modelId = (props.message.model ?? '').trim()
+  const effort = (props.message.reasoning_effort ?? '').trim()
+  if (!modelId && !effort) return null
+  return formatHarnessModelEffort(modelId, effort, props.models ?? catalog.value)
 })
 
 onMounted(async () => {
@@ -144,6 +152,7 @@ function setCompactionOpen(partId: string, open: boolean): void {
               v-if="block.part.type === 'subtask'"
               :part="block.part"
               :child-session-id="childIdFor(block.part)"
+              :models="models ?? catalog"
               @open-subtask="emit('openSubtask', $event)"
             />
             <HarnessPatchCard v-else-if="block.part.type === 'patch'" :part="block.part" />
@@ -195,6 +204,13 @@ function setCompactionOpen(partId: string, open: boolean): void {
         </template>
       </div>
       <HarnessThinking v-if="showThinking" :class="blocks.length ? 'mt-2' : ''" />
+      <p
+        v-if="streamingModelLine"
+        data-testid="harness-message-running-model"
+        class="mt-1 text-xs text-muted-foreground"
+      >
+        {{ streamingModelLine }}
+      </p>
       <p
         v-if="usageLine"
         data-testid="harness-message-usage"

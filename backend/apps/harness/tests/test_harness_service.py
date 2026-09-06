@@ -17,6 +17,7 @@ from apps.harness.harness_service import (
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_QUESTION,
+    FRONTEND_EVENT_STATUS,
     HarnessService,
 )
 from apps.harness.models import HarnessSession, QuestionRequest, Todo
@@ -1075,6 +1076,87 @@ async def test_start_run_snapshots_reasoning_effort_on_assistant(
     assert assistant.model == "fake-model"
     assert assistant.reasoning_effort == "high"
 
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_snapshots_org_default_when_session_model_empty(
+    harness_workspace, monkeypatch
+) -> None:
+    """Auto (empty session.model) snapshots org default onto the assistant."""
+    from apps.harness.providers.models_catalog import ProviderModel
+    from apps.harness.providers.openrouter import OpenRouterAdapter
+    from apps.harness.services import ProviderConfigService
+
+    org_id = harness_workspace.runner.organization_id
+    ProviderConfigService().save_config(
+        organization_id=org_id,
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        default_model="org-default-model",
+        small_model="",
+    )
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="auto model",
+        agent_name="build",
+        mode="build",
+        model="",
+        reasoning_effort="medium",
+    )
+
+    async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        yield Delta(text="hello", usage=Usage(1, 1, 2))
+
+    monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        return [
+            ProviderModel(
+                id="org-default-model",
+                name="Org Default",
+                reasoning_efforts=("medium",),
+                default_effort="medium",
+                supports_tools=True,
+                context_length=128_000,
+                max_output_tokens=8_192,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
+
+    collected: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        collected.append({"event": event, **data})
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+    )
+    assistant = await service.start_run(
+        session,
+        "say hello",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert assistant.model == "org-default-model"
+    assert assistant.reasoning_effort == "medium"
+    refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert refreshed is not None
+    assert refreshed.model == ""
+    busy = next(
+        item
+        for item in collected
+        if item.get("event") == FRONTEND_EVENT_STATUS and item.get("status") == "busy"
+    )
+    assert busy["model"] == "org-default-model"
+    assert busy["reasoning_effort"] == "medium"
+    await service._tasks[str(session.id)]
+    refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert refreshed is not None
+    assert refreshed.model == ""
 
 
 @pytest.mark.django_db(transaction=True)

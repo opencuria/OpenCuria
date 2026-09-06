@@ -124,6 +124,7 @@ class TaskTool(Tool):
                 "subtask_id": subtask_id,
                 "agent": agent,
                 "description": args.description,
+                "model": model,
             },
         )
         child_registry = _child_registry(ctx.registry, agent)

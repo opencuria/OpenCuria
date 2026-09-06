@@ -325,24 +325,29 @@ class HarnessService:
         session: HarnessSession,
         *,
         provider: ProviderAdapter | None = None,
-    ) -> None:
+    ) -> str:
         """Ensure provider config and model are present before starting a run.
+
+        Returns the resolved model id for this turn. An empty session model
+        (Auto) is filled from the org default without pinning ``session.model``.
 
         Raises:
             NotFoundError: When no ProviderConfig exists for the org.
             ValueError: When API key or model is missing.
         """
+        session_model = (session.model or "").strip()
         if provider is not None or self._provider_factory is not None:
-            return
+            return session_model
         from .services import ProviderConfigService
 
         config_service = ProviderConfigService()
         config = config_service.get_config(organization_id)
         if not config.api_key_encrypted:
             raise ValueError("Provider API key not configured")
-        model = (session.model or "").strip() or (config.default_model or "").strip()
+        model = session_model or (config.default_model or "").strip()
         if not model:
             raise ValueError("No model configured for harness run")
+        return model
 
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
         """Return all sessions of a workspace."""
@@ -445,7 +450,7 @@ class HarnessService:
                 user_id=user_id,
                 organization_id=org_id,
             )
-        await sync_to_async(self.validate_provider_for_run)(
+        resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id, session, provider=provider
         )
         prior_user_messages = await sync_to_async(
@@ -462,7 +467,7 @@ class HarnessService:
             session_id=session.id,
             role="assistant",
             content="",
-            model=session.model or "",
+            model=resolved_model,
             reasoning_effort=session.reasoning_effort or "",
             provider=(provider.name if provider is not None else ""),
         )
@@ -514,11 +519,11 @@ class HarnessService:
             )
         await self._emit_frontend(
             FRONTEND_EVENT_STATUS,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": key,
-                "status": "busy",
-            },
+            self._session_status_payload(
+                session,
+                "busy",
+                model=resolved_model,
+            ),
             str(session.workspace_id),
         )
         log.info(
@@ -1070,11 +1075,11 @@ class HarnessService:
             )
             await self._emit_frontend(
                 FRONTEND_EVENT_STATUS,
-                {
-                    "workspace_id": str(session.workspace_id),
-                    "session_id": key,
-                    "status": "idle",
-                },
+                self._session_status_payload(
+                    session,
+                    "idle",
+                    model=assistant.model or "",
+                ),
                 str(session.workspace_id),
             )
 
@@ -1374,6 +1379,8 @@ class HarnessService:
                     "subtask_id": event.get("subtask_id", ""),
                     "agent": event.get("agent", ""),
                     "child_session_id": event.get("child_session_id", ""),
+                    "model": event.get("model", ""),
+                    "reasoning_effort": event.get("reasoning_effort", ""),
                 },
             )
             self._runs.get(session_id, {}).get("subtask_parts", {})[
@@ -1389,6 +1396,8 @@ class HarnessService:
                     "agent": event.get("agent", ""),
                     "description": event.get("description", ""),
                     "part_id": str(part.id),
+                    "model": event.get("model", ""),
+                    "reasoning_effort": event.get("reasoning_effort", ""),
                 },
                 workspace_id,
             )
@@ -1652,6 +1661,22 @@ class HarnessService:
                 str(session.workspace_id),
             )
 
+    def _session_status_payload(
+        self,
+        session: HarnessSession,
+        status: str,
+        *,
+        model: str = "",
+    ) -> dict[str, Any]:
+        """Shape a ``harness.session_status`` frontend payload."""
+        return {
+            "workspace_id": str(session.workspace_id),
+            "session_id": str(session.id),
+            "status": status,
+            "model": (model or session.model or "").strip(),
+            "reasoning_effort": session.reasoning_effort or "",
+        }
+
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
@@ -1770,6 +1795,8 @@ class HarnessService:
                 "child_session_id": str(child.id),
                 "agent": agent,
                 "description": args.description,
+                "model": child.model or "",
+                "reasoning_effort": child.reasoning_effort or "",
             },
         )
         status = "completed"
