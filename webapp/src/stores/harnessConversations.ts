@@ -75,13 +75,17 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     }
   }
 
-  function updateSessionStatus(sessionId: string, status: HarnessSessionStatus): void {
+  function updateSessionStatus(
+    sessionId: string,
+    status: HarnessSessionStatus,
+    viewed = false,
+  ): void {
     const conv = conversations.value.find((row) => row.session_id === sessionId)
     if (!conv) return
     conv.status = status
     conv.updated_at = new Date().toISOString()
     if (status === 'idle') {
-      conv.unread = true
+      conv.unread = !viewed
     } else {
       conv.unread = false
     }

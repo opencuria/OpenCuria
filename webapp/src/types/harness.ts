@@ -76,6 +76,7 @@ export interface HarnessSession {
   reasoning_effort?: string
   status: HarnessSessionStatus
   skill_ids?: string[]
+  unread?: boolean
   cost: number
   tokens: Record<string, number>
   created_at?: string
@@ -166,6 +167,8 @@ export interface HarnessConversation {
   status: HarnessSessionStatus
   mode: HarnessSessionMode
   agent_name: string
+  model: string
+  reasoning_effort?: string
   unread: boolean
   updated_at: string
 }

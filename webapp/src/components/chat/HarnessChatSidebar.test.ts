@@ -28,7 +28,10 @@ const dialogStubs = {
   DialogTitle: { template: '<div><slot /></div>' },
   DialogDescription: { template: '<div><slot /></div>' },
   DialogFooter: { template: '<div><slot /></div>' },
-  ScrollArea: { template: '<div><slot /></div>' },
+  ScrollArea: {
+    inheritAttrs: false,
+    template: '<div data-testid="chat-list-scroll" v-bind="$attrs"><slot /></div>',
+  },
 }
 
 describe('HarnessChatSidebar', () => {
@@ -102,5 +105,54 @@ describe('HarnessChatSidebar', () => {
     await confirm!.trigger('click')
 
     expect(wrapper.emitted('delete')?.[0]).toEqual(['session-1'])
+  })
+
+  it('shows an unread dot on unread root sessions only', () => {
+    const wrapper = mount(HarnessChatSidebar, {
+      props: {
+        sessions: [
+          makeSession({ unread: true }),
+          makeSession({ id: 'session-2', title: 'Read chat', unread: false }),
+        ],
+        childSessionsByParent: {
+          'session-1': [
+            makeSession({
+              id: 'child-1',
+              parent_id: 'session-1',
+              title: 'Subtask chat',
+              unread: true,
+            }),
+          ],
+        },
+        activeSessionId: null,
+      },
+      global: { stubs: dialogStubs },
+    })
+
+    const dots = wrapper.findAll('[data-testid="unread-dot"]')
+    expect(dots).toHaveLength(1)
+  })
+
+  it('constrains the session list so it can scroll', () => {
+    const wrapper = mount(HarnessChatSidebar, {
+      props: {
+        sessions: [
+          makeSession({ id: 'session-1', title: 'Chat one' }),
+          makeSession({ id: 'session-2', title: 'Chat two' }),
+          makeSession({ id: 'session-3', title: 'Chat three' }),
+        ],
+        childSessionsByParent: {},
+        activeSessionId: null,
+      },
+      global: { stubs: dialogStubs },
+    })
+
+    const root = wrapper.find('.flex.h-full')
+    expect(root.classes()).toContain('min-h-0')
+
+    const scroll = wrapper.get('[data-testid="chat-list-scroll"]')
+    expect(scroll.classes()).toContain('min-h-0')
+    expect(scroll.classes()).toContain('overflow-hidden')
+    expect(scroll.classes()).toContain('flex-1')
   })
 })

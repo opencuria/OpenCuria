@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatEffort,
+  formatHarnessModelEffort,
   resolveCatalogModel,
   snapEffort,
   type ProviderModel,
@@ -48,5 +49,13 @@ describe('harnessModels', () => {
     const models = [withEffort, plain]
     expect(resolveCatalogModel(models, '', 'acme/think')?.id).toBe('acme/think')
     expect(resolveCatalogModel(models, 'acme/plain')?.id).toBe('acme/plain')
+  })
+
+  it('formats model and effort for conversation cards', () => {
+    const models = [withEffort, plain]
+    expect(formatHarnessModelEffort('acme/think', 'high', models)).toBe('Think High')
+    expect(formatHarnessModelEffort('', 'medium', models, 'acme/think')).toBe('Auto Medium')
+    expect(formatHarnessModelEffort('acme/plain', '', models)).toBe('Plain')
+    expect(formatHarnessModelEffort('missing/id', 'low', [])).toBe('missing/id Low')
   })
 })

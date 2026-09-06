@@ -114,6 +114,8 @@ class HarnessConversationOut(Schema):
     status: str
     mode: str
     agent_name: str
+    model: str = ""
+    reasoning_effort: str = ""
     unread: bool = False
     updated_at: datetime
 
@@ -169,6 +171,7 @@ class HarnessSessionOut(Schema):
     cost: float
     tokens: dict = {}
     skill_ids: list[str] = []
+    unread: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -329,7 +332,7 @@ def _delete_org_provider_config(org_id: uuid.UUID) -> None:
     ProviderConfigService().delete_config(org_id)
 
 
-def _session_to_out(session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
+def _session_to_out(session, *, unread: bool = False) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
     """Map a HarnessSession ORM row to HarnessSessionOut."""
     return HarnessSessionOut(
         id=session.id,
@@ -344,9 +347,15 @@ def _session_to_out(session) -> HarnessSessionOut:  # type: ignore[no-untyped-de
         cost=float(session.cost or 0.0),
         tokens=dict(session.tokens or {}),
         skill_ids=[str(skill_id) for skill_id in (session.skill_ids or [])],
+        unread=unread,
         created_at=session.created_at,
         updated_at=session.updated_at,
     )
+
+
+def _session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
+    """Map a session and compute its unread flag."""
+    return _session_to_out(session, unread=service.is_session_unread(session))
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +378,11 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
         _owned_workspace(request, org_id, workspace_id)
         service = _resolve_harness_service()
         sessions = service.list_sessions(workspace_id)
-        return 200, [_session_to_out(s) for s in sessions]
+        unread_map = service.unread_for_sessions(sessions)
+        return 200, [
+            _session_to_out(session, unread=unread_map.get(session.id, False))
+            for session in sessions
+        ]
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
 
@@ -419,7 +432,7 @@ async def create_harness_session(
             skill_ids=payload.skill_ids or [],
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 201, _session_to_out(fresh)
+        return 201, await sync_to_async(_session_to_out_with_unread)(service, fresh)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -471,7 +484,7 @@ async def send_harness_message(
             skill_ids=payload.skill_ids if payload.skill_ids else None,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, _session_to_out(fresh)
+        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -505,7 +518,9 @@ async def patch_harness_session(
         updated = await sync_to_async(service.update_title)(
             session.id, payload.title
         )
-        return 200, _session_to_out(updated)
+        return 200, await sync_to_async(_session_to_out_with_unread)(
+            service, updated
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
@@ -566,6 +581,8 @@ def list_harness_conversations(request: HttpRequest):
             status=row["status"],
             mode=row["mode"],
             agent_name=row["agent_name"],
+            model=row.get("model") or "",
+            reasoning_effort=row.get("reasoning_effort") or "",
             unread=row["unread"],
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -619,7 +636,9 @@ async def set_harness_session_mode(
                 f"Harness session '{session.id}' already has an active run"
             )
         updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
-        return 200, _session_to_out(updated)
+        return 200, await sync_to_async(_session_to_out_with_unread)(
+            service, updated
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -647,7 +666,9 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         aborted = await service.abort_run(session.id)
-        return 200, _session_to_out(aborted)
+        return 200, await sync_to_async(_session_to_out_with_unread)(
+            service, aborted
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
 
@@ -685,7 +706,9 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                 )
             )
         return 200, {
-            "session": _session_to_out(session).model_dump(mode="json"),
+            "session": _session_to_out_with_unread(service, session).model_dump(
+                mode="json"
+            ),
             "messages": [
                 {
                     **HarnessMessageOut(

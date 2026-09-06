@@ -20,6 +20,7 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
     status: 'idle',
     mode: 'plan',
     agent_name: 'plan',
+    model: '',
     unread: true,
     updated_at: '2026-03-29T10:00:00.000Z',
     ...overrides,

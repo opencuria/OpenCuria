@@ -254,7 +254,6 @@ class HarnessService:
         """List root sessions across owned workspaces (conversations feed)."""
         sessions = self.sessions.list_for_workspaces(workspace_ids)
         workspace_names: dict[str, str] = {}
-        latest_assistant_at: dict[uuid.UUID, Any] = {}
         if sessions:
             from apps.runners.models import Workspace
 
@@ -262,11 +261,7 @@ class HarnessService:
                 id__in={session.workspace_id for session in sessions}
             ).only("id", "name")
             workspace_names = {str(row.id): row.name for row in rows}
-            latest_assistant_at = (
-                self.messages.latest_assistant_completed_at_by_session(
-                    [session.id for session in sessions]
-                )
-            )
+        unread_map = self.unread_for_sessions(sessions)
         return [
             {
                 "session_id": str(session.id),
@@ -276,10 +271,9 @@ class HarnessService:
                 "status": session.status,
                 "mode": session.mode,
                 "agent_name": session.agent_name,
-                "unread": self._is_conversation_unread(
-                    session,
-                    latest_assistant_at.get(session.id),
-                ),
+                "model": session.model or "",
+                "reasoning_effort": session.reasoning_effort or "",
+                "unread": unread_map.get(session.id, False),
                 "updated_at": session.updated_at.isoformat(),
             }
             for session in sessions
@@ -289,6 +283,27 @@ class HarnessService:
         """Persist that the user opened a harness session."""
         session = self.get_session(session_id)
         return self.sessions.mark_read(session)
+
+    def unread_for_sessions(
+        self, sessions: list[HarnessSession]
+    ) -> dict[uuid.UUID, bool]:
+        """Return unread flags keyed by session id."""
+        if not sessions:
+            return {}
+        latest_assistant_at = self.messages.latest_assistant_completed_at_by_session(
+            [session.id for session in sessions]
+        )
+        return {
+            session.id: self._is_conversation_unread(
+                session,
+                latest_assistant_at.get(session.id),
+            )
+            for session in sessions
+        }
+
+    def is_session_unread(self, session: HarnessSession) -> bool:
+        """Return whether a single session has unread assistant work."""
+        return self.unread_for_sessions([session]).get(session.id, False)
 
     @staticmethod
     def _is_conversation_unread(

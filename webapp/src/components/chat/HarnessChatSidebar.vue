@@ -109,7 +109,7 @@ function sessionTitle(session: HarnessSession): string {
   />
 
   <div
-    class="flex h-full shrink-0 flex-col border-r border-border bg-card transition-all duration-200"
+    class="flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-card transition-all duration-200"
     :class="[
       isCollapsed ? 'md:w-12' : 'md:w-64',
       mobileOpen ? 'fixed bottom-0 left-0 top-0 z-50 flex w-72' : 'hidden md:flex',
@@ -124,7 +124,7 @@ function sessionTitle(session: HarnessSession): string {
     </button>
 
     <div
-      class="flex items-center justify-between border-b border-border px-3 py-3"
+      class="flex shrink-0 items-center justify-between border-b border-border px-3 py-3"
       :class="isCollapsed && !mobileOpen ? 'md:hidden' : ''"
     >
       <span class="text-sm font-medium text-foreground">Chats</span>
@@ -143,7 +143,7 @@ function sessionTitle(session: HarnessSession): string {
 
     <div
       v-if="isCollapsed && !mobileOpen"
-      class="hidden flex-col items-center gap-2 border-b border-border py-3 md:flex"
+      class="hidden shrink-0 flex-col items-center gap-2 border-b border-border py-3 md:flex"
     >
       <MessageSquare :size="18" class="text-muted-foreground" />
       <Button variant="ghost" size="icon-sm" title="New chat" @click="emit('create')">
@@ -151,7 +151,7 @@ function sessionTitle(session: HarnessSession): string {
       </Button>
     </div>
 
-    <ScrollArea v-if="!isCollapsed || mobileOpen" class="flex-1">
+    <ScrollArea v-if="!isCollapsed || mobileOpen" class="min-h-0 flex-1 overflow-hidden">
       <div class="flex flex-col gap-0.5 p-1.5">
         <template v-for="session in orderedSessions" :key="session.id">
           <div
@@ -189,6 +189,11 @@ function sessionTitle(session: HarnessSession): string {
                   <template v-if="session.updated_at"> · {{ formatDate(session.updated_at) }}</template>
                 </div>
               </div>
+              <span
+                v-if="session.unread"
+                class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+                data-testid="unread-dot"
+              />
               <div class="flex shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
                 <Button variant="ghost" size="icon-sm" class="h-6 w-6" @click.stop="startRename(session)">
                   <Pencil :size="11" />

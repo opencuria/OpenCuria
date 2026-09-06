@@ -1453,7 +1453,7 @@ def _get_harness_service():
     return get_harness_service()
 
 
-def _session_dict(session) -> dict:
+def _session_dict(session, *, unread: bool = False) -> dict:
     """Serialize a HarnessSession ORM row for MCP responses."""
     return {
         "id": str(session.id),
@@ -1466,9 +1466,15 @@ def _session_dict(session) -> dict:
         "status": session.status,
         "cost": float(session.cost or 0.0),
         "tokens": dict(session.tokens or {}),
+        "unread": unread,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
+
+
+def _session_dict_with_unread(service, session) -> dict:
+    """Serialize a session and compute its unread flag."""
+    return _session_dict(session, unread=service.is_session_unread(session))
 
 
 def _owned_harness_session_or_error(api_key, org_id, session_id):
@@ -1552,7 +1558,13 @@ def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent
 
     service = _get_harness_service()
     sessions = service.list_sessions(workspace_id)
-    return _text([_session_dict(session) for session in sessions])
+    unread_map = service.unread_for_sessions(sessions)
+    return _text(
+        [
+            _session_dict(session, unread=unread_map.get(session.id, False))
+            for session in sessions
+        ]
+    )
 
 
 async def _call_create_harness_session(
@@ -1602,7 +1614,9 @@ async def _call_create_harness_session(
             skill_ids=list(args.get("skill_ids") or []),
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return _text(_session_dict(fresh))
+        return _text(
+            await sync_to_async(_session_dict_with_unread)(service, fresh)
+        )
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -1656,7 +1670,9 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
             skill_ids=list(args.get("skill_ids") or []) or None,
         )
         fresh = await sync_to_async(service.get_session)(current.id)
-        return _text(_session_dict(fresh))
+        return _text(
+            await sync_to_async(_session_dict_with_unread)(service, fresh)
+        )
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -1685,7 +1701,7 @@ def _call_abort_harness_session(api_key, org_id, args: dict) -> list[TextContent
     loop = asyncio.new_event_loop()
     updated = loop.run_until_complete(_abort())
     loop.close()
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1758,7 +1774,7 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
         )
     return _text(
         {
-            "session": _session_dict(session),
+            "session": _session_dict_with_unread(service, session),
             "messages": [
                 {
                     "id": str(message.id),
@@ -1869,7 +1885,7 @@ def _call_patch_harness_session(api_key, org_id, args: dict) -> list[TextContent
         updated = service.update_title(session.id, title)
     except ValueError as exc:
         return _error(str(exc))
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_set_harness_session_mode(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1896,7 +1912,7 @@ def _call_set_harness_session_mode(api_key, org_id, args: dict) -> list[TextCont
         updated = service.set_mode(session.id, mode)
     except ValueError as exc:
         return _error(str(exc))
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_delete_harness_session(api_key, org_id, args: dict) -> list[TextContent]:

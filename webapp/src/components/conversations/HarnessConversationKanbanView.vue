@@ -2,22 +2,24 @@
 import { Bot, CheckCircle2 } from '@lucide/vue'
 import type { HarnessConversation } from '@/types/harness'
 import StartNewHarnessChatDialog from '@/components/workspaces/StartNewHarnessChatDialog.vue'
-import {
-  harnessConversationModeLabel,
-  harnessConversationPreview,
-} from '@/lib/harnessConversationState'
+import { harnessConversationModeLabel } from '@/lib/harnessConversationState'
 
 interface Props {
   idleConvs: HarnessConversation[]
   workingConvs: HarnessConversation[]
   doneConvs: HarnessConversation[]
   formatTimeAgo: (isoString: string) => string
+  formatModelEffort: (conv: HarnessConversation) => string
 }
 
 defineProps<Props>()
 defineEmits<{
   conversationClick: [conv: HarnessConversation]
 }>()
+
+function conversationTitle(conv: HarnessConversation): string {
+  return conv.title || conv.workspace_name || conv.workspace_id.slice(0, 12) + '…'
+}
 </script>
 
 <template>
@@ -60,17 +62,17 @@ defineEmits<{
             >
               <Bot :size="13" class="text-muted-foreground" />
             </div>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center justify-between gap-1 mb-0.5">
+            <div class="flex-1 min-w-0 flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-1">
                 <span class="text-xs font-semibold text-foreground truncate">
-                  {{ conv.title || conv.workspace_name || conv.workspace_id.slice(0, 12) + '…' }}
+                  {{ conversationTitle(conv) }}
                 </span>
                 <span class="text-xs text-muted-foreground shrink-0 tabular-nums">
                   {{ formatTimeAgo(conv.updated_at) }}
                 </span>
               </div>
-              <p class="text-xs text-muted-foreground truncate mb-1.5">
-                {{ conv.workspace_name }}
+              <p class="text-xs text-muted-foreground truncate">
+                {{ formatModelEffort(conv) }}
               </p>
               <span class="text-xs text-muted-foreground">
                 {{ harnessConversationModeLabel(conv) }}
@@ -125,17 +127,17 @@ defineEmits<{
                 <span class="relative inline-flex rounded-full h-3 w-3 bg-warning" />
               </span>
             </div>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center justify-between gap-1 mb-0.5">
+            <div class="flex-1 min-w-0 flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-1">
                 <span class="text-xs font-bold text-foreground truncate">
-                  {{ conv.title || conv.workspace_name || conv.workspace_id.slice(0, 12) + '…' }}
+                  {{ conversationTitle(conv) }}
                 </span>
                 <span class="text-xs text-muted-foreground shrink-0 tabular-nums">
                   {{ formatTimeAgo(conv.updated_at) }}
                 </span>
               </div>
-              <p class="text-xs text-warning/80 truncate mb-1.5">
-                {{ harnessConversationPreview(conv) }}
+              <p class="text-xs text-warning/80 truncate">
+                {{ formatModelEffort(conv) }}
               </p>
               <span class="text-xs text-muted-foreground">
                 {{ conv.workspace_name }} · {{ harnessConversationModeLabel(conv) }}
@@ -171,7 +173,7 @@ defineEmits<{
           v-for="conv in doneConvs"
           :key="`done-${conv.session_id}`"
           type="button"
-          class="w-full text-left p-3 rounded-lg border border-success/30 bg-success/5 hover:bg-success/10 transition-colors relative overflow-hidden"
+          class="w-full text-left p-3 rounded-lg border border-success/30 bg-success/5 hover:bg-success/10 transition-colors relative overflow-hidden shrink-0"
           @click="$emit('conversationClick', conv)"
         >
           <div class="absolute left-0 top-0 bottom-0 w-0.5 bg-success" />
@@ -181,10 +183,10 @@ defineEmits<{
             >
               <CheckCircle2 :size="13" class="text-success" />
             </div>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center justify-between gap-1 mb-0.5">
+            <div class="flex-1 min-w-0 flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-1">
                 <span class="text-xs font-bold text-foreground truncate">
-                  {{ conv.title || conv.workspace_name || conv.workspace_id.slice(0, 12) + '…' }}
+                  {{ conversationTitle(conv) }}
                 </span>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <span class="w-1.5 h-1.5 rounded-full bg-primary" />
@@ -193,8 +195,8 @@ defineEmits<{
                   </span>
                 </div>
               </div>
-              <p class="text-xs text-muted-foreground truncate mb-1.5">
-                {{ harnessConversationPreview(conv) }}
+              <p class="text-xs text-muted-foreground truncate">
+                {{ formatModelEffort(conv) }}
               </p>
               <span class="text-xs text-muted-foreground">
                 {{ conv.workspace_name }} · {{ harnessConversationModeLabel(conv) }}

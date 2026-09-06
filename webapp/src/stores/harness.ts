@@ -43,6 +43,7 @@ import {
 } from '@/lib/harnessReducer'
 import { collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
 import { useNotificationStore } from './notifications'
+import { useHarnessConversationStore } from './harnessConversations'
 
 export const useHarnessStore = defineStore('harness', () => {
   // --- State ---
@@ -56,6 +57,8 @@ export const useHarnessStore = defineStore('harness', () => {
   /** Pending question requests keyed by request id. */
   const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
   const activeSessionId = ref<string | null>(null)
+  /** Session currently open in the chat panel; cleared when the panel unmounts. */
+  const viewingSessionId = ref<string | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
   /** Model picker value; empty string means "org default". */
@@ -138,6 +141,22 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function setActiveSession(sessionId: string | null): void {
     activeSessionId.value = sessionId
+  }
+
+  function setViewingSession(sessionId: string | null): void {
+    viewingSessionId.value = sessionId
+    if (!sessionId) return
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (session?.status === 'idle') {
+      void markSessionRead(sessionId)
+    }
+  }
+
+  async function markSessionRead(sessionId: string): Promise<void> {
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (session) session.unread = false
+    const conversationStore = useHarnessConversationStore()
+    await conversationStore.markAsRead(sessionId)
   }
 
   async function fetchParts(
@@ -374,6 +393,15 @@ export const useHarnessStore = defineStore('harness', () => {
   function handleSessionStatus(sessionId: string, status: HarnessSession['status']): void {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) session.status = status
+    if (status === 'idle') {
+      if (viewingSessionId.value === sessionId) {
+        void markSessionRead(sessionId)
+        return
+      }
+      if (session) session.unread = true
+      return
+    }
+    if (session) session.unread = false
   }
 
   function handlePermissionRequired(request: HarnessPermissionRequest): void {
@@ -441,6 +469,7 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions.value = {}
     pendingQuestions.value = {}
     activeSessionId.value = null
+    viewingSessionId.value = null
     loading.value = false
     error.value = null
   }
@@ -453,6 +482,7 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions,
     pendingQuestions,
     activeSessionId,
+    viewingSessionId,
     loading,
     error,
     modelInput,
@@ -468,6 +498,8 @@ export const useHarnessStore = defineStore('harness', () => {
     // Actions
     fetchSessions,
     setActiveSession,
+    setViewingSession,
+    markSessionRead,
     fetchParts,
     fetchTodos,
     createSession,

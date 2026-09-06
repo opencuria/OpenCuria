@@ -5,6 +5,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
+import { markHarnessSessionRead } from '@/services/harness.api'
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
@@ -30,6 +31,7 @@ vi.mock('@/services/harness.api', async () => {
       api_key_hint: '',
     }),
     listProviderModels: vi.fn().mockResolvedValue([]),
+    markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),
   }
 })
 
@@ -212,5 +214,30 @@ describe('HarnessChatPanel', () => {
     expect(stack.element.parentElement).toBe(input.element.parentElement)
     const sheets = stack.props('sheets') as Array<{ kind: string }>
     expect(sheets.map((sheet) => sheet.kind)).toEqual(['permission', 'todos'])
+  })
+
+  it('marks an idle session read when it becomes the active viewing chat', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ unread: true })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+
+    expect(store.viewingSessionId).toBe('session-root')
+    expect(vi.mocked(markHarnessSessionRead)).toHaveBeenCalledWith('session-root')
+    expect(store.sessions[0]?.unread).toBe(false)
+    wrapper.unmount()
+    expect(store.viewingSessionId).toBeNull()
   })
 })

@@ -30,6 +30,7 @@ vi.mock('@/services/harness.api', async () => {
       has_api_key: false,
       api_key_hint: '',
     }),
+    listProviderModels: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -81,6 +82,7 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
     status: 'idle',
     mode: 'build',
     agent_name: 'build',
+    model: '',
     unread: false,
     updated_at: '2026-03-29T10:00:00.000Z',
     ...overrides,

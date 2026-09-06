@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useRunnerStore } from '@/stores/runners'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
+import { useHarnessStore } from '@/stores/harness'
 import { usePolling } from '@/composables/usePolling'
 import {
   subscribeToWorkspace,
@@ -17,6 +18,8 @@ import {
   isHarnessConversationDoneUnread,
   isHarnessConversationRunning,
 } from '@/lib/harnessConversationState'
+import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
+import { getProviderConfig, listProviderModels } from '@/services/harness.api'
 import { Input } from '@/components/ui/input'
 import {
   Search,
@@ -33,6 +36,10 @@ const router = useRouter()
 const runnerStore = useRunnerStore()
 const workspaceStore = useWorkspaceStore()
 const conversationStore = useHarnessConversationStore()
+const harnessStore = useHarnessStore()
+
+const catalogModels = ref<ProviderModel[]>([])
+const orgDefaultModel = ref('')
 
 const { start: startRunnerPolling } = usePolling(() => runnerStore.fetchRunners(), 10000)
 const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
@@ -54,7 +61,11 @@ function setupSocketListeners(): void {
 
   cleanupFns.push(
     onEvent('harness.session_status', (data) => {
-      conversationStore.updateSessionStatus(data.session_id, data.status)
+      conversationStore.updateSessionStatus(
+        data.session_id,
+        data.status,
+        harnessStore.viewingSessionId === data.session_id,
+      )
     }),
   )
 
@@ -118,6 +129,7 @@ onMounted(async () => {
   await conversationStore.fetchConversations()
   startConvPolling()
   setupSocketListeners()
+  void loadProviderCatalog()
 })
 
 onUnmounted(() => {
@@ -170,6 +182,26 @@ function formatTimeAgo(isoString: string): string {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+async function loadProviderCatalog(): Promise<void> {
+  try {
+    const config = await getProviderConfig()
+    orgDefaultModel.value = config.default_model || ''
+    catalogModels.value = await listProviderModels()
+  } catch {
+    catalogModels.value = []
+    orgDefaultModel.value = ''
+  }
+}
+
+function formatConversationModel(conv: HarnessConversation): string {
+  return formatHarnessModelEffort(
+    conv.model,
+    conv.reasoning_effort ?? '',
+    catalogModels.value,
+    orgDefaultModel.value,
+  )
 }
 
 function navigateToConversation(conv: HarnessConversation): void {
@@ -262,6 +294,7 @@ function navigateToConversation(conv: HarnessConversation): void {
       :working-convs="workingConvs"
       :done-convs="doneConvs"
       :format-time-ago="formatTimeAgo"
+      :format-model-effort="formatConversationModel"
       @conversation-click="navigateToConversation"
     />
   </div>

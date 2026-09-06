@@ -264,11 +264,15 @@ function cleanupSocket(): void {
 
 onMounted(() => {
   setupSocketListeners()
-  void harness.fetchSessions(props.workspaceId).then(() => applySessionQuery())
+  void harness.fetchSessions(props.workspaceId).then(() => {
+    applySessionQuery()
+    harness.setViewingSession(harness.activeSessionId)
+  })
   void skillStore.fetchSkills()
 })
 
 onUnmounted(() => {
+  harness.setViewingSession(null)
   cleanupSocket()
 })
 
@@ -278,7 +282,10 @@ watch(
     if (next === prev) return
     cleanupSocket()
     setupSocketListeners()
-    void harness.fetchSessions(next).then(() => applySessionQuery())
+    void harness.fetchSessions(next).then(() => {
+      applySessionQuery()
+      harness.setViewingSession(harness.activeSessionId)
+    })
   },
 )
 
@@ -308,6 +315,7 @@ watch(
 watch(
   () => harness.activeSessionId,
   (sessionId) => {
+    harness.setViewingSession(sessionId)
     if (!sessionId) {
       composerMode.value = 'build'
       return

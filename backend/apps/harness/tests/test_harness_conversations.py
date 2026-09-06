@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import timedelta
 
@@ -137,6 +136,8 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
         workspace_id=conv_setup["owned"].id,
         organization_id=conv_setup["org"].id,
         prompt="hello harness",
+        model="openrouter/test-model",
+        reasoning_effort="high",
     )
     HarnessSessionRepository.mark_status(session, HarnessSessionStatus.IDLE)
     client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
@@ -152,6 +153,8 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["status"] == HarnessSessionStatus.IDLE
     assert row["mode"] == "build"
     assert row["agent_name"] == "build"
+    assert row["model"] == "openrouter/test-model"
+    assert row["reasoning_effort"] == "high"
     assert row["unread"] is False
     assert "updated_at" in row
 
@@ -267,3 +270,66 @@ def test_mark_read_foreign_session_is_404(conv_setup, fake_harness_service):
     client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
     response = client.post(f"/api/v1/harness/sessions/{session.id}/read")
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_list_sessions_unread_when_idle_with_completed_assistant(
+    conv_setup, fake_harness_service
+):
+    """Workspace session list exposes unread for idle completed work."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="work done",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.IDLE)
+    _complete_assistant(session.id)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    response = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["unread"] is True
+
+
+@pytest.mark.django_db
+def test_list_sessions_unread_false_when_busy(conv_setup, fake_harness_service):
+    """Busy sessions are never unread in the workspace session list."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="running",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.BUSY)
+    _complete_assistant(session.id)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    response = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["unread"] is False
+
+
+@pytest.mark.django_db
+def test_list_sessions_unread_false_after_mark_read(conv_setup, fake_harness_service):
+    """Mark-read clears unread on the workspace session list."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="read me",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.IDLE)
+    _complete_assistant(session.id)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    listed = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    )
+    assert listed.json()[0]["unread"] is True
+    mark = client.post(f"/api/v1/harness/sessions/{session.id}/read")
+    assert mark.status_code == 204
+    listed = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    )
+    assert listed.json()[0]["unread"] is False
