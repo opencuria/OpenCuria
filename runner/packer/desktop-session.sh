@@ -600,8 +600,8 @@ cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
 #!/bin/bash
 # Stop Xvnc and the XFCE session (including Plank / skippy-xd).
 for pattern in \
-    'Xvnc.*:1' \
-    'Xtigervnc.*:1' \
+    '^(/usr/bin/)?Xvnc :1' \
+    '^(/usr/bin/)?Xtigervnc :1' \
     'xfce4-session' \
     'xfwm4' \
     'xfce4-panel' \

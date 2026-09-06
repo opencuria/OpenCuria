@@ -1096,7 +1096,8 @@ class WorkspaceService:
                     "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
                     'sys.exit(0 if rc == 0 else 1)"; '
                     "else "
-                    "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
+                    "pgrep -f '^(/usr/bin/)?Xvnc :1|^(/usr/bin/)?Xtigervnc :1' "
+                    ">/dev/null; "
                     "fi"
                 ),
             ],
@@ -1371,13 +1372,17 @@ class WorkspaceService:
 
     @staticmethod
     def _desktop_start_command(width: int, height: int) -> str:
-        """Return the shell used to start Xvnc at a fixed geometry."""
+        """Return the shell used to start Xvnc at a fixed geometry.
+
+        Must not call ``opencuria-desktop-stop``. That script uses
+        ``pgrep -f 'Xvnc.*:1'``, which matches this ``bash -lc`` argv and
+        would kill the start process before Xvnc is launched.
+        """
         geometry = f"{width}x{height}"
         return (
             "set -e\n"
             "export DISPLAY=:1\n"
             "export HOME=/root\n"
-            "/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\n"
             "mkdir -p /root/.vnc\n"
             "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
             f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
@@ -1395,6 +1400,7 @@ class WorkspaceService:
             "  sleep 0.25\n"
             "done\n"
             'echo "Desktop session failed to start" >&2\n'
+            "tail -n 50 /root/.vnc/server.log >&2 || true\n"
             "exit 1\n"
         )
 
@@ -1445,9 +1451,25 @@ class WorkspaceService:
 
         log = logger.bind(workspace_id=str(workspace_id))
 
+        # Stop first as its own exec. The baked stop script matches
+        # ``Xvnc.*:1`` in any process argv, so it must not run inside the
+        # start command whose command line contains those bytes.
+        await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "bash",
+                "-lc",
+                "/usr/local/bin/opencuria-desktop-stop >/dev/null 2>&1 || true",
+            ],
+            env={"HOME": "/root"},
+        )
+
+        start_command = self._desktop_start_command(
+            resolved_width, resolved_height
+        )
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
-            ["bash", "-lc", self._desktop_start_command(resolved_width, resolved_height)],
+            ["bash", "-lc", start_command],
             env={"HOME": "/root", "DISPLAY": ":1"},
         )
         if exit_code != 0:
