@@ -32,6 +32,7 @@ import {
   sendHarnessMessage,
   setSessionMode,
 } from '@/services/harness.api'
+import { hydrateHarnessPart } from '@/lib/toolDisplay'
 import {
   applyPartDelta,
   applySubtaskFinished,
@@ -148,7 +149,7 @@ export const useHarnessStore = defineStore('harness', () => {
       const incoming = response.messages.map((message) => ({
         ...message,
         session_id: sessionId,
-        parts: message.parts ?? [],
+        parts: (message.parts ?? []).map(hydrateHarnessPart),
       }))
       const session = sessions.value.find((item) => item.id === sessionId)
       messagesBySession.value[sessionId] =

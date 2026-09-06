@@ -29,7 +29,7 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
 }
 
 describe('HarnessWorkRow', () => {
-  it('labels reasoning as Thought', () => {
+  it('labels reasoning as Thought and shows a one-line preview', () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
         part: makePart({
@@ -42,35 +42,38 @@ describe('HarnessWorkRow', () => {
     })
 
     expect(wrapper.get('[data-testid="harness-work-row-label"]').text()).toBe('Thought')
+    expect(wrapper.get('[data-testid="harness-work-row-preview"]').text()).toBe(
+      'considering the layout',
+    )
     expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe(
       '1',
     )
   })
 
-  it('expands a standalone tool row to show output', async () => {
+  it('expands a standalone tool row to show the tool detail', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: { part: makePart() },
     })
 
     expect(wrapper.text()).not.toContain('export const x = 1')
     await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
-    expect(wrapper.text()).toContain('export const x = 1')
-    expect(wrapper.text()).toContain('read')
+    expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('export const x = 1')
   })
 
-  it('uses a tooltip instead of a collapsible for grouped completed tools', () => {
+  it('keeps grouped completed tools expandable', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: { part: makePart(), grouped: true },
     })
 
-    expect(wrapper.find('[data-slot="collapsible-trigger"]').exists()).toBe(false)
-    expect(wrapper.find('[data-slot="tooltip-trigger"]').exists()).toBe(true)
+    expect(wrapper.find('[data-slot="collapsible-trigger"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe(
-      '0',
+      '1',
     )
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('export const x = 1')
   })
 
-  it('keeps grouped reasoning expandable', async () => {
+  it('expands grouped reasoning to markdown', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
         grouped: true,
@@ -87,10 +90,9 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.text()).toContain('need to check the store')
   })
 
-  it('keeps grouped error tools expandable', async () => {
+  it('opens error tools by default', () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
-        grouped: true,
         part: makePart({
           state: 'error',
           title: 'Read missing.ts',
@@ -99,8 +101,7 @@ describe('HarnessWorkRow', () => {
       },
     })
 
-    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
-    expect(wrapper.text()).toContain('file not found')
+    expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('file not found')
   })
 
   it('shows a spinner while a tool is running', () => {
@@ -132,5 +133,23 @@ describe('HarnessWorkRow', () => {
     })
 
     expect(wrapper.find('svg.lucide-mouse-pointer-2').exists()).toBe(true)
+  })
+
+  it('renders a bash terminal detail', async () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({
+          tool: 'bash',
+          title: '$ ls',
+          output: 'a.ts',
+          input: { arguments: '{"command":"ls"}' },
+          meta: { exit_code: 0 },
+        }),
+      },
+    })
+
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(wrapper.get('[data-testid="tool-detail-bash"]').text()).toContain('$ ls')
+    expect(wrapper.get('[data-testid="tool-detail-bash-exit"]').text()).toContain('exit 0')
   })
 })

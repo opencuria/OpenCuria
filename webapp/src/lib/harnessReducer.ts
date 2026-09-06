@@ -147,7 +147,10 @@ export function applyPartDelta(
       call_id: delta.call_id ?? opts.partId,
       tool: delta.tool_started,
       title: delta.title ?? delta.tool_started,
-      input: delta.call_id ? { call_id: delta.call_id } : {},
+      input: {
+        tool: delta.tool_started,
+        arguments: delta.arguments ?? '',
+      },
       output: '',
       meta: opts.step !== undefined ? { step: opts.step } : {},
     }

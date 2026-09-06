@@ -42,11 +42,10 @@ describe('buildRenderBlocks', () => {
     ])
   })
 
-  it('groups two or more consecutive work items', () => {
+  it('groups two or more consecutive tool calls', () => {
     const parts = [
       makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
       makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
-      makePart('reasoning', { id: 'r1', output: 'hmm' }),
     ]
 
     const blocks = buildRenderBlocks(parts)
@@ -54,8 +53,40 @@ describe('buildRenderBlocks', () => {
     expect(blocks).toHaveLength(1)
     expect(blocks[0]).toMatchObject({ kind: 'group' })
     if (blocks[0]?.kind === 'group') {
-      expect(blocks[0].parts.map((part) => part.id)).toEqual(['tool-1', 'tool-2', 'r1'])
+      expect(blocks[0].parts.map((part) => part.id)).toEqual(['tool-1', 'tool-2'])
     }
+  })
+
+  it('breaks a tool group on reasoning', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+      makePart('reasoning', { id: 'r1', output: 'hmm' }),
+      makePart('tool', { id: 'tool-3', tool: 'list', title: 'List src' }),
+      makePart('tool', { id: 'tool-4', tool: 'read', title: 'Read b.ts' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['group', 'single', 'group'])
+    expect(blocks[1]).toMatchObject({ kind: 'single', part: { id: 'r1' } })
+  })
+
+  it('renders failed tools as standalone rows', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('tool', {
+        id: 'tool-2',
+        tool: 'bash',
+        title: '$ false',
+        state: 'error',
+        output: 'boom',
+      }),
+      makePart('tool', { id: 'tool-3', tool: 'grep', title: 'Grep foo' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'single', 'single'])
+    expect(blocks[1]).toMatchObject({ kind: 'single', part: { id: 'tool-2' } })
   })
 
   it('skips step-finish and still renders a single work item', () => {
@@ -210,21 +241,23 @@ describe('buildRenderBlocks', () => {
 })
 
 describe('work item helpers', () => {
-  it('identifies work items and card parts', () => {
+  it('identifies groupable tools and card parts', () => {
     expect(isWorkItem(makePart('tool'))).toBe(true)
-    expect(isWorkItem(makePart('reasoning'))).toBe(true)
+    expect(isWorkItem(makePart('tool', { state: 'error' }))).toBe(false)
+    expect(isWorkItem(makePart('reasoning'))).toBe(false)
     expect(isWorkItem(makePart('text'))).toBe(false)
     expect(isCardPart(makePart('subtask'))).toBe(true)
     expect(isCardPart(makePart('patch'))).toBe(true)
     expect(isCardPart(makePart('tool'))).toBe(false)
   })
 
-  it('counts only tool and reasoning parts', () => {
+  it('counts only groupable tool parts', () => {
     const parts = [
       makePart('tool'),
       makePart('step-finish'),
       makePart('reasoning'),
+      makePart('tool', { id: 'err', state: 'error' }),
     ]
-    expect(countWorkItems(parts)).toBe(2)
+    expect(countWorkItems(parts)).toBe(1)
   })
 })

@@ -1752,6 +1752,7 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 "call_id": part.call_id or "",
                 "title": part.title or "",
                 "output": part.output or "",
+                "input": dict(part.input or {}),
                 "meta": dict(part.meta or {}),
             }
         )

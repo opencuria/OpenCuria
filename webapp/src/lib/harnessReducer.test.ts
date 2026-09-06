@@ -49,7 +49,7 @@ describe('harnessReducer', () => {
     applyPartDelta(
       messages,
       'session-1',
-      { tool_started: 'bash', title: '$ ls', call_id: 'call-1' },
+      { tool_started: 'bash', title: '$ ls', call_id: 'call-1', arguments: 'ls -la' },
       { step: 2, partId: 'part-tool-1' },
     )
 
@@ -57,6 +57,7 @@ describe('harnessReducer', () => {
     let tool = findPart(assistant, { callId: 'call-1' })
     expect(tool?.state).toBe('running')
     expect(tool?.title).toBe('$ ls')
+    expect(tool?.input).toEqual({ tool: 'bash', arguments: 'ls -la' })
 
     applyPartDelta(
       messages,

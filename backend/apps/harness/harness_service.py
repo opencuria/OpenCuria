@@ -1233,6 +1233,7 @@ class HarnessService:
                         "tool_started": event.get("tool", ""),
                         "title": event.get("title", ""),
                         "call_id": event.get("call_id", ""),
+                        "arguments": event.get("arguments", ""),
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -1292,6 +1293,7 @@ class HarnessService:
                 meta={
                     "subtask_id": event.get("subtask_id", ""),
                     "agent": event.get("agent", ""),
+                    "child_session_id": event.get("child_session_id", ""),
                 },
             )
             self._runs.get(session_id, {}).get("subtask_parts", {})[
@@ -1475,6 +1477,7 @@ class HarnessService:
                 "subtask_id": subtask_id,
                 "agent": event.get("agent", ""),
                 "status": status,
+                "child_session_id": event.get("child_session_id", ""),
             },
         )
 

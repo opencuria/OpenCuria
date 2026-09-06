@@ -185,6 +185,7 @@ export interface HarnessPartDelta {
   tool_error?: string
   title?: string
   call_id?: string
+  arguments?: string
   output?: string
   patch?: string
   compaction?: boolean

@@ -199,6 +199,7 @@ class HarnessPartOut(Schema):
     call_id: str
     title: str
     output: str
+    input: dict = {}
     meta: dict = {}
 
 
@@ -679,6 +680,7 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                     call_id=part.call_id or "",
                     title=part.title or "",
                     output=part.output or "",
+                    input=dict(part.input or {}),
                     meta=dict(part.meta or {}),
                 )
             )

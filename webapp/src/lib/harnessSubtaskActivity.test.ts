@@ -36,6 +36,7 @@ describe('formatSubagentType', () => {
   it('maps known subagent ids to display labels', () => {
     expect(formatSubagentType('explore')).toBe('Explorer')
     expect(formatSubagentType('general')).toBe('General')
+    expect(formatSubagentType('computeruse')).toBe('Computer use')
     expect(formatSubagentType('EXPLORER')).toBe('Explorer')
   })
 

@@ -150,6 +150,68 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_subtask_part_persists_child_session_id(harness_workspace) -> None:
+    """subtask_started/finished store child_session_id on the part meta."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+    )
+    assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "subtask_started",
+            "subtask_id": "sub-1",
+            "agent": "explore",
+            "description": "research",
+            "child_session_id": "child-session-1",
+        },
+    )
+    started_parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "subtask"
+    ]
+    assert len(started_parts) == 1
+    assert started_parts[0].meta.get("child_session_id") == "child-session-1"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "subtask_finished",
+            "subtask_id": "sub-1",
+            "agent": "explore",
+            "status": "completed",
+            "summary": "found it",
+            "child_session_id": "child-session-1",
+        },
+    )
+    finished_parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "subtask"
+    ]
+    assert finished_parts[0].meta.get("child_session_id") == "child-session-1"
+    assert finished_parts[0].meta.get("status") == "completed"
+    assert finished_parts[0].state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_permission_event_emitted_once_with_request_id(
     harness_workspace,
 ) -> None:

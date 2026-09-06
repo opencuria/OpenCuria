@@ -16,6 +16,7 @@ from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
+from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -340,6 +341,40 @@ def test_parts_todos_abort_flow(harness_setup, fake_harness_service):
 
     abort = run_client.post(f"/api/v1/harness/sessions/{session_id}/abort")
     assert abort.status_code == 200
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_tool_input(harness_setup, fake_harness_service):
+    """GET parts returns the persisted tool input payload."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="read a file",
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-1",
+        title="Read a.txt",
+        input={"tool": "read", "arguments": '{"path":"a.txt"}'},
+    )
+    HarnessPartRepository.mark_state(part, "completed", output="hello")
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.get(f"/api/v1/harness/sessions/{session.id}/parts")
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assistant_out = next(
+        message for message in messages if message["role"] == "assistant" and message["parts"]
+    )
+    tool_part = next(part for part in assistant_out["parts"] if part["type"] == "tool")
+    assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
+    assert tool_part["output"] == "hello"
 
 
 @pytest.mark.django_db(transaction=True)

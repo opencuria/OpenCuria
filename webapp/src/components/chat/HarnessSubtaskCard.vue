@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Loader2 } from '@lucide/vue'
+import { ChevronRight, Loader2 } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
 } from '@/lib/harnessSubtaskActivity'
+import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
 const props = defineProps<{
   part: HarnessPart
@@ -42,6 +43,11 @@ const activity = computed(() =>
 
 const isRunning = computed(() => props.part.state === 'running')
 
+const showDesktopMini = computed(() => {
+  const agent = String(props.part.meta?.['agent'] ?? '').toLowerCase()
+  return agent === 'computeruse' && isRunning.value
+})
+
 function handleOpen(): void {
   if (childId.value) emit('openSubtask', childId.value)
 }
@@ -51,7 +57,8 @@ function handleOpen(): void {
   <button
     type="button"
     data-testid="harness-subtask-row"
-    class="flex w-full min-w-0 items-start gap-2 py-0.5 text-left disabled:cursor-default"
+    class="flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-default"
+    :class="childId ? 'cursor-pointer hover:bg-muted/60' : ''"
     :disabled="!childId"
     @click="handleOpen"
   >
@@ -83,6 +90,11 @@ function handleOpen(): void {
         >
           {{ agentLabel }}
         </span>
+        <ChevronRight
+          v-if="childId"
+          :size="14"
+          class="ml-auto shrink-0 text-muted-foreground"
+        />
       </span>
       <span
         v-if="activity"
@@ -91,6 +103,7 @@ function handleOpen(): void {
       >
         {{ activity }}
       </span>
+      <HarnessDesktopMini v-if="showDesktopMini" />
     </span>
   </button>
 </template>

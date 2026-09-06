@@ -189,6 +189,72 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-testid="harness-worked-running"]').text()).toBe('2 running')
   })
 
+  it('keeps reasoning outside of a tool group', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({
+            id: 'tool-1',
+            type: 'tool',
+            tool: 'read',
+            title: 'Read a.ts',
+          }),
+          makePart({
+            id: 'r1',
+            type: 'reasoning',
+            title: '',
+            output: 'need a second file',
+          }),
+          makePart({
+            id: 'tool-2',
+            type: 'tool',
+            tool: 'grep',
+            title: 'Grep foo',
+          }),
+        ]),
+      },
+    })
+
+    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    expect(kinds).toEqual(['single', 'single', 'single'])
+    expect(wrapper.text()).toContain('Thought')
+    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+  })
+
+  it('opens the matching child session for adjacent subtasks', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({
+            id: 'sub-1',
+            type: 'subtask',
+            title: 'Explore renderer',
+            meta: {
+              agent: 'explore',
+              subtask_id: 'sub-1',
+              child_session_id: 'child-a',
+            },
+          }),
+          makePart({
+            id: 'sub-2',
+            type: 'subtask',
+            title: 'General research',
+            meta: {
+              agent: 'general',
+              subtask_id: 'sub-2',
+              child_session_id: 'child-b',
+            },
+          }),
+        ]),
+      },
+    })
+
+    const rows = wrapper.findAll('[data-testid="harness-subtask-row"]')
+    await rows[0]!.trigger('click')
+    await rows[1]!.trigger('click')
+    expect(wrapper.emitted('openSubtask')).toEqual([['child-a'], ['child-b']])
+  })
+
   it('renders two running subtask cards at once', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {

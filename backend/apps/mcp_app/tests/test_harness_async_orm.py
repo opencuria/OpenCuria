@@ -221,3 +221,51 @@ async def test_mcp_list_harness_parts_includes_message_reasoning_effort(
     )
     assert assistant["model"] == "fake-model"
     assert assistant["reasoning_effort"] == "high"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_list_harness_parts_includes_tool_input(monkeypatch) -> None:
+    """list_harness_parts returns persisted tool input for MCP clients."""
+    from apps.harness.repositories import (
+        HarnessMessageRepository,
+        HarnessPartRepository,
+    )
+
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="read a file",
+        agent_name="build",
+        mode="build",
+        user_id=user.id,
+    )
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    part = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-1",
+        title="Read a.txt",
+        input={"tool": "read", "arguments": '{"path":"a.txt"}'},
+    )
+    await sync_to_async(HarnessPartRepository.mark_state)(
+        part, "completed", output="hello"
+    )
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    api_key = SimpleNamespace(user=user)
+    result = await sync_to_async(_call_list_harness_parts)(
+        api_key, org.id, {"session_id": str(session.id)}
+    )
+    body = _parse(result)
+    assistant_out = next(
+        message
+        for message in body["messages"]
+        if message["role"] == "assistant" and message["parts"]
+    )
+    tool_part = next(item for item in assistant_out["parts"] if item["type"] == "tool")
+    assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
+    assert tool_part["output"] == "hello"

@@ -46,24 +46,12 @@ const streamingSessionId = computed(() =>
 const childSessionIds = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
   for (const session of harness.sessions) {
-    if (!session.parent_id) continue
-    for (const message of harness.messagesBySession[session.parent_id] ?? []) {
-      for (const part of message.parts) {
-        if (part.type !== 'subtask') continue
-        const subtaskId = part.meta?.['subtask_id']
-        if (typeof subtaskId === 'string' && subtaskId) {
-          map[subtaskId] = session.id
-        }
-      }
-    }
-  }
-  for (const session of harness.sessions) {
     for (const message of harness.messagesBySession[session.id] ?? []) {
       for (const part of message.parts) {
         if (part.type !== 'subtask') continue
         const childId = part.meta?.['child_session_id']
         const subtaskId = part.meta?.['subtask_id']
-        if (typeof childId === 'string' && childId && typeof subtaskId === 'string') {
+        if (typeof childId === 'string' && childId && typeof subtaskId === 'string' && subtaskId) {
           map[subtaskId] = childId
         }
       }

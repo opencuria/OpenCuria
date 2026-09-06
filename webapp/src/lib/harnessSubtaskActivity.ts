@@ -8,6 +8,7 @@ import type { HarnessMessage, HarnessPart } from '@/types/harness'
 const SUBAGENT_TYPE_LABELS: Record<string, string> = {
   explore: 'Explorer',
   general: 'General',
+  computeruse: 'Computer use',
 }
 
 /** Display label for a subagent type (`explore` → `Explorer`). */

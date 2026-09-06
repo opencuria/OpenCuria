@@ -6,6 +6,10 @@ import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
 import type { HarnessPart } from '@/types/harness'
 
+vi.mock('./HarnessDesktopMini.vue', () => ({
+  default: { template: '<div data-testid="harness-desktop-mini" />' },
+}))
+
 function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: 'part-sub-1',
@@ -98,6 +102,41 @@ describe('HarnessSubtaskCard', () => {
     await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
 
     expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+  })
+
+  it('highlights the row on hover when it is clickable', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart(), childSessionId: 'session-child' },
+    })
+
+    const classes = wrapper.get('[data-testid="harness-subtask-row"]').classes()
+    expect(classes).toContain('hover:bg-muted/60')
+    expect(classes).toContain('cursor-pointer')
+  })
+
+  it('shows a live desktop mini only for a running computer-use subtask', () => {
+    const running = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          state: 'running',
+          output: '',
+          meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
+        }),
+        childSessionId: 'cu-1',
+      },
+    })
+    expect(running.get('[data-testid="harness-subtask-type"]').text()).toBe('Computer use')
+    expect(running.find('[data-testid="harness-desktop-mini"]').exists()).toBe(true)
+
+    const done = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
+        }),
+        childSessionId: 'cu-1',
+      },
+    })
+    expect(done.find('[data-testid="harness-desktop-mini"]').exists()).toBe(false)
   })
 
   it('shows Failed when the subtask errored', () => {

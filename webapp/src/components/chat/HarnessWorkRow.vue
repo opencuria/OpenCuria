@@ -1,60 +1,32 @@
 <script setup lang="ts">
-import { computed, ref, type Component } from 'vue'
-import {
-  ChevronDown,
-  FilePenLine,
-  FileText,
-  FolderOpen,
-  Globe,
-  Lightbulb,
-  ListTodo,
-  Monitor,
-  MousePointer2,
-  Network,
-  Search,
-  Terminal,
-  Wrench,
-} from '@lucide/vue'
+import { computed, ref, watch, type Component } from 'vue'
+import { ChevronDown } from '@lucide/vue'
 
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import type { HarnessPart } from '@/types/harness'
 import HarnessMarkdown from './HarnessMarkdown.vue'
+import ToolDetailBash from './tools/ToolDetailBash.vue'
+import ToolDetailComputerUse from './tools/ToolDetailComputerUse.vue'
+import ToolDetailDefault from './tools/ToolDetailDefault.vue'
+import ToolDetailQuestion from './tools/ToolDetailQuestion.vue'
+import ToolDetailRead from './tools/ToolDetailRead.vue'
+import ToolDetailSearch from './tools/ToolDetailSearch.vue'
+import ToolDetailTodos from './tools/ToolDetailTodos.vue'
+import ToolDetailWebfetch from './tools/ToolDetailWebfetch.vue'
+import {
+  resolveToolName,
+  toolDisplayIcon,
+  toolDisplayLabel,
+} from '@/lib/toolDisplay'
 
-const props = withDefaults(
-  defineProps<{
-    part: HarnessPart
-    grouped?: boolean
-  }>(),
-  { grouped: false },
-)
-
-const open = ref(false)
-
-const canExpand = computed(() => {
-  if (!props.grouped) return true
-  return props.part.type === 'reasoning' || props.part.state === 'error'
-})
-
-const toolName = computed(() => props.part.tool || props.part.title || 'tool')
-
-const label = computed(() => {
-  if (props.part.type === 'reasoning') return 'Thought'
-  return props.part.title || toolName.value
-})
-
-const COMPUTER_USE_VIEW_TOOLS = new Set(['view_screen', 'view_region'])
-const COMPUTER_USE_INPUT_TOOLS = new Set([
+const COMPUTER_USE_DETAIL_TOOLS = new Set([
+  'view_screen',
+  'view_region',
   'move_mouse',
   'left_click',
   'right_click',
@@ -64,50 +36,52 @@ const COMPUTER_USE_INPUT_TOOLS = new Set([
   'scroll',
   'type_text',
   'press_key',
+  'open_url',
   'wait',
-  'ask_user',
 ])
 
-const icon = computed<Component>(() => {
-  if (props.part.type === 'reasoning') return Lightbulb
-  const tool = (props.part.tool || '').trim().toLowerCase()
-  switch (tool) {
-    case 'bash':
-      return Terminal
-    case 'read':
-      return FileText
-    case 'write':
-    case 'edit':
-      return FilePenLine
-    case 'glob':
-    case 'grep':
-      return Search
-    case 'list':
-      return FolderOpen
-    case 'task':
-      return Network
-    case 'webfetch':
-    case 'open_url':
-      return Globe
-    case 'todowrite':
-      return ListTodo
-    default:
-      if (COMPUTER_USE_VIEW_TOOLS.has(tool)) return Monitor
-      if (COMPUTER_USE_INPUT_TOOLS.has(tool)) return MousePointer2
-      return Wrench
-  }
+const DETAIL_BY_TOOL: Record<string, Component> = {
+  bash: ToolDetailBash,
+  read: ToolDetailRead,
+  glob: ToolDetailSearch,
+  grep: ToolDetailSearch,
+  list: ToolDetailSearch,
+  webfetch: ToolDetailWebfetch,
+  todowrite: ToolDetailTodos,
+  question: ToolDetailQuestion,
+  ask_user: ToolDetailQuestion,
+}
+
+const props = withDefaults(
+  defineProps<{
+    part: HarnessPart
+    grouped?: boolean
+  }>(),
+  { grouped: false },
+)
+
+const open = ref(props.part.state === 'error')
+
+watch(
+  () => props.part.state,
+  (state) => {
+    if (state === 'error') open.value = true
+  },
+)
+
+const label = computed(() => toolDisplayLabel(props.part))
+const icon = computed<Component>(() => toolDisplayIcon(props.part))
+
+const reasoningPreview = computed(() => {
+  if (props.part.type !== 'reasoning') return ''
+  return (props.part.output || '').replace(/\s+/g, ' ').trim()
 })
 
-const outputPreview = computed(() => {
-  const output = props.part.output || ''
-  if (output.length <= 2000) return output
-  return `${output.slice(0, 2000)}\n…[truncated ${output.length} chars total]`
-})
-
-const tooltipPreview = computed(() => {
-  const output = (props.part.output || '').replace(/\s+/g, ' ').trim()
-  if (!output) return ''
-  return output.length > 200 ? `${output.slice(0, 200)}…` : output
+const detailComponent = computed<Component>(() => {
+  const tool = resolveToolName(props.part).toLowerCase()
+  if (DETAIL_BY_TOOL[tool]) return DETAIL_BY_TOOL[tool]!
+  if (COMPUTER_USE_DETAIL_TOOLS.has(tool)) return ToolDetailComputerUse
+  return ToolDetailDefault
 })
 
 const rowClass = computed(() => {
@@ -119,9 +93,7 @@ const rowClass = computed(() => {
   } else {
     classes.push('text-muted-foreground')
   }
-  if (canExpand.value) {
-    classes.push('hover:text-foreground')
-  }
+  classes.push('hover:text-foreground')
   return classes.join(' ')
 })
 </script>
@@ -132,15 +104,23 @@ const rowClass = computed(() => {
     :data-part-id="part.id"
     :data-part-type="part.type"
     :data-grouped="grouped ? '1' : '0'"
-    :data-expandable="canExpand ? '1' : '0'"
+    data-expandable="1"
     class="min-w-0"
   >
-    <Collapsible v-if="canExpand" v-model:open="open">
+    <Collapsible v-model:open="open">
       <CollapsibleTrigger :class="rowClass">
         <component :is="icon" :size="12" class="shrink-0 opacity-80" />
-        <span data-testid="harness-work-row-label" class="min-w-0 flex-1 truncate">
+        <span data-testid="harness-work-row-label" class="min-w-0 shrink-0 truncate">
           {{ label }}
         </span>
+        <span
+          v-if="!open && reasoningPreview"
+          data-testid="harness-work-row-preview"
+          class="min-w-0 flex-1 truncate opacity-70"
+        >
+          {{ reasoningPreview }}
+        </span>
+        <span v-else class="min-w-0 flex-1" />
         <LoadingSpinner v-if="part.state === 'running'" :size="10" class="shrink-0" />
         <ChevronDown
           :size="12"
@@ -154,41 +134,8 @@ const rowClass = computed(() => {
           :text="part.output"
           compact
         />
-        <template v-else>
-          <code class="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-            {{ toolName }}
-          </code>
-          <pre
-            v-if="outputPreview"
-            class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground"
-            :class="part.state === 'error' ? 'text-destructive' : ''"
-          >{{ outputPreview }}</pre>
-          <p
-            v-else-if="part.state === 'running'"
-            class="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground"
-          >
-            <LoadingSpinner :size="10" />
-            Running…
-          </p>
-        </template>
+        <component :is="detailComponent" v-else :part="part" />
       </CollapsibleContent>
     </Collapsible>
-    <TooltipProvider v-else>
-      <Tooltip>
-        <TooltipTrigger as-child>
-          <div :class="rowClass">
-            <component :is="icon" :size="12" class="shrink-0 opacity-80" />
-            <span data-testid="harness-work-row-label" class="min-w-0 flex-1 truncate">
-              {{ label }}
-            </span>
-            <LoadingSpinner v-if="part.state === 'running'" :size="10" class="shrink-0" />
-          </div>
-        </TooltipTrigger>
-        <TooltipContent class="max-w-sm">
-          <p class="font-normal">{{ label }}</p>
-          <p v-if="tooltipPreview" class="mt-0.5 opacity-80">{{ tooltipPreview }}</p>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
   </div>
 </template>
