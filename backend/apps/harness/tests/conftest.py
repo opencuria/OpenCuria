@@ -97,6 +97,7 @@ class FakeAccessor(WorkspaceAccessor):
         self.written: dict[str, bytes] = {}
         self.exec_calls: list[tuple] = []
         self.desktop_calls: list[tuple] = []
+        self.processes: dict[str, dict[str, Any]] = {}
 
     def _maybe_fail(self) -> None:
         if self.error is not None:
@@ -230,6 +231,59 @@ class FakeAccessor(WorkspaceAccessor):
         self._maybe_fail()
         self.desktop_calls.append((action, args, timeout))
         return self._desktop_payload(action, args or {})
+
+    async def process_start(
+        self,
+        command: str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Return a canned started-process record."""
+        self._maybe_fail()
+        record = {
+            "process_id": "proc-1",
+            "workspace_id": self.workspace_id,
+            "name": name or "",
+            "command": command,
+            "workdir": workdir,
+            "pid": 1234,
+            "log_path": "/workspace/.opencuria/processes/proc-1.log",
+            "status": "running",
+            "exit_code": None,
+        }
+        self.processes[record["process_id"]] = record
+        return dict(record)
+
+    async def process_list(self) -> list[dict[str, Any]]:
+        """Return canned process records."""
+        self._maybe_fail()
+        return [dict(record) for record in self.processes.values()]
+
+    async def process_get(self, process_id: str) -> dict[str, Any]:
+        """Return one canned process record."""
+        self._maybe_fail()
+        try:
+            return dict(self.processes[process_id])
+        except KeyError as exc:
+            raise RunnerAccessorError(
+                f"process_get failed: unknown process {process_id}"
+            ) from exc
+
+    async def process_stop(
+        self, process_id: str, force: bool = False
+    ) -> dict[str, Any]:
+        """Mark a canned process record stopped."""
+        self._maybe_fail()
+        try:
+            record = self.processes[process_id]
+        except KeyError as exc:
+            raise RunnerAccessorError(
+                f"process_stop failed: unknown process {process_id}"
+            ) from exc
+        record["status"] = "killed" if force else "exited"
+        record["exit_code"] = 0
+        return dict(record)
 
 
 @pytest.fixture

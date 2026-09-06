@@ -15,6 +15,7 @@ from django.db import models
 from django.utils import timezone
 
 from .enums import (
+    ProcessStatus,
     RunnerStatus,
     RuntimeType,
     TaskStatus,
@@ -248,6 +249,67 @@ class Task(models.Model):
 
     def __str__(self) -> str:
         return f"Task({str(self.id)[:8]}, {self.type}, {self.status})"
+
+
+class WorkspaceProcess(models.Model):
+    """
+    A backend-tracked background process running inside a workspace.
+
+    The backend is the source of truth for process bookkeeping (status,
+    exit code, pid, log path). The runner owns the actual OS process and
+    reports live state via ``harness:process_*`` RPC results and the
+    per-workspace ``processes`` heartbeat payload. Log content stays
+    decentralised as a file inside the workspace
+    (``.opencuria/processes/<id>.log``); agents read it via file tools.
+    Processes are workspace-bound: stopping or removing the workspace
+    kills them. There is no auto-restart.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="processes",
+        help_text=(
+            "Workspace this process runs in. "
+            "Deleting the workspace deletes its processes."
+        ),
+    )
+    name = models.CharField(max_length=255, blank=True, default="")
+    command = models.TextField(
+        help_text="Shell command the process was started with.",
+    )
+    workdir = models.CharField(max_length=1024, default="/workspace")
+    pid = models.IntegerField(null=True, blank=True)
+    log_path = models.CharField(max_length=1024, blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=ProcessStatus.choices,
+        default=ProcessStatus.RUNNING,
+    )
+    exit_code = models.IntegerField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workspace_processes",
+    )
+    session_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Agent loop that started this process (informational, no FK).",
+    )
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runners_workspace_process"
+        ordering = ["-started_at"]
+
+    def __str__(self) -> str:
+        return f"WorkspaceProcess({str(self.id)[:8]}, {self.status})"
 
 
 class RunnerSystemMetrics(models.Model):

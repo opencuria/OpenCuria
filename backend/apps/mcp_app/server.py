@@ -49,6 +49,10 @@ Tools and their required permissions
 - list_harness_conversations → harness:read
 - list_org_credential_services       → org_credential_services:read
 - toggle_org_credential_service_activation → org_credential_services:write
+- list_processes         → workspaces:processes_read
+- get_process            → workspaces:processes_read
+- start_process          → workspaces:processes_run
+- stop_process           → workspaces:processes_run
 """
 
 from __future__ import annotations
@@ -569,6 +573,72 @@ _TOOLS: list[Tool] = [
             "required": ["service_id", "active"],
         },
     ),
+    Tool(
+        name="list_processes",
+        description="List background processes of a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."}
+            },
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="get_process",
+        description="Get the status of one background process.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID.",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
+    Tool(
+        name="start_process",
+        description="Start a detached background process in a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "command": {"type": "string", "description": "Shell command."},
+                "workdir": {
+                    "type": "string",
+                    "description": "Working directory (default /workspace).",
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables.",
+                },
+                "name": {"type": "string", "description": "Process display name."},
+            },
+            "required": ["workspace_id", "command"],
+        },
+    ),
+    Tool(
+        name="stop_process",
+        description="Stop a background process (SIGTERM, SIGKILL when forced).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID.",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "SIGKILL when true (default false).",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
 ]
 
 # Map tool name → required permission
@@ -614,6 +684,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "resolve_harness_question": APIKeyPermission.HARNESS_PERMISSIONS,
     "list_org_credential_services": APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ,
     "toggle_org_credential_service_activation": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
+    "list_processes": APIKeyPermission.WORKSPACES_PROCESSES_READ,
+    "get_process": APIKeyPermission.WORKSPACES_PROCESSES_READ,
+    "start_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
+    "stop_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
 }
 
 
@@ -652,13 +726,19 @@ def _error(msg: str) -> list[TextContent]:
     return [TextContent(type="text", text=f"Error: {msg}")]
 
 
+def _runner_service():
+    """Return the process-wide RunnerService (lazy import, no cycle)."""
+    from apps.runners.sio_server import get_runner_service
+
+    return get_runner_service()
+
+
 def _get_owned_workspace_or_error(api_key, org_id, workspace_id):
     """Return an owned workspace or an MCP-formatted error payload."""
-    from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
-    svc = get_runner_service()
+    svc = _runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     try:
@@ -2121,6 +2201,159 @@ def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextCont
         return _error(str(exc))
 
 
+def _process_payload(process) -> dict:
+    """Serialize a WorkspaceProcess ORM row for MCP responses."""
+    started_at = getattr(process, "started_at", None)
+    ended_at = getattr(process, "ended_at", None)
+    updated_at = getattr(process, "updated_at", None)
+    return {
+        "id": str(getattr(process, "id", "")),
+        "workspace_id": str(getattr(process, "workspace_id", "")),
+        "name": getattr(process, "name", "") or "",
+        "command": getattr(process, "command", "") or "",
+        "workdir": getattr(process, "workdir", "") or "",
+        "pid": getattr(process, "pid", None),
+        "log_path": getattr(process, "log_path", "") or "",
+        "status": str(getattr(process, "status", "") or ""),
+        "exit_code": getattr(process, "exit_code", None),
+        "started_at": started_at.isoformat() if started_at else None,
+        "ended_at": ended_at.isoformat() if ended_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+def _parse_process_args(args: dict, *required: str) -> tuple:
+    """Parse workspace/process UUIDs from MCP args or return an error."""
+    import uuid as _uuid
+
+    values: dict[str, _uuid.UUID] = {}
+    for key in required:
+        raw = args.get(key)
+        if not raw:
+            return None, _error(f"{key} is required")
+        try:
+            values[key] = _uuid.UUID(str(raw))
+        except ValueError:
+            return None, _error(f"Invalid {key} UUID")
+    return values, None
+
+
+async def _call_list_processes(api_key, org_id, args: dict) -> list[TextContent]:
+    """List background processes of an owned workspace (no nested loop)."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    svc = _runner_service()
+    try:
+        processes = await svc.list_processes(workspace.id)
+    except Exception as exc:
+        return _error(str(exc))
+    return _text([_process_payload(process) for process in processes])
+
+
+async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Return one background process scoped to an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.get_process(workspace.id, parsed["process_id"])
+    except NotFoundError as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
+async def _call_start_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Start a detached background process in an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    command = (args.get("command") or "").strip()
+    if not args.get("workspace_id"):
+        return _error("workspace_id is required")
+    if not command:
+        return _error("command is required")
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.start_process(
+            workspace.id,
+            command,
+            workdir=str(args.get("workdir") or "/workspace"),
+            env=dict(args.get("env") or {}),
+            name=str(args.get("name") or ""),
+            user=api_key.user,
+        )
+    except (NotFoundError, ConflictError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
+async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Stop a background process in an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.stop_process(
+            workspace.id,
+            parsed["process_id"],
+            force=bool(args.get("force", False)),
+        )
+    except (NotFoundError, ConflictError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
 def _call_list_org_credential_services(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
@@ -2252,6 +2485,10 @@ _TOOL_HANDLERS = {
     "resolve_harness_question": _call_resolve_harness_question,
     "list_org_credential_services": _call_list_org_credential_services,
     "toggle_org_credential_service_activation": _call_toggle_org_credential_service_activation,
+    "list_processes": _call_list_processes,
+    "get_process": _call_get_process,
+    "start_process": _call_start_process,
+    "stop_process": _call_stop_process,
 }
 
 

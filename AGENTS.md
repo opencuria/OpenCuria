@@ -665,7 +665,7 @@ The runner connects to the backend as a socketio client. Events:
 | Direction | Event | Payload |
 |-----------|-------|---------|
 | Runner -> Backend | `runner:register` | `{supported_runtimes: ["docker", "qemu"], status}` |
-| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?}]}` |
+| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?, processes?}]}` (each `processes` entry: `{process_id, status, exit_code, pid}`) |
 | Backend -> Runner | `task:create_workspace` | `{task_id, workspace_id, repos, runtime_type, env_vars, files, ssh_keys, image_tag/base_image_path}` |
 | Runner -> Backend | `workspace:created` | `{task_id, workspace_id, status, credentials_present}` |
 | Backend -> Runner | `task:resume_workspace` | `{task_id, workspace_id, qemu_*, env_vars, files, ssh_keys}` |
@@ -676,6 +676,14 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `harness:process_start` | `{request_id, workspace_id, process_id, command, workdir, env, name}` |
+| Runner -> Backend | `harness:process_start_result` | `{request_id, workspace_id, process_id, pid, log_path, status}` |
+| Backend -> Runner | `harness:process_list` | `{request_id, workspace_id}` |
+| Runner -> Backend | `harness:process_list_result` | `{request_id, workspace_id, processes}` |
+| Backend -> Runner | `harness:process_get` | `{request_id, workspace_id, process_id}` |
+| Runner -> Backend | `harness:process_get_result` | `{request_id, workspace_id, process}` |
+| Backend -> Runner | `harness:process_stop` | `{request_id, workspace_id, process_id, force}` |
+| Runner -> Backend | `harness:process_stop_result` | `{request_id, workspace_id, process_id, stopped, ...}` |
 | Backend -> Runner | `files:find` | `{request_id, workspace_id, query, limit}` |
 | Runner -> Backend | `files:find_result` | `{request_id, workspace_id, query, paths, truncated}` |
 | Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` (`ensure`/`hold` include `desktop_width`/`desktop_height`) |
@@ -719,6 +727,7 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `desktop:started` | `{workspace_id, task_id, proxy_url, computer_use_active?}` |
 | Backend -> Frontend | `desktop:stopped` | `{workspace_id, task_id}` |
 | Backend -> Frontend | `desktop:viewer_released` | `{workspace_id, task_id, computer_use_active}` |
+| Backend -> Frontend | `process:status_changed` | `{workspace_id, process_id, status, exit_code, pid}` |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.
 Frontend Socket.IO authentication: JWT token passed in `auth: { token }` on connect (validated server-side).

@@ -570,3 +570,35 @@ export interface ImageDefinition {
   created_at: string
   updated_at: string
 }
+
+// --- Background processes ---
+
+export enum ProcessStatus {
+  RUNNING = 'running',
+  EXITED = 'exited',
+  KILLED = 'killed',
+  FAILED = 'failed',
+}
+
+export interface WorkspaceProcess {
+  id: string
+  workspace_id: string
+  name: string
+  command: string
+  workdir: string
+  pid: number | null
+  log_path: string
+  status: ProcessStatus | string
+  exit_code: number | null
+  started_at: string
+  ended_at: string | null
+  updated_at: string
+}
+
+export interface ProcessStatusChangedEvent {
+  workspace_id: string
+  process_id: string
+  status: string
+  exit_code: number | null
+  pid: number | null
+}

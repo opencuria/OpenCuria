@@ -9,6 +9,7 @@ import type {
   WorkspaceCreateOut,
   WorkspaceUpdateIn,
   WorkspaceUpdateOut,
+  WorkspaceProcess,
   Task,
   ImageArtifact,
   ImageArtifactCreateIn,
@@ -109,6 +110,30 @@ export function writeDesktopClipboard(
 export function readDesktopClipboard(id: string): Promise<{ text: string }> {
   return post<{ text: string }>(
     `/workspaces/${id}/desktop/clipboard/read/`,
+  )
+}
+
+// --- Background process API (workspace-bound) ---
+
+export function listProcesses(workspaceId: string): Promise<WorkspaceProcess[]> {
+  return get<WorkspaceProcess[]>(`/workspaces/${workspaceId}/processes/`)
+}
+
+export function getProcess(
+  workspaceId: string,
+  processId: string,
+): Promise<WorkspaceProcess> {
+  return get<WorkspaceProcess>(`/workspaces/${workspaceId}/processes/${processId}/`)
+}
+
+export function stopProcess(
+  workspaceId: string,
+  processId: string,
+  force: boolean = false,
+): Promise<WorkspaceProcess> {
+  return post<WorkspaceProcess>(
+    `/workspaces/${workspaceId}/processes/${processId}/stop/`,
+    { force },
   )
 }
 

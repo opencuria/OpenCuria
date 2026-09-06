@@ -163,3 +163,33 @@ class WorkspaceAccessor(abc.ABC):
         (e.g. ``ok``, ``image_b64``, ``width``, ``height`` for screenshots).
         Raises on runner-reported ``error``.
         """
+
+    @abc.abstractmethod
+    async def process_start(
+        self,
+        command: str,
+        workdir: str = HARNESS_WORKSPACE_ROOT,
+        env: dict[str, str] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Start a detached background process in the workspace.
+
+        Returns a JSON-serializable dict (``process_id``, ``status``,
+        ``pid``, ``exit_code``, ``log_path``, ...). The backend assigns
+        the process id; logs stay in the workspace and are read back
+        via ``read_file`` using the returned ``log_path``.
+        """
+
+    @abc.abstractmethod
+    async def process_list(self) -> list[dict[str, Any]]:
+        """List background processes of the workspace (newest first)."""
+
+    @abc.abstractmethod
+    async def process_get(self, process_id: str) -> dict[str, Any]:
+        """Return one background process scoped to the workspace."""
+
+    @abc.abstractmethod
+    async def process_stop(
+        self, process_id: str, force: bool = False
+    ) -> dict[str, Any]:
+        """Stop a background process (SIGTERM, SIGKILL when forced)."""

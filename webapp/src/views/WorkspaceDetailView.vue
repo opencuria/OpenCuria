@@ -5,6 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
 import { useTerminalStore } from '@/stores/terminal'
 import { useDesktopStore } from '@/stores/desktop'
+import { useProcessesStore } from '@/stores/processes'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { usePolling } from '@/composables/usePolling'
@@ -20,6 +21,7 @@ import HarnessChatSidebar from '@/components/chat/HarnessChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
+import WorkspaceProcesses from '@/components/workspaces/WorkspaceProcesses.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
@@ -27,13 +29,14 @@ import { Badge } from '@/components/ui/badge'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { ArrowLeft, Loader2, MessageSquare } from '@lucide/vue'
+import { ArrowLeft, Loader2, MessageSquare, Activity } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const desktopStore = useDesktopStore()
+const processesStore = useProcessesStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
@@ -43,6 +46,8 @@ const renaming = ref(false)
 const editingName = ref(false)
 const workspaceNameInput = ref('')
 const terminalHeight = ref(300)
+const processesHeight = ref(280)
+const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
 const mobileChatListOpen = ref(false)
 
@@ -130,6 +135,20 @@ const isDesktopPanelVisible = computed(
   () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
 )
 
+const runningProcessCount = computed(() =>
+  processesStore.runningCountFor(workspaceId.value),
+)
+const isProcessesPanelVisible = computed(
+  () => processesOpen.value && canPrompt.value,
+)
+
+function toggleProcessesPanel(): void {
+  processesOpen.value = !processesOpen.value
+  if (processesOpen.value) {
+    void processesStore.fetchProcesses(workspaceId.value)
+  }
+}
+
 const chatPanelTarget = computed<HTMLElement | null>(() => {
   if (isDesktopPanelVisible.value) {
     return desktopChatPanelHost.value
@@ -190,6 +209,14 @@ function setupSocketListeners(): void {
     onEvent('runner:online', (data) => {
       if (data.workspace_id === workspaceId.value) {
         workspaceStore.updateWorkspaceRunnerOnline(data.workspace_id, true)
+      }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('process:status_changed', (data) => {
+      if (data.workspace_id === workspaceId.value) {
+        void processesStore.handleStatusChanged(data)
       }
     }),
   )
@@ -280,9 +307,16 @@ const { start, stop } = usePolling(
   5000,
 )
 
+// Polling fallback for background processes (socket is the live path)
+const {
+  start: startProcessesPolling,
+  stop: stopProcessesPolling,
+} = usePolling(() => processesStore.fetchProcesses(workspaceId.value), 10000)
+
 onMounted(() => {
   lgQuery.addEventListener('change', onBreakpointChange)
   start()
+  startProcessesPolling()
   setupSocketListeners()
 })
 
@@ -305,9 +339,11 @@ watch(isDesktop, (desktop) => {
 onUnmounted(() => {
   lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
+  stopProcessesPolling()
   cleanupSocket()
   desktopStore.reset()
   terminalStore.reset()
+  processesStore.reset()
   fileExplorerStore.reset()
   workspaceImageStore.reset()
   harnessStore.reset()
@@ -319,9 +355,12 @@ watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
     desktopStore.reset()
+    processesStore.clearWorkspace(oldId)
+    processesOpen.value = false
     fileExplorerStore.reset()
     harnessStore.reset()
     workspaceStore.fetchWorkspaceDetail(newId)
+    void processesStore.fetchProcesses(newId)
     setupSocketListeners()
   }
 })
@@ -382,6 +421,31 @@ function onDragStart(e: MouseEvent): void {
 
   const onUp = () => {
     isDragging.value = false
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+// --- Processes panel resize drag ---
+
+const isProcessesDragging = ref(false)
+
+function onProcessesDragStart(e: MouseEvent): void {
+  e.preventDefault()
+  isProcessesDragging.value = true
+  const startY = e.clientY
+  const startHeight = processesHeight.value
+
+  const onMove = (ev: MouseEvent) => {
+    const delta = startY - ev.clientY
+    processesHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
+  }
+
+  const onUp = () => {
+    isProcessesDragging.value = false
     document.removeEventListener('mousemove', onMove)
     document.removeEventListener('mouseup', onUp)
   }
@@ -458,7 +522,7 @@ function onDragStart(e: MouseEvent): void {
           </div>
         </div>
 
-        <!-- Right: mobile chats button + workspace actions -->
+        <!-- Right: mobile chats button + processes toggle + workspace actions -->
         <div class="flex items-center gap-1 shrink-0">
           <Button
             v-if="hasHarnessChats"
@@ -469,6 +533,22 @@ function onDragStart(e: MouseEvent): void {
             @click="mobileChatListOpen = true"
           >
             <MessageSquare :size="16" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="relative"
+            :title="isProcessesPanelVisible ? 'Hide processes' : 'Show background processes'"
+            @click="toggleProcessesPanel"
+          >
+            <Activity :size="16" :class="isProcessesPanelVisible ? 'text-primary' : ''" />
+            <Badge
+              v-if="runningProcessCount > 0"
+              variant="secondary"
+              class="absolute -top-1 -right-1 h-4 min-w-4 px-1 text-[10px] rounded-full"
+            >
+              {{ runningProcessCount }}
+            </Badge>
           </Button>
           <WorkspaceActions
             v-if="workspace"
@@ -547,6 +627,21 @@ function onDragStart(e: MouseEvent): void {
             :style="{ height: terminalHeight + 'px' }"
           >
             <WorkspaceTerminal :workspace-id="workspaceId" />
+          </div>
+        </template>
+
+        <!-- Background processes panel (bottom) -->
+        <template v-if="isProcessesPanelVisible">
+          <!-- Drag handle -->
+          <div
+            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
+            @mousedown="onProcessesDragStart"
+          ></div>
+          <div
+            class="shrink-0 relative border-t border-border bg-background"
+            :style="{ height: processesHeight + 'px' }"
+          >
+            <WorkspaceProcesses :workspace-id="workspaceId" />
           </div>
         </template>
 

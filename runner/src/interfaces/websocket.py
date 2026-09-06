@@ -1276,6 +1276,136 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_desktop_action_failed")
 
+        @sio.on("harness:process_start")
+        async def on_harness_process_start(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            log = logger.bind(
+                workspace_id=str(workspace_id), request_id=request_id
+            )
+            log.info("harness_received", task="process_start")
+            try:
+                result = await self._service.start_background_process(
+                    workspace_id,
+                    process_id,
+                    str(data.get("command", "")),
+                    workdir=data.get("workdir", "/workspace"),
+                    env=data.get("env"),
+                    name=str(data.get("name", "") or ""),
+                )
+                await _harness_result(
+                    "harness:process_start_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": result["process_id"],
+                        "pid": result["pid"],
+                        "log_path": result["log_path"],
+                        "exit_path": result["exit_path"],
+                        "status": "running",
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_start_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "error": str(exc),
+                    },
+                )
+                log.exception("harness_process_start_failed")
+
+        @sio.on("harness:process_list")
+        async def on_harness_process_list(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            try:
+                processes = await self._service.list_background_processes(
+                    workspace_id
+                )
+                await _harness_result(
+                    "harness:process_list_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": processes,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_list_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": [],
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_list_failed")
+
+        @sio.on("harness:process_get")
+        async def on_harness_process_get(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            try:
+                process = await self._service.get_background_status(
+                    workspace_id, process_id
+                )
+                await _harness_result(
+                    "harness:process_get_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process": process,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_get_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_get_failed")
+
+        @sio.on("harness:process_stop")
+        async def on_harness_process_stop(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            force = bool(data.get("force", False))
+            try:
+                result = await self._service.stop_background_process(
+                    workspace_id, process_id, force=force
+                )
+                await _harness_result(
+                    "harness:process_stop_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        **result,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_stop_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "stopped": False,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_stop_failed")
+
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
             request_id = data.get("request_id", "")
