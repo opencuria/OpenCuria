@@ -333,6 +333,8 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.WORKSPACES_RESUME: "Resume stopped workspaces",
         APIKeyPermission.WORKSPACES_DELETE: "Delete workspaces",
         APIKeyPermission.TERMINAL_ACCESS: "Open interactive terminal sessions",
+        APIKeyPermission.WORKSPACES_PROCESSES_READ: "List and view background processes",
+        APIKeyPermission.WORKSPACES_PROCESSES_RUN: "Start and stop background processes",
         APIKeyPermission.RUNNERS_READ: "List and view runners",
         APIKeyPermission.RUNNERS_CREATE: "Register new runners",
         APIKeyPermission.ORGANIZATIONS_READ: "List and view organizations",

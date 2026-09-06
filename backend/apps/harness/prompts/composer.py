@@ -197,6 +197,11 @@ async def compose_system_prompt(
         tool_lines = ["# Available tools"]
         for schema in tools:
             tool_lines.append(f"- {schema.name}: {schema.description}")
+        if any(schema.name == "process_start" for schema in tools):
+            tool_lines.append(
+                "Background servers via process_start; read logs from the "
+                "returned log_path."
+            )
         tool_lines.append(
             "Independent tool calls in one assistant message run in parallel. "
             "Issue multiple tool calls in a single step for independent work; "

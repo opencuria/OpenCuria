@@ -94,6 +94,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                     "status": "running",
                     "runtime_type": "docker",
                     "desktop": None,
+                    "processes": [],
                 }
             ],
         )

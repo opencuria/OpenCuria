@@ -31,6 +31,7 @@ from .models import (
     RunnerSystemMetrics,
     Task,
     Workspace,
+    WorkspaceProcess,
 )
 
 # ---------------------------------------------------------------------------
@@ -488,6 +489,134 @@ class WorkspaceRepository:
             active_operation=None,
             delete_last_error=error,
         )
+
+
+# ---------------------------------------------------------------------------
+class WorkspaceProcessRepository:
+    """Data access for WorkspaceProcess records."""
+
+    @staticmethod
+    def create(
+        *,
+        process_id: uuid.UUID,
+        workspace: Workspace,
+        command: str,
+        workdir: str = "/workspace",
+        name: str = "",
+        created_by=None,
+        session_id: uuid.UUID | None = None,
+    ) -> WorkspaceProcess:
+        """Create a new process record in running state."""
+        from .enums import ProcessStatus
+
+        return WorkspaceProcess.objects.create(
+            id=process_id,
+            workspace=workspace,
+            command=command,
+            workdir=workdir or "/workspace",
+            name=name or "",
+            status=ProcessStatus.RUNNING,
+            created_by=created_by,
+            session_id=session_id,
+        )
+
+    @staticmethod
+    def get_by_id(process_id: uuid.UUID) -> WorkspaceProcess | None:
+        """Fetch a process by its ID."""
+        return (
+            WorkspaceProcess.objects.filter(id=process_id)
+            .select_related("workspace", "workspace__runner", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def get_for_workspace(
+        process_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+    ) -> WorkspaceProcess | None:
+        """Fetch a process scoped to a workspace (None when foreign)."""
+        return (
+            WorkspaceProcess.objects.filter(
+                id=process_id, workspace_id=workspace_id
+            )
+            .select_related("workspace", "workspace__runner", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[WorkspaceProcess]:
+        """Return all processes for a workspace, newest first."""
+        return WorkspaceProcess.objects.filter(
+            workspace_id=workspace_id
+        ).select_related("created_by")
+
+    @staticmethod
+    def list_running_by_workspace(
+        workspace_id: uuid.UUID,
+    ) -> QuerySet[WorkspaceProcess]:
+        """Return processes still marked running for a workspace."""
+        from .enums import ProcessStatus
+
+        return WorkspaceProcess.objects.filter(
+            workspace_id=workspace_id,
+            status=ProcessStatus.RUNNING,
+        )
+
+    @staticmethod
+    def update_status(
+        process_id: uuid.UUID,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        pid: int | None = None,
+        log_path: str | None = None,
+        ended_at=None,
+    ) -> int:
+        """Update lifecycle fields of a process. Returns rows updated."""
+        fields: dict[str, Any] = {"status": status}
+        if exit_code is not None:
+            fields["exit_code"] = exit_code
+        if pid is not None:
+            fields["pid"] = pid
+        if log_path is not None:
+            fields["log_path"] = log_path
+        if ended_at is not None:
+            fields["ended_at"] = ended_at
+        return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
+
+    @staticmethod
+    def mark_finished(
+        process_id: uuid.UUID,
+        *,
+        status: str,
+        exit_code: int | None = None,
+    ) -> int:
+        """Mark a process finished with an end timestamp."""
+        return WorkspaceProcess.objects.filter(id=process_id).update(
+            status=status,
+            exit_code=exit_code,
+            ended_at=timezone.now(),
+        )
+
+    @staticmethod
+    def mark_processes_killed(
+        workspace_id: uuid.UUID,
+        *,
+        status: str,
+    ) -> int:
+        """Mark all running processes of a workspace killed/finished."""
+        from .enums import ProcessStatus
+
+        return WorkspaceProcess.objects.filter(
+            workspace_id=workspace_id,
+            status=ProcessStatus.RUNNING,
+        ).update(status=status, ended_at=timezone.now())
+
+    @staticmethod
+    def delete(process_id: uuid.UUID) -> int:
+        """Delete a process record. Returns rows deleted."""
+        deleted, _ = WorkspaceProcess.objects.filter(id=process_id).delete()
+        return deleted
 
 
 # ---------------------------------------------------------------------------

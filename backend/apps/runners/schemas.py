@@ -288,6 +288,43 @@ class DesktopClipboardReadOut(Schema):
 
 
 # ---------------------------------------------------------------------------
+# Background process schemas
+# ---------------------------------------------------------------------------
+
+
+class ProcessStartIn(Schema):
+    """Request schema for starting a background process."""
+
+    command: str
+    workdir: str = "/workspace"
+    env: dict[str, str] = {}
+    name: str = ""
+
+
+class ProcessStopIn(Schema):
+    """Request schema for stopping a background process."""
+
+    force: bool = False
+
+
+class ProcessOut(Schema):
+    """Response schema for a workspace background process."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    name: str
+    command: str
+    workdir: str
+    pid: int | None = None
+    log_path: str = ""
+    status: str
+    exit_code: int | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Error schemas
 # ---------------------------------------------------------------------------
 

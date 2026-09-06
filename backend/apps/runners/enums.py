@@ -77,3 +77,12 @@ class TaskStatus(models.TextChoices):
     IN_PROGRESS = "in_progress", "In Progress"
     COMPLETED = "completed", "Completed"
     FAILED = "failed", "Failed"
+
+
+class ProcessStatus(models.TextChoices):
+    """Lifecycle status of a workspace background process."""
+
+    RUNNING = "running", "Running"
+    EXITED = "exited", "Exited"
+    KILLED = "killed", "Killed"
+    FAILED = "failed", "Failed"

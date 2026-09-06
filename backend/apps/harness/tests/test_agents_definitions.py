@@ -71,6 +71,7 @@ def test_explore_is_read_only() -> None:
     assert evaluator.evaluate("bash", "sudo reboot") == "deny"
     assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
     assert evaluator.evaluate("grep", "/workspace") == "allow"
+    assert evaluator.evaluate("process", "") == "deny"
     assert get_agent("explore").steps is None
 
 
