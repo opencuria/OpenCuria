@@ -27,6 +27,11 @@ const props = defineProps<{
   workspaceId: string
   canPrompt?: boolean
   showWorkspaceToolbar?: boolean
+  processesOpen?: boolean
+}>()
+
+const emit = defineEmits<{
+  'close-processes': []
 }>()
 
 provide(harnessWorkspaceIdKey, toRef(props, 'workspaceId'))
@@ -104,6 +109,7 @@ const composerSheets = computed(() =>
     permissions: activeRequests.value,
     notice: activeNotice.value,
     todos: harness.activeTodos,
+    processesOpen: Boolean(props.processesOpen),
     contextOpen: contextOpen.value,
     context: contextSheet.value,
   }),
@@ -137,6 +143,10 @@ function handleToggleContext(): void {
 
 function handleCloseContext(): void {
   contextOpen.value = false
+}
+
+function handleCloseProcesses(): void {
+  emit('close-processes')
 }
 
 function handleDismissNotice(messageId: string): void {
@@ -506,6 +516,7 @@ const desktopButtonTitle = computed(() => {
           @question-skip="handleQuestionSkip"
           @resolve="handleResolve"
           @close-context="handleCloseContext"
+          @close-processes="handleCloseProcesses"
           @dismiss-notice="handleDismissNotice"
         />
         <HarnessChatInput

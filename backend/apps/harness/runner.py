@@ -1442,7 +1442,7 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_stop(self, process_id, force=False):  # type: ignore[no-untyped-def]
+    async def process_stop(self, process_id):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 

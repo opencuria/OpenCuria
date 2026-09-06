@@ -48,6 +48,12 @@ vi.mock('@/components/chat/HarnessNoticeSheet.vue', () => ({
   },
 }))
 
+vi.mock('@/components/chat/HarnessProcessSheet.vue', () => ({
+  default: {
+    template: '<div data-testid="process-stub" />',
+  },
+}))
+
 function makeTodo(id: string, overrides: Partial<HarnessTodo> = {}): HarnessTodo {
   return { id, content: id, status: 'pending', priority: 'medium', order: 0, ...overrides }
 }
@@ -207,5 +213,21 @@ describe('HarnessSheetStack', () => {
     const notice = wrapper.findComponent({ name: 'HarnessNoticeSheet' })
     notice.vm.$emit('dismiss', 'msg-1')
     expect(wrapper.emitted('dismiss-notice')).toEqual([['msg-1']])
+  })
+
+  it('renders the processes sheet on top of todos and forwards close', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [{ kind: 'processes' }, { kind: 'todos', todos: [makeTodo('t1')] }],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'processes',
+    )
+    expect(wrapper.find('[data-testid="process-stub"]').exists()).toBe(true)
+    const processes = wrapper.findComponent({ name: 'HarnessProcessSheet' })
+    processes.vm.$emit('close')
+    expect(wrapper.emitted('close-processes')).toEqual([[]])
   })
 })

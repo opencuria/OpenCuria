@@ -622,7 +622,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="stop_process",
-        description="Stop a background process (SIGTERM, SIGKILL when forced).",
+        description="Stop a background process (SIGTERM, then SIGKILL after grace).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -630,10 +630,6 @@ _TOOLS: list[Tool] = [
                 "process_id": {
                     "type": "string",
                     "description": "Background process UUID.",
-                },
-                "force": {
-                    "type": "boolean",
-                    "description": "SIGKILL when true (default false).",
                 },
             },
             "required": ["workspace_id", "process_id"],
@@ -2345,7 +2341,6 @@ async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
         process = await svc.stop_process(
             workspace.id,
             parsed["process_id"],
-            force=bool(args.get("force", False)),
         )
     except (NotFoundError, ConflictError) as exc:
         return _error(str(exc))

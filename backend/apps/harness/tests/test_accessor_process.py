@@ -121,10 +121,10 @@ async def test_process_list_get_stop_roundtrip() -> None:
     assert len(listed) == 1 and listed[0]["process_id"] == str(PROCESS_ID)
     gotten = await accessor.process_get(str(PROCESS_ID))
     assert gotten["command"] == "python server.py"
-    stopped = await accessor.process_stop(str(PROCESS_ID), force=True)
+    stopped = await accessor.process_stop(str(PROCESS_ID))
     assert stopped["status"] == "killed"
     assert service.calls[-1][0] == "stop_process"
-    assert service.calls[-1][3] == {"force": True}
+    assert service.calls[-1][3] == {}
 
 
 async def test_process_get_rejects_invalid_uuid() -> None:

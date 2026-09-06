@@ -270,9 +270,7 @@ class FakeAccessor(WorkspaceAccessor):
                 f"process_get failed: unknown process {process_id}"
             ) from exc
 
-    async def process_stop(
-        self, process_id: str, force: bool = False
-    ) -> dict[str, Any]:
+    async def process_stop(self, process_id: str) -> dict[str, Any]:
         """Mark a canned process record stopped."""
         self._maybe_fail()
         try:
@@ -281,7 +279,7 @@ class FakeAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(
                 f"process_stop failed: unknown process {process_id}"
             ) from exc
-        record["status"] = "killed" if force else "exited"
+        record["status"] = "exited"
         record["exit_code"] = 0
         return dict(record)
 

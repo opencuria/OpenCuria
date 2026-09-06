@@ -301,12 +301,6 @@ class ProcessStartIn(Schema):
     name: str = ""
 
 
-class ProcessStopIn(Schema):
-    """Request schema for stopping a background process."""
-
-    force: bool = False
-
-
 class ProcessOut(Schema):
     """Response schema for a workspace background process."""
 

@@ -452,13 +452,12 @@ class WorkspaceService:
         self,
         workspace_id: uuid.UUID,
         process_id: str,
-        force: bool = False,
     ) -> dict[str, Any]:
         """Stop a tracked background process and drop it from tracking.
 
         Sends SIGTERM, waits up to a short grace period, then escalates to
-        SIGKILL when ``force`` is set or the grace period expires. Already
-        exited processes are cleaned up and reported as exited.
+        SIGKILL. Already exited processes are cleaned up and reported as
+        exited.
         """
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -490,16 +489,13 @@ class WorkspaceService:
             }
 
         await self._kill_background_pid(runtime, info.instance_id, entry.pid, "TERM")
-        deadline = 0.0 if force else _BACKGROUND_STOP_GRACE_S
         elapsed = 0.0
         stopped = False
-        while elapsed <= deadline:
+        while elapsed <= _BACKGROUND_STOP_GRACE_S:
             if not await self._probe_background_pid(
                 runtime, info.instance_id, entry.pid
             ):
                 stopped = True
-                break
-            if force:
                 break
             await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
             elapsed += _BACKGROUND_STOP_POLL_S
@@ -520,7 +516,6 @@ class WorkspaceService:
             workspace_id=str(workspace_id),
             process_id=entry.process_id,
             pid=entry.pid,
-            force=force,
         )
         return {
             "process_id": entry.process_id,

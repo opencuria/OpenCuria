@@ -64,17 +64,16 @@ export const useProcessesStore = defineStore('processes', () => {
   async function stopProcess(
     workspaceId: string,
     processId: string,
-    force: boolean = false,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
     const next = new Set(stoppingIds.value)
     next.add(processId)
     stoppingIds.value = next
     try {
-      const updated = await workspacesApi.stopProcess(workspaceId, processId, force)
+      const updated = await workspacesApi.stopProcess(workspaceId, processId)
       upsertProcess(workspaceId, updated)
       notifications.success(
-        force ? 'Process force-stopped' : 'Process stopped',
+        'Process stopped',
         `Process ${updated.name || updated.id.slice(0, 8)} was stopped.`,
       )
       return true

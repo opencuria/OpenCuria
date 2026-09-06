@@ -92,13 +92,6 @@ async def test_process_stop_happy_path(fake_accessor) -> None:
     assert "proc-1" in result.output
     assert result.metadata["status"] == "exited"
 
-    forced = FakeAccessor()
-    await forced.process_start("sleep 60")
-    forced_result = await ProcessStopTool().execute(
-        {"process_id": "proc-1", "force": True}, _ctx(forced)
-    )
-    assert forced_result.metadata["status"] == "killed"
-
 
 async def test_process_tools_translate_runner_errors() -> None:
     """Runner failures surface as ToolError for every tool."""

@@ -129,11 +129,9 @@ export function getProcess(
 export function stopProcess(
   workspaceId: string,
   processId: string,
-  force: boolean = false,
 ): Promise<WorkspaceProcess> {
   return post<WorkspaceProcess>(
     `/workspaces/${workspaceId}/processes/${processId}/stop/`,
-    { force },
   )
 }
 

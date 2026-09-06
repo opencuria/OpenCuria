@@ -79,10 +79,10 @@ describe('processes store', () => {
     const stopped = makeProcess({ status: ProcessStatus.KILLED, exit_code: 143 })
     vi.mocked(workspacesApi.stopProcess).mockResolvedValue(stopped)
 
-    const ok = await store.stopProcess('workspace-1', 'process-1', false)
+    const ok = await store.stopProcess('workspace-1', 'process-1')
 
     expect(ok).toBe(true)
-    expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1', false)
+    expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
     expect(store.processesFor('workspace-1')[0]?.status).toBe(ProcessStatus.KILLED)
     expect(store.isStopping('process-1')).toBe(false)
     expect(toast.success).toHaveBeenCalledWith(
@@ -91,15 +91,15 @@ describe('processes store', () => {
     )
   })
 
-  it('passes force through and notifies on stop failure', async () => {
+  it('notifies on stop failure without changing the local record', async () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess()]
     vi.mocked(workspacesApi.stopProcess).mockRejectedValue(new Error('boom'))
 
-    const ok = await store.stopProcess('workspace-1', 'process-1', true)
+    const ok = await store.stopProcess('workspace-1', 'process-1')
 
     expect(ok).toBe(false)
-    expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1', true)
+    expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
     // Failed stop keeps the local record untouched.
     expect(store.processesFor('workspace-1')[0]?.status).toBe(ProcessStatus.RUNNING)
     expect(toast.error).toHaveBeenCalledWith(

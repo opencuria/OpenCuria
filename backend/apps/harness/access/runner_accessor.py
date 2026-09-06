@@ -636,15 +636,13 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_get failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_stop(
-        self, process_id: str, force: bool = False
-    ) -> dict[str, Any]:
+    async def process_stop(self, process_id: str) -> dict[str, Any]:
         """Stop a background process via RunnerService."""
         parsed = _parse_process_uuid(process_id)
         service = self._runner_service()
         try:
             process = await service.stop_process(
-                self._workspace_uuid(), parsed, force=bool(force)
+                self._workspace_uuid(), parsed
             )
         except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
             raise RunnerAccessorError(f"process_stop failed: {exc}") from exc

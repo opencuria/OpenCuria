@@ -2636,10 +2636,8 @@ class RunnerService:
         self,
         workspace_id: uuid.UUID,
         process_id: uuid.UUID,
-        *,
-        force: bool = False,
     ) -> "WorkspaceProcess":
-        """Stop a tracked background process (SIGTERM, SIGKILL when forced).
+        """Stop a tracked background process (SIGTERM, then SIGKILL after grace).
 
         Already-finished records are returned unchanged (idempotent).
         """
@@ -2664,7 +2662,6 @@ class RunnerService:
                 "request_id": request_id,
                 "workspace_id": str(workspace_id),
                 "process_id": str(process_id),
-                "force": bool(force),
             },
             runner=runner,
             timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,

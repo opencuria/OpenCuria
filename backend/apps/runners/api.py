@@ -55,7 +55,6 @@ from .schemas import (
     ImageBuildJobUpdateIn,
     ProcessOut,
     ProcessStartIn,
-    ProcessStopIn,
     TaskOut,
     TerminalStartIn,
     WorkspaceFromImageArtifactIn,
@@ -1162,9 +1161,8 @@ async def stop_process(
     request: HttpRequest,
     workspace_id: uuid.UUID,
     process_id: uuid.UUID,
-    payload: ProcessStopIn = None,
 ):
-    """Stop a background process (SIGTERM, SIGKILL when forced)."""
+    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
     ):
@@ -1178,7 +1176,6 @@ async def stop_process(
         process = await service.stop_process(
             workspace_id,
             process_id,
-            force=bool(payload.force) if payload else False,
         )
         return 200, _process_to_out(process)
     except NotFoundError as e:

@@ -189,7 +189,5 @@ class WorkspaceAccessor(abc.ABC):
         """Return one background process scoped to the workspace."""
 
     @abc.abstractmethod
-    async def process_stop(
-        self, process_id: str, force: bool = False
-    ) -> dict[str, Any]:
-        """Stop a background process (SIGTERM, SIGKILL when forced)."""
+    async def process_stop(self, process_id: str) -> dict[str, Any]:
+        """Stop a background process (SIGTERM, then SIGKILL after grace)."""

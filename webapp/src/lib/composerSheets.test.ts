@@ -28,7 +28,7 @@ function makeTodo(id: string): HarnessTodo {
 }
 
 describe('buildComposerSheets', () => {
-  it('orders sheets by priority: mention > question > permission > notice > context > todos', () => {
+  it('orders sheets by priority: mention > question > permission > notice > processes > context > todos', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
@@ -38,6 +38,7 @@ describe('buildComposerSheets', () => {
         candidates: [{ kind: 'file', label: 'a.ts', insert: 'file:a.ts' }],
         activeIndex: 0,
       },
+      processesOpen: true,
       contextOpen: true,
       context: { used: 1000, limit: 10_000, percent: 10 },
     })
@@ -47,6 +48,7 @@ describe('buildComposerSheets', () => {
       'question',
       'permission',
       'notice',
+      'processes',
       'context',
       'todos',
     ])
@@ -56,6 +58,15 @@ describe('buildComposerSheets', () => {
     const sheets = buildComposerSheets({
       contextOpen: false,
       context: { used: 1000, limit: 10_000, percent: 10 },
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['todos'])
+  })
+
+  it('omits the processes sheet when it is closed', () => {
+    const sheets = buildComposerSheets({
+      processesOpen: false,
       todos: [makeTodo('t1')],
     })
 

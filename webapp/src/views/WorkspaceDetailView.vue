@@ -21,7 +21,6 @@ import HarnessChatSidebar from '@/components/chat/HarnessChatSidebar.vue'
 import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
-import WorkspaceProcesses from '@/components/workspaces/WorkspaceProcesses.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
@@ -46,7 +45,6 @@ const renaming = ref(false)
 const editingName = ref(false)
 const workspaceNameInput = ref('')
 const terminalHeight = ref(300)
-const processesHeight = ref(280)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
 const mobileChatListOpen = ref(false)
@@ -428,31 +426,6 @@ function onDragStart(e: MouseEvent): void {
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)
 }
-
-// --- Processes panel resize drag ---
-
-const isProcessesDragging = ref(false)
-
-function onProcessesDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isProcessesDragging.value = true
-  const startY = e.clientY
-  const startHeight = processesHeight.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startY - ev.clientY
-    processesHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
-  }
-
-  const onUp = () => {
-    isProcessesDragging.value = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
 </script>
 
 <template>
@@ -630,28 +603,14 @@ function onProcessesDragStart(e: MouseEvent): void {
           </div>
         </template>
 
-        <!-- Background processes panel (bottom) -->
-        <template v-if="isProcessesPanelVisible">
-          <!-- Drag handle -->
-          <div
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onProcessesDragStart"
-          ></div>
-          <div
-            class="shrink-0 relative border-t border-border bg-background"
-            :style="{ height: processesHeight + 'px' }"
-          >
-            <WorkspaceProcesses :workspace-id="workspaceId" />
-          </div>
-        </template>
-
-
         <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
           <HarnessChatPanel
             :workspace-id="workspaceId"
             :can-prompt="canPrompt"
             :show-workspace-toolbar="isDesktop && !isDesktopPanelVisible"
+            :processes-open="isProcessesPanelVisible"
             class="min-h-0 flex-1"
+            @close-processes="processesOpen = false"
           />
         </Teleport>
       </div>

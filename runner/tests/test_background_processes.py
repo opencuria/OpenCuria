@@ -29,6 +29,7 @@ class FakeRuntime:
         self.exit_codes: dict[str, int | None] = {}
         self.next_pid = 100
         self.last_start_shell = ""
+        self.ignore_term = False
 
     async def _dispatch(self, instance_id, command=None, workdir=None, env=None):
         self.calls.append(((instance_id, command, workdir), {"env": env}))
@@ -63,6 +64,10 @@ class FakeRuntime:
             return (0, "")
         if "kill -TERM" in shell:
             self.killed.append(shell)
+            if not self.ignore_term:
+                for pid in list(self.alive):
+                    if str(pid) in shell:
+                        self.alive[pid] = False
             return (0, "")
         return (0, "")
 
@@ -122,14 +127,17 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["status"], "exited")
         self.assertEqual(status["exit_code"], 3)
 
-    async def test_kill_path_force(self) -> None:
+    async def test_stop_escalates_to_kill_after_grace(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
+        runtime.ignore_term = True
         await service.start_background_process(ws_id, "proc-k", "sleep 999")
         runtime.exit_codes["proc-k"] = 143
-        result = await service.stop_background_process(
-            ws_id, "proc-k", force=True
-        )
+        with unittest.mock.patch(
+            "src.service.asyncio.sleep", new_callable=AsyncMock
+        ):
+            result = await service.stop_background_process(ws_id, "proc-k")
         self.assertTrue(result["stopped"])
+        self.assertTrue(any("TERM" in cmd for cmd in runtime.killed))
         self.assertTrue(any("KILL" in cmd for cmd in runtime.killed))
 
     def test_exit_command_wrapped_in_subshell(self) -> None:
@@ -285,7 +293,6 @@ class BackgroundWebsocketTests(unittest.IsolatedAsyncioTestCase):
                 "workspace_id": str(ws_id),
                 "request_id": "r4",
                 "process_id": "proc-ws",
-                "force": True,
             }
         )
         event, payload = interface._sio.emit.await_args.args

@@ -1380,10 +1380,9 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
-            force = bool(data.get("force", False))
             try:
                 result = await self._service.stop_background_process(
-                    workspace_id, process_id, force=force
+                    workspace_id, process_id
                 )
                 await _harness_result(
                     "harness:process_stop_result",

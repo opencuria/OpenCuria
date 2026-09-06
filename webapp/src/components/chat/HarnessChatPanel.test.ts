@@ -290,6 +290,29 @@ describe('HarnessChatPanel', () => {
     expect(after.map((sheet) => sheet.kind)).not.toContain('notice')
   })
 
+  it('includes the processes sheet when processesOpen is true', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+        processesOpen: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const sheets = stack.props('sheets') as Array<{ kind: string }>
+    expect(sheets.map((sheet) => sheet.kind)).toContain('processes')
+
+    stack.vm.$emit('close-processes')
+    expect(wrapper.emitted('close-processes')).toEqual([[]])
+    wrapper.unmount()
+  })
+
   it('syncs the session query so a subtask click is not snapped back', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {

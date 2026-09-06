@@ -38,7 +38,6 @@ class ProcessStopArgs(BaseModel):
     """Arguments for the process_stop tool."""
 
     process_id: str = Field(description="Background process UUID.")
-    force: bool = Field(default=False)
 
 
 def _status_line(record: dict) -> str:
@@ -180,12 +179,12 @@ class ProcessGetTool(Tool):
 
 
 class ProcessStopTool(Tool):
-    """Stop a background process (SIGTERM, SIGKILL when forced)."""
+    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
 
     name = "process_stop"
     description = (
-        "Stop a background process (SIGTERM, SIGKILL when force is true). "
-        "Already-finished processes are returned unchanged."
+        "Stop a background process (SIGTERM, then SIGKILL after a short "
+        "grace period). Already-finished processes are returned unchanged."
     )
     args_schema: type[BaseModel] = ProcessStopArgs
     permission_key = "process"
@@ -206,7 +205,7 @@ class ProcessStopTool(Tool):
             raise ToolError("process_id must not be empty", tool=self.name)
         try:
             record = await ctx.accessor.process_stop(
-                args.process_id.strip(), force=bool(args.force)
+                args.process_id.strip()
             )
         except (RunnerAccessorError, TimeoutError) as exc:
             raise ToolError(str(exc), tool=self.name) from exc

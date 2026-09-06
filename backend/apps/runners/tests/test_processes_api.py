@@ -298,7 +298,6 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
 
     stop = client.post(
         f"/api/v1/workspaces/{workspace.id}/processes/{process.id}/stop/",
-        data=json.dumps({"force": False}),
         content_type="application/json",
         **_auth_headers(token, str(org.id)),
     )
