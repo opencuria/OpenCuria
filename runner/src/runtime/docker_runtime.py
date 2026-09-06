@@ -269,7 +269,13 @@ class DockerRuntime(RuntimeBackend):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> AsyncIterator[str]:
-        """Execute a command inside the container and stream output line by line."""
+        """Execute a command inside the container and stream output line by line.
+
+        Note: the Docker SDK offers no reliable ``exec_kill`` for a running
+        exec, so a cancelled consumer stops draining but the remote command
+        runs to completion; the thread always terminates and ``exec_inspect``
+        state is never leaked.
+        """
 
         # docker SDK exec_run with stream=True returns a blocking generator,
         # so we run the iteration in a thread and push lines into an async queue.

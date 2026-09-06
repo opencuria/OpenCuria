@@ -12,13 +12,21 @@ Matching rules:
 - The action string for path-scoped tools is the target path; for
   command-scoped tools (``bash``) it is the command line.
 - LAST-MATCH-WINS within one rule dict (insertion order).
-- Merge order across layers: global -> agent -> mode. Each layer can
-  override the previous one; ``deny`` always wins over a merged allow.
+- Merge order across layers: global -> agent -> mode. ``deny``
+  in any layer beats a merged allow; ``ask`` beats ``allow``
+  (see ``_combine_decisions`` in ``runner``).
 - Default when nothing matches: ``allow``, except the reserved keys
   ``external_directory`` and ``doom_loop`` which default to ``ask``.
+- Filename-only secret matching: granular ``read`` rules are matched
+  against both the full action path and its basename, so ``*.env``
+  fires for ``/workspace/.env`` (OpenCode parity).
 
-Agent and mode definitions arrive in M4; this evaluator already takes
-three rule dicts plus a mode name so no signature change is needed then.
+Phase 3 decision (WIRE, not remove): ``HarnessRunner._decide`` and
+``_filtered_schemas`` forward ``mode`` to :meth:`evaluate`, so
+``mode_rules`` take effect wherever the runner is used. Production
+wiring currently passes ``mode_rules=None`` (no per-mode overrides),
+which is a documented no-op; the constructor signature stays stable
+so future per-mode rules need no signature change.
 """
 
 from __future__ import annotations
@@ -41,6 +49,22 @@ VALID_DECISIONS = (ALLOW, ASK, DENY)
 
 #: Reserved permission keys with an ``ask`` default instead of ``allow``.
 ASK_BY_DEFAULT_KEYS = ("external_directory", "doom_loop")
+
+#: Global baseline rules (OpenCode parity): secret files ask for
+#: approval while everything else reads freely. Order matters
+#: (last-match-wins): the ``*.env.example`` allow must come after the
+#: ``*.env``/``*.env.*`` asks so the shipped example stays readable.
+#: Agent layers with ``{"*": "allow"}`` (build/general) do NOT override
+#: this: the runner combines the base and agent evaluators with
+#: deny > ask > allow precedence, so a base ``ask`` always survives.
+DEFAULT_GLOBAL_RULES: dict[str, Any] = {
+    "read": {
+        "*": "allow",
+        "*.env": "ask",
+        "*.env.*": "ask",
+        "*.env.example": "allow",
+    }
+}
 
 # Tools whose action string is a workspace path (pattern-matched).
 PATH_SCOPED_KEYS = ("read", "edit", "glob", "grep", "list")
@@ -127,6 +151,11 @@ def compile_rules(rules: dict[str, Any] | None) -> list[PermissionRule]:
 
 class PermissionEvaluator:
     """Evaluate tool permissions across global/agent/mode layers.
+
+    Phase 3 decision: mode layer is WIRED (not removed). Pass the
+    active run mode via ``mode`` (``"plan"``/``"build"``) so the
+    matching ``mode_rules`` slice applies. ``mode_rules=None`` (the
+    production default) is a documented no-op.
 
     Args:
         global_rules: Baseline org/workspace rules.
@@ -247,9 +276,19 @@ class PermissionEvaluator:
     def _match_granular(
         granular: dict[str, Decision], action: str
     ) -> tuple[Decision, str] | None:
-        """Apply last-match-wins across granular pattern keys."""
+        """Apply last-match-wins across granular pattern keys.
+
+        ``read``-style actions are full paths while secret patterns
+        (``*.env``) are basename-scoped, so both the full action and
+        its basename are tried (OpenCode parity: ``.env`` matches
+        ``/workspace/.env``).
+        """
         matched: tuple[Decision, str] | None = None
+        candidates = [action]
+        basename = action.rsplit("/", 1)[-1]
+        if basename and basename != action:
+            candidates.append(basename)
         for pattern, decision in granular.items():
-            if _matches(pattern, action):
+            if any(_matches(pattern, candidate) for candidate in candidates):
                 matched = (decision, pattern)
         return matched

@@ -423,5 +423,217 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((stdout, stderr), ("out", "err"))
 
 
+class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
+    """Quote-injection: a ``'`` in the path must not break shell quoting."""
+
+    def _service(self) -> tuple:
+        from src.models import WorkspaceInfo
+        from src.service import WorkspaceService
+
+        captured: list[list[str]] = []
+
+        class FakeRuntime:
+            async def exec_command_wait(
+                self, instance_id, command, workdir=None, env=None
+            ):
+                if command[:2] == ["realpath", "-m"]:
+                    return 0, command[2] + "\n"
+                captured.append(command)
+                if command[:2] == ["sh", "-c"]:
+                    return 0, "missing"
+                if command[:2] == ["test", "-d"]:
+                    return 1, ""
+                return 0, ""
+
+        runtime = FakeRuntime()
+        service = WorkspaceService(
+            runtimes={"docker": runtime}, settings=RunnerSettings()
+        )
+        workspace_id = uuid.uuid4()
+        service._cache[workspace_id] = WorkspaceInfo(
+            workspace_id=workspace_id,
+            instance_id="instance-1",
+            status="running",
+            runtime_type="docker",
+        )
+        return service, captured, workspace_id
+
+    async def test_read_file_quotes_single_quote_path(self) -> None:
+        import shlex
+
+        service, captured, workspace_id = self._service()
+        evil = "/workspace/x'; touch /tmp/pwned; echo '"
+        with self.assertRaises((RuntimeError, FileNotFoundError)):
+            await service.read_file(workspace_id, evil)
+        shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
+        self.assertIn(shlex.quote(evil), shell_cmd)
+        self.assertNotIn("'x'; touch", shell_cmd.replace(shlex.quote(evil), ""))
+
+    async def test_stat_path_quotes_single_quote_path(self) -> None:
+        import shlex
+
+        service, captured, workspace_id = self._service()
+        evil = "/workspace/x'; touch /tmp/pwned; echo '"
+        with self.assertRaises(FileNotFoundError):
+            await service.stat_path(workspace_id, evil)
+        shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
+        self.assertIn(shlex.quote(evil), shell_cmd)
+
+    async def test_download_dir_quotes_single_quote_path(self) -> None:
+        import shlex
+
+        from src.models import WorkspaceInfo
+
+        service, captured, workspace_id = self._service()
+
+        class DirRuntime:
+            async def exec_command_wait(
+                self, instance_id, command, workdir=None, env=None
+            ):
+                if command[:2] == ["realpath", "-m"]:
+                    return 0, command[2] + "\n"
+                captured.append(command)
+                if command[:2] == ["test", "-d"]:
+                    return 0, ""
+                return 0, "QUJD"
+
+        service._runtimes = {"docker": DirRuntime()}
+        info = service._cache[workspace_id]
+        service._cache[workspace_id] = WorkspaceInfo(
+            workspace_id=info.workspace_id,
+            instance_id="instance-1",
+            status="running",
+            runtime_type="docker",
+        )
+        evil = "/workspace/x'; touch /tmp/pwned; echo '"
+        result = await service.download_file(workspace_id, evil)
+        self.assertTrue(result["content"])
+        shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
+        self.assertIn(shlex.quote(evil.rsplit("/", 1)[0]), shell_cmd)
+
+
+class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
+    """Symlink containment: realpath escapes fail closed with ValueError."""
+
+    def _service(self, resolved: str):
+        from src.models import WorkspaceInfo
+        from src.service import WorkspaceService
+
+        class FakeRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def exec_command_wait(
+                self, instance_id, command, workdir=None, env=None
+            ):
+                self.calls += 1
+                return 0, resolved + "\n"
+
+        runtime = FakeRuntime()
+        service = WorkspaceService(
+            runtimes={"docker": runtime}, settings=RunnerSettings()
+        )
+        workspace_id = uuid.uuid4()
+        service._cache[workspace_id] = WorkspaceInfo(
+            workspace_id=workspace_id,
+            instance_id="instance-1",
+            status="running",
+            runtime_type="docker",
+        )
+        return service, runtime, workspace_id
+
+    async def test_read_file_rejects_symlink_escape(self) -> None:
+        service, _runtime, workspace_id = self._service("/etc/shadow")
+        with self.assertRaises(ValueError):
+            await service.read_file(workspace_id, "/workspace/link")
+
+    async def test_stat_path_rejects_symlink_escape(self) -> None:
+        service, _runtime, workspace_id = self._service("/etc/passwd")
+        with self.assertRaises(ValueError):
+            await service.stat_path(workspace_id, "/workspace/link")
+
+    async def test_list_files_rejects_symlink_escape(self) -> None:
+        service, _runtime, workspace_id = self._service("/etc")
+        with self.assertRaises(ValueError):
+            await service.list_files(workspace_id, "/workspace/link")
+
+    async def test_download_file_rejects_symlink_escape(self) -> None:
+        service, _runtime, workspace_id = self._service("/etc/shadow")
+        with self.assertRaises(ValueError):
+            await service.download_file(workspace_id, "/workspace/link")
+
+    async def test_write_file_content_rejects_symlink_escape(self) -> None:
+        service, _runtime, workspace_id = self._service("/etc/cron.d/evil")
+        with self.assertRaises(ValueError):
+            await service.write_file_content(
+                workspace_id,
+                "/workspace/link",
+                base64.b64encode(b"x").decode(),
+            )
+
+    async def test_normal_path_passes_realpath_check(self) -> None:
+        service, runtime, workspace_id = self._service(
+            "/workspace/sub/file.txt"
+        )
+        resolved = await service._realpath_under_workspace(
+            service._get_runtime(workspace_id),
+            "instance-1",
+            "/workspace/sub/file.txt",
+        )
+        self.assertEqual(resolved, "/workspace/sub/file.txt")
+        self.assertEqual(runtime.calls, 1)
+
+    async def test_realpath_missing_falls_back_tolerant(self) -> None:
+        from src.service import WorkspaceService
+
+        class FailingRuntime:
+            async def exec_command_wait(
+                self, instance_id, command, workdir=None, env=None
+            ):
+                return 127, "realpath: command not found"
+
+        runtime = FailingRuntime()
+        service = WorkspaceService(
+            runtimes={"docker": runtime}, settings=RunnerSettings()
+        )
+        resolved = await service._realpath_under_workspace(
+            runtime, "instance-1", "/workspace/a.txt"
+        )
+        self.assertEqual(resolved, "/workspace/a.txt")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessExecWaitTrackedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exec_wait_tracked_and_cancellable(self) -> None:
+        service = _FakeService()
+
+        async def _slow(*args, **kwargs):
+            await asyncio.sleep(5)
+            return (0, "", "")  # pragma: no cover
+
+        service.exec_harness_command = _slow  # type: ignore[assignment]
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:exec_wait"]
+        task = asyncio.create_task(
+            handler(
+                _payload(
+                    workspace_id,
+                    "req-w",
+                    command=["sleep", "5"],
+                    workdir="/workspace",
+                    env={},
+                    timeout=30,
+                )
+            )
+        )
+        await asyncio.sleep(0.05)
+        self.assertIn("harness:req-w", interface._running_tasks)
+        cancel = interface._sio.handlers["/"]["harness:cancel"]
+        await cancel({"request_id": "req-w"})
+        await task
+        await asyncio.sleep(0)
+        self.assertNotIn("harness:req-w", interface._running_tasks)

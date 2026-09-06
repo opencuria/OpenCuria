@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from ..access.base import sanitize_harness_path
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .file_locks import get_lock
 from .truncate import MAX_BYTES, MAX_LINES
 
 # Output page cap sent to the model (OpenCode ``MAX_BYTES``).
@@ -72,6 +73,51 @@ def paginate_read(
     return raw, more, cut
 
 
+async def _miss_message(safe_path: str, exc: Exception, ctx: ToolContext) -> str:
+    """Build a miss error with up to 3 same-directory suggestions."""
+    base = str(exc)
+    text = base.lower()
+    if "not found" not in text and "no such file" not in text:
+        return base
+    suggestions = await _sibling_suggestions_async(safe_path, ctx)
+    if not suggestions:
+        return base
+    listed = "\n".join(f"- {name}" for name in suggestions[:3])
+    return f"{base}\nDid you mean one of these?\n{listed}"
+
+
+async def _sibling_suggestions_async(
+    safe_path: str, ctx: ToolContext
+) -> list[str]:
+    """Awaitable sibling lookup (best effort, swallows errors)."""
+    accessor = getattr(ctx, "accessor", None)
+    list_dir = getattr(accessor, "list_dir", None)
+    if list_dir is None:
+        return []
+    dirname = safe_path.rsplit("/", 1)[0] or "/workspace"
+    wanted = safe_path.rsplit("/", 1)[-1].lower()
+    try:
+        entries = await list_dir(dirname)
+    except Exception:
+        return []
+    names: list[str] = []
+    for entry in entries or []:
+        name = getattr(entry, "name", "") or ""
+        if not name:
+            continue
+        names.append(name)
+    if not names:
+        return []
+    ranked = sorted(
+        names,
+        key=lambda name: (
+            0 if wanted in name.lower() or name.lower() in wanted else 1,
+            name.lower(),
+        ),
+    )
+    return ranked[:3]
+
+
 def _patch_metadata(
     path: str,
     *,
@@ -100,15 +146,20 @@ def _patch_metadata(
 
 
 class ReadArgs(BaseModel):
-    """Arguments for the read tool."""
+    """Arguments for the read tool.
+
+    Phase 3 decision: ``offset`` stays 0-based (backwards compatible);
+    displayed line numbers are 0-based too (``f"{lineno}: {line}"``
+    with ``lineno = offset + index``).
+    """
 
     path: str = Field(description="Workspace-relative or /workspace path.")
     offset: int = Field(
         default=0,
         ge=0,
         description=(
-            "First line to return (0-based). "
-            "Use to continue a large file."
+            "First line to return (0-based, displayed line numbers "
+            "are 0-based). Use to continue a large file."
         ),
     )
     limit: int = Field(
@@ -135,14 +186,22 @@ class EditArgs(BaseModel):
 
 
 class ReadTool(Tool):
-    """Read a text file with an optional line range."""
+    """Read a text file with an optional line range.
+
+    Phase 3 decision: 0-based ``offset`` is kept (backwards
+    compatible); output lines carry a ``"{lineno}: "`` prefix with
+    0-based numbers so the pagination footer (``lines X-Y``) stays
+    consistent. On a miss, up to 3 same-directory basenames are
+    suggested (OpenCode parity, best effort).
+    """
 
     name = "read"
     description = (
-        "Read a text file from the workspace. Returns up to 2000 lines "
-        "(and at most 50 KB) from offset. Use offset to continue in large "
-        "files. Rejects binary files. Lines longer than 2000 characters "
-        "are truncated."
+        "Read a text file from the workspace. Paged via offset/limit "
+        "(defaults: offset 0, limit 2000 lines, at most 50 KB per page). "
+        "Offset and displayed line numbers are 0-based. "
+        "Use offset to continue in large files. Rejects binary files. "
+        "Lines longer than 2000 characters are truncated."
     )
     args_schema: type[BaseModel] = ReadArgs
     permission_key = "read"
@@ -165,7 +224,9 @@ class ReadTool(Tool):
                 safe_path, max_size=READ_FETCH_MAX_BYTES
             )
         except RunnerAccessorError as exc:
-            raise ToolError(str(exc), tool=self.name) from exc
+            raise ToolError(
+                await _miss_message(safe_path, exc, ctx), tool=self.name
+            ) from exc
         content = stored.content
         if _is_binary(content):
             raise ToolError(
@@ -186,10 +247,11 @@ class ReadTool(Tool):
                 f"({len(lines)} lines): {args.path}",
                 tool=self.name,
             )
-        page, more, cut = paginate_read(
-            lines, offset=args.offset, limit=args.limit
-        )
-        output = "\n".join(page)
+        page, more, cut = paginate_read(lines, offset=args.offset, limit=args.limit)
+        numbered = [
+            f"{args.offset + index}: {line}" for index, line in enumerate(page)
+        ]
+        output = "\n".join(numbered)
         last = args.offset + len(page)
         next_offset = last
         if cut:
@@ -246,17 +308,20 @@ class WriteTool(Tool):
         assert isinstance(validated, WriteArgs)
         args = validated
         safe_path = sanitize_harness_path(args.path)
-        old_text = ""
-        try:
-            stored = await ctx.accessor.read_file(safe_path)
-            if not _is_binary(stored.content):
-                old_text = stored.content.decode("utf-8", errors="replace")
-        except RunnerAccessorError:
+        async with get_lock(safe_path):
             old_text = ""
-        try:
-            await ctx.accessor.write_file(safe_path, args.content.encode("utf-8"))
-        except RunnerAccessorError as exc:
-            raise ToolError(str(exc), tool=self.name) from exc
+            try:
+                stored = await ctx.accessor.read_file(safe_path)
+                if not _is_binary(stored.content):
+                    old_text = stored.content.decode("utf-8", errors="replace")
+            except RunnerAccessorError:
+                old_text = ""
+            try:
+                await ctx.accessor.write_file(
+                    safe_path, args.content.encode("utf-8")
+                )
+            except RunnerAccessorError as exc:
+                raise ToolError(str(exc), tool=self.name) from exc
         patch = _patch_metadata(safe_path, old_text=old_text, new_text=args.content)
         return ToolResult(
             output=f"Wrote {len(args.content.encode('utf-8'))} bytes to {safe_path}",
@@ -290,46 +355,47 @@ class EditTool(Tool):
         if not args.old_string:
             raise ToolError("old_string must not be empty", tool=self.name)
         safe_path = sanitize_harness_path(args.path)
-        try:
-            stored = await ctx.accessor.read_file(safe_path)
-        except RunnerAccessorError as exc:
-            raise ToolError(str(exc), tool=self.name) from exc
-        if _is_binary(stored.content):
-            raise ToolError(
-                f"Refusing to edit binary file: {args.path}",
-                tool=self.name,
+        async with get_lock(safe_path):
+            try:
+                stored = await ctx.accessor.read_file(safe_path)
+            except RunnerAccessorError as exc:
+                raise ToolError(str(exc), tool=self.name) from exc
+            if _is_binary(stored.content):
+                raise ToolError(
+                    f"Refusing to edit binary file: {args.path}",
+                    tool=self.name,
+                )
+            try:
+                text = stored.content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ToolError(
+                    f"File is not valid UTF-8: {args.path}",
+                    tool=self.name,
+                ) from exc
+            occurrences = text.count(args.old_string)
+            if occurrences == 0:
+                raise ToolError(
+                    f"old_string not found in {args.path}",
+                    tool=self.name,
+                )
+            if occurrences > 1 and not args.replace_all:
+                raise ToolError(
+                    f"old_string occurs {occurrences}x in {args.path}; "
+                    "set replace_all=true to replace all",
+                    tool=self.name,
+                )
+            if args.replace_all:
+                updated = text.replace(args.old_string, args.new_string)
+            else:
+                updated = text.replace(args.old_string, args.new_string, 1)
+            try:
+                await ctx.accessor.write_file(safe_path, updated.encode("utf-8"))
+            except RunnerAccessorError as exc:
+                raise ToolError(str(exc), tool=self.name) from exc
+            patch = _patch_metadata(safe_path, old_text=text, new_text=updated)
+            patch["replacements"] = occurrences if args.replace_all else 1
+            return ToolResult(
+                output=f"Replaced {occurrences if args.replace_all else 1} "
+                f"occurrence(s) in {safe_path}",
+                metadata=patch,
             )
-        try:
-            text = stored.content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ToolError(
-                f"File is not valid UTF-8: {args.path}",
-                tool=self.name,
-            ) from exc
-        occurrences = text.count(args.old_string)
-        if occurrences == 0:
-            raise ToolError(
-                f"old_string not found in {args.path}",
-                tool=self.name,
-            )
-        if occurrences > 1 and not args.replace_all:
-            raise ToolError(
-                f"old_string occurs {occurrences}x in {args.path}; "
-                "set replace_all=true to replace all",
-                tool=self.name,
-            )
-        if args.replace_all:
-            updated = text.replace(args.old_string, args.new_string)
-        else:
-            updated = text.replace(args.old_string, args.new_string, 1)
-        try:
-            await ctx.accessor.write_file(safe_path, updated.encode("utf-8"))
-        except RunnerAccessorError as exc:
-            raise ToolError(str(exc), tool=self.name) from exc
-        patch = _patch_metadata(safe_path, old_text=text, new_text=updated)
-        patch["replacements"] = occurrences if args.replace_all else 1
-        return ToolResult(
-            output=f"Replaced {occurrences if args.replace_all else 1} "
-            f"occurrence(s) in {safe_path}",
-            metadata=patch,
-        )

@@ -1224,7 +1224,13 @@ class QemuRuntime(RuntimeBackend):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> AsyncIterator[str]:
-        """Execute a command in the VM via SSH and stream output."""
+        """Execute a command in the VM via SSH and stream output.
+
+        Note: cancellation stops draining the SSH stream but does not
+        kill the remote process — once ``create_process`` yields lines,
+        the handle is consumed locally and no kill is issued, mirroring
+        ``DockerRuntime.exec_command`` behaviour.
+        """
         ssh = await self._get_ssh(instance_id)
         cmd_str = self._build_shell_command(command, workdir, env)
 
@@ -1249,7 +1255,13 @@ class QemuRuntime(RuntimeBackend):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> tuple[int, str]:
-        """Execute a command and wait for completion."""
+        """Execute a command and wait for completion.
+
+        Note: like ``DockerRuntime.exec_command``, cancellation of the
+        awaiting caller does not kill the remote SSH command — ``ssh.run``
+        exposes no process handle, so the command runs to completion in
+        the VM. Cancelling only stops waiting for the result.
+        """
         ssh = await self._get_ssh(instance_id)
         cmd_str = self._build_shell_command(command, workdir, env)
 

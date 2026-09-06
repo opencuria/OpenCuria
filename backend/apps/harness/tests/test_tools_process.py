@@ -50,6 +50,30 @@ async def test_process_start_rejects_empty_command(fake_accessor) -> None:
         await tool_start().execute({"command": "  "}, _ctx(fake_accessor))
 
 
+async def test_process_start_allowed_env_passes() -> None:
+    """Benign env vars reach the accessor; missing env means {}."""
+    accessor = FakeAccessor()
+    result = await ProcessStartTool().execute(
+        {"command": "sleep 60", "env": {"FOO": "1"}},
+        _ctx(accessor),
+    )
+    assert result.metadata["process_id"] == "proc-1"
+
+
+@pytest.mark.parametrize("key", ["LD_PRELOAD", "PATH", "PYTHONPATH", "HOME"])
+async def test_process_start_blocked_env_rejected(
+    key: str, fake_accessor: FakeAccessor
+) -> None:
+    """Dangerous env keys are rejected before any accessor call."""
+    before = dict(fake_accessor.processes)
+    with pytest.raises(ToolError, match="blocked"):
+        await ProcessStartTool().execute(
+            {"command": "sleep 60", "env": {key: "evil"}},
+            _ctx(fake_accessor),
+        )
+    assert fake_accessor.processes == before
+
+
 def tool_start() -> ProcessStartTool:
     """Return a fresh ProcessStartTool."""
     return ProcessStartTool()

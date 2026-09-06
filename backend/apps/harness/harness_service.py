@@ -1393,6 +1393,19 @@ class HarnessService:
                 },
                 workspace_id,
             )
+        elif etype in ("retry_scheduled", "retry_attempt"):
+            # Lightweight forward without a DB part, mirroring
+            # step_start/step_finish (no persisted part, frontend-only).
+            await self._emit_frontend(
+                FRONTEND_EVENT_PART,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "delta": {etype: event.get("attempt")},
+                    "step": event.get("step"),
+                },
+                workspace_id,
+            )
         elif etype == "todo_updated":
             await self._emit_frontend(
                 FRONTEND_EVENT_TODO,

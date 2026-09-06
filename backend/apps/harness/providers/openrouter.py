@@ -35,6 +35,9 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 HTTPX_POOL_TIMEOUT_SECONDS = 5.0
 
+#: Cap for the enriched ``response_body`` stored on provider errors.
+RESPONSE_BODY_MAX_CHARS = 2000
+
 
 def positive_timeout(value: float | None) -> float | None:
     """Return *value* when it is a positive timeout, otherwise ``None``."""
@@ -327,22 +330,39 @@ class OpenRouterAdapter(ProviderAdapter):
         """Validate the HTTP status and parse SSE lines into deltas."""
         if response.status_code in (401, 403):
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderAuthError(
                 f"OpenRouter auth failed ({response.status_code}): {body}",
                 provider=self.name,
+                status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
         if response.status_code == 429:
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderRateLimitError(
                 f"OpenRouter rate limit ({response.status_code}): {body}",
                 provider=self.name,
+                status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
         if response.status_code >= 400:
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderResponseError(
                 f"OpenRouter error ({response.status_code}): {body}",
                 provider=self.name,
                 status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
 
         async for line in self._aiter_lines(
@@ -405,11 +425,37 @@ class OpenRouterAdapter(ProviderAdapter):
     @staticmethod
     async def _read_body_snippet(response: httpx.Response) -> str:
         """Read a short error-body snippet without raising."""
+        return await OpenRouterAdapter._read_body(response, 500)
+
+    @staticmethod
+    async def _read_body(response: httpx.Response, limit: int) -> str:
+        """Read up to *limit* chars of the response body without raising."""
         try:
             body = await response.aread()
-            return body.decode("utf-8", errors="replace")[:500]
+            return body.decode("utf-8", errors="replace")[:limit]
         except Exception:
             return "<unreadable body>"
+
+    @staticmethod
+    def _response_headers(response: httpx.Response) -> dict[str, str]:
+        """Return response headers with lowercased names and str values."""
+        headers: dict[str, str] = {}
+        try:
+            for name, value in response.headers.items():
+                headers[name.lower()] = str(value)
+        except Exception:
+            return {}
+        return headers
+
+    @staticmethod
+    def _should_retry_hint(headers: dict[str, str]) -> bool | None:
+        """Parse the ``x-should-retry`` header (Pi provider-retry parity)."""
+        hint = headers.get("x-should-retry", "").strip().lower()
+        if hint == "true":
+            return True
+        if hint == "false":
+            return False
+        return None
 
     def _parse_chunk(self, data: str) -> Delta | None:
         """Parse one SSE data payload into a Delta.

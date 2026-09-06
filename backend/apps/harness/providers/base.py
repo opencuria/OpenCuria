@@ -75,9 +75,61 @@ class ProviderError(Exception):
 class ProviderAuthError(ProviderError):
     """Raised when the provider rejects credentials (401/403)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
+    ) -> None:
+        """Create an auth error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
+        self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
+        super().__init__(message, provider=provider)
+
 
 class ProviderRateLimitError(ProviderError):
     """Raised when the provider rate-limits the request (429)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
+    ) -> None:
+        """Create a rate-limit error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
+        self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
+        super().__init__(message, provider=provider)
 
 
 class ProviderTimeoutError(ProviderError):
@@ -118,8 +170,24 @@ class ProviderResponseError(ProviderError):
         *,
         provider: str = "",
         status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
     ) -> None:
+        """Create a response error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
         self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
         super().__init__(message, provider=provider)
 
 

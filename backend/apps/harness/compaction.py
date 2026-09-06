@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,40 @@ _CONTEXT_OVERFLOW_PHRASES = (
     "too many tokens",
 )
 
+#: Pi/OpenCode parity overflow patterns (case-insensitive regexes).
+CONTEXT_OVERFLOW_PATTERNS = (
+    re.compile(r"prompt is too long", re.I),
+    re.compile(r"request_too_large", re.I),
+    re.compile(r"exceeds (?:the )?context window", re.I),
+    re.compile(r"exceeds (?:the )?(?:model'?s )?maximum context length", re.I),
+    re.compile(r"input token count.*exceeds (?:the )?maximum", re.I),
+    re.compile(r"maximum prompt length", re.I),
+    re.compile(r"reduce (?:the )?length of (?:the )?messages", re.I),
+    re.compile(r"maximum allowed input length", re.I),
+    re.compile(r"longer than (?:the )?(?:model'?s )?context length", re.I),
+    re.compile(r"exceeds (?:the )?(?:available context size|limit)", re.I),
+    re.compile(r"available context size", re.I),
+    re.compile(r"greater than (?:the )?context length", re.I),
+    re.compile(r"context window exceeds limit", re.I),
+    re.compile(r"exceeded model token limit", re.I),
+    re.compile(r"too large for model", re.I),
+    re.compile(r"configured context size", re.I),
+    re.compile(r"model_context_window_exceeded", re.I),
+    re.compile(r"prompt too long", re.I),
+    re.compile(r"range of input length", re.I),
+    re.compile(r"context[_ ]length[_ ]exceeded", re.I),
+    re.compile(r"too many tokens", re.I),
+    re.compile(r"token limit exceeded", re.I),
+    re.compile(r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", re.I),
+)
+
+#: Non-overflow exclusions checked before overflow patterns (Pi parity).
+NON_OVERFLOW_EXCLUSIONS = (
+    re.compile(r"^(throttling error|service unavailable):", re.I),
+    re.compile(r"rate limit", re.I),
+    re.compile(r"too many requests", re.I),
+)
+
 
 @dataclass(frozen=True)
 class ModelLimits:
@@ -144,9 +179,22 @@ def preserve_recent_budget(limits: ModelLimits) -> int:
 
 
 def is_context_overflow_error(exc: BaseException) -> bool:
-    """Return True when *exc* looks like a provider context-length failure."""
-    text = str(exc).lower()
-    return any(phrase in text for phrase in _CONTEXT_OVERFLOW_PHRASES)
+    """Return True when *exc* looks like a provider context-length failure.
+
+    Both the message and an enriched ``response_body`` (see
+    ``providers.base``) are classified, so overflow text hidden in the
+    raw body is detected as well.
+    """
+    text = str(exc)
+    body = getattr(exc, "response_body", "")
+    if isinstance(body, str) and body:
+        text = f"{text}\n{body}"
+    if any(pattern.search(text) for pattern in NON_OVERFLOW_EXCLUSIONS):
+        return False
+    if any(pattern.search(text) for pattern in CONTEXT_OVERFLOW_PATTERNS):
+        return True
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
 
 
 def _truncate(value: str) -> str:

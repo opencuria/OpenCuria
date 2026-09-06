@@ -93,3 +93,54 @@ async def test_registry_hard_caps_even_when_tool_sets_truncated(
     preview = result.output.split("\n\n...", 1)[0]
     assert len(preview.encode("utf-8")) <= MAX_BYTES
     assert len(result.output) < MAX_BYTES + 2048
+
+
+def test_truncate_tail_keeps_last_lines() -> None:
+    """Tail keeps the final lines so build errors stay visible."""
+    text = "\n".join(f"line-{i}" for i in range(MAX_LINES + 50))
+    result = truncate_tool_output(text, direction="tail")
+    assert result.truncated is True
+    assert result.content.startswith("...50 lines truncated...")
+    preview = result.content.split("...\n\n", 1)[1]
+    assert len(preview.split("\n")) == MAX_LINES
+    assert preview.split("\n")[-1] == f"line-{MAX_LINES + 49}"
+    assert "line-0" not in preview.split("\n")
+
+
+def test_truncate_head_marker_is_suffix() -> None:
+    """Head keeps the first lines with a trailing marker."""
+    text = "\n".join(f"line-{i}" for i in range(MAX_LINES + 10))
+    result = truncate_tool_output(text, direction="head")
+    assert result.truncated is True
+    assert result.content.endswith("...10 lines truncated...")
+    assert result.content.split("\n")[0] == "line-0"
+
+
+def test_truncate_invalid_direction_rejected() -> None:
+    """Unknown directions raise ValueError (auth-adjacent input guard)."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="Invalid direction"):
+        truncate_tool_output("x" * 10, direction="middle")  # type: ignore[arg-type]
+
+
+def test_truncate_tail_single_oversized_line_suffix() -> None:
+    """A single oversized line keeps a tail suffix under the byte cap."""
+    text = "x" * (MAX_BYTES + 4096)
+    result = truncate_tool_output(text, direction="tail")
+    assert result.truncated is True
+    assert result.content.startswith("...") and "bytes truncated" in result.content
+    preview = result.content.split("...\n\n", 1)[1]
+    assert len(preview.encode("utf-8")) <= MAX_BYTES
+    assert preview.endswith("x" * 100)
+
+
+def test_truncate_head_oversized_second_line_byte_clip() -> None:
+    """Head byte-window reports bytes and keeps a prefix preview."""
+    text = "a" * 100 + "\n" + "b" * (MAX_BYTES + 100)
+    result = truncate_tool_output(text)  # default head
+    assert result.truncated is True
+    assert "bytes truncated" in result.content
+    preview = result.content.split("\n\n...", 1)[0]
+    assert len(preview.encode("utf-8")) <= MAX_BYTES
+    assert preview.startswith("a" * 100)

@@ -174,7 +174,7 @@ class FakeAccessor(WorkspaceAccessor):
         if self.exec_result is not None:
             return self.exec_result
         text = command if isinstance(command, str) else " ".join(command)
-        if text.startswith("find "):
+        if "rg --files" in text or text.startswith("find "):
             paths = sorted(self.files)
             return ExecResult(exit_code=0, stdout="\n".join(paths))
         if "rg " in text or "grep " in text:

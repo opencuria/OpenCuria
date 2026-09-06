@@ -5,6 +5,7 @@ from __future__ import annotations
 from .evaluator import (
     ALLOW,
     ASK,
+    DEFAULT_GLOBAL_RULES,
     DENY,
     Evaluation,
     PermissionContext,
@@ -21,6 +22,7 @@ from .service import (
 __all__ = [
     "ALLOW",
     "ASK",
+    "DEFAULT_GLOBAL_RULES",
     "DENY",
     "AllowlistRepository",
     "Evaluation",

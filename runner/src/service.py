@@ -2593,6 +2593,38 @@ class WorkspaceService:
 
         return filename
 
+    async def _realpath_under_workspace(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        path: str,
+    ) -> str:
+        """Resolve symlinks for *path* and ensure it stays in /workspace.
+
+        Runs ``realpath -m`` inside the workspace, which resolves symlinks
+        and ``..`` segments. Raises ``ValueError`` (fail-closed) when the
+        resolved path escapes ``/workspace``. Falls back to *path* when
+        ``realpath`` is unavailable in the image (coreutils ships it on
+        Ubuntu, so this is only a safety net). Note: check-then-use is
+        inherently TOCTOU-prone if the workspace mutates the link between
+        the check and the file operation; accepted here as defense-in-depth
+        on top of the ``/workspace`` sandbox.
+        """
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["realpath", "-m", path],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            return path
+        resolved = output.strip().splitlines()
+        if not resolved or not resolved[0]:
+            return path
+        real = resolved[0].strip()
+        if real != "/workspace" and not real.startswith("/workspace/"):
+            raise ValueError(f"Path escapes /workspace: {path}")
+        return real
+
     @staticmethod
     def _build_single_file_tar(filename: str, content: bytes) -> bytes:
         """Build a tar archive containing exactly one file."""
@@ -2639,6 +2671,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
@@ -2795,28 +2830,33 @@ class WorkspaceService:
                 )
 
         async with sem:
+            safe_path = await self._realpath_under_workspace(
+                runtime, info.instance_id, safe_path
+            )
             # Combine stat + read into a single SSH exec to halve the number
             # of SSH channels opened compared to two sequential commands.
             # Output format:
             #   line 1 = file size (bytes)
             #   line 2 = MIME type
             #   rest   = base64 content
-            # Single quotes in safe_path are already prevented by _sanitize_path
-            # (normpath keeps paths clean), so direct interpolation is safe here.
+            # Paths are embedded via shlex.quote so a quote in the path
+            # cannot break out of the shell quoting.
+            qpath = shlex.quote(safe_path)
             shell_cmd = (
                 # Guard: exit 1 immediately if the file does not exist.
                 # Without this, the else-branch's `head | base64` pipeline
                 # exits 0 even on a missing file, causing a ValueError when
                 # we try to parse the empty first line as an integer.
-                f"test -f '{safe_path}' || exit 1; "
-                f"SZ=$(stat -c '%s' '{safe_path}'); "
-                f"MT=$(file --mime-type -b '{safe_path}' 2>/dev/null || echo 'application/octet-stream'); "
+                f"test -f {qpath} || exit 1; "
+                f"SZ=$(stat -c '%s' {qpath}); "
+                f"MT=$(file --mime-type -b {qpath} 2>/dev/null "
+                "|| echo 'application/octet-stream'); "
                 f'echo "$SZ"; '
                 f'echo "$MT"; '
                 f'if [ "$SZ" -le {read_limit} ]; then '
-                f"  base64 '{safe_path}'; "
+                f"  base64 {qpath}; "
                 f"else "
-                f"  head -c {read_limit} '{safe_path}' | base64; "
+                f"  head -c {read_limit} {qpath} | base64; "
                 f"fi"
             )
             exit_code, output = await runtime.exec_command_wait(
@@ -2867,6 +2907,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         # Check upload size
         raw_size = len(content_b64) * 3 // 4  # approximate decoded size
@@ -2920,6 +2963,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         # Check if it's a directory
         exit_code, _ = await runtime.exec_command_wait(
@@ -2930,13 +2976,14 @@ class WorkspaceService:
         is_dir = exit_code == 0
 
         if is_dir:
+            qp_dir = shlex.quote(os.path.dirname(safe_path))
+            qp_base = shlex.quote(os.path.basename(safe_path))
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=[
                     "sh",
                     "-c",
-                    f"tar czf - -C '{os.path.dirname(safe_path)}' "
-                    f"'{os.path.basename(safe_path)}' | base64",
+                    f"tar czf - -C {qp_dir} {qp_base} | base64",
                 ],
                 workdir="/workspace",
             )
@@ -2972,14 +3019,18 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
+        qpath = shlex.quote(safe_path)
         shell_cmd = (
-            f"if [ -e '{safe_path}' ]; then "
-            f"if [ -d '{safe_path}' ]; then echo 'dir'; "
-            f"du -sb '{safe_path}' | cut -f1; "
+            f"if [ -e {qpath} ]; then "
+            f"if [ -d {qpath} ]; then echo 'dir'; "
+            f"du -sb {qpath} | cut -f1; "
             f"echo 'inode/directory'; "
-            f"else stat -c '%s' '{safe_path}'; "
-            f"file --mime-type -b '{safe_path}' 2>/dev/null "
+            f"else stat -c '%s' {qpath}; "
+            f"file --mime-type -b {qpath} 2>/dev/null "
             "|| echo 'application/octet-stream'; "
             f"fi; else echo 'missing'; fi"
         )
@@ -3023,6 +3074,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
         try:
             decoded = base64.b64decode(content_b64, validate=True)
         except Exception as exc:
