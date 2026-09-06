@@ -110,6 +110,37 @@ describe('HarnessChatInput', () => {
     )
   })
 
+  it('starts as a single line and caps growth at 200px', async () => {
+    const wrapper = mountInput()
+    const textarea = wrapper.find('[data-testid="composer-textarea"]')
+    expect(textarea.classes()).toContain('min-h-10')
+    expect(textarea.classes()).toContain('md:min-h-9')
+    expect(textarea.classes()).toContain('max-h-[200px]')
+  })
+
+  it('clamps autosize height at 200px when content overflows', async () => {
+    const wrapper = mountInput()
+    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 500 })
+    await wrapper.find('textarea').setValue('line\n'.repeat(20))
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('200px')
+    expect(el.style.overflowY).toBe('auto')
+  })
+
+  it('resets to one line after send', async () => {
+    const wrapper = mountInput()
+    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 80 })
+    await wrapper.find('textarea').setValue('hello world')
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('80px')
+    await wrapper.find('textarea').trigger('keydown', { key: 'Enter' })
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('')
+    expect(el.style.overflowY).toBe('')
+  })
+
   it('shows org settings CTA when provider config is missing', async () => {
     getProviderConfigMock.mockRejectedValue(new Error('not found'))
     const wrapper = mountInput()

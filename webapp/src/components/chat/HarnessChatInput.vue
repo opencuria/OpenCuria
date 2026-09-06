@@ -181,6 +181,10 @@ onMounted(() => {
   const cached = loadFromCache()
   if (cached) prompt.value = cached
   void loadProviderModels()
+  void nextTick(() => {
+    resizeTextarea()
+    observeTextareaResize()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -189,6 +193,8 @@ onBeforeUnmount(() => {
     clearTimeout(mentionFindTimer)
     mentionFindTimer = null
   }
+  textareaResizeObserver?.disconnect()
+  textareaResizeObserver = null
 })
 
 watch(
@@ -231,6 +237,7 @@ watch(
 
 watch(prompt, (value) => {
   saveToCache(value)
+  void nextTick(resizeTextarea)
 })
 
 function handleSend(): void {
@@ -390,6 +397,43 @@ function textareaEl(): HTMLTextAreaElement | null {
   if (!root) return null
   const el = (root as { $el?: unknown }).$el
   return el instanceof HTMLTextAreaElement ? el : null
+}
+
+const MAX_COMPOSER_HEIGHT = 200
+let textareaResizeObserver: ResizeObserver | null = null
+
+/**
+ * Grow the composer to fit its content, capped at MAX_COMPOSER_HEIGHT.
+ * Empty input resets to CSS min-height so it stays one line.
+ */
+function resizeTextarea(): void {
+  const el = textareaEl()
+  if (!el) return
+  if (!el.value) {
+    el.style.height = ''
+    el.style.overflowY = ''
+    return
+  }
+  el.style.height = 'auto'
+  const content = el.scrollHeight
+  if (content <= 0) return
+  el.style.height = `${Math.min(content, MAX_COMPOSER_HEIGHT)}px`
+  el.style.overflowY = content > MAX_COMPOSER_HEIGHT ? 'auto' : 'hidden'
+}
+
+function observeTextareaResize(): void {
+  if (typeof ResizeObserver === 'undefined') return
+  const el = textareaEl()
+  if (!el) return
+  textareaResizeObserver?.disconnect()
+  let lastWidth = el.offsetWidth
+  textareaResizeObserver = new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width ?? 0
+    if (width === lastWidth) return
+    lastWidth = width
+    resizeTextarea()
+  })
+  textareaResizeObserver.observe(el)
 }
 
 function closeComposerQuery(): void {
@@ -582,7 +626,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
           :disabled="disabled"
           :rows="1"
           placeholder="Plan, Build, / for skills, @ for context"
-          class="min-h-[50px] max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-3 text-base !shadow-none !outline-none !ring-0 focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0"
+          class="min-h-10 max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-2 text-base !shadow-none !outline-none !ring-0 transition-[height] duration-100 ease-out focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0 md:min-h-9"
           data-testid="composer-textarea"
           @keydown="handleKeydown"
           @input="onPromptInput"
