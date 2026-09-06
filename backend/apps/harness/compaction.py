@@ -342,17 +342,10 @@ def select(messages: list[LLMMessage], limits: ModelLimits) -> CompactionSelecti
             keep_start = split
         break
 
-    last_user_start = starts[-1]
-    if keep_start is None or keep_start == 0 or keep_start > last_user_start:
-        keep_start = last_user_start
-
-    if keep_start == 0:
-        tail_start_id = ""
-        for message in conversation:
-            if message.role == "user" and not _is_checkpoint(message):
-                tail_start_id = message.message_id
-                break
-        return CompactionSelection(head=[], tail=conversation, tail_start_id=tail_start_id)
+    # OpenCode: no retained tail when nothing fits or the kept range
+    # starts at the first conversation message (summarize everything).
+    if keep_start is None or keep_start == 0:
+        return CompactionSelection(head=conversation, tail=[], tail_start_id="")
 
     head = conversation[:keep_start]
     tail = conversation[keep_start:]
@@ -389,3 +382,82 @@ def apply_compaction(
         [*system, _checkpoint_message(summary), *tail],
         selection.tail_start_id,
     )
+
+
+CONTEXT_OVERFLOW_COMPACTION_ERROR = (
+    "Conversation history too large to compact - exceeds model context limit"
+)
+
+
+def _last_real_user(messages: list[LLMMessage]) -> LLMMessage | None:
+    """Return the latest non-checkpoint user message, if any."""
+    for message in reversed(messages):
+        if message.role == "user" and not _is_checkpoint(message):
+            return message
+    return None
+
+
+def strip_media(message: LLMMessage) -> LLMMessage:
+    """Replace image parts with text placeholders for overflow replay."""
+    content = message.content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if part.get("type") == "image_url":
+                parts.append("[Attached image: file]")
+            elif part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        content = "".join(parts)
+    return LLMMessage(
+        role="user",
+        content=content if isinstance(content, str) else str(content or ""),
+        message_id=message.message_id,
+    )
+
+
+def apply_overflow_replay(
+    original: list[LLMMessage],
+    compacted: list[LLMMessage],
+) -> list[LLMMessage]:
+    """Keep system/checkpoint prefix and replay the last user without tools.
+
+    OpenCode overflow compaction drops the overflowing assistant/tool turn
+    and re-sends the prior user prompt with media stripped to placeholders.
+    """
+    user = _last_real_user(original)
+    if user is None:
+        return compacted
+    prefix = [
+        message
+        for message in compacted
+        if message.role == "system" or _is_checkpoint(message)
+    ]
+    return [*prefix, strip_media(user)]
+
+
+def ensure_current_user(
+    original: list[LLMMessage],
+    compacted: list[LLMMessage],
+) -> list[LLMMessage]:
+    """Re-insert the latest user prompt when compaction dropped the tail."""
+    user = _last_real_user(original)
+    if user is None:
+        return compacted
+    for message in compacted:
+        if message.role != "user" or _is_checkpoint(message):
+            continue
+        if user.message_id and message.message_id == user.message_id:
+            return compacted
+        if message.content == user.content:
+            return compacted
+    prefix: list[LLMMessage] = []
+    rest: list[LLMMessage] = []
+    seen_rest = False
+    for message in compacted:
+        is_prefix = message.role == "system" or _is_checkpoint(message)
+        if is_prefix and not seen_rest:
+            prefix.append(message)
+            continue
+        seen_rest = True
+        rest.append(message)
+    return [*prefix, user, *rest]

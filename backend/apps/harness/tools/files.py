@@ -9,9 +9,21 @@ from pydantic import BaseModel, Field
 from ..access.base import sanitize_harness_path
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .truncate import MAX_BYTES, MAX_LINES
 
-# Files larger than this are rejected by ``read`` (binary-safety guard).
-READ_MAX_BYTES = 256 * 1024
+# Output page cap sent to the model (OpenCode ``MAX_BYTES``).
+READ_MAX_BYTES = MAX_BYTES
+
+# Bytes fetched from the runner so later pages can still be sliced.
+READ_FETCH_MAX_BYTES = 5 * 1024 * 1024
+
+# Default page size, mirroring OpenCode ``DEFAULT_READ_LIMIT``.
+READ_DEFAULT_LIMIT = MAX_LINES
+
+# OpenCode ``MAX_LINE_LENGTH`` — minify/lockfile lines stay bounded.
+READ_MAX_LINE_LENGTH = 2000
+_READ_LINE_SUFFIX = f"... (line truncated to {READ_MAX_LINE_LENGTH} chars)"
+_READ_FOOTER_RESERVE = 256
 
 # Binary detection: NUL byte in the probed prefix means "not text".
 _BINARY_PROBE_BYTES = 4096
@@ -20,6 +32,44 @@ _BINARY_PROBE_BYTES = 4096
 def _is_binary(content: bytes) -> bool:
     """Return True when *content* looks like a binary file."""
     return b"\x00" in content[:_BINARY_PROBE_BYTES]
+
+
+def _clip_line(line: str) -> str:
+    """Truncate one line to OpenCode's per-line character cap."""
+    if len(line) <= READ_MAX_LINE_LENGTH:
+        return line
+    return f"{line[:READ_MAX_LINE_LENGTH]}{_READ_LINE_SUFFIX}"
+
+
+def paginate_read(
+    lines: list[str],
+    *,
+    offset: int,
+    limit: int,
+    max_bytes: int = READ_MAX_BYTES,
+) -> tuple[list[str], bool, bool]:
+    """Return a page of *lines* capped by *limit* and *max_bytes*.
+
+    The third flag is True when the byte budget stopped the page early
+    (OpenCode ``cut``), as opposed to only the line limit.
+    """
+    if offset < 0:
+        offset = 0
+    budget = max(1, max_bytes - _READ_FOOTER_RESERVE)
+    raw: list[str] = []
+    bytes_used = 0
+    cut = False
+    end = min(len(lines), offset + limit)
+    for index in range(offset, end):
+        line = _clip_line(lines[index])
+        size = len(line.encode("utf-8")) + (1 if raw else 0)
+        if bytes_used + size > budget:
+            cut = True
+            break
+        raw.append(line)
+        bytes_used += size
+    more = cut or (offset + len(raw) < len(lines))
+    return raw, more, cut
 
 
 def _patch_metadata(
@@ -53,9 +103,19 @@ class ReadArgs(BaseModel):
     """Arguments for the read tool."""
 
     path: str = Field(description="Workspace-relative or /workspace path.")
-    offset: int = Field(default=0, ge=0, description="First line (0-based).")
-    limit: int | None = Field(default=None, gt=0, description="Max lines to return.")
-    max_size: int = Field(default=READ_MAX_BYTES, gt=0)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "First line to return (0-based). "
+            "Use to continue a large file."
+        ),
+    )
+    limit: int = Field(
+        default=READ_DEFAULT_LIMIT,
+        gt=0,
+        description="Max lines to return (defaults to 2000).",
+    )
 
 
 class WriteArgs(BaseModel):
@@ -79,8 +139,10 @@ class ReadTool(Tool):
 
     name = "read"
     description = (
-        "Read a text file from the workspace. Returns UTF-8 text for an "
-        "optional line range. Rejects binary files and oversized files."
+        "Read a text file from the workspace. Returns up to 2000 lines "
+        "(and at most 50 KB) from offset. Use offset to continue in large "
+        "files. Rejects binary files. Lines longer than 2000 characters "
+        "are truncated."
     )
     args_schema: type[BaseModel] = ReadArgs
     permission_key = "read"
@@ -93,22 +155,18 @@ class ReadTool(Tool):
     async def execute(
         self, args: BaseModel | dict[str, object], ctx: ToolContext
     ) -> ToolResult:
-        """Read a file via the workspace accessor."""
+        """Read a file via the workspace accessor, paginated like OpenCode."""
         validated = self.coerce_args(args)
         assert isinstance(validated, ReadArgs)
         args = validated
         safe_path = sanitize_harness_path(args.path)
         try:
-            stored = await ctx.accessor.read_file(safe_path, max_size=args.max_size)
+            stored = await ctx.accessor.read_file(
+                safe_path, max_size=READ_FETCH_MAX_BYTES
+            )
         except RunnerAccessorError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         content = stored.content
-        if stored.truncated or len(content) > args.max_size:
-            raise ToolError(
-                f"File too large ({len(content)} bytes, "
-                f"limit {args.max_size}): {args.path}",
-                tool=self.name,
-            )
         if _is_binary(content):
             raise ToolError(
                 f"Refusing to read binary file: {args.path}",
@@ -122,18 +180,44 @@ class ReadTool(Tool):
                 tool=self.name,
             ) from exc
         lines = text.splitlines()
-        sliced = (
-            lines[args.offset : args.offset + args.limit]
-            if args.limit is not None
-            else lines[args.offset :]
+        if args.offset > 0 and args.offset >= len(lines):
+            raise ToolError(
+                f"Offset {args.offset} is out of range for this file "
+                f"({len(lines)} lines): {args.path}",
+                tool=self.name,
+            )
+        page, more, cut = paginate_read(
+            lines, offset=args.offset, limit=args.limit
         )
+        output = "\n".join(page)
+        last = args.offset + len(page)
+        next_offset = last
+        if cut:
+            output += (
+                f"\n\n(Output capped at {READ_MAX_BYTES // 1024} KB. "
+                f"Showing lines {args.offset}-{last - 1}. "
+                f"Use offset={next_offset} to continue.)"
+            )
+        elif more:
+            output += (
+                f"\n\n(Showing lines {args.offset}-{last - 1} of "
+                f"{len(lines)}. Use offset={next_offset} to continue.)"
+            )
+        elif stored.truncated:
+            output += (
+                f"\n\n(Fetched the first {len(content)} bytes; the file "
+                f"continues on disk. Use Grep or raise offset to inspect "
+                "later sections.)"
+            )
         return ToolResult(
-            output="\n".join(sliced),
-            truncated=stored.truncated,
+            output=output,
+            truncated=more or cut or stored.truncated,
             metadata={
                 "path": safe_path,
                 "lines": len(lines),
-                "size": len(content),
+                "size": stored.size or len(content),
+                "offset": args.offset,
+                "next_offset": next_offset if (more or cut) else None,
             },
         )
 

@@ -14,7 +14,9 @@ from apps.harness.compaction import (
     OUTPUT_TOKEN_MAX,
     ModelLimits,
     apply_compaction,
+    apply_overflow_replay,
     build_compaction_prompt,
+    ensure_current_user,
     find_previous_summary,
     is_context_overflow_error,
     is_overflow,
@@ -22,10 +24,17 @@ from apps.harness.compaction import (
     preserve_recent_budget,
     select,
     serialize,
+    strip_media,
     token_count,
     usable,
 )
-from apps.harness.providers.base import Delta, LLMMessage, ProviderAdapter, ToolSchema, Usage
+from apps.harness.providers.base import (
+    Delta,
+    LLMMessage,
+    ProviderAdapter,
+    ToolSchema,
+    Usage,
+)
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.test_paket6_features import ScriptProvider
@@ -163,30 +172,18 @@ def test_compaction_buffer_constant() -> None:
     assert COMPACTION_BUFFER == 20_000
 
 
-def test_select_keeps_current_user_when_all_turns_fit_budget() -> None:
-    """When every turn fits the preserve budget, the current user stays in tail."""
-    limits = ModelLimits(context_length=200_000, max_output_tokens=16_384)
-    messages = [
-        LLMMessage(role="user", content="small", message_id="u1"),
-        LLMMessage(role="assistant", content="answer"),
-        LLMMessage(role="user", content="current", message_id="current"),
-    ]
-    selection = select(messages, limits)
-    assert selection.tail[-1].message_id == "current"
-    assert selection.tail_start_id == "current"
-
-
-def test_select_single_user_turn_has_empty_head() -> None:
-    """A lone user turn must never move into the summarizable head."""
+def test_select_single_user_turn_summarizes_all() -> None:
+    """A lone user turn has no retained tail (OpenCode keep.start === 0)."""
     limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
     messages = [LLMMessage(role="user", content="only", message_id="only")]
     selection = select(messages, limits)
-    assert selection.head == []
-    assert selection.tail[0].message_id == "only"
+    assert selection.head == messages
+    assert selection.tail == []
+    assert selection.tail_start_id == ""
 
 
-def test_select_keeps_huge_current_user_in_tail() -> None:
-    """The latest user turn stays in the tail even when it exceeds budget."""
+def test_select_huge_current_user_is_head_not_tail() -> None:
+    """An oversized latest turn is summarized instead of forced into the tail."""
     limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
     messages = [
         LLMMessage(role="user", content="old", message_id="old"),
@@ -195,11 +192,53 @@ def test_select_keeps_huge_current_user_in_tail() -> None:
     ]
     selection = select(messages, limits)
     assert selection.head
-    assert selection.tail[-1].message_id == "current"
+    assert selection.tail == []
+    assert any(message.message_id == "current" for message in selection.head)
 
 
-def test_apply_compaction_noop_for_single_user_turn() -> None:
-    """apply_compaction does not drop the only user message."""
+def test_select_all_turns_fitting_budget_has_no_tail() -> None:
+    """When every turn fits, OpenCode keeps no tail (summarize everything)."""
+    limits = ModelLimits(context_length=200_000, max_output_tokens=16_384)
+    messages = [
+        LLMMessage(role="user", content="small", message_id="u1"),
+        LLMMessage(role="assistant", content="answer"),
+        LLMMessage(role="user", content="current", message_id="current"),
+    ]
+    selection = select(messages, limits)
+    assert selection.tail == []
+    assert selection.head[-1].message_id == "current"
+
+
+def test_select_splits_oversized_turn_after_user() -> None:
+    """splitTurn may retain a suffix that starts after the user message."""
+    limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
+    messages = [
+        LLMMessage(role="user", content="old", message_id="old"),
+        LLMMessage(role="assistant", content="answer"),
+        LLMMessage(role="user", content="now", message_id="current"),
+        LLMMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[{"id": "c1", "name": "grep", "arguments": "{}"}],
+        ),
+        LLMMessage(role="tool", content="x" * 50_000, tool_call_id="c1"),
+        LLMMessage(role="assistant", content="tiny"),
+    ]
+    selection = select(messages, limits)
+    assert selection.head
+    if selection.tail:
+        assert (
+            selection.tail[0].role != "user"
+            or selection.tail[0].message_id != "current"
+        )
+        assert all(
+            not (message.role == "tool" and len(str(message.content or "")) > 10_000)
+            for message in selection.tail
+        )
+
+
+def test_apply_compaction_replaces_single_turn_with_checkpoint() -> None:
+    """apply_compaction summarizes a lone user turn; runner re-inserts the prompt."""
     limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
     messages = [LLMMessage(role="user", content="only", message_id="only")]
     compacted, tail_start_id = apply_compaction(
@@ -207,15 +246,17 @@ def test_apply_compaction_noop_for_single_user_turn() -> None:
         "## Objective\n- summary",
         limits,
     )
-    assert compacted == messages
-    assert tail_start_id == "only"
+    assert tail_start_id == ""
+    assert compacted[0].content.startswith(CHECKPOINT_PREFIX)
+    restored = ensure_current_user(messages, compacted)
+    assert restored[-1].content == "only"
 
 
-def test_apply_compaction_keeps_current_user_when_all_turns_fit_budget() -> None:
-    """Small multi-turn conversations keep the latest user message in the tail."""
-    limits = ModelLimits(context_length=200_000, max_output_tokens=16_384)
+def test_apply_compaction_keeps_current_user_when_older_turn_is_head() -> None:
+    """When the latest turn fits and older turns do not, the current user stays."""
+    limits = ModelLimits(context_length=10_000, max_output_tokens=2_000)
     messages = [
-        LLMMessage(role="user", content="a", message_id="u1"),
+        LLMMessage(role="user", content="a" * 8_000, message_id="u1"),
         LLMMessage(role="assistant", content="b"),
         LLMMessage(role="user", content="current", message_id="current"),
     ]
@@ -227,7 +268,11 @@ def test_apply_compaction_keeps_current_user_when_all_turns_fit_budget() -> None
     assert compacted[-1].content == "current"
     assert compacted[-1].message_id == "current"
     assert tail_start_id == "current"
-    assert not any(message.content == "a" for message in compacted if message.role == "user")
+    assert not any(
+        message.content == "a" * 8_000
+        for message in compacted
+        if message.role == "user"
+    )
 
 
 class OverflowRetryProvider(ProviderAdapter):
@@ -420,3 +465,162 @@ async def test_compaction_never_adds_synthetic_continue_user_message() -> None:
     )
     assert seen_user_texts
     assert not any("Continue if you have next steps" in text for text in seen_user_texts)
+
+
+def test_strip_media_replaces_image_parts() -> None:
+    """Overflow replay must not send base64 image payloads."""
+    message = LLMMessage(
+        role="user",
+        content=[
+            {"type": "text", "text": "see "},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+        message_id="u1",
+    )
+    stripped = strip_media(message)
+    assert isinstance(stripped.content, str)
+    assert "AAAA" not in stripped.content
+    assert "[Attached image: file]" in stripped.content
+    assert "see " in stripped.content
+
+
+def test_apply_overflow_replay_drops_tool_results() -> None:
+    """Overflow replay keeps the user prompt and drops overflowing tools."""
+    original = [
+        LLMMessage(role="system", content="sys"),
+        LLMMessage(role="user", content="old", message_id="old"),
+        LLMMessage(role="assistant", content="prior"),
+        LLMMessage(role="user", content="follow-up", message_id="current"),
+        LLMMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[{"id": "c1", "name": "grep", "arguments": "{}"}],
+        ),
+        LLMMessage(role="tool", content="x" * 10_000, tool_call_id="c1"),
+    ]
+    compacted = [
+        LLMMessage(role="system", content="sys"),
+        LLMMessage(
+            role="user",
+            content=f"{CHECKPOINT_PREFIX}\n## Objective\n- recovered",
+        ),
+        LLMMessage(role="tool", content="x" * 10_000, tool_call_id="c1"),
+    ]
+    replayed = apply_overflow_replay(original, compacted)
+    assert replayed[0].role == "system"
+    assert replayed[-1].content == "follow-up"
+    assert not any(message.role == "tool" for message in replayed)
+
+
+class OverflowRetryCaptureProvider(ProviderAdapter):
+    """Overflow once, compact, then capture the retry payload."""
+
+    name = "overflow-retry-capture"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.retry_messages: list[LLMMessage] = []
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts=None,
+    ) -> AsyncIterator[Delta]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("maximum context length exceeded")
+        if self.calls == 2:
+            yield Delta(text="## Objective\n- recovered", usage=Usage(1, 1, 2))
+            return
+        self.retry_messages = list(messages)
+        yield Delta(text="final answer", usage=Usage(1, 1, 2))
+
+
+class AlwaysOverflowAfterCompactProvider(ProviderAdapter):
+    """Overflow, compact successfully, then overflow again on retry."""
+
+    name = "always-overflow"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts=None,
+    ) -> AsyncIterator[Delta]:
+        self.calls += 1
+        if self.calls == 2:
+            yield Delta(text="## Objective\n- summary", usage=Usage(1, 1, 2))
+            return
+        raise RuntimeError("maximum context length exceeded")
+
+
+@pytest.mark.asyncio
+async def test_overflow_retry_drops_huge_tool_output() -> None:
+    """Provider overflow retries without the overflowing tool blob."""
+    provider = OverflowRetryCaptureProvider()
+    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    result = await runner.run(
+        "follow-up",
+        "build",
+        "session-model",
+        "build",
+        RunOptions(
+            auto_approve=True,
+            context_length=1_000,
+            max_output_tokens=100,
+            history=[
+                LLMMessage(role="user", content="old"),
+                LLMMessage(role="assistant", content="prior answer"),
+                LLMMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[{"id": "c1", "name": "grep", "arguments": "{}"}],
+                ),
+                LLMMessage(role="tool", content="Force" * 20_000, tool_call_id="c1"),
+            ],
+        ),
+    )
+    assert result.output == "final answer"
+    joined = json.dumps(
+        [
+            message.content
+            for message in provider.retry_messages
+            if isinstance(message.content, str)
+        ]
+    )
+    assert "Force" * 50 not in joined
+    assert any(
+        message.role == "user" and message.content == "follow-up"
+        for message in provider.retry_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_overflow_after_compaction_stops_without_loop() -> None:
+    """A second context overflow after compaction fails the run once."""
+    provider = AlwaysOverflowAfterCompactProvider()
+    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    with pytest.raises(RuntimeError, match="too large to compact"):
+        await runner.run(
+            "follow-up",
+            "build",
+            "session-model",
+            "build",
+            RunOptions(
+                auto_approve=True,
+                context_length=1_000,
+                max_output_tokens=100,
+                history=[
+                    LLMMessage(role="user", content="old"),
+                    LLMMessage(role="assistant", content="prior answer"),
+                ],
+            ),
+        )
+    assert provider.calls == 3
+

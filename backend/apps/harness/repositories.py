@@ -397,6 +397,7 @@ class HarnessPartRepository:
         call_id: str = "",
         title: str = "",
         input: dict | None = None,
+        output: str = "",
         meta: dict | None = None,
     ) -> HarnessPart:
         """Create a streamed part shell for an assistant message."""
@@ -407,6 +408,7 @@ class HarnessPartRepository:
             call_id=call_id or "",
             title=title or "",
             input=dict(input or {}),
+            output=output or "",
             meta=dict(meta or {}),
         )
 

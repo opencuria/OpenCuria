@@ -77,13 +77,60 @@ async def test_read_rejects_binary() -> None:
         await tool.execute({"path": "/workspace/b.bin"}, _ctx(accessor))
 
 
-async def test_read_too_large() -> None:
-    """Files above max_size are rejected."""
+async def test_read_paginates_large_file_instead_of_rejecting() -> None:
+    """Files over the default page size return a continue hint, not an error."""
     tool = ReadTool()
-    accessor = FakeAccessor(files={"/workspace/big.txt": b"x" * 100})
-    with pytest.raises(ToolError, match="too large"):
+    lines = [f"line-{i}" for i in range(3000)]
+    accessor = FakeAccessor(
+        files={"/workspace/big.py": ("\n".join(lines)).encode()}
+    )
+    result = await tool.execute({"path": "/workspace/big.py"}, _ctx(accessor))
+    assert "File too large" not in result.output
+    assert "Use offset=" in result.output
+    assert result.truncated is True
+    assert result.output.startswith("line-0\n")
+    next_offset = result.metadata["next_offset"]
+    assert isinstance(next_offset, int) and next_offset > 0
+    page2 = await tool.execute(
+        {"path": "/workspace/big.py", "offset": next_offset},
+        _ctx(accessor),
+    )
+    assert f"line-{next_offset}" in page2.output
+    assert "line-0\n" not in page2.output
+
+
+async def test_read_caps_page_bytes_with_continue_hint() -> None:
+    """A byte-heavy page is capped at 50 KB, not rejected."""
+    tool = ReadTool()
+    chunk = "x" * 2000
+    body = "\n".join(chunk for _ in range(30))
+    accessor = FakeAccessor(files={"/workspace/wide.py": body.encode()})
+    result = await tool.execute({"path": "/workspace/wide.py"}, _ctx(accessor))
+    assert "File too large" not in result.output
+    assert "Output capped at 50 KB" in result.output
+    assert "Use offset=" in result.output
+    preview = result.output.split("\n\n(", 1)[0]
+    assert len(preview.encode("utf-8")) <= 50 * 1024
+
+
+async def test_read_truncates_long_lines() -> None:
+    """Lines longer than 2000 characters are clipped with a marker."""
+    tool = ReadTool()
+    accessor = FakeAccessor(
+        files={"/workspace/min.js": ("y" * 5000).encode()}
+    )
+    result = await tool.execute({"path": "/workspace/min.js"}, _ctx(accessor))
+    assert "line truncated to 2000 chars" in result.output
+    assert "y" * 2500 not in result.output.split("...", 1)[0]
+
+
+async def test_read_offset_out_of_range() -> None:
+    """Offsets past the last line raise ToolError."""
+    tool = ReadTool()
+    accessor = FakeAccessor(files={"/workspace/a.txt": b"hello\nworld"})
+    with pytest.raises(ToolError, match="out of range"):
         await tool.execute(
-            {"path": "/workspace/big.txt", "max_size": 10}, _ctx(accessor)
+            {"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor)
         )
 
 

@@ -37,9 +37,12 @@ from .agents.definitions import (
     subagent_descriptions,
 )
 from .compaction import (
+    CONTEXT_OVERFLOW_COMPACTION_ERROR,
     ModelLimits,
     apply_compaction,
+    apply_overflow_replay,
     build_compaction_prompt,
+    ensure_current_user,
     find_previous_summary,
     is_context_overflow_error,
     is_overflow,
@@ -1192,13 +1195,18 @@ class HarnessRunner:
             retry_messages, retry_schemas, retry_opts = self._last_step_request(
                 compacted, schemas, is_last_step
             )
-            text, calls, usage = await self._provider_step_with_transient_retry(
-                model=model,
-                messages=retry_messages,
-                schemas=retry_schemas,
-                step=step,
-                chat_options=retry_opts,
-            )
+            try:
+                text, calls, usage = await self._provider_step_with_transient_retry(
+                    model=model,
+                    messages=retry_messages,
+                    schemas=retry_schemas,
+                    step=step,
+                    chat_options=retry_opts,
+                )
+            except Exception as retry_exc:
+                if is_context_overflow_error(retry_exc):
+                    raise RuntimeError(CONTEXT_OVERFLOW_COMPACTION_ERROR) from retry_exc
+                raise
             return text, calls, usage, compacted
 
     async def _provider_step_with_transient_retry(
@@ -1367,6 +1375,10 @@ class HarnessRunner:
             if not summary:
                 return messages
             compacted, tail_start_id = apply_compaction(messages, summary, limits)
+            if overflow:
+                compacted = apply_overflow_replay(messages, compacted)
+            else:
+                compacted = ensure_current_user(messages, compacted)
             await self._send(
                 {
                     "type": "compaction",

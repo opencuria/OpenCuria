@@ -57,6 +57,7 @@ from .runner import HarnessRunner, RunOptions
 from .tools import default_tool_registry
 from .tools.subagents import TaskArgs
 from .tools.todos import TodoWriteTool, repository_for_session
+from .tools.truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
 
@@ -784,10 +785,11 @@ class HarnessService:
                 )
             )
             for part in tool_parts:
+                clipped = truncate_tool_output(part.output or "")
                 history.append(
                     LLMMessage(
                         role="tool",
-                        content=part.output or "",
+                        content=clipped.content,
                         tool_call_id=part.call_id,
                     )
                 )

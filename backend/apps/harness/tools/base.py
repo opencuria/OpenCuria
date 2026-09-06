@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from ..access.base import WorkspaceAccessor
 from ..providers.base import ToolSchema
+from .truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
 
@@ -219,5 +220,9 @@ class ToolRegistry:
         )
         await self.run_before(tool.name, validated, ctx)
         result = await tool.execute(validated, ctx)
+        clipped = truncate_tool_output(result.output)
+        if clipped.truncated:
+            result.output = clipped.content
+            result.truncated = True
         await self.run_after(tool.name, validated, ctx, result)
         return result

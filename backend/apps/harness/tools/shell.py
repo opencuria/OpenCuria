@@ -9,15 +9,16 @@ from pydantic import BaseModel, Field
 from ..access.base import HARNESS_WORKSPACE_ROOT, sanitize_harness_path
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .truncate import MAX_BYTES, MAX_LINES
 
 # Output truncation for bash, mirroring OpenCode's max_lines/max_bytes.
-BASH_MAX_LINES = 2000
-BASH_MAX_BYTES = 256 * 1024
+BASH_MAX_LINES = MAX_LINES
+BASH_MAX_BYTES = MAX_BYTES
 BASH_DEFAULT_TIMEOUT = 60.0
 
-# Safety caps for search-style tools.
-GLOB_MAX_RESULTS = 500
-GREP_MAX_RESULTS = 500
+# Safety caps for search-style tools (OpenCode grep/glob limit).
+GLOB_MAX_RESULTS = 100
+GREP_MAX_RESULTS = 100
 
 
 def truncate_output(text: str) -> tuple[str, bool]:

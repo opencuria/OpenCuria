@@ -42,6 +42,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
+from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
 
 
@@ -920,6 +921,98 @@ async def test_build_history_includes_tool_calls(harness_workspace) -> None:
     assert assistant_msg.tool_calls[0]["name"] == "read"
     assert history[2].tool_call_id == "call-42"
     assert history[2].content == "file contents"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_truncates_huge_tool_output(harness_workspace) -> None:
+    """Persisted oversized tool parts are clipped before the provider sees them."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="grep Force"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role="assistant",
+        content="searching",
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-grep",
+        title="grep Force",
+        input={"tool": "grep", "arguments": '{"pattern":"Force"}'},
+        output="x" * (MAX_BYTES + 8_000),
+    )
+    history = await service._build_history(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, str)
+    preview = tool_msg.content.split("\n\n...", 1)[0]
+    assert len(preview.encode("utf-8")) <= MAX_BYTES
+    assert len(tool_msg.content) < len(part.output)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_compaction_event_persists_output(harness_workspace) -> None:
+    """Compaction parts store the summary via create(output=)."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "compaction",
+            "summary": "## Objective\n- recovered",
+            "auto": True,
+            "overflow": True,
+            "tail_start_id": "user-1",
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "compaction"
+    ]
+    assert len(parts) == 1
+    assert parts[0].output == "## Objective\n- recovered"
+    assert parts[0].meta.get("tail_start_id") == "user-1"
+    assert parts[0].state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
+    """Patch parts store the unified diff via create(output=)."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "patch",
+            "call_id": "c1",
+            "title": "Patch a.txt",
+            "path": "/workspace/a.txt",
+            "unified_diff": "--- a\n+++ b\n",
+            "old_content": "a",
+            "new_content": "b",
+            "tool": "edit",
+            "step": 1,
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "patch"
+    ]
+    assert len(parts) == 1
+    assert parts[0].output == "--- a\n+++ b\n"
 
 
 @pytest.mark.django_db(transaction=True)
