@@ -22,8 +22,9 @@ import {
 } from '@lucide/vue'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
-import { getProviderConfig, listProviderModels } from '@/services/harness.api'
+import { getProviderConfig } from '@/services/harness.api'
 import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
@@ -167,7 +168,7 @@ async function loadProviderModels(): Promise<void> {
       catalog.value = []
       return
     }
-    catalog.value = await listProviderModels()
+    catalog.value = await loadProviderModelsCached()
   } catch {
     providerMissing.value = true
     catalog.value = []

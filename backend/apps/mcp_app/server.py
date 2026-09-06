@@ -1764,6 +1764,7 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                     "role": message.role,
                     "content": message.content or "",
                     "model": message.model or "",
+                    "reasoning_effort": message.reasoning_effort or "",
                     "cost": float(message.cost or 0.0),
                     "tokens": dict(message.tokens or {}),
                     "finish": message.finish or "",

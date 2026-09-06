@@ -3,6 +3,7 @@
  */
 
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import { formatEffort, resolveCatalogModel, type ProviderModel } from './harnessModels'
 
 export interface MessageUsage {
   cost: number
@@ -82,4 +83,23 @@ export function formatMessageUsage(usage: MessageUsage): string | null {
     parts.push(`${formatTokens(usage.completionTokens)} out`)
   }
   return parts.length > 0 ? parts.join(' · ') : null
+}
+
+/** Hover footer: catalog model, effort, then cost/tokens. */
+export function formatMessageHoverLine(
+  message: HarnessMessage,
+  models: ProviderModel[] = [],
+): string | null {
+  const segments: string[] = []
+  const modelId = (message.model ?? '').trim()
+  if (modelId) {
+    segments.push(resolveCatalogModel(models, modelId)?.name ?? modelId)
+  } else {
+    segments.push('Auto')
+  }
+  const effort = (message.reasoning_effort ?? '').trim()
+  if (effort) segments.push(formatEffort(effort))
+  const usage = formatMessageUsage(resolveMessageUsage(message))
+  if (usage) segments.push(usage)
+  return segments.length > 0 ? segments.join(' · ') : null
 }

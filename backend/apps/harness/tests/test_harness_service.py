@@ -881,6 +881,31 @@ def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_start_run_snapshots_reasoning_effort_on_assistant(
+    harness_workspace,
+) -> None:
+    """Assistant shells store the session effort used for that turn."""
+    service, _, _ = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="think hard",
+        mode="build",
+        model="fake-model",
+        reasoning_effort="high",
+    )
+    assistant = await service.start_run(
+        session,
+        "think hard",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert assistant.model == "fake-model"
+    assert assistant.reasoning_effort == "high"
+
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
     """set_mode(plan) also sets agent_name to plan."""
     service, _, _ = _service()

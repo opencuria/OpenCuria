@@ -27,6 +27,7 @@ from apps.harness.providers.base import (
 )
 from apps.mcp_app.server import (
     _call_create_harness_session,
+    _call_list_harness_parts,
     _call_send_harness_message,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -181,3 +182,42 @@ async def test_mcp_send_harness_message_without_sync_orm(monkeypatch) -> None:
     assert body["id"] == str(session.id)
     assert body["mode"] == "plan"
     assert body["model"] == "other-model"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_list_harness_parts_includes_message_reasoning_effort(
+    monkeypatch,
+) -> None:
+    """list_harness_parts returns the effort snapshotted on the assistant."""
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="think hard",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+        reasoning_effort="high",
+        user_id=user.id,
+    )
+    await service.start_run(
+        session,
+        "think hard",
+        organization_id=org.id,
+        workspace_id=str(workspace.id),
+        user_id=user.id,
+    )
+    monkeypatch.setattr(
+        "apps.mcp_app.server._get_harness_service", lambda: service
+    )
+    api_key = SimpleNamespace(user=user)
+    result = await sync_to_async(_call_list_harness_parts)(
+        api_key, org.id, {"session_id": str(session.id)}
+    )
+    body = _parse(result)
+    assistant = next(
+        message for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["model"] == "fake-model"
+    assert assistant["reasoning_effort"] == "high"

@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import HarnessChatInput from './HarnessChatInput.vue'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 
 vi.mock('@/services/harness.api', async () => {
@@ -67,6 +68,7 @@ describe('HarnessChatInput', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    resetProviderCatalogCache()
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',

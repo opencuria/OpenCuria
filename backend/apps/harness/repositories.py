@@ -271,6 +271,7 @@ class HarnessMessageRepository:
         role: str,
         content: str = "",
         model: str = "",
+        reasoning_effort: str = "",
         provider: str = "",
     ) -> HarnessMessage:
         """Create a user or assistant message shell."""
@@ -279,6 +280,7 @@ class HarnessMessageRepository:
             role=role,
             content=content or "",
             model=model or "",
+            reasoning_effort=reasoning_effort or "",
             provider=provider or "",
         )
 

@@ -210,6 +210,39 @@ def test_create_session_persists_reasoning_effort(harness_setup, fake_harness_se
 
 
 @pytest.mark.django_db(transaction=True)
+def test_parts_include_message_reasoning_effort(
+    harness_setup, fake_harness_service
+):
+    """GET parts returns the effort snapshotted on the assistant message."""
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {
+                "prompt": "hello",
+                "mode": "build",
+                "model": "fake-model",
+                "reasoning_effort": "high",
+            }
+        ),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    session_id = created.json()["id"]
+    parts = client.get(f"/api/v1/harness/sessions/{session_id}/parts")
+    assert parts.status_code == 200, parts.content[:500]
+    messages = parts.json()["messages"]
+    assistant = next(message for message in messages if message["role"] == "assistant")
+    assert assistant["model"] == "fake-model"
+    assert assistant["reasoning_effort"] == "high"
+
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_invalid_reasoning_effort_is_400(
     harness_setup, fake_harness_service
 ):

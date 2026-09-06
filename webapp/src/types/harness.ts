@@ -48,6 +48,7 @@ export interface HarnessMessage {
   role: 'user' | 'assistant'
   content: string
   model?: string
+  reasoning_effort?: string
   cost?: number
   tokens?: Record<string, number>
   finish?: string

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { User, ChevronDown } from '@lucide/vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
-import { formatMessageUsage, resolveMessageUsage } from '@/lib/harnessUsage'
+import { formatMessageHoverLine } from '@/lib/harnessUsage'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import type { ProviderModel } from '@/lib/harnessModels'
 import {
   Collapsible,
   CollapsibleContent,
@@ -22,6 +24,7 @@ const props = defineProps<{
   message: HarnessMessage
   streaming?: boolean
   childSessionIds?: Record<string, string>
+  models?: ProviderModel[]
 }>()
 
 const emit = defineEmits<{
@@ -40,9 +43,20 @@ const showThinking = computed(
   () => props.streaming === true && !hasRunningToolOrSubtask(props.message.parts),
 )
 
+const catalog = ref<ProviderModel[]>(props.models ?? [])
+
 const usageLine = computed(() => {
   if (props.streaming || props.message.role !== 'assistant') return null
-  return formatMessageUsage(resolveMessageUsage(props.message))
+  return formatMessageHoverLine(props.message, props.models ?? catalog.value)
+})
+
+onMounted(async () => {
+  if (props.models) return
+  try {
+    catalog.value = await loadProviderModelsCached()
+  } catch {
+    catalog.value = []
+  }
 })
 
 function childIdFor(part: HarnessPart): string | null {

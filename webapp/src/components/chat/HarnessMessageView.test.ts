@@ -4,6 +4,16 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessMessageView from './HarnessMessageView.vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+
+vi.mock('@/services/harness.api', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
+  return {
+    ...actual,
+    listProviderModels: vi.fn().mockResolvedValue([]),
+  }
+})
 
 vi.mock('@/components/common/LoadingSpinner.vue', () => ({
   default: { template: '<span class="loading-stub" />' },
@@ -41,6 +51,7 @@ function makeAssistant(parts: HarnessPart[]): HarnessMessage {
 describe('HarnessMessageView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    resetProviderCatalogCache()
   })
   it('renders text and a single tool in chronological order', () => {
     const wrapper = mount(HarnessMessageView, {
@@ -267,8 +278,21 @@ describe('HarnessMessageView', () => {
   it('shows a hover usage footer on finished answers', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
+        models: [
+          {
+            id: 'acme/think',
+            name: 'Think',
+            reasoning_efforts: ['high'],
+            default_effort: 'high',
+            supports_tools: true,
+            context_length: 1,
+            max_output_tokens: 1,
+          },
+        ],
         message: {
           ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Done' })]),
+          model: 'acme/think',
+          reasoning_effort: 'high',
           cost: 0.0123,
           tokens: { prompt: 1204, completion: 318, total: 1522 },
         },
@@ -276,7 +300,7 @@ describe('HarnessMessageView', () => {
     })
 
     const footer = wrapper.get('[data-testid="harness-message-usage"]')
-    expect(footer.text()).toBe('$0.0123 · 1,204 in · 318 out')
+    expect(footer.text()).toBe('Think · High · $0.0123 · 1,204 in · 318 out')
     expect(footer.classes()).toContain('opacity-0')
     expect(footer.classes()).toContain('group-hover:opacity-100')
   })
@@ -294,6 +318,20 @@ describe('HarnessMessageView', () => {
     })
 
     expect(wrapper.find('[data-testid="harness-message-usage"]').exists()).toBe(false)
+  })
+
+  it('shows the model on the hover footer when usage is empty', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        models: [],
+        message: {
+          ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Done' })]),
+          model: 'unknown/model',
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-message-usage"]').text()).toBe('unknown/model')
   })
 
   it('renders compaction as a collapsed divider, not a user bubble', () => {

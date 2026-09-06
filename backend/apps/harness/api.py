@@ -180,6 +180,7 @@ class HarnessMessageOut(Schema):
     role: str
     content: str
     model: str
+    reasoning_effort: str = ""
     cost: float
     tokens: dict = {}
     finish: str
@@ -690,6 +691,7 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                         role=message.role,
                         content=message.content or "",
                         model=message.model or "",
+                        reasoning_effort=message.reasoning_effort or "",
                         cost=float(message.cost or 0.0),
                         tokens=dict(message.tokens or {}),
                         finish=message.finish or "",

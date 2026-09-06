@@ -414,6 +414,7 @@ class HarnessService:
             role="assistant",
             content="",
             model=session.model or "",
+            reasoning_effort=session.reasoning_effort or "",
             provider=(provider.name if provider is not None else ""),
         )
         await sync_to_async(self.sessions.mark_status)(
