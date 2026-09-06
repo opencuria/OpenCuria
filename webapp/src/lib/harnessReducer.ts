@@ -341,3 +341,25 @@ export function mergeBusyFetchedMessages(
   }
   return incoming
 }
+
+const STREAM_PART_TYPES = new Set(['text', 'reasoning'])
+
+/**
+ * Coerce leftover running/pending text and reasoning parts to completed.
+ *
+ * Idle fetches of older sessions can still have those parts stuck in
+ * `running` because the backend used to leave them open after a turn.
+ */
+export function settleOpenStreamParts(messages: HarnessMessage[]): HarnessMessage[] {
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (
+        STREAM_PART_TYPES.has(part.type) &&
+        (part.state === 'running' || part.state === 'pending')
+      ) {
+        part.state = 'completed'
+      }
+    }
+  }
+  return messages
+}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
@@ -10,8 +10,13 @@ import { useTerminalStore } from '@/stores/terminal'
 import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
-import { buildComposerSheets, type ContextSheetState } from '@/lib/composerSheets'
+import {
+  buildComposerSheets,
+  type ContextSheetState,
+  type NoticeSheetState,
+} from '@/lib/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
+import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
 import { Button } from '@/components/ui/button'
 import { FolderTree, Monitor, TerminalSquare } from '@lucide/vue'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
@@ -28,6 +33,7 @@ provide(harnessWorkspaceIdKey, toRef(props, 'workspaceId'))
 
 const harness = useHarnessStore()
 const route = useRoute()
+const router = useRouter()
 const fileExplorer = useFileExplorerStore()
 const skillStore = useSkillStore()
 const terminalStore = useTerminalStore()
@@ -43,22 +49,9 @@ const streamingSessionId = computed(() =>
   activeSession.value?.status === 'busy' ? activeSession.value.id : null,
 )
 
-const childSessionIds = computed<Record<string, string>>(() => {
-  const map: Record<string, string> = {}
-  for (const session of harness.sessions) {
-    for (const message of harness.messagesBySession[session.id] ?? []) {
-      for (const part of message.parts) {
-        if (part.type !== 'subtask') continue
-        const childId = part.meta?.['child_session_id']
-        const subtaskId = part.meta?.['subtask_id']
-        if (typeof childId === 'string' && childId && typeof subtaskId === 'string' && subtaskId) {
-          map[subtaskId] = childId
-        }
-      }
-    }
-  }
-  return map
-})
+const childSessionIds = computed<Record<string, string>>(() =>
+  buildChildSessionIdMap(harness.sessions, harness.messagesBySession),
+)
 
 const activeRequests = computed(() => harness.activePermissionRequests)
 const activeQuestions = computed(() => harness.activeQuestionRequests)
@@ -85,6 +78,22 @@ const contextSheet = computed<ContextSheetState | null>(() => {
   }
 })
 
+const activeNotice = computed<NoticeSheetState | null>(() => {
+  const messages = harness.activeMessages
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message?.role !== 'assistant' || !message.error) continue
+    if (harness.dismissedNoticeIds[message.id]) continue
+    const aborted = message.finish === 'aborted'
+    return {
+      messageId: message.id,
+      text: aborted ? 'Run stopped by user' : message.error,
+      tone: aborted ? 'info' : 'error',
+    }
+  }
+  return null
+})
+
 const composerSheets = computed(() =>
   buildComposerSheets({
     mention:
@@ -93,6 +102,7 @@ const composerSheets = computed(() =>
         : null,
     questions: activeQuestions.value,
     permissions: activeRequests.value,
+    notice: activeNotice.value,
     todos: harness.activeTodos,
     contextOpen: contextOpen.value,
     context: contextSheet.value,
@@ -127,6 +137,10 @@ function handleToggleContext(): void {
 
 function handleCloseContext(): void {
   contextOpen.value = false
+}
+
+function handleDismissNotice(messageId: string): void {
+  harness.dismissNotice(messageId)
 }
 
 function handleContextMetrics(
@@ -297,6 +311,21 @@ function applySessionQuery(): void {
   }
 }
 
+function syncSessionQuery(sessionId: string | null): void {
+  const current = typeof route.query.session === 'string' ? route.query.session : undefined
+  if (sessionId) {
+    if (current !== sessionId) {
+      void router.replace({ query: { ...route.query, session: sessionId } })
+    }
+    return
+  }
+  if (!current) return
+  if (harness.sessions.length === 0) return
+  const nextQuery = { ...route.query }
+  delete nextQuery.session
+  void router.replace({ query: nextQuery })
+}
+
 watch(
   () => route.query.session,
   () => {
@@ -306,16 +335,10 @@ watch(
 )
 
 watch(
-  () => harness.sessions,
-  () => {
-    applySessionQuery()
-  },
-)
-
-watch(
   () => harness.activeSessionId,
   (sessionId) => {
     harness.setViewingSession(sessionId)
+    syncSessionQuery(sessionId)
     if (!sessionId) {
       composerMode.value = 'build'
       return
@@ -402,14 +425,9 @@ async function handleQuestionSkip(requestId: string): Promise<void> {
 }
 
 function handleOpenSubtask(childSessionId: string): void {
-  if (harness.sessions.some((session) => session.id === childSessionId)) {
-    harness.setActiveSession(childSessionId)
-  } else {
-    void harness.fetchSessions(props.workspaceId).then(() => {
-      if (harness.sessions.some((session) => session.id === childSessionId)) {
-        harness.setActiveSession(childSessionId)
-      }
-    })
+  harness.setActiveSession(childSessionId)
+  if (!harness.sessions.some((session) => session.id === childSessionId)) {
+    void harness.fetchSessions(props.workspaceId)
   }
 }
 
@@ -477,6 +495,7 @@ const desktopButtonTitle = computed(() => {
           @question-skip="handleQuestionSkip"
           @resolve="handleResolve"
           @close-context="handleCloseContext"
+          @dismiss-notice="handleDismissNotice"
         />
         <HarnessChatInput
           ref="chatInputRef"

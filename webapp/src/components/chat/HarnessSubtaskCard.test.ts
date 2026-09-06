@@ -94,13 +94,48 @@ describe('HarnessSubtaskCard', () => {
     )
   })
 
-  it('emits openSubtask when the row is clicked', async () => {
+  it('opens the only child session even when titles differ', async () => {
+    const store = useHarnessStore()
+    store.sessions = [
+      {
+        id: 'session-parent',
+        workspace_id: 'workspace-1',
+        parent_id: null,
+        title: 'parent',
+        mode: 'build',
+        agent_name: 'build',
+        model: 'm',
+        status: 'idle',
+        cost: 0,
+        tokens: {},
+      },
+      {
+        id: 'session-child',
+        workspace_id: 'workspace-1',
+        parent_id: 'session-parent',
+        title: 'Generated login test title',
+        mode: 'build',
+        agent_name: 'computeruse',
+        model: 'm',
+        status: 'idle',
+        cost: 0,
+        tokens: {},
+      },
+    ]
+
     const wrapper = mount(HarnessSubtaskCard, {
-      props: { part: makeSubtaskPart(), childSessionId: 'session-child' },
+      props: {
+        part: makeSubtaskPart({
+          title: 'Webapp Login und Dashboard testen',
+          meta: { subtask_id: 'sub-1', agent: 'computeruse' },
+        }),
+      },
     })
 
+    expect(wrapper.get('[data-testid="harness-subtask-row"]').classes()).toContain(
+      'cursor-pointer',
+    )
     await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
-
     expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
   })
 

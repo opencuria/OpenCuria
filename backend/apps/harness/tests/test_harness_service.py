@@ -203,11 +203,14 @@ async def test_double_run_rejected_with_conflict(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_abort_marks_message_and_parts(harness_workspace) -> None:
-    """Abort cancels the task and marks message/parts as aborted."""
+    """Abort cancels the task and keeps streamed reasoning content."""
     gate = asyncio.Event()
+    streamed = asyncio.Event()
 
     class HangingProvider(FakeProvider):
         async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            yield Delta(reasoning="considering the layout")
+            streamed.set()
             await gate.wait()
             yield Delta(text="never", usage=Usage(1, 1, 2))
 
@@ -220,7 +223,8 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(streamed.wait(), timeout=2)
+    await _wait_for_part(session.id, part_type="reasoning")
     assert service.is_running(session.id)
     aborted = await service.abort_run(session.id)
     assert aborted.status == "idle"
@@ -229,7 +233,126 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "aborted"
+    assert assistant.error == "aborted by user"
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "considering the layout"
     assert [e["event"] for e in events][-1] == "harness.session_status"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_settles_open_text_and_reasoning_parts(
+    harness_workspace,
+) -> None:
+    """A finished run persists leftover text/reasoning parts as completed."""
+    provider = FakeProvider(
+        [
+            [
+                Delta(reasoning="planning the change"),
+                Delta(text="hello", usage=Usage(1, 1, 2)),
+            ]
+        ]
+    )
+    service, _, _events = _service(provider=provider)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "do the thing",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    text = [p for p in parts if p.type == "text"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "planning the change"
+    assert text
+    assert text[0].state == "completed"
+    assert "hello" in (text[0].output or "")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_run_error_preserves_stream_content_and_fails_tools(
+    harness_workspace,
+) -> None:
+    """A provider crash completes thoughts and fails leftover tools."""
+
+    class FailingProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            yield Delta(reasoning="almost there")
+            raise RuntimeError("provider exploded")
+
+    service, _, _events = _service(provider=FailingProvider([]))
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "will fail",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assistant = [m for m in stored if m.role == "assistant"][0]
+    assert assistant.finish == "error"
+    assert "provider exploded" in (assistant.error or "")
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "almost there"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_fail_open_parts_preserves_partial_tool_output(
+    harness_workspace,
+) -> None:
+    """Abort keeps partial tool output instead of overwriting it."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id,
+        role="assistant",
+        content="",
+    )
+    reasoning = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="reasoning",
+        state="running",
+    )
+    await sync_to_async(HarnessPartRepository.append_output)(
+        reasoning, "already thought this"
+    )
+    tool_partial = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="tool",
+        state="running",
+        title="bash",
+    )
+    await sync_to_async(HarnessPartRepository.append_output)(tool_partial, "stdout…")
+    tool_empty = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="tool",
+        state="running",
+        title="read",
+    )
+
+    await service._fail_open_parts(assistant, state="error", output="aborted")
+
+    reasoning.refresh_from_db()
+    tool_partial.refresh_from_db()
+    tool_empty.refresh_from_db()
+    assert reasoning.state == "completed"
+    assert reasoning.output == "already thought this"
+    assert tool_partial.state == "error"
+    assert tool_partial.output == "stdout…"
+    assert tool_empty.state == "error"
+    assert tool_empty.output == "aborted"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -942,6 +1065,22 @@ async def test_missing_provider_config_raises(harness_workspace) -> None:
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
+
+
+async def _wait_for_part(
+    session_id: uuid.UUID, *, part_type: str, timeout: float = 2.0
+):
+    """Poll until a part of *part_type* exists for *session_id*."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+            session_id
+        )
+        match = [part for part in parts if part.type == part_type]
+        if match:
+            return match[0]
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no {part_type} part within {timeout}s")
 
 
 async def _db_create_session(harness_workspace):  # type: ignore[no-untyped-def]

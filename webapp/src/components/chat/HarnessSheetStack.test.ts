@@ -41,6 +41,13 @@ vi.mock('@/components/chat/HarnessTodoSheet.vue', () => ({
   },
 }))
 
+vi.mock('@/components/chat/HarnessNoticeSheet.vue', () => ({
+  default: {
+    props: ['notice'],
+    template: '<div data-testid="notice-stub">{{ notice.text }}:{{ notice.tone }}</div>',
+  },
+}))
+
 function makeTodo(id: string, overrides: Partial<HarnessTodo> = {}): HarnessTodo {
   return { id, content: id, status: 'pending', priority: 'medium', order: 0, ...overrides }
 }
@@ -178,5 +185,27 @@ describe('HarnessSheetStack', () => {
     const context = wrapper.findComponent({ name: 'HarnessContextSheet' })
     context.vm.$emit('close')
     expect(wrapper.emitted('close-context')).toEqual([[]])
+  })
+
+  it('renders the notice sheet and forwards dismiss', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [
+          {
+            kind: 'notice',
+            notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
+          },
+          { kind: 'todos', todos: [makeTodo('t1')] },
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'notice',
+    )
+    expect(wrapper.find('[data-testid="notice-stub"]').text()).toBe('Run stopped by user:info')
+    const notice = wrapper.findComponent({ name: 'HarnessNoticeSheet' })
+    notice.vm.$emit('dismiss', 'msg-1')
+    expect(wrapper.emitted('dismiss-notice')).toEqual([['msg-1']])
   })
 })

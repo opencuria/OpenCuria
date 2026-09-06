@@ -1013,6 +1013,7 @@ class HarnessService:
             await sync_to_async(self.messages.complete)(
                 assistant, finish=result.finish_reason
             )
+            await self._settle_open_stream_parts(assistant)
         except asyncio.CancelledError:
             await sync_to_async(self.messages.complete)(
                 assistant, finish="aborted", error="aborted by user"
@@ -1042,10 +1043,34 @@ class HarnessService:
                 str(session.workspace_id),
             )
 
+    async def _settle_open_stream_parts(self, assistant: HarnessMessage) -> None:
+        """Mark leftover running text/reasoning parts completed.
+
+        The runner closes these in-memory on ``step_finish``, but the DB
+        rows stay ``running`` unless we persist the completed state.
+        """
+        open_parts = await sync_to_async(
+            lambda: list(
+                self.parts.model.objects.filter(
+                    message_id=assistant.id,
+                    type__in=("text", "reasoning"),
+                    state__in=("pending", "running"),
+                )
+            )
+        )()
+        for part in open_parts:
+            await sync_to_async(self.parts.mark_state)(part, "completed")
+
     async def _fail_open_parts(
         self, assistant: HarnessMessage, *, state: str, output: str
     ) -> None:
-        """Mark pending/running parts of *assistant* as failed/aborted."""
+        """Mark pending/running parts of *assistant* as failed/aborted.
+
+        Text and reasoning keep their streamed content and are marked
+        completed — aborting a run does not abort a thought that already
+        happened. Tool/subtask parts become *state* and keep any partial
+        output already written.
+        """
         open_parts = await sync_to_async(
             lambda: list(
                 self.parts.model.objects.filter(
@@ -1055,7 +1080,12 @@ class HarnessService:
             )
         )()
         for part in open_parts:
-            await sync_to_async(self.parts.mark_state)(part, state, output=output)
+            if part.type in ("text", "reasoning"):
+                await sync_to_async(self.parts.mark_state)(part, "completed")
+                continue
+            await sync_to_async(self.parts.mark_state)(
+                part, state, output=part.output or output
+            )
 
     async def _on_permission(
         self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any

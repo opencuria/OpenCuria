@@ -10,6 +10,7 @@ import {
   findPart,
   mergeBusyFetchedMessages,
   resetHarnessPartCounter,
+  settleOpenStreamParts,
 } from './harnessReducer'
 
 function makeMessages(): HarnessMessage[] {
@@ -308,5 +309,48 @@ describe('harnessReducer', () => {
     expect(last!.id).toBe('server-assistant')
     expect(last!.content).toBe('Hello world')
     expect(last!.parts[0]!.output).toBe('Hello world')
+  })
+
+  it('settles leftover running text and reasoning parts without touching tools', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [
+          {
+            id: 'r1',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'planning',
+          },
+          {
+            id: 't1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'pending',
+            title: '',
+            output: 'done',
+          },
+          {
+            id: 'tool-1',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'running',
+            title: 'bash',
+            output: '',
+          },
+        ],
+      },
+    ]
+
+    const settled = settleOpenStreamParts(messages)
+    expect(settled[0]!.parts[0]!.state).toBe('completed')
+    expect(settled[0]!.parts[0]!.output).toBe('planning')
+    expect(settled[0]!.parts[1]!.state).toBe('completed')
+    expect(settled[0]!.parts[2]!.state).toBe('running')
   })
 })

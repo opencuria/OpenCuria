@@ -6,6 +6,8 @@ import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
+  buildChildSessionIdMap,
+  resolveChildSessionId,
 } from '@/lib/harnessSubtaskActivity'
 import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
@@ -22,9 +24,15 @@ const harness = useHarnessStore()
 
 /** The child session id links parent/child (backend `parent` FK). */
 const childId = computed(() => {
-  const fromMeta = props.part.meta?.['child_session_id']
-  if (typeof fromMeta === 'string' && fromMeta) return fromMeta
-  return props.childSessionId ?? null
+  const map = buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
+  const subtaskId = String(props.part.meta?.['subtask_id'] ?? '')
+  const fromProp = props.childSessionId
+    ? {
+        [props.part.id]: props.childSessionId,
+        ...(subtaskId ? { [subtaskId]: props.childSessionId } : {}),
+      }
+    : {}
+  return resolveChildSessionId(props.part, harness.sessions, { ...map, ...fromProp })
 })
 
 const agentLabel = computed(() => {

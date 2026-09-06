@@ -420,4 +420,19 @@ describe('HarnessMessageView', () => {
     expect(wrapper.text()).not.toContain('secret summary')
     expect(wrapper.find('pre').exists()).toBe(false)
   })
+
+  it('does not render message errors inline', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: {
+          ...makeAssistant([makePart({ id: 't1', type: 'text', output: 'Hello' })]),
+          error: 'aborted by user',
+          finish: 'aborted',
+        },
+      },
+    })
+
+    expect(wrapper.text()).toContain('Hello')
+    expect(wrapper.text()).not.toContain('aborted by user')
+  })
 })

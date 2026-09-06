@@ -60,14 +60,18 @@ const props = withDefaults(
   { grouped: false },
 )
 
-const open = ref(props.part.state === 'error')
+const open = ref(shouldAutoOpen(props.part))
 
 watch(
   () => props.part.state,
-  (state) => {
-    if (state === 'error') open.value = true
+  () => {
+    if (shouldAutoOpen(props.part)) open.value = true
   },
 )
+
+function shouldAutoOpen(part: HarnessPart): boolean {
+  return part.state === 'error' && resolveToolName(part).toLowerCase() !== 'bash'
+}
 
 const label = computed(() => toolDisplayLabel(props.part))
 const icon = computed<Component>(() => toolDisplayIcon(props.part))

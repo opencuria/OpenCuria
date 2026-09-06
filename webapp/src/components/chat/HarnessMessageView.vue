@@ -62,7 +62,9 @@ onMounted(async () => {
 function childIdFor(part: HarnessPart): string | null {
   const fromMeta = part.meta?.['child_session_id']
   if (typeof fromMeta === 'string' && fromMeta) return fromMeta
-  const fromMap = props.childSessionIds?.[String(part.meta?.['subtask_id'] ?? '')]
+  const fromMap =
+    props.childSessionIds?.[String(part.meta?.['subtask_id'] ?? '')] ??
+    props.childSessionIds?.[part.id]
   return fromMap ?? null
 }
 
@@ -200,7 +202,6 @@ function setCompactionOpen(partId: string, open: boolean): void {
       >
         {{ usageLine }}
       </p>
-      <p v-if="message.error" class="mt-2 text-xs text-destructive">{{ message.error }}</p>
     </div>
   </div>
 </template>

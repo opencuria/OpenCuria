@@ -240,4 +240,146 @@ describe('HarnessChatPanel', () => {
     wrapper.unmount()
     expect(store.viewingSessionId).toBeNull()
   })
+
+  it('surfaces abort and error notices in the composer sheet stack', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'msg-user',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'msg-abort',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: '',
+        finish: 'aborted',
+        error: 'aborted by user',
+        parts: [],
+      },
+    ]
+    await wrapper.vm.$nextTick()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const sheets = stack.props('sheets') as Array<{ kind: string; notice?: { text: string } }>
+    expect(sheets.map((sheet) => sheet.kind)).toContain('notice')
+    expect(sheets.find((sheet) => sheet.kind === 'notice')?.notice?.text).toBe(
+      'Run stopped by user',
+    )
+
+    stack.vm.$emit('dismiss-notice', 'msg-abort')
+    await wrapper.vm.$nextTick()
+    const after = stack.props('sheets') as Array<{ kind: string }>
+    expect(after.map((sheet) => sheet.kind)).not.toContain('notice')
+  })
+
+  it('syncs the session query so a subtask click is not snapped back', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'Computer use',
+        agent_name: 'computeruse',
+      }),
+    ]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-root')
+
+    store.setActiveSession('session-child')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-child')
+
+    store.sessions = [...store.sessions]
+    await wrapper.vm.$nextTick()
+    expect(store.activeSessionId).toBe('session-child')
+    expect(router.currentRoute.value.query.session).toBe('session-child')
+  })
+
+  it('opens a subtask immediately even if that session is not listed yet', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    await flushPromises()
+    expect(store.activeSessionId).toBe('session-child')
+  })
+
+  it('does not snap back to the query session when the session list refreshes', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'Computer use',
+        agent_name: 'computeruse',
+      }),
+    ]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-root')
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    store.sessions = [...store.sessions]
+    await wrapper.vm.$nextTick()
+    expect(store.activeSessionId).toBe('session-child')
+  })
 })

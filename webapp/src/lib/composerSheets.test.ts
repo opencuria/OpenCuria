@@ -28,11 +28,12 @@ function makeTodo(id: string): HarnessTodo {
 }
 
 describe('buildComposerSheets', () => {
-  it('orders sheets by priority: mention > question > permission > context > todos', () => {
+  it('orders sheets by priority: mention > question > permission > notice > context > todos', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
       questions: [makeQuestion('q1')],
+      notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
       mention: {
         candidates: [{ kind: 'file', label: 'a.ts', insert: 'file:a.ts' }],
         activeIndex: 0,
@@ -45,6 +46,7 @@ describe('buildComposerSheets', () => {
       'mention',
       'question',
       'permission',
+      'notice',
       'context',
       'todos',
     ])
@@ -79,10 +81,14 @@ describe('buildComposerSheets', () => {
     ])
   })
 
-  it('returns an empty stack when nothing is active', () => {
-    expect(
-      buildComposerSheets({ mention: null, questions: [], permissions: [], todos: [] }),
-    ).toEqual([])
+  it('includes a notice sheet when a run error is present', () => {
+    const sheets = buildComposerSheets({
+      notice: { messageId: 'msg-1', text: 'boom', tone: 'error' },
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['notice', 'todos'])
+    expect(sheets[0]?.notice?.text).toBe('boom')
   })
 
   it('skips empty sources instead of rendering placeholder sheets', () => {

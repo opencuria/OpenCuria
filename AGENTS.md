@@ -497,8 +497,9 @@ the summary is persisted as a `compaction` part with `tail_start_id`, and
 `_build_history` sends only the in-memory checkpoint plus the retained tail.
 The current user prompt is kept; the summary is not re-sent as a user message.
 The composer shows a context-usage ring (left of the paperclip) and a Context
-Usage sheet in the todos/questions stack; compaction renders as a “Session
-compacted” divider in chat.
+Usage sheet in the todos/questions stack; aborted or failed runs surface a
+dismissible notice sheet in that same stack (above context/todos). Compaction
+renders as a “Session compacted” divider in chat.
 
 **@ mentions:** typing `@` searches workspace files via Socket.IO `files:find`
 (capped at 50, prunes `.git`/`node_modules`/etc.). The mention sheet ranks

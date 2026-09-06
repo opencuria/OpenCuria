@@ -40,6 +40,7 @@ import {
   applyTodoUpdate,
   ensureAssistantMessage,
   mergeBusyFetchedMessages,
+  settleOpenStreamParts,
 } from '@/lib/harnessReducer'
 import { collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
 import { useNotificationStore } from './notifications'
@@ -65,6 +66,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const modelInput = ref('')
   /** Reasoning effort for the next run; empty uses the model default. */
   const effortInput = ref('')
+  /** Message ids whose error/abort notice the user dismissed. */
+  const dismissedNoticeIds = ref<Record<string, true>>({})
 
   // --- Getters ---
   const activeSession = computed(
@@ -125,10 +128,12 @@ export const useHarnessStore = defineStore('harness', () => {
     loading.value = true
     error.value = null
     try {
+      const previous = sessions.value
       sessions.value = await listHarnessSessions(workspaceId)
       if (
         activeSessionId.value &&
-        !sessions.value.some((session) => session.id === activeSessionId.value)
+        !sessions.value.some((session) => session.id === activeSessionId.value) &&
+        previous.some((session) => session.id === activeSessionId.value)
       ) {
         activeSessionId.value = null
       }
@@ -174,7 +179,7 @@ export const useHarnessStore = defineStore('harness', () => {
       messagesBySession.value[sessionId] =
         session?.status === 'busy'
           ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
-          : incoming
+          : settleOpenStreamParts(incoming)
       if (hydrateChildren) {
         const childIds = collectRunningChildSessionIds(
           messagesBySession.value[sessionId] ?? [],
@@ -462,6 +467,10 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  function dismissNotice(messageId: string): void {
+    dismissedNoticeIds.value = { ...dismissedNoticeIds.value, [messageId]: true }
+  }
+
   function reset(): void {
     sessions.value = []
     messagesBySession.value = {}
@@ -472,6 +481,7 @@ export const useHarnessStore = defineStore('harness', () => {
     viewingSessionId.value = null
     loading.value = false
     error.value = null
+    dismissedNoticeIds.value = {}
   }
 
   return {
@@ -487,6 +497,7 @@ export const useHarnessStore = defineStore('harness', () => {
     error,
     modelInput,
     effortInput,
+    dismissedNoticeIds,
     // Getters
     activeSession,
     activeMessages,
@@ -508,6 +519,7 @@ export const useHarnessStore = defineStore('harness', () => {
     removeSession,
     updateSessionMode,
     abortSession,
+    dismissNotice,
     resolvePermission,
     resolveQuestion,
     // Real-time

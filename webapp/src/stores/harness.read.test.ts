@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useHarnessStore } from '@/stores/harness'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
-import { markHarnessSessionRead } from '@/services/harness.api'
+import { markHarnessSessionRead, listHarnessSessions } from '@/services/harness.api'
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/harness.api', async () => {
@@ -86,5 +86,23 @@ describe('harness store read tracking', () => {
     store.handleSessionStatus('session-1', 'idle')
     expect(store.sessions[0]?.unread).toBe(true)
     expect(markReadMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps an explicit selection that is not in the fetched list yet', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-child')
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([makeSession()])
+    await store.fetchSessions('ws-1')
+    expect(store.activeSessionId).toBe('session-child')
+  })
+
+  it('clears the active session when a previously listed session disappears', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-1')
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([])
+    await store.fetchSessions('ws-1')
+    expect(store.activeSessionId).toBeNull()
   })
 })

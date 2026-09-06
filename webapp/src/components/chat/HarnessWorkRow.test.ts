@@ -90,7 +90,7 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.text()).toContain('need to check the store')
   })
 
-  it('opens error tools by default', () => {
+  it('opens non-bash error tools by default', () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
         part: makePart({
@@ -102,6 +102,23 @@ describe('HarnessWorkRow', () => {
     })
 
     expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('file not found')
+  })
+
+  it('keeps bash rows collapsed even when the command failed', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({
+          tool: 'bash',
+          state: 'error',
+          title: '$ missing',
+          output: 'Command exited with code 127',
+          input: { arguments: '{"command":"missing"}' },
+        }),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="tool-detail-bash"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="harness-work-row-label"]').text()).toContain('$ missing')
   })
 
   it('shows a spinner while a tool is running', () => {
