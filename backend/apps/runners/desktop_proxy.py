@@ -233,7 +233,13 @@ async def _proxy_http(
         # path= tells KasmVNC client where to open the WebSocket.
         # KasmVNC serves WS at root, so we proxy to / on the upstream.
         ws_path = f"ws/desktop/{workspace_id}/?token={token}"
-        redirect_url = f"{base_path}/vnc.html?token={token}&autoconnect=true&resize=remote&path={ws_path}"
+        # Always scale locally. ``resize=remote`` asks KasmVNC to send
+        # SetDesktopSize and would shrink/grow the real X11 framebuffer
+        # when switching between the chat mini viewer and fullscreen.
+        redirect_url = (
+            f"{base_path}/vnc.html?token={token}"
+            f"&autoconnect=true&resize=scale&path={ws_path}"
+        )
         resp_headers = [[b"location", redirect_url.encode()]]
         if cookie_header:
             resp_headers.append([b"set-cookie", cookie_header.encode()])

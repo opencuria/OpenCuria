@@ -38,7 +38,7 @@ def test_docker_desktop_block_disables_remote_resize() -> None:
 
     block = RunnerService._desktop_session_dockerfile_block()
     assert "allow_resize: false" in block
-    assert "AcceptSetDesktopSize" not in block
+    assert "-AcceptSetDesktopSize=0" in block
     assert "OPENCURIA_DESKTOP_GEOMETRY" in block
 
 

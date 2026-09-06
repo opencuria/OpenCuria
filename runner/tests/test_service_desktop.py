@@ -73,7 +73,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         start_command = commands[2]
         self.assertEqual(start_command[0], "bash")
         self.assertIn("-geometry 1280x720", start_command[2])
-        self.assertNotIn("AcceptSetDesktopSize", start_command[2])
+        self.assertIn("-AcceptSetDesktopSize=0", start_command[2])
         self.assertNotIn("opencuria-desktop-start", start_command)
         self.assertNotIn("opencuria-desktop-stop", start_command[2])
 

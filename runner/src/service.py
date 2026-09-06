@@ -1390,6 +1390,7 @@ class WorkspaceService:
             "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
             "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
             "-AcceptPointerEvents -SendCutText -AcceptCutText "
+            "-AcceptSetDesktopSize=0 "
             ">>/root/.vnc/server.log 2>&1 &\n"
             "for _ in $(seq 1 120); do\n"
             "  if [ -e /tmp/.X11-unix/X1 ]; then\n"

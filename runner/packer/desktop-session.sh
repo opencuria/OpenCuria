@@ -582,6 +582,7 @@ GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
     -AcceptPointerEvents \
     -SendCutText \
     -AcceptCutText \
+    -AcceptSetDesktopSize=0 \
     >>/root/.vnc/server.log 2>&1 &
 
 for _ in $(seq 1 120); do

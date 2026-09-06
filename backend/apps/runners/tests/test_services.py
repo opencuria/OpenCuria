@@ -2320,7 +2320,7 @@ class TestDesktopSessionImageContent:
         assert "ffmpeg" in script
         assert "xdotool" in script
         assert "allow_resize: false" in script
-        assert "AcceptSetDesktopSize" not in script
+        assert "-AcceptSetDesktopSize=0" in script
         assert "--start-maximized" not in script
         assert "openbox-session" not in script
         assert "xfce4-session" in script

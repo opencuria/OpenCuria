@@ -170,6 +170,50 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
+    monkeypatch,
+):
+    """Mini and fullscreen viewers must never ask KasmVNC to resize X11."""
+    workspace_id = str(uuid.uuid4())
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._validate_token",
+        AsyncMock(return_value=SimpleNamespace(pk=1)),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._user_can_access_workspace",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._get_desktop_proxy_target",
+        AsyncMock(
+            return_value={
+                "runner_sid": "runner-sid",
+                "runner_id": "runner-id",
+                "desktop_info": {"port": 6901},
+            }
+        ),
+    )
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": f"/ws/desktop/{workspace_id}/",
+        "query_string": b"token=test-token&resize=remote",
+        "headers": [],
+    }
+
+    events = await _call_http(scope)
+
+    assert events[0]["type"] == "http.response.start"
+    assert events[0]["status"] == 302
+    location = dict(events[0]["headers"])[b"location"].decode()
+    assert "vnc.html" in location
+    assert "resize=scale" in location
+    assert "resize=remote" not in location
+    assert "autoconnect=true" in location
+
+
+@pytest.mark.asyncio
 async def test_runner_frames_are_forwarded_to_registered_websocket_tunnel():
     tunnel_id = uuid.uuid4().hex
     queue = _register_ws_tunnel(
