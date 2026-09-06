@@ -114,9 +114,15 @@ watch(isAdmin, (admin) => {
 
 <template>
   <Dialog v-model:open="open">
+    <!-- Breite mit Tailwind-v4-Important-Modifier (trailing `!`): tailwind-merge
+      löst die Dialog-Basis (`sm:max-w-md`, `w-full`) zwar korrekt ab
+      (verifiziert via twMerge + gemountetem Dialog), das `!` sichert die
+      80rem-Breite zusätzlich gegen die Stylesheet-Reihenfolge ab, falls die
+      Klasse je ohne Merge konkateniert wird (`sm:max-w-md` läge im
+      generierten CSS hinter `sm:max-w-[80rem]` und würde sonst gewinnen). -->
     <DialogContent
       aria-describedby="settings-sheet-description"
-      class="max-w-[80rem] sm:max-w-[80rem] w-[calc(100vw-2rem)] h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
+      class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
       data-testid="settings-sheet"
       @open-auto-focus.prevent
     >

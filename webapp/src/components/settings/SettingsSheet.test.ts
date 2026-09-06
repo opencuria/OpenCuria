@@ -256,4 +256,14 @@ describe('SettingsSheet', () => {
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
     authMock.isAdmin = true
   })
+
+  it('pins the 80rem dialog width with the Tailwind v4 important modifier', () => {
+    const wrapper = mountSheet()
+    const classes = wrapper.find('[data-testid="settings-sheet"]').classes()
+    // Trailing `!` (v4-Syntax) gewinnt die Kaskade auch dann, falls die
+    // Dialog-Basis (`sm:max-w-md`) je ohne tailwind-merge konkateniert wird.
+    expect(classes).toContain('max-w-[80rem]!')
+    expect(classes).toContain('sm:max-w-[80rem]!')
+    expect(classes).toContain('w-[calc(100vw-2rem)]!')
+  })
 })
