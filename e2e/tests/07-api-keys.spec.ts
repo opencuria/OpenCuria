@@ -8,14 +8,15 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('07 — API Keys', () => {
   test('should create an API key with full access via UI', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/api-keys`);
+    await page.goto(`${BASE_URL}/?settings=api-keys`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // Click New API Key
     await page.getByRole('button', { name: /new api key/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const keyName = `${testState.prefix}-apikey`;
 
     // Fill name
@@ -93,7 +94,8 @@ test.describe('07 — API Keys', () => {
   });
 
   test('should show API keys on the page', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/api-keys`);
+    await page.goto(`${BASE_URL}/?settings=api-keys`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     if (testState.apiKeyId) {

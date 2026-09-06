@@ -8,14 +8,15 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('06 — Skills', () => {
   test('should create a personal skill via UI', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/skills`);
+    await page.goto(`${BASE_URL}/?settings=skills`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // Click New Skill
     await page.getByRole('button', { name: /new skill/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const skillName = `${testState.prefix}-personal-skill`;
 
     // Fill name
@@ -53,13 +54,14 @@ test.describe('06 — Skills', () => {
   });
 
   test('should create an org skill via UI', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/skills`);
+    await page.goto(`${BASE_URL}/?settings=skills`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     await page.getByRole('button', { name: /new skill/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const skillName = `${testState.prefix}-org-skill`;
 
     await dialog.locator('input[placeholder*="TypeScript"], input[placeholder*="name"], input').first().fill(skillName);
@@ -96,7 +98,8 @@ test.describe('06 — Skills', () => {
     expect(updated.body).toContain('Updated');
 
     // Verify on UI the skill still shows
-    await page.goto(`${BASE_URL}/skills`);
+    await page.goto(`${BASE_URL}/?settings=skills`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
     const skillName = `${testState.prefix}-personal-skill`;
     await expect(page.getByText(skillName)).toBeVisible({ timeout: 5_000 });
@@ -104,7 +107,8 @@ test.describe('06 — Skills', () => {
   });
 
   test('should show skill scope badges', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/skills`);
+    await page.goto(`${BASE_URL}/?settings=skills`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // Check that skills have scope badges

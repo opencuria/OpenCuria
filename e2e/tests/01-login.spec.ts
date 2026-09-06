@@ -30,7 +30,7 @@ test.describe('01 — Login', () => {
     await page.goto(`${BASE_URL}/login`);
     await page.waitForLoadState('networkidle');
 
-    // If redirected to dashboard (already logged in), sign out
+    // If redirected to home (already logged in), sign out
     if (!page.url().includes('/login')) {
       const signOut = page.getByRole('button', { name: 'Sign out' });
       if (await signOut.isVisible({ timeout: 3000 }).catch(() => false)) {
@@ -59,13 +59,13 @@ test.describe('01 — Login', () => {
     expect(hasError).toBe(true);
   });
 
-  test('should login successfully and reach dashboard', async ({ page }) => {
+  test('should login successfully and reach home', async ({ page }) => {
     await page.goto(`${BASE_URL}/login`);
     await page.waitForLoadState('networkidle');
 
     if (!page.url().includes('/login')) {
-      // Already logged in
-      await expect(page.getByText(/dashboard|workspace|runner/i).first()).toBeVisible();
+      // Already logged in — home screen shows the greeting
+      await expect(page.getByTestId('chat-home')).toBeVisible({ timeout: 15_000 });
       return;
     }
 
@@ -76,19 +76,21 @@ test.describe('01 — Login', () => {
     // Should redirect away from login
     await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 });
 
-    // Dashboard should show runners/workspaces info
-    await expect(page.getByText(/runner|workspace|dashboard/i).first()).toBeVisible();
+    // Home screen shows the greeting after login
+    await expect(page.getByTestId('chat-home')).toBeVisible({ timeout: 15_000 });
   });
 
   test('should persist session across navigation', async ({ authedPage: page }) => {
-    // Already authed via fixture
-    await page.goto(`${BASE_URL}/skills`);
+    // Already authed via fixture (settings routes redirect to / with sheet)
+    await page.goto(`${BASE_URL}/?settings=skills`);
     await page.waitForLoadState('networkidle');
     expect(page.url()).not.toContain('/login');
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
 
-    await page.goto(`${BASE_URL}/credentials`);
+    await page.goto(`${BASE_URL}/?settings=credentials`);
     await page.waitForLoadState('networkidle');
     expect(page.url()).not.toContain('/login');
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
   });
 
   test('should discover runners and save to test state', async ({ authedPage: page, testState }) => {

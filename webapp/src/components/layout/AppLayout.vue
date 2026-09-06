@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import AppSidebar from './AppSidebar.vue'
+import ChatSidebar from './ChatSidebar.vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
+import SettingsSheetHost from '@/components/settings/SettingsSheetHost.vue'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Separator } from '@/components/ui/separator'
 
 const route = useRoute()
 const showMobileTopBar = computed(() => !route.meta.hideTopBar)
-const isFullBleed = computed(() => Boolean(route.meta.fullBleed))
+// Chat-Home ("/", meta.fullBleed) und Thread (workspace-detail) sind FullBleed;
+// weitere Routen können sich zusätzlich über meta.fullBleed einklinken.
+const isFullBleed = computed(
+  () => Boolean(route.meta.fullBleed) || route.name === 'workspace-detail',
+)
 </script>
 
 <template>
   <SidebarProvider :class="isFullBleed ? 'h-svh overflow-hidden' : undefined">
-    <AppSidebar />
+    <ChatSidebar />
     <SidebarInset :class="isFullBleed ? 'min-h-0 overflow-hidden' : undefined">
       <header
         v-if="showMobileTopBar"
@@ -35,5 +40,7 @@ const isFullBleed = computed(() => Boolean(route.meta.fullBleed))
         <RouterView />
       </main>
     </SidebarInset>
+    <!-- Globales Settings-Sheet (Schritt 5): einmal hosten, überall öffnen. -->
+    <SettingsSheetHost />
   </SidebarProvider>
 </template>

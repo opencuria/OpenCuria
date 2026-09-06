@@ -590,12 +590,12 @@ function onComposerKeydown(e: KeyboardEvent): void {
     @keydown="onComposerKeydown"
   >
     <div
-      class="flex flex-col rounded-xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary"
+      class="flex flex-col rounded-3xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary focus-within:shadow-md"
       data-testid="composer-card"
     >
       <RouterLink
         v-if="providerMissing"
-        to="/org-settings?tab=provider"
+        to="/?settings=provider"
         class="mx-4 mt-3 w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
       >
         Configure OpenRouter in Org Settings
@@ -812,11 +812,6 @@ function onComposerKeydown(e: KeyboardEvent): void {
     </div>
     <p v-if="busyMessage" class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400">
       {{ busyMessage }}
-    </p>
-    <p v-else class="mt-2 hidden text-center text-xs text-muted-foreground sm:block">
-      Press <kbd class="font-mono font-medium text-foreground">Enter</kbd> to send,
-      <kbd class="font-mono font-medium text-foreground">Shift+Enter</kbd> for newline,
-      <kbd class="font-mono font-medium text-foreground">Shift+Tab</kbd> to switch mode
     </p>
   </div>
 </template>

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
+import { resolveSettingsTab } from '@/components/settings/settingsTabs'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -37,14 +38,14 @@ const router = createRouter({
       children: [
         {
           path: '',
-          name: 'dashboard',
-          component: () => import('@/views/DashboardView.vue'),
-          meta: { title: 'Dashboard', fullBleed: true },
+          name: 'home',
+          component: () => import('@/views/ChatHomeView.vue'),
+          meta: { title: 'New Chat', fullBleed: true },
         },
         {
           path: 'runners',
           name: 'runners',
-          component: () => import('@/views/RunnersView.vue'),
+          redirect: { path: '/', query: { settings: 'runners' } },
           meta: { title: 'Runners' },
         },
         {
@@ -62,31 +63,34 @@ const router = createRouter({
         {
           path: 'images',
           name: 'images',
-          component: () => import('@/views/ImagesView.vue'),
+          redirect: { path: '/', query: { settings: 'images' } },
           meta: { title: 'Captured Images' },
         },
         {
           path: 'skills',
           name: 'skills',
-          component: () => import('@/views/SkillsView.vue'),
+          redirect: { path: '/', query: { settings: 'skills' } },
           meta: { title: 'Skills' },
         },
         {
           path: 'credentials',
           name: 'credentials',
-          component: () => import('@/views/CredentialsView.vue'),
+          redirect: { path: '/', query: { settings: 'credentials' } },
           meta: { title: 'Credentials' },
         },
         {
           path: 'api-keys',
           name: 'api-keys',
-          component: () => import('@/views/ApiKeysView.vue'),
+          redirect: { path: '/', query: { settings: 'api-keys' } },
           meta: { title: 'API Keys' },
         },
         {
           path: 'org-settings',
           name: 'org-settings',
-          component: () => import('@/views/OrgSettingsView.vue'),
+          redirect: (to) => ({
+            path: '/',
+            query: { settings: resolveSettingsTab(to.query.tab) },
+          }),
           meta: { title: 'Organization Settings' },
         },
         {
