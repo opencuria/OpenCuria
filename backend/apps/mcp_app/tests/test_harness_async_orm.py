@@ -269,3 +269,44 @@ async def test_mcp_list_harness_parts_includes_tool_input(monkeypatch) -> None:
     tool_part = next(item for item in assistant_out["parts"] if item["type"] == "tool")
     assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
     assert tool_part["output"] == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_list_harness_parts_includes_pending_gates(monkeypatch) -> None:
+    """list_harness_parts returns pending permission and question gates."""
+    from apps.harness.permissions.service import PermissionRequestRepository
+    from apps.harness.repositories import QuestionRequestRepository
+
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="need a decision",
+        agent_name="build",
+        mode="build",
+        user_id=user.id,
+    )
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=org.id,
+        session_id=session.id,
+        workspace_id=workspace.id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=org.id,
+        session_id=session.id,
+        workspace_id=workspace.id,
+        questions=[{"question": "Which color?"}],
+    )
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    api_key = SimpleNamespace(user=user)
+    result = await sync_to_async(_call_list_harness_parts)(
+        api_key, org.id, {"session_id": str(session.id)}
+    )
+    body = _parse(result)
+    assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
+    assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
+    assert body["questions"][0]["questions"] == [{"question": "Which color?"}]

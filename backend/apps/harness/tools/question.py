@@ -10,9 +10,6 @@ from pydantic import BaseModel, Field
 
 from .base import Tool, ToolContext, ToolError, ToolResult
 
-#: Default wait for user answers before the tool fails (runner may override).
-DEFAULT_QUESTION_TIMEOUT = 600.0
-
 
 class QuestionOption(BaseModel):
     """One selectable option for a structured question."""
@@ -76,12 +73,13 @@ class QuestionTool(Tool):
                 tool=self.name,
             )
         payload = [item.model_dump(mode="json") for item in validated.questions]
-        timeout = ctx.question_timeout or DEFAULT_QUESTION_TIMEOUT
+        pending = callback(questions=payload, call_id=ctx.call_id)
+        timeout = ctx.question_timeout
         try:
-            answers = await asyncio.wait_for(
-                callback(questions=payload, call_id=ctx.call_id),
-                timeout=timeout,
-            )
+            if timeout is not None and timeout > 0:
+                answers = await asyncio.wait_for(pending, timeout=timeout)
+            else:
+                answers = await pending
         except asyncio.TimeoutError as exc:
             raise ToolError(
                 f"Question timed out after {timeout:.0f}s",

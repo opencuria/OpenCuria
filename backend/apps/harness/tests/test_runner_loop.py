@@ -172,7 +172,7 @@ def _runner(
     events: list[dict[str, Any]],
     *,
     agent_rules: dict[str, Any] | None = None,
-    permission_timeout: float = 5.0,
+    permission_timeout: float | None = None,
     auto_approve: bool = False,
     on_permission=None,
     files: dict[str, bytes] | None = None,
@@ -309,6 +309,36 @@ async def test_permission_timeout_auto_denies() -> None:
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "after timeout"
     assert any(event["type"] == "tool_error" for event in events)
+
+
+async def test_permission_waits_until_resolved() -> None:
+    """Without a timeout, ask waits until on_permission returns."""
+    gate = asyncio.Event()
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        await gate.wait()
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "echo hi"}, call_id="c1"),
+            _text_step("after approve"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=on_permission,
+    )
+    task = asyncio.create_task(runner.run("p", "build", "m", "build", opts))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    gate.set()
+    result = await asyncio.wait_for(task, timeout=2.0)
+    assert result.output == "after approve"
+    assert any(event["type"] == "tool_completed" for event in events)
 
 
 async def test_deny_tool_not_offered_to_provider() -> None:

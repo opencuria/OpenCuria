@@ -7,10 +7,11 @@ streams deltas via an ``emit`` callback, gates ``ask`` tools through an
 a text-only answer, an optional last step, an abort, or a doom-loop
 guard.
 
-Permission ``ask`` never hangs: the ``on_permission`` wait is wrapped
-in ``asyncio.wait_for`` with a configurable timeout and auto-denies on
-timeout. Cancellation (``asyncio.CancelledError``) is re-raised after
-emitting an ``aborted`` event so callers still observe cancellation.
+Permission ``ask`` and question tools wait until the user resolves them
+or the run is aborted. An optional timeout still auto-denies (permissions)
+or raises ``ToolError`` (questions) when tests set one. Cancellation
+(``asyncio.CancelledError``) is re-raised after emitting an ``aborted``
+event so callers still observe cancellation.
 
 Independent tool calls in one step run concurrently. Results are fed
 back to the model in the original emitted call order. A single tool
@@ -77,12 +78,6 @@ log = structlog.get_logger(__name__)
 #: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
 DEFAULT_MAX_DEPTH = 1
 
-#: Default wait for the ``on_permission`` callback before auto-deny.
-DEFAULT_PERMISSION_TIMEOUT = 120.0
-
-#: Default wait for the ``on_question`` callback before auto-timeout.
-DEFAULT_QUESTION_TIMEOUT = 600.0
-
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
 DOOM_LOOP_REPEATS = 3
 
@@ -103,8 +98,8 @@ class RunOptions:
     cwd: str = HARNESS_WORKSPACE_ROOT
     small_model: str = ""
     skills: list[str] = field(default_factory=list)
-    permission_timeout: float = DEFAULT_PERMISSION_TIMEOUT
-    question_timeout: float = DEFAULT_QUESTION_TIMEOUT
+    permission_timeout: float | None = None
+    question_timeout: float | None = None
     auto_approve: bool = False
     on_permission: PermissionCallback | None = None
     on_question: QuestionCallback | None = None
@@ -350,7 +345,8 @@ class HarnessRunner:
         """Resolve an ``ask`` gate via ``on_permission`` (True = approved).
 
         Auto-denies when no callback is configured (unless
-        ``auto_approve``) and on callback timeout — the loop never hangs.
+        ``auto_approve``). An optional positive ``permission_timeout``
+        still auto-denies; otherwise the loop waits until resolve or abort.
         """
         key = "doom_loop" if doom_loop else "permission"
         if opts.auto_approve:
@@ -360,17 +356,19 @@ class HarnessRunner:
         if callback is None:
             log.info("permission_auto_denied_no_callback", tool=tool_name)
             return False
+        pending = callback(
+            tool=tool_name,
+            action=action,
+            title=title,
+            call_id=call_id,
+            key=key,
+        )
+        timeout = opts.permission_timeout
         try:
-            response = await asyncio.wait_for(
-                callback(
-                    tool=tool_name,
-                    action=action,
-                    title=title,
-                    call_id=call_id,
-                    key=key,
-                ),
-                timeout=opts.permission_timeout,
-            )
+            if timeout is not None and timeout > 0:
+                response = await asyncio.wait_for(pending, timeout=timeout)
+            else:
+                response = await pending
         except asyncio.TimeoutError:
             log.warning("permission_timeout_auto_deny", tool=tool_name)
             return False

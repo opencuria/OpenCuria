@@ -16,11 +16,16 @@ from django.core.exceptions import SynchronousOnlyOperation
 from apps.harness.harness_service import (
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
+    FRONTEND_EVENT_QUESTION,
     HarnessService,
 )
-from apps.harness.models import HarnessSession, Todo
+from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.service import PermissionService
+from apps.harness.permissions.models import PermissionRequest
+from apps.harness.permissions.service import (
+    PermissionRequestRepository,
+    PermissionService,
+)
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
@@ -34,6 +39,7 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
+    QuestionRequestRepository,
 )
 from common.exceptions import ConflictError
 
@@ -240,6 +246,49 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     assert reasoning[0].state == "completed"
     assert reasoning[0].output == "considering the layout"
     assert [e["event"] for e in events][-1] == "harness.session_status"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_rejects_pending_permission_and_question(
+    harness_workspace,
+) -> None:
+    """Abort marks leftover user gates rejected and notifies the frontend."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Continue?"}],
+    )
+    await service.abort_run(session.id)
+
+    stored_permission = await sync_to_async(PermissionRequest.objects.get)(
+        id=permission.id
+    )
+    stored_question = await sync_to_async(QuestionRequest.objects.get)(id=question.id)
+    assert stored_permission.status == "rejected"
+    assert stored_question.status == "rejected"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("decision") == "reject"
+        for event in events
+    )
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("status") == "rejected"
+        for event in events
+    )
 
 
 @pytest.mark.django_db(transaction=True)

@@ -12,6 +12,7 @@ import type {
   HarnessMessageIn,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
+  HarnessQuestionRequest,
   HarnessSession,
   HarnessSessionCreateIn,
   HarnessSessionMode,
@@ -43,6 +44,8 @@ export interface HarnessSessionOut extends HarnessSession {}
 export interface HarnessPartsResponse {
   session: HarnessSession
   messages: HarnessMessage[]
+  permissions?: HarnessPermissionRequest[]
+  questions?: HarnessQuestionRequest[]
 }
 
 export interface HarnessPermissionOut {

@@ -679,7 +679,7 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
     summary="List messages and parts of a harness session",
 )
 def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
-    """Return messages with their streamed parts (owner-scoped)."""
+    """Return messages with their streamed parts and pending user gates."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     org_id = _get_org_id(request)
@@ -731,6 +731,8 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                 }
                 for message in messages
             ],
+            "permissions": service.list_pending_permissions(session.id),
+            "questions": service.list_pending_questions(session.id),
         }
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

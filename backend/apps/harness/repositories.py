@@ -18,6 +18,7 @@ from .models import (
     HarnessSessionStatus,
     ProviderConfig,
     QuestionRequest,
+    QuestionRequestStatus,
     Todo,
 )
 
@@ -531,6 +532,16 @@ class QuestionRequestRepository:
     def get_by_id(request_id: uuid.UUID) -> QuestionRequest | None:
         """Fetch a question request by primary key."""
         return QuestionRequest.objects.filter(id=request_id).first()
+
+    @staticmethod
+    def list_pending_for_session(session_id: uuid.UUID) -> list[QuestionRequest]:
+        """Return pending question requests for *session_id*."""
+        return list(
+            QuestionRequest.objects.filter(
+                session_id=session_id,
+                status=QuestionRequestStatus.PENDING,
+            ).order_by("created_at")
+        )
 
     @staticmethod
     def resolve(

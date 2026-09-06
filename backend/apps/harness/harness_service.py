@@ -373,6 +373,40 @@ class HarnessService:
             for row in rows
         ]
 
+    def list_pending_permissions(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Return pending permission gates for *session_id* as dicts."""
+        self.get_session(session_id)
+        rows = self.permissions.requests.list_pending_for_session(session_id)
+        return [
+            {
+                "request_id": str(row.id),
+                "session_id": str(row.session_id),
+                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+                "tool": row.tool,
+                "pattern": row.pattern,
+                "title": row.title or "",
+                "call_id": row.call_id or "",
+                "status": "pending",
+            }
+            for row in rows
+        ]
+
+    def list_pending_questions(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Return pending question gates for *session_id* as dicts."""
+        self.get_session(session_id)
+        rows = QuestionRequestRepository.list_pending_for_session(session_id)
+        return [
+            {
+                "request_id": str(row.id),
+                "session_id": str(row.session_id),
+                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+                "questions": list(row.questions or []),
+                "call_id": row.call_id or "",
+                "status": "pending",
+            }
+            for row in rows
+        ]
+
     # -- run orchestration --------------------------------------------------
 
     def is_running(self, session_id: uuid.UUID) -> bool:
@@ -495,7 +529,7 @@ class HarnessService:
         return assistant
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
-        """Cancel the active run task and mark message/parts aborted."""
+        """Cancel the active run task, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
         children = await sync_to_async(self.sessions.list_children)(session_id)
         key = str(session.id)
@@ -525,6 +559,7 @@ class HarnessService:
                     session, HarnessSessionStatus.IDLE
                 )
                 session.status = HarnessSessionStatus.IDLE
+        await self._reject_pending_user_gates(session)
         for child in children:
             await self.abort_run(child.id)
         return session
@@ -1533,6 +1568,54 @@ class HarnessService:
             lock = asyncio.Lock()
             self._event_locks[session_id] = lock
         return lock
+
+    async def _reject_pending_user_gates(self, session: HarnessSession) -> None:
+        """Reject leftover permission and question gates after abort."""
+        pending_perms = await sync_to_async(
+            self.permissions.requests.list_pending_for_session
+        )(session.id)
+        pending_questions = await sync_to_async(
+            QuestionRequestRepository.list_pending_for_session
+        )(session.id)
+        workspace_id = str(session.workspace_id)
+        session_id = str(session.id)
+        for request in pending_perms:
+            await sync_to_async(self.permissions.requests.mark_resolved)(
+                request, approved=False, remember="once"
+            )
+            future = self._pending_permissions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+            await self._emit_frontend(
+                FRONTEND_EVENT_PERMISSION,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "request_id": str(request.id),
+                    "decision": "reject",
+                    "remember": "once",
+                },
+                workspace_id,
+            )
+        for request in pending_questions:
+            await sync_to_async(QuestionRequestRepository.resolve)(
+                request,
+                answers=[],
+                status="rejected",
+            )
+            future = self._pending_questions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+            await self._emit_frontend(
+                FRONTEND_EVENT_QUESTION,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "request_id": str(request.id),
+                    "status": "rejected",
+                },
+                workspace_id,
+            )
 
     async def _resolve_sibling_permissions(
         self,

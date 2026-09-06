@@ -258,13 +258,17 @@ function setupSocketListeners(): void {
     onEvent('harness.question_required', (data) => {
       if (data.workspace_id === props.workspaceId) {
         if (!data.request_id) return
+        if (data.status && data.status !== 'pending') {
+          harness.handleQuestionResolved(data.request_id, data.status)
+          return
+        }
         harness.handleQuestionRequired({
           request_id: data.request_id,
           session_id: data.session_id,
           workspace_id: data.workspace_id,
           questions: data.questions ?? [],
           call_id: data.call_id,
-          status: data.status === 'pending' ? 'pending' : undefined,
+          status: 'pending',
         })
       }
     }),

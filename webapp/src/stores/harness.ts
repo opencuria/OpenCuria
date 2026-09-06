@@ -180,6 +180,26 @@ export const useHarnessStore = defineStore('harness', () => {
         session?.status === 'busy'
           ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
           : settleOpenStreamParts(incoming)
+      const nextPermissions = { ...pendingPermissions.value }
+      for (const id of Object.keys(nextPermissions)) {
+        if (nextPermissions[id]?.session_id === sessionId) {
+          delete nextPermissions[id]
+        }
+      }
+      for (const request of response.permissions ?? []) {
+        nextPermissions[request.request_id] = { ...request, status: 'pending' }
+      }
+      pendingPermissions.value = nextPermissions
+      const nextQuestions = { ...pendingQuestions.value }
+      for (const id of Object.keys(nextQuestions)) {
+        if (nextQuestions[id]?.session_id === sessionId) {
+          delete nextQuestions[id]
+        }
+      }
+      for (const request of response.questions ?? []) {
+        nextQuestions[request.request_id] = { ...request, status: 'pending' }
+      }
+      pendingQuestions.value = nextQuestions
       if (hydrateChildren) {
         const childIds = collectRunningChildSessionIds(
           messagesBySession.value[sessionId] ?? [],

@@ -14,9 +14,16 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.service import PermissionService
+from apps.harness.permissions.service import (
+    PermissionRequestRepository,
+    PermissionService,
+)
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
-from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
+from apps.harness.repositories import (
+    HarnessMessageRepository,
+    HarnessPartRepository,
+    QuestionRequestRepository,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -334,6 +341,8 @@ def test_parts_todos_abort_flow(harness_setup, fake_harness_service):
     parts = read_client.get(f"/api/v1/harness/sessions/{session_id}/parts")
     assert parts.status_code == 200
     assert "messages" in parts.json()
+    assert parts.json()["permissions"] == []
+    assert parts.json()["questions"] == []
 
     todos = read_client.get(f"/api/v1/harness/sessions/{session_id}/todos")
     assert todos.status_code == 200
@@ -375,6 +384,54 @@ def test_parts_include_tool_input(harness_setup, fake_harness_service):
     tool_part = next(part for part in assistant_out["parts"] if part["type"] == "tool")
     assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
     assert tool_part["output"] == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_pending_permissions_and_questions(
+    harness_setup, fake_harness_service
+):
+    """GET parts returns pending permission and question gates."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="need a decision",
+    )
+    permission = PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+        call_id="call-perm",
+    )
+    question = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Which color?"}],
+        call_id="call-q",
+    )
+    answered = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Already answered?"}],
+    )
+    QuestionRequestRepository.resolve(answered, answers=["done"], status="answered")
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.get(f"/api/v1/harness/sessions/{session.id}/parts")
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
+    assert body["permissions"][0]["tool"] == "bash"
+    assert body["permissions"][0]["pattern"] == "reboot"
+    assert body["permissions"][0]["status"] == "pending"
+    assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
+    assert body["questions"][0]["questions"] == [{"question": "Which color?"}]
+    assert body["questions"][0]["status"] == "pending"
 
 
 @pytest.mark.django_db(transaction=True)

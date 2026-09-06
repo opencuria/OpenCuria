@@ -462,7 +462,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_harness_parts",
-        description="List messages and parts of a harness session.",
+        description="List messages, parts, and pending permission/question gates of a harness session.",
         inputSchema={
             "type": "object",
             "properties": {"session_id": {"type": "string"}},
@@ -1888,6 +1888,8 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 }
                 for message in messages
             ],
+            "permissions": service.list_pending_permissions(session.id),
+            "questions": service.list_pending_questions(session.id),
         }
     )
 
