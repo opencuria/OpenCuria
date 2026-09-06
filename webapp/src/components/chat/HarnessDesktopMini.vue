@@ -2,9 +2,11 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useDesktopStore } from '@/stores/desktop'
+import { useWorkspaceStore } from '@/stores/workspaces'
 import { getDesktopStatus } from '@/services/workspaces.api'
 import { getConfig } from '@/services/config'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
+import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
 
 const POLL_MS = 1000
 
@@ -12,9 +14,19 @@ const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
 
 const desktopStore = useDesktopStore()
+const workspaceStore = useWorkspaceStore()
 
 const proxyUrl = ref<string | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+const desktopSize = computed(() => {
+  const workspace =
+    workspaceStore.workspaces.find((entry) => entry.id === workspaceId.value)
+    ?? (workspaceStore.activeWorkspace?.id === workspaceId.value
+      ? workspaceStore.activeWorkspace
+      : null)
+  return workspaceDesktopSize(workspace)
+})
 
 const fullDesktopOpen = computed(
   () => desktopStore.isOpen && !desktopStore.isMinimized,
@@ -24,7 +36,7 @@ const iframeSrc = computed(() => {
   if (!proxyUrl.value) return ''
   const token = localStorage.getItem('kern_access_token') || ''
   const base = getConfig().wsBaseUrl || ''
-  return `${base}${proxyUrl.value}?token=${encodeURIComponent(token)}`
+  return buildDesktopIframeSrc(base, proxyUrl.value, token)
 })
 
 function stopPolling(): void {
@@ -94,7 +106,10 @@ function openFullDesktop(): void {
     class="mt-2 w-full overflow-hidden rounded-md border border-border bg-black text-left"
     @click.stop="openFullDesktop"
   >
-    <div class="relative aspect-video w-full overflow-hidden">
+    <div
+      class="relative w-full overflow-hidden"
+      :style="{ aspectRatio: `${desktopSize.width} / ${desktopSize.height}` }"
+    >
       <span
         class="absolute left-1.5 top-1.5 z-10 rounded bg-red-600 px-1.5 py-px text-[9px] font-semibold tracking-wide text-white"
       >

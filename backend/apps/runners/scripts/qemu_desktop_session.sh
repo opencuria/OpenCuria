@@ -96,7 +96,7 @@ desktop:
   resolution:
     width: 1920
     height: 1080
-  allow_resize: true
+  allow_resize: false
 network:
   protocol: http
   interface: 0.0.0.0
@@ -567,8 +567,9 @@ mkdir -p /root/.vnc
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
 # Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
+GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
 /usr/bin/Xvnc :1 \
-    -geometry 1920x1080 \
+    -geometry "$GEOMETRY" \
     -depth 24 \
     -rfbport 5901 \
     -SecurityTypes None \
@@ -579,7 +580,6 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
     -AlwaysShared \
     -AcceptKeyEvents \
     -AcceptPointerEvents \
-    -AcceptSetDesktopSize \
     -SendCutText \
     -AcceptCutText \
     >>/root/.vnc/server.log 2>&1 &

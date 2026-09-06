@@ -49,6 +49,26 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.exec_command_wait.await_count, 2)
         self.assertIs(self.service._desktop_sessions[self.workspace_id], session)
 
+    async def test_ensure_desktop_starts_xvnc_without_remote_resize(self) -> None:
+        """Fresh Xvnc starts at a fixed geometry and rejects SetDesktopSize."""
+        self.runtime.exec_command_wait.side_effect = [
+            (1, "dead"),
+            (0, "started"),
+        ]
+
+        await self.service.ensure_desktop_process(
+            self.workspace_id,
+            width=1280,
+            height=720,
+        )
+
+        start_call = self.runtime.exec_command_wait.await_args_list[-1]
+        command = start_call.args[1]
+        self.assertEqual(command[0], "bash")
+        self.assertIn("-geometry 1280x720", command[2])
+        self.assertNotIn("AcceptSetDesktopSize", command[2])
+        self.assertNotIn("opencuria-desktop-start", command)
+
     async def test_heartbeat_payload_prunes_stale_desktop_sessions(self) -> None:
         self.service._desktop_sessions[self.workspace_id] = DesktopSession(
             workspace_id=self.workspace_id,

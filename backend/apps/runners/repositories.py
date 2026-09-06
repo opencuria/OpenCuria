@@ -275,10 +275,14 @@ class WorkspaceRepository:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        desktop_width: int | None = None,
+        desktop_height: int | None = None,
         base_image_instance=None,
         created_by=None,
     ) -> Workspace:
         """Create a new workspace record."""
+        from .desktop import DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH
+
         workspace = Workspace.objects.create(
             id=workspace_id,
             runner=runner,
@@ -287,6 +291,12 @@ class WorkspaceRepository:
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            desktop_width=(
+                DEFAULT_DESKTOP_WIDTH if desktop_width is None else desktop_width
+            ),
+            desktop_height=(
+                DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height
+            ),
             base_image_instance=base_image_instance,
             status=WorkspaceStatus.CREATING,
             active_operation=WorkspaceOperation.CREATING,
@@ -399,6 +409,19 @@ class WorkspaceRepository:
         workspace.qemu_memory_mb = qemu_memory_mb
         workspace.qemu_disk_size_gb = qemu_disk_size_gb
         workspace.save(update_fields=["qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb", "updated_at"])
+        return workspace
+
+    @staticmethod
+    def update_desktop_geometry(
+        workspace: Workspace,
+        *,
+        desktop_width: int,
+        desktop_height: int,
+    ) -> Workspace:
+        """Persist the fixed desktop framebuffer size."""
+        workspace.desktop_width = desktop_width
+        workspace.desktop_height = desktop_height
+        workspace.save(update_fields=["desktop_width", "desktop_height", "updated_at"])
         return workspace
 
     @staticmethod

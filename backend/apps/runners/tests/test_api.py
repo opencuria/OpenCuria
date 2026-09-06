@@ -160,6 +160,8 @@ class TestListWorkspaces:
         assert response.json()["active_operation"] == "restarting"
         assert response.json()["auto_stop_timeout_minutes"] == 15
         assert response.json()["last_activity_at"]
+        assert response.json()["desktop_width"] == 1920
+        assert response.json()["desktop_height"] == 1080
         assert "sessions" not in response.json()
 
 

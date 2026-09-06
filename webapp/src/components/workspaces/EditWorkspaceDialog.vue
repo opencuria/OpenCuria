@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input'
 import type { Workspace, WorkspaceUpdateIn } from '@/types'
 import { RuntimeType } from '@/types'
 import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
+import { DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH } from '@/lib/desktopGeometry'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
@@ -36,6 +37,8 @@ const selectedCredentialIds = ref<string[]>([])
 const qemuVcpus = ref(2)
 const qemuMemoryMb = ref(4096)
 const qemuDiskSizeGb = ref(50)
+const desktopWidth = ref(1920)
+const desktopHeight = ref(1080)
 const submitting = ref(false)
 
 const btnSize = computed(() => (props.size === 'sm' ? 'icon-sm' as const : 'icon' as const))
@@ -85,6 +88,8 @@ function syncFormWithWorkspace(workspace: Workspace): void {
   qemuVcpus.value = currentQemuResources.vcpus
   qemuMemoryMb.value = currentQemuResources.memoryMb
   qemuDiskSizeGb.value = currentQemuResources.diskSizeGb
+  desktopWidth.value = workspace.desktop_width || DEFAULT_DESKTOP_WIDTH
+  desktopHeight.value = workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT
 }
 
 watch(
@@ -134,6 +139,14 @@ async function handleSubmit(): Promise<void> {
       payload.qemu_disk_size_gb = qemuDiskSizeGb.value
     }
   }
+  const currentWidth = props.workspace.desktop_width || DEFAULT_DESKTOP_WIDTH
+  const currentHeight = props.workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT
+  if (desktopWidth.value !== currentWidth) {
+    payload.desktop_width = desktopWidth.value
+  }
+  if (desktopHeight.value !== currentHeight) {
+    payload.desktop_height = desktopHeight.value
+  }
 
   const success = await workspaceStore.updateWorkspace(props.workspace.id, payload)
   submitting.value = false
@@ -175,7 +188,7 @@ async function navigateToCredentials(): Promise<void> {
     <DialogContent>
       <DialogHeader>
         <DialogTitle>Edit Workspace</DialogTitle>
-        <DialogDescription>Update the workspace name and attached credentials.</DialogDescription>
+        <DialogDescription>Update the workspace name, desktop size, and attached credentials.</DialogDescription>
       </DialogHeader>
 
       <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
@@ -235,6 +248,37 @@ async function navigateToCredentials(): Promise<void> {
             <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
             first.
           </p>
+        </div>
+
+        <div class="space-y-3">
+          <label class="text-sm font-medium text-foreground block">Desktop size</label>
+          <p class="text-xs text-muted-foreground">
+            Applies the next time the desktop starts.
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">Width</label>
+              <Input
+                v-model.number="desktopWidth"
+                :disabled="submitting || props.disabled"
+                type="number"
+                min="800"
+                max="3840"
+                step="2"
+              />
+            </div>
+            <div>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">Height</label>
+              <Input
+                v-model.number="desktopHeight"
+                :disabled="submitting || props.disabled"
+                type="number"
+                min="600"
+                max="2160"
+                step="2"
+              />
+            </div>
+          </div>
         </div>
 
         <div v-if="workspace.runtime_type === RuntimeType.QEMU" class="space-y-3">

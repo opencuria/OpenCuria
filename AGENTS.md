@@ -280,7 +280,9 @@ and executed there. The runner exposes plain operations the harness calls via
 - `desktop_action(workspace_id, action, args)` — desktop ensure/hold/release,
   screenshot, xdotool input, ffmpeg record/stop (no agent logic). Viewer
   `task:start_desktop`/`task:stop_desktop` acquire/release a viewer lease;
-  Xvnc stops only when no computer-use hold remains.
+  Xvnc stops only when no computer-use hold remains. Framebuffer size is
+  fixed per workspace (`desktop_width`/`desktop_height`, default 1920×1080);
+  viewers scale in the browser and never remote-resize the display.
 
 ### 4.6 Interfaces
 
@@ -673,8 +675,9 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
 | Backend -> Runner | `files:find` | `{request_id, workspace_id, query, limit}` |
 | Runner -> Backend | `files:find_result` | `{request_id, workspace_id, query, paths, truncated}` |
-| Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` |
+| Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` (`ensure`/`hold` include `desktop_width`/`desktop_height`) |
 | Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
+| Backend -> Runner | `task:start_desktop` | `{task_id, workspace_id, desktop_width, desktop_height}` |
 | Runner -> Backend | `desktop:started` | viewer lease acquired (`task_id`, routing, `viewer`, `computer_use`) |
 | Runner -> Backend | `desktop:process` | live Xvnc for proxy routing after reconnect (not a viewer acquire) |
 | Runner -> Backend | `desktop:stopped` | Xvnc process ended |

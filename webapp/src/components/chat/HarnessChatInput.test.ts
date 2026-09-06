@@ -343,4 +343,13 @@ describe('HarnessChatInput', () => {
     expect(card.classes()).not.toContain('rounded-t-none')
     expect(card.classes()).not.toContain('border-t-0')
   })
+
+  it('styles the stop button with primary accent colors when stoppable', () => {
+    const wrapper = mountInput({ stoppable: true })
+    const stop = wrapper.find('[data-testid="composer-stop"]')
+    expect(stop.exists()).toBe(true)
+    expect(stop.classes()).toContain('bg-primary')
+    expect(stop.classes()).toContain('text-primary-foreground')
+    expect(stop.classes()).not.toContain('bg-destructive')
+  })
 })

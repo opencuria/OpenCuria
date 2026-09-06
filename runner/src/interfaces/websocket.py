@@ -849,7 +849,11 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
-                session = await self._service.start_desktop(workspace_id)
+                session = await self._service.start_desktop(
+                    workspace_id,
+                    width=data.get("desktop_width"),
+                    height=data.get("desktop_height"),
+                )
 
                 # Get container IP for backend proxy
                 container_ip = self._service.get_desktop_container_ip(workspace_id)

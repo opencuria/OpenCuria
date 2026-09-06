@@ -152,7 +152,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         handler = interface._sio.handlers["/"]["task:start_desktop"]
         await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
 
-        service.start_desktop.assert_awaited_once_with(workspace_id)
+        service.start_desktop.assert_awaited_once_with(
+            workspace_id, width=None, height=None
+        )
         interface._sio.emit.assert_awaited_with(
             "desktop:started",
             {

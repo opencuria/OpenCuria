@@ -144,10 +144,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         *,
         emit: EmitFn,
         default_timeout: float = DEFAULT_TIMEOUT,
+        desktop_geometry: Callable[[], Awaitable[tuple[int, int]]] | None = None,
     ) -> None:
         super().__init__(workspace_id)
         self._emit = emit
         self._default_timeout = default_timeout
+        self._desktop_geometry = desktop_geometry
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         try:
@@ -519,6 +521,11 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Run a desktop automation action in the workspace."""
+        payload_args = dict(args or {})
+        if action in {"ensure", "hold"} and self._desktop_geometry is not None:
+            width, height = await self._desktop_geometry()
+            payload_args.setdefault("desktop_width", width)
+            payload_args.setdefault("desktop_height", height)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
             request_id,
@@ -527,7 +534,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 "request_id": request_id,
                 "workspace_id": self.workspace_id,
                 "action": action,
-                "args": dict(args or {}),
+                "args": payload_args,
             },
             timeout,
         )
@@ -596,8 +603,23 @@ async def create_harness_accessor(
         except RunnerOfflineError as exc:
             raise RunnerAccessorError(f"{event} failed: {exc}") from exc
 
+    from apps.runners.desktop import (
+        DEFAULT_DESKTOP_HEIGHT,
+        DEFAULT_DESKTOP_WIDTH,
+    )
+
+    async def _desktop_geometry() -> tuple[int, int]:
+        """Return the workspace's configured desktop framebuffer size."""
+        current = await sync_to_async(service.workspaces.get_by_id)(
+            _uuid.UUID(workspace_id)
+        )
+        if current is None:
+            return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+        return int(current.desktop_width), int(current.desktop_height)
+
     return RunnerWorkspaceAccessor(
         workspace_id,
         emit=_emit,
         default_timeout=default_timeout,
+        desktop_geometry=_desktop_geometry,
     )

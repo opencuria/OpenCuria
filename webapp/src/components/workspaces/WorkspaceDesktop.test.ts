@@ -141,4 +141,25 @@ describe('WorkspaceDesktop leases', () => {
     expect(store.isOpen).toBe(false)
     expect(store.isConnected).toBe(false)
   })
+
+  it('does not expose live screen-size or rotate controls', async () => {
+    const store = useDesktopStore()
+    store.open()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    const wrapper = mount(WorkspaceDesktop, {
+      props: { workspaceId: 'ws-1' },
+      global: {
+        stubs: {
+          Button: { template: '<button v-bind="$attrs"><slot /></button>' },
+          LoadingSpinner: { template: '<div />' },
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Screen size')
+    expect(wrapper.text()).not.toContain('Rotate')
+    expect(wrapper.get('iframe').attributes('src')).toContain('resize=scale')
+  })
 })

@@ -49,6 +49,7 @@ describe('HarnessDesktopMini', () => {
     const iframe = wrapper.get('iframe')
     expect(iframe.attributes('src')).toContain('/ws/desktop/ws-1/')
     expect(iframe.attributes('src')).toContain('token=tok')
+    expect(iframe.attributes('src')).toContain('resize=scale')
     expect(wrapper.text()).toContain('LIVE')
   })
 
@@ -80,5 +81,8 @@ describe('HarnessDesktopMini', () => {
 
     expect(getDesktopStatus).not.toHaveBeenCalled()
     expect(wrapper.get('iframe').attributes('src')).toContain('/ws/desktop/ws-1/')
+    expect(wrapper.get('iframe').attributes('src')).toContain('resize=scale')
+    const frame = wrapper.get('[data-testid="harness-desktop-mini"] > div')
+    expect(frame.attributes('style')).toContain('1920 / 1080')
   })
 })

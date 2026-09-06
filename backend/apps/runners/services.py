@@ -34,6 +34,11 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .desktop import (
+    DEFAULT_DESKTOP_HEIGHT,
+    DEFAULT_DESKTOP_WIDTH,
+    validate_desktop_geometry,
+)
 from .exceptions import (
     NoAvailableRunnerError,
     RunnerNotFoundError,
@@ -719,6 +724,8 @@ class RunnerService:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        desktop_width: int | None = None,
+        desktop_height: int | None = None,
         env_vars: dict[str, str] | None = None,
         files: list | None = None,
         ssh_keys: list[str] | None = None,
@@ -846,6 +853,11 @@ class RunnerService:
                 requested_disk_size_gb=resolved_qemu_disk_size_gb,
             )
 
+        resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
+            DEFAULT_DESKTOP_WIDTH if desktop_width is None else desktop_width,
+            DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height,
+        )
+
         # Create records
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, repos, workspace_id)
@@ -857,6 +869,8 @@ class RunnerService:
             qemu_vcpus=resolved_qemu_vcpus,
             qemu_memory_mb=resolved_qemu_memory_mb,
             qemu_disk_size_gb=resolved_qemu_disk_size_gb,
+            desktop_width=resolved_desktop_width,
+            desktop_height=resolved_desktop_height,
             base_image_instance=selected_image,
             created_by=user,
         )
@@ -925,6 +939,8 @@ class RunnerService:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        desktop_width: int | None = None,
+        desktop_height: int | None = None,
     ) -> "Workspace":
         """Update mutable workspace metadata and attached credentials."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
@@ -1062,6 +1078,23 @@ class RunnerService:
                             "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
                         },
                     )
+
+        if desktop_width is not None or desktop_height is not None:
+            resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
+                workspace.desktop_width if desktop_width is None else desktop_width,
+                workspace.desktop_height if desktop_height is None else desktop_height,
+            )
+            if (
+                resolved_desktop_width != workspace.desktop_width
+                or resolved_desktop_height != workspace.desktop_height
+            ):
+                workspace = await sync_to_async(
+                    self.workspaces.update_desktop_geometry
+                )(
+                    workspace,
+                    desktop_width=resolved_desktop_width,
+                    desktop_height=resolved_desktop_height,
+                )
 
         return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
 
@@ -1841,6 +1874,8 @@ class RunnerService:
             {
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
+                "desktop_width": workspace.desktop_width,
+                "desktop_height": workspace.desktop_height,
             },
         )
 
@@ -2920,13 +2955,13 @@ RUN apt-get update && apt-get install -y \\
 RUN mkdir -p /root/.vnc \\
     && touch /root/.vnc/.de-was-selected \\
     && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
-    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
+    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: false\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
     && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry 1920x1080 -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -AcceptSetDesktopSize -SendCutText -AcceptCutText >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry "$GEOMETRY" -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -SendCutText -AcceptCutText >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
     && printf '#!/bin/bash\\nfor pid in $(pgrep -f "Xvnc.*:1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
     && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 """
@@ -4194,12 +4229,16 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             qemu_vcpus = source_workspace.qemu_vcpus
             qemu_memory_mb = source_workspace.qemu_memory_mb
             qemu_disk_size_gb = source_workspace.qemu_disk_size_gb
+            desktop_width = source_workspace.desktop_width
+            desktop_height = source_workspace.desktop_height
         elif image.build_job is not None:
             runner = image.build_job.runner
             runtime_type = image.build_job.image_definition.runtime_type
             qemu_vcpus = None
             qemu_memory_mb = None
             qemu_disk_size_gb = None
+            desktop_width = DEFAULT_DESKTOP_WIDTH
+            desktop_height = DEFAULT_DESKTOP_HEIGHT
         else:
             raise ValueError(
                 f"Image artifact '{image_artifact_id}' is missing its source runtime metadata"
@@ -4255,6 +4294,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            desktop_width=desktop_width,
+            desktop_height=desktop_height,
             base_image_instance=image,
             created_by=user,
         )

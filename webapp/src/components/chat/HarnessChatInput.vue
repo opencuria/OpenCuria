@@ -782,7 +782,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             class="h-8 w-8 shrink-0 rounded-full transition-all"
             :class="
               canStop
-                ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                 : 'bg-muted text-muted-foreground'
             "
             title="Stop current run"

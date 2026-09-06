@@ -256,6 +256,33 @@ async def test_desktop_action_returns_screenshot_payload() -> None:
     assert payload["args"] == {"full": True}
 
 
+async def test_desktop_action_ensure_includes_geometry() -> None:
+    """ensure/hold attach the workspace framebuffer size for Xvnc start."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "ok": True,
+                "display": ":1",
+                "port": 6901,
+            }
+        )
+
+    async def geometry() -> tuple[int, int]:
+        return 1280, 720
+
+    transport.auto_reply = auto_reply
+    accessor = _accessor(transport, desktop_geometry=geometry)
+    result = await accessor.desktop_action("ensure")
+    assert result["ok"] is True
+    payload = _request_id(transport, "harness:desktop_action")
+    assert payload["action"] == "ensure"
+    assert payload["args"] == {"desktop_width": 1280, "desktop_height": 720}
+
+
 async def test_desktop_action_runner_error_raises() -> None:
     """Runner-reported desktop errors surface as RunnerAccessorError."""
     transport = FakeTransport()

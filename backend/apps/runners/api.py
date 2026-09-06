@@ -139,6 +139,8 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         qemu_vcpus=workspace.qemu_vcpus,
         qemu_memory_mb=workspace.qemu_memory_mb,
         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+        desktop_width=workspace.desktop_width,
+        desktop_height=workspace.desktop_height,
         created_by_id=workspace.created_by_id,
         last_activity_at=workspace.last_activity_at,
         auto_stop_timeout_minutes=auto_stop_timeout_minutes,
@@ -573,6 +575,8 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
+            desktop_width=payload.desktop_width,
+            desktop_height=payload.desktop_height,
             env_vars=resolved.env_vars,
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
@@ -937,6 +941,8 @@ async def update_workspace(
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
+            desktop_width=payload.desktop_width,
+            desktop_height=payload.desktop_height,
         )
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
@@ -948,6 +954,8 @@ async def update_workspace(
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+            desktop_width=workspace.desktop_width,
+            desktop_height=workspace.desktop_height,
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)

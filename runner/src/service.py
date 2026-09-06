@@ -85,6 +85,10 @@ DESKTOP_DISPLAY = ":1"
 DESKTOP_HOME = "/root"
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
+MIN_DESKTOP_WIDTH = 800
+MAX_DESKTOP_WIDTH = 3840
+MIN_DESKTOP_HEIGHT = 600
+MAX_DESKTOP_HEIGHT = 2160
 COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_HOLDER_VIEWER = "viewer"
@@ -1338,9 +1342,68 @@ class WorkspaceService:
             computer_use_active=bool(session.computeruse_run_ids),
         )
 
+    @staticmethod
+    def _resolve_desktop_geometry(
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """Return a sanitized even framebuffer size for Xvnc."""
+
+        def _coerce(value: int | None, default: int, minimum: int, maximum: int) -> int:
+            if value is None:
+                return default
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            if parsed % 2 != 0:
+                parsed -= 1
+            return max(minimum, min(maximum, parsed))
+
+        return (
+            _coerce(
+                width, DEFAULT_DESKTOP_WIDTH, MIN_DESKTOP_WIDTH, MAX_DESKTOP_WIDTH
+            ),
+            _coerce(
+                height, DEFAULT_DESKTOP_HEIGHT, MIN_DESKTOP_HEIGHT, MAX_DESKTOP_HEIGHT
+            ),
+        )
+
+    @staticmethod
+    def _desktop_start_command(width: int, height: int) -> str:
+        """Return the shell used to start Xvnc at a fixed geometry."""
+        geometry = f"{width}x{height}"
+        return (
+            "set -e\n"
+            "export DISPLAY=:1\n"
+            "export HOME=/root\n"
+            "/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\n"
+            "mkdir -p /root/.vnc\n"
+            "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
+            f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
+            "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
+            "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
+            "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
+            "-AcceptPointerEvents -SendCutText -AcceptCutText "
+            ">>/root/.vnc/server.log 2>&1 &\n"
+            "for _ in $(seq 1 120); do\n"
+            "  if [ -e /tmp/.X11-unix/X1 ]; then\n"
+            "    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\n"
+            '    echo "Desktop session started on :1 (ws port 6901)"\n'
+            "    exit 0\n"
+            "  fi\n"
+            "  sleep 0.25\n"
+            "done\n"
+            'echo "Desktop session failed to start" >&2\n'
+            "exit 1\n"
+        )
+
     async def ensure_desktop_process(
         self,
         workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Start the shared KasmVNC process without acquiring a lease.
 
@@ -1378,12 +1441,13 @@ class WorkspaceService:
 
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
+        resolved_width, resolved_height = self._resolve_desktop_geometry(width, height)
 
         log = logger.bind(workspace_id=str(workspace_id))
 
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
-            ["/usr/local/bin/opencuria-desktop-start"],
+            ["bash", "-lc", self._desktop_start_command(resolved_width, resolved_height)],
             env={"HOME": "/root", "DISPLAY": ":1"},
         )
         if exit_code != 0:
@@ -1406,10 +1470,16 @@ class WorkspaceService:
         *,
         holder: str,
         run_id: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Ensure the desktop process and acquire a viewer or computer-use lease."""
         kind = self._parse_desktop_holder(holder)
-        session = await self.ensure_desktop_process(workspace_id)
+        session = await self.ensure_desktop_process(
+            workspace_id,
+            width=width,
+            height=height,
+        )
         if kind == DESKTOP_HOLDER_VIEWER:
             session.viewer_held = True
         else:
@@ -1491,9 +1561,17 @@ class WorkspaceService:
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Acquire the viewer lease and ensure the desktop process is running."""
-        return await self.acquire_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+        return await self.acquire_desktop(
+            workspace_id,
+            holder=DESKTOP_HOLDER_VIEWER,
+            width=width,
+            height=height,
+        )
 
     async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
         """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
@@ -1630,7 +1708,11 @@ class WorkspaceService:
         log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
 
         if action == "ensure":
-            session = await self.ensure_desktop_process(workspace_id)
+            session = await self.ensure_desktop_process(
+                workspace_id,
+                width=payload.get("desktop_width"),
+                height=payload.get("desktop_height"),
+            )
             return {
                 "ok": True,
                 "display": DESKTOP_DISPLAY,
@@ -1643,6 +1725,8 @@ class WorkspaceService:
                 workspace_id,
                 holder=holder,
                 run_id=payload.get("run_id"),
+                width=payload.get("desktop_width"),
+                height=payload.get("desktop_height"),
             )
             return {
                 "ok": True,

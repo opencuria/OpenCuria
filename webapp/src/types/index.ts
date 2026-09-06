@@ -210,6 +210,8 @@ export interface Workspace {
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
+  desktop_width: number
+  desktop_height: number
   created_by_id: number
   last_activity_at: string
   auto_stop_timeout_minutes: number | null
@@ -239,6 +241,8 @@ export interface WorkspaceCreateIn {
   qemu_vcpus?: number
   qemu_memory_mb?: number
   qemu_disk_size_gb?: number
+  desktop_width?: number
+  desktop_height?: number
   image_id: string
 }
 
@@ -248,6 +252,8 @@ export interface WorkspaceUpdateIn {
   qemu_vcpus?: number
   qemu_memory_mb?: number
   qemu_disk_size_gb?: number
+  desktop_width?: number
+  desktop_height?: number
 }
 
 export interface WorkspaceUpdateOut {
@@ -260,6 +266,8 @@ export interface WorkspaceUpdateOut {
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
+  desktop_width: number
+  desktop_height: number
 }
 
 export interface WorkspaceCreateOut {

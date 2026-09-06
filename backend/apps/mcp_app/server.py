@@ -12,6 +12,7 @@ Tools and their required permissions
 - list_workspaces        → workspaces:read
 - get_workspace          → workspaces:read
 - create_workspace       → workspaces:create
+- update_workspace       → workspaces:update
 - stop_workspace         → workspaces:stop
 - resume_workspace       → workspaces:resume
 - remove_workspace       → workspaces:delete
@@ -134,8 +135,42 @@ _TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "Optional image artifact UUID to start workspace from.",
                 },
+                "desktop_width": {
+                    "type": "integer",
+                    "description": "Fixed desktop width in pixels (default 1920).",
+                },
+                "desktop_height": {
+                    "type": "integer",
+                    "description": "Fixed desktop height in pixels (default 1080).",
+                },
             },
             "required": ["name"],
+        },
+    ),
+    Tool(
+        name="update_workspace",
+        description="Update workspace metadata, including the fixed desktop size.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Workspace UUID.",
+                },
+                "name": {"type": "string", "description": "New workspace name."},
+                "desktop_width": {
+                    "type": "integer",
+                    "description": "Fixed desktop width in pixels.",
+                },
+                "desktop_height": {
+                    "type": "integer",
+                    "description": "Fixed desktop height in pixels.",
+                },
+                "qemu_vcpus": {"type": "integer"},
+                "qemu_memory_mb": {"type": "integer"},
+                "qemu_disk_size_gb": {"type": "integer"},
+            },
+            "required": ["workspace_id"],
         },
     ),
     Tool(
@@ -541,6 +576,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspaces": APIKeyPermission.WORKSPACES_READ,
     "get_workspace": APIKeyPermission.WORKSPACES_READ,
     "create_workspace": APIKeyPermission.WORKSPACES_CREATE,
+    "update_workspace": APIKeyPermission.WORKSPACES_UPDATE,
     "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
     "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
@@ -698,6 +734,8 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "status": str(workspace.status),
         "runner_id": str(workspace.runner_id),
         "runtime_type": str(workspace.runtime_type),
+        "desktop_width": workspace.desktop_width,
+        "desktop_height": workspace.desktop_height,
         "created_at": workspace.created_at.isoformat(),
     }
     return _text(result)
@@ -725,6 +763,8 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
     repos = args.get("repos", [])
     runtime_type = args.get("runtime_type", "docker")
+    desktop_width = args.get("desktop_width")
+    desktop_height = args.get("desktop_height")
     image_artifact_id = None
     if args.get("image_artifact_id"):
         try:
@@ -744,6 +784,8 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             credentials=[],
             runner_id=runner_id,
             image_artifact_id=image_artifact_id,
+            desktop_width=desktop_width,
+            desktop_height=desktop_height,
             user=api_key.user,
             organization_id=org_id,
         )
@@ -761,7 +803,57 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
                 "message": "Workspace creation started. Use get_workspace to check status.",
             }
         )
-    except (NotFoundError, ConflictError) as e:
+    except (NotFoundError, ConflictError, ValueError) as e:
+        return _error(str(e))
+
+
+def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
+    """Update mutable workspace metadata, including desktop geometry."""
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import NotFoundError, ConflictError
+
+    import asyncio
+    import uuid as _uuid
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    svc = get_runner_service()
+
+    async def _update():
+        return await svc.update_workspace(
+            workspace_id,
+            name=args.get("name"),
+            qemu_vcpus=args.get("qemu_vcpus"),
+            qemu_memory_mb=args.get("qemu_memory_mb"),
+            qemu_disk_size_gb=args.get("qemu_disk_size_gb"),
+            desktop_width=args.get("desktop_width"),
+            desktop_height=args.get("desktop_height"),
+        )
+
+    try:
+        loop = asyncio.new_event_loop()
+        updated = loop.run_until_complete(_update())
+        loop.close()
+        return _text(
+            {
+                "id": str(updated.id),
+                "name": updated.name,
+                "desktop_width": updated.desktop_width,
+                "desktop_height": updated.desktop_height,
+                "updated_at": updated.updated_at.isoformat(),
+            }
+        )
+    except (NotFoundError, ConflictError, ValueError) as e:
         return _error(str(e))
 
 
@@ -2116,6 +2208,7 @@ _TOOL_HANDLERS = {
     "list_workspaces": _call_list_workspaces,
     "get_workspace": _call_get_workspace,
     "create_workspace": _call_create_workspace,
+    "update_workspace": _call_update_workspace,
     "stop_workspace": _call_stop_workspace,
     "resume_workspace": _call_resume_workspace,
     "remove_workspace": _call_remove_workspace,

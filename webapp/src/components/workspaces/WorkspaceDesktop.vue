@@ -7,21 +7,17 @@ import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { X, Monitor, RefreshCw, Minus, RotateCw, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
+import { X, Monitor, RefreshCw, Minus, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
+import { useWorkspaceStore } from '@/stores/workspaces'
+import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
 
 const props = defineProps<{
   workspaceId: string
 }>()
 
 const desktopStore = useDesktopStore()
+const workspaceStore = useWorkspaceStore()
 const notifications = useNotificationStore()
 const error = ref<string | null>(null)
 const clipboardBusy = ref(false)
@@ -31,80 +27,46 @@ const cleanupFns: (() => void)[] = []
 const viewportHostRef = ref<HTMLElement | null>(null)
 const viewportWidth = ref(0)
 const viewportHeight = ref(0)
-const viewportPreset = ref('auto')
-const rotatePreset = ref(false)
 let resizeObserver: ResizeObserver | null = null
 let iframeKeydownCleanup: (() => void) | null = null
 let isDispatchingSyntheticPasteShortcut = false
 
-type ViewportPreset = {
-  value: string
-  label: string
-  width: number
-  height: number
-}
-
-const VIEWPORT_PRESETS: ViewportPreset[] = [
-  { value: 'phone', label: 'Smartphone · 390×844', width: 390, height: 844 },
-  { value: 'tablet', label: 'Tablet · 768×1024', width: 768, height: 1024 },
-  { value: 'laptop', label: 'Laptop · 1366×768', width: 1366, height: 768 },
-  { value: 'desktop', label: 'Desktop · 1920×1080', width: 1920, height: 1080 },
-]
-
-const viewportPresetOptions = computed(() => [
-  { value: 'auto', label: 'Auto' },
-  ...VIEWPORT_PRESETS.map((preset) => ({ value: preset.value, label: preset.label })),
-])
-
-const selectedPreset = computed(() =>
-  VIEWPORT_PRESETS.find((preset) => preset.value === viewportPreset.value) ?? null,
-)
-const isCustomPreset = computed(() => selectedPreset.value !== null)
-
-const presetWidth = computed(() => {
-  if (!selectedPreset.value) return 0
-  return rotatePreset.value ? selectedPreset.value.height : selectedPreset.value.width
-})
-
-const presetHeight = computed(() => {
-  if (!selectedPreset.value) return 0
-  return rotatePreset.value ? selectedPreset.value.width : selectedPreset.value.height
+const desktopSize = computed(() => {
+  const workspace =
+    workspaceStore.workspaces.find((entry) => entry.id === props.workspaceId)
+    ?? (workspaceStore.activeWorkspace?.id === props.workspaceId
+      ? workspaceStore.activeWorkspace
+      : null)
+  return workspaceDesktopSize(workspace)
 })
 
 const viewportScale = computed(() => {
-  if (!selectedPreset.value) return 1
   if (viewportWidth.value <= 0 || viewportHeight.value <= 0) return 1
   const fitScale = Math.min(
-    viewportWidth.value / Math.max(presetWidth.value, 1),
-    viewportHeight.value / Math.max(presetHeight.value, 1),
+    viewportWidth.value / Math.max(desktopSize.value.width, 1),
+    viewportHeight.value / Math.max(desktopSize.value.height, 1),
   )
   return Math.max(Math.min(fitScale, 1), 0.1)
 })
 
-const scaledFrameStyle = computed<CSSProperties>(() => {
-  if (!selectedPreset.value) return {}
-  return {
-    width: `${presetWidth.value}px`,
-    height: `${presetHeight.value}px`,
-    transform: `scale(${viewportScale.value})`,
-    transformOrigin: 'center center',
-  }
-})
+const scaledFrameStyle = computed<CSSProperties>(() => ({
+  width: `${desktopSize.value.width}px`,
+  height: `${desktopSize.value.height}px`,
+  transform: `scale(${viewportScale.value})`,
+  transformOrigin: 'center center',
+}))
 
-const scaledIframeStyle = computed<CSSProperties>(() => {
-  if (!selectedPreset.value) return {}
-  return {
-    width: `${presetWidth.value}px`,
-    height: `${presetHeight.value}px`,
-  }
-})
+const scaledIframeStyle = computed<CSSProperties>(() => ({
+  width: `${desktopSize.value.width}px`,
+  height: `${desktopSize.value.height}px`,
+}))
 
 const desktopIframeSrc = computed(() => {
   if (!desktopStore.proxyUrl) return ''
   const token = localStorage.getItem('kern_access_token') || ''
   const config = getConfig()
   const base = config.wsBaseUrl || ''
-  return `${base}${desktopStore.proxyUrl}?token=${encodeURIComponent(token)}`
+  return buildDesktopIframeSrc(base, desktopStore.proxyUrl, token)
 })
 
 async function startDesktop(): Promise<void> {
@@ -183,11 +145,6 @@ async function takeControl(): Promise<void> {
   } finally {
     takeControlBusy.value = false
   }
-}
-
-function toggleRotatePreset(): void {
-  if (!isCustomPreset.value) return
-  rotatePreset.value = !rotatePreset.value
 }
 
 async function copyFromVmClipboard(): Promise<boolean> {
@@ -443,8 +400,6 @@ watch(
       if (previousWorkspaceId) await stopDesktopIfActive(previousWorkspaceId)
       error.value = null
       desktopStore.reset()
-      viewportPreset.value = 'auto'
-      rotatePreset.value = false
     }
   },
 )
@@ -453,13 +408,6 @@ watch(
   () => desktopIframeRef.value,
   () => {
     bindDesktopIframeKeydownListener()
-  },
-)
-
-watch(
-  () => viewportPreset.value,
-  (nextPreset) => {
-    if (nextPreset === 'auto') rotatePreset.value = false
   },
 )
 </script>
@@ -502,17 +450,7 @@ watch(
           v-else-if="desktopStore.isConnected && desktopStore.proxyUrl"
           class="absolute inset-0"
         >
-          <iframe
-            v-if="viewportPreset === 'auto'"
-            ref="desktopIframeRef"
-            :src="desktopIframeSrc"
-            class="h-full w-full border-0"
-            sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-            allow="clipboard-read; clipboard-write"
-            @load="bindDesktopIframeKeydownListener"
-          />
           <div
-            v-else
             class="flex h-full w-full items-center justify-center overflow-hidden p-2 sm:p-3"
           >
             <div
@@ -618,32 +556,6 @@ watch(
             </Button>
           </div>
         </div>
-
-        <div class="text-[11px] text-muted-foreground">Screen size</div>
-        <Select v-model="viewportPreset">
-          <SelectTrigger class="h-8 py-1 text-xs sm:h-9">
-            <SelectValue placeholder="Screen size" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="opt in viewportPresetOptions"
-              :key="opt.value"
-              :value="opt.value"
-            >
-              {{ opt.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
-          variant="outline"
-          size="sm"
-          :disabled="!isCustomPreset"
-          title="Rotate viewport preset"
-          @click="toggleRotatePreset"
-        >
-          <RotateCw :size="12" class="mr-1" />
-          Rotate
-        </Button>
 
         <div class="hidden min-h-0 flex-1 overflow-hidden pt-2 lg:flex">
           <slot name="sidebar-content" />

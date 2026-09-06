@@ -141,6 +141,20 @@ class Workspace(models.Model):
     qemu_vcpus = models.PositiveSmallIntegerField(null=True, blank=True)
     qemu_memory_mb = models.PositiveIntegerField(null=True, blank=True)
     qemu_disk_size_gb = models.PositiveIntegerField(null=True, blank=True)
+    desktop_width = models.PositiveIntegerField(
+        default=1920,
+        help_text=(
+            "Fixed Xvnc framebuffer width in pixels. Applied the next "
+            "time the desktop starts."
+        ),
+    )
+    desktop_height = models.PositiveIntegerField(
+        default=1080,
+        help_text=(
+            "Fixed Xvnc framebuffer height in pixels. Applied the next "
+            "time the desktop starts."
+        ),
+    )
     base_image_instance = models.ForeignKey(
         "runners.ImageInstance",
         on_delete=models.PROTECT,
