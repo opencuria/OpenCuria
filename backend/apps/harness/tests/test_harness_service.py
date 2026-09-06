@@ -26,6 +26,7 @@ from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -278,6 +279,43 @@ async def test_spawn_background_detaches_asgiref_executor() -> None:
 
     assert "executor" in seen
     assert seen["executor"] is not sentinel
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_failed_run_persists_error_without_task_exception(
+    harness_workspace, monkeypatch
+) -> None:
+    """Provider failures persist error finish and do not leak task exceptions."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+
+    class TimeoutProvider(FakeProvider):
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            raise ProviderTimeoutError("SSE read timed out", provider="fake")
+            yield Delta(text="unused")  # pragma: no cover
+
+    service, _, _ = _service(provider=TimeoutProvider([]))
+    session = await _db_create_session(harness_workspace)
+    assistant = await service.start_run(
+        session,
+        "will timeout",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    task = service._tasks.get(str(session.id))
+    if task is not None:
+        await task
+        assert task.exception() is None
+    assistant.refresh_from_db()
+    assert assistant.finish == "error"
+    assert "timed out" in (assistant.error or "")
+    session.refresh_from_db()
+    assert session.status == "idle"
 
 
 @pytest.mark.django_db(transaction=True)

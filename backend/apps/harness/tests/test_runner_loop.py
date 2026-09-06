@@ -17,6 +17,8 @@ from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderAuthError,
+    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -708,3 +710,77 @@ async def test_send_logs_emitter_errors_without_raising() -> None:
         emit=boom,
     )
     await runner._send({"type": "step_start"})
+
+
+class _FlakyTimeoutProvider(FakeProvider):
+    """Fail the first N stream attempts with a timeout, then succeed."""
+
+    def __init__(self, failures: int, steps: list[list[Delta]]) -> None:
+        super().__init__(steps)
+        self.failures = failures
+        self.attempts = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts: ChatOptions | None = None,
+    ) -> AsyncIterator[Delta]:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderTimeoutError("SSE read timed out", provider="fake")
+        async for delta in super().chat_stream(model, messages, tools, opts):
+            yield delta
+
+
+async def test_transient_timeout_retries_then_succeeds(monkeypatch) -> None:
+    """A single timeout is retried and the run completes."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    provider = _FlakyTimeoutProvider(1, [_text_step("recovered")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "recovered"
+    assert provider.attempts == 2
+
+
+async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None:
+    """Six timeouts (1 + 5 retries) surface the original error."""
+    from apps.harness.provider_retry import RETRY_MAX_RETRIES
+
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    provider = _FlakyTimeoutProvider(99, [_text_step("never")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    with pytest.raises(ProviderTimeoutError, match="SSE read timed out"):
+        await runner.run("go", "build", "m", "build", opts)
+    assert provider.attempts == RETRY_MAX_RETRIES + 1
+
+
+async def test_auth_error_is_not_retried(monkeypatch) -> None:
+    """Auth failures fail the step immediately."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+
+    class AuthFailProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.attempts = 0
+
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            self.attempts += 1
+            raise ProviderAuthError("nope", provider="fake")
+            yield Delta(text="unused")  # pragma: no cover
+
+    provider = AuthFailProvider()
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    with pytest.raises(ProviderAuthError):
+        await runner.run("go", "build", "m", "build", opts)
+    assert provider.attempts == 1

@@ -453,7 +453,7 @@ class HarnessService:
             )
         )
         self._tasks[key] = task
-        task.add_done_callback(lambda _t, _k=key: self._tasks.pop(_k, None))
+        task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
         if session.parent_id is None and prior_user_messages == 0:
             self._spawn_background(
                 self._generate_title(
@@ -832,6 +832,19 @@ class HarnessService:
             context=contextvars.Context(),
         )
 
+    def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
+        """Drop the run task and retrieve any leftover exception."""
+        self._tasks.pop(key, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "harness_background_task_failed",
+                session_id=key,
+                error=str(exc),
+            )
+
     @staticmethod
     async def _await_in_thread_sensitive_context(coro: Awaitable[None]) -> None:
         """Await *coro* with a dedicated thread-sensitive ORM executor."""
@@ -996,7 +1009,6 @@ class HarnessService:
             )
             await self._fail_open_parts(assistant, state="error", output=str(exc))
             log.exception("harness_run_failed", session_id=key)
-            raise
         finally:
             self._runs.pop(key, None)
             self._tasks.pop(key, None)

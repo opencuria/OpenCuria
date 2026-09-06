@@ -84,6 +84,31 @@ class ProviderTimeoutError(ProviderError):
     """Raised when the provider request times out."""
 
 
+class ProviderHeaderTimeoutError(ProviderTimeoutError):
+    """Raised when response headers do not arrive in time."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        provider: str = "",
+        timeout_seconds: float = 0.0,
+    ) -> None:
+        ms = int(timeout_seconds * 1000)
+        super().__init__(
+            message or f"Provider response headers timed out after {ms}ms",
+            provider=provider,
+        )
+        self.timeout_seconds = timeout_seconds
+
+
+class ProviderStreamTimeoutError(ProviderTimeoutError):
+    """Raised when the SSE stream goes idle between chunks."""
+
+    def __init__(self, message: str = "", *, provider: str = "") -> None:
+        super().__init__(message or "SSE read timed out", provider=provider)
+
+
 class ProviderResponseError(ProviderError):
     """Raised for malformed or unexpected provider responses."""
 
@@ -98,13 +123,29 @@ class ProviderResponseError(ProviderError):
         super().__init__(message, provider=provider)
 
 
+#: OpenCode ``headerTimeout`` default (ms → seconds).
+DEFAULT_HEADER_TIMEOUT_SECONDS = 300.0
+
+#: OpenCode ``chunkTimeout`` default (ms → seconds).
+DEFAULT_CHUNK_TIMEOUT_SECONDS = 300.0
+
+
 @dataclass(frozen=True)
 class ChatOptions:
-    """Optional per-request settings for a chat completion."""
+    """Optional per-request settings for a chat completion.
+
+    Timeouts match OpenCode's fetch wrapper: wait up to
+    ``header_timeout_seconds`` for response headers, then up to
+    ``chunk_timeout_seconds`` of idle time between SSE chunks. ``None``
+    or ``<= 0`` disables that phase. ``timeout_seconds`` is an optional
+    wall-clock cap with no default.
+    """
 
     temperature: float | None = None
     max_tokens: int | None = None
-    timeout_seconds: float = 60.0
+    header_timeout_seconds: float | None = DEFAULT_HEADER_TIMEOUT_SECONDS
+    chunk_timeout_seconds: float | None = DEFAULT_CHUNK_TIMEOUT_SECONDS
+    timeout_seconds: float | None = None
     reasoning_effort: str | None = None
     tool_choice: str | None = None
 

@@ -56,6 +56,11 @@ from .images import hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import ASK, DENY, PermissionEvaluator
 from .prompts.composer import compose_system_prompt
+from .provider_retry import (
+    RETRY_MAX_RETRIES,
+    is_retryable_provider_error,
+    retry_delay,
+)
 from .providers.base import (
     ChatOptions,
     LLMMessage,
@@ -1149,7 +1154,7 @@ class HarnessRunner:
             messages, schemas, is_last_step
         )
         try:
-            text, calls, usage = await self._provider_step(
+            text, calls, usage = await self._provider_step_with_transient_retry(
                 model=model,
                 messages=request_messages,
                 schemas=request_schemas,
@@ -1175,7 +1180,7 @@ class HarnessRunner:
             retry_messages, retry_schemas, retry_opts = self._last_step_request(
                 compacted, schemas, is_last_step
             )
-            text, calls, usage = await self._provider_step(
+            text, calls, usage = await self._provider_step_with_transient_retry(
                 model=model,
                 messages=retry_messages,
                 schemas=retry_schemas,
@@ -1183,6 +1188,44 @@ class HarnessRunner:
                 chat_options=retry_opts,
             )
             return text, calls, usage, compacted
+
+    async def _provider_step_with_transient_retry(
+        self,
+        *,
+        model: str,
+        messages: list[LLMMessage],
+        schemas: list[ToolSchema],
+        step: int,
+        chat_options: ChatOptions | None = None,
+    ) -> tuple[str, list[_PendingToolCall], Usage]:
+        """Run one provider step, retrying transient timeouts and 5xx errors."""
+        attempt = 0
+        while True:
+            try:
+                return await self._provider_step(
+                    model=model,
+                    messages=messages,
+                    schemas=schemas,
+                    step=step,
+                    chat_options=chat_options,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if (
+                    not is_retryable_provider_error(exc)
+                    or attempt >= RETRY_MAX_RETRIES
+                ):
+                    raise
+                attempt += 1
+                delay = retry_delay(attempt)
+                log.warning(
+                    "provider_step_retry",
+                    attempt=attempt,
+                    delay_seconds=delay,
+                    error=str(exc),
+                )
+                await asyncio.sleep(delay)
 
     async def _provider_step(
         self,
