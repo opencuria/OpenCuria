@@ -52,3 +52,18 @@ export function resolveCatalogModel(
   if (!effective) return undefined
   return models.find((item) => item.id === effective)
 }
+
+/** Compact "Model Effort" label for conversation cards. */
+export function formatHarnessModelEffort(
+  modelId: string,
+  effort: string,
+  models: ProviderModel[],
+  defaultModel = '',
+): string {
+  const trimmedModel = modelId.trim()
+  const modelName = trimmedModel
+    ? (resolveCatalogModel(models, trimmedModel, defaultModel)?.name ?? trimmedModel)
+    : 'Auto'
+  const effortLabel = effort.trim() ? formatEffort(effort) : ''
+  return effortLabel ? `${modelName} ${effortLabel}` : modelName
+}

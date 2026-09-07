@@ -7,10 +7,11 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('03 — Provider (OpenRouter)', () => {
   test('should show Provider tab and form fields', async ({ authedPage: page }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=provider`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Provider (OpenRouter)' }).click();
+    await page.getByTestId('settings-nav-provider').first().click();
 
     await expect(page.getByText('OpenRouter Provider')).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('#provider-api-key')).toBeVisible();
@@ -24,10 +25,11 @@ test.describe('03 — Provider (OpenRouter)', () => {
     authedPage: page,
     testState,
   }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=provider`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Provider (OpenRouter)' }).click();
+    await page.getByTestId('settings-nav-provider').first().click();
     await page.waitForTimeout(500);
 
     await page.locator('#provider-base-url').fill('https://openrouter.ai/api/v1');

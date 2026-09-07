@@ -8,17 +8,18 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('04 — Image Definitions', () => {
   test('should create a Docker image definition', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Image Definitions' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
 
     // Click New Image Definition
     await page.getByRole('button', { name: /new image definition/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const imgName = `${testState.prefix}-docker-img`;
 
     // Fill name — first textbox (placeholder: "Python Dev Environment")
@@ -48,10 +49,11 @@ test.describe('04 — Image Definitions', () => {
   test('should show Docker image definition in list', async ({ authedPage: page, testState }) => {
     test.skip(!testState.imageDefinitionDockerId, 'No Docker image definition');
 
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Image Definitions' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
 
     const imgName = `${testState.prefix}-docker-img`;
@@ -97,9 +99,10 @@ test.describe('04 — Image Definitions', () => {
     console.log(`Created QEMU image def: ${created.id}`);
 
     // Verify it appears on page
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
-    await page.getByRole('button', { name: 'Image Definitions' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
     await expect(page.getByText(imgName)).toBeVisible({ timeout: 5_000 });
   });

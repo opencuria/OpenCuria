@@ -17,6 +17,8 @@ from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderAuthError,
+    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -170,7 +172,7 @@ def _runner(
     events: list[dict[str, Any]],
     *,
     agent_rules: dict[str, Any] | None = None,
-    permission_timeout: float = 5.0,
+    permission_timeout: float | None = None,
     auto_approve: bool = False,
     on_permission=None,
     files: dict[str, bytes] | None = None,
@@ -261,6 +263,133 @@ async def test_permission_ask_approve_runs_tool() -> None:
     assert any(event["type"] == "tool_completed" for event in events)
 
 
+async def test_once_approval_cached_within_run() -> None:
+    """A second identical ask call reuses the once-approval (1 callback)."""
+    calls: list[dict[str, Any]] = []
+
+    async def approve(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c1"),
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c2"),
+            _text_step("done twice"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=approve,
+    )
+    result = await runner.run("clean twice", "build", "m", "build", opts)
+    assert result.output == "done twice"
+    assert len(calls) == 1
+    assert sum(1 for e in events if e["type"] == "tool_completed") == 2
+
+
+async def test_always_approval_not_cached_as_once() -> None:
+    """'always' responses are not recorded in the once-approved cache."""
+    async def always(**kwargs):  # type: ignore[no-untyped-def]
+        return "always"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c1"),
+            _text_step("done"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=always,
+    )
+    result = await runner.run("clean", "build", "m", "build", opts)
+    assert result.output == "done"
+    assert ("bash", "rm -rf /tmp/x") not in opts.once_approved
+
+
+async def test_mode_rules_reach_decide_and_schemas() -> None:
+    """Mode-specific rules apply via the wired mode layer (happy path)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    provider = FakeProvider([_text_step("planned")])
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(
+            mode_rules={"plan": {"bash": "deny"}},
+        ),
+        accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
+        emit=emit,
+    )
+    from apps.harness.agents.definitions import get_agent
+
+    agent = get_agent("build")
+    assert runner._decide(agent, "bash", "ls", "plan") == "deny"
+    assert runner._decide(agent, "bash", "ls", "build") == "allow"
+    schemas = runner._filtered_schemas(agent, "plan", depth=0, max_depth=1)
+    assert "bash" not in [schema.name for schema in schemas]
+    schemas_build = runner._filtered_schemas(
+        agent, "build", depth=0, max_depth=1
+    )
+    assert "bash" in [schema.name for schema in schemas_build]
+
+
+async def test_tool_errors_include_raw_arguments() -> None:
+    """Unknown tools and failures echo truncated raw args (failure path)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    from apps.harness.runner import _PendingToolCall
+    from apps.harness.tools.base import ToolContext
+
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=default_tool_registry(),
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    raw = '{"path": "missing.txt", "marker": "SNIFF-ARGS-123"}'
+    call = _PendingToolCall(
+        call_id="c1",
+        name="nope-tool",
+        arguments={},
+        raw_arguments=raw,
+    )
+    from apps.harness.agents.definitions import get_agent
+
+    outcome = await runner._dispatch_tool_call(
+        call=call,
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert "SNIFF-ARGS-123" in outcome.message.content
+    errors = [e for e in events if e["type"] == "tool_error"]
+    assert errors and "SNIFF-ARGS-123" in errors[0]["error"]
+
+
 async def test_permission_ask_deny_skips_tool() -> None:
     """Deny returns a tool message so the model can react, then finishes."""
 
@@ -309,6 +438,36 @@ async def test_permission_timeout_auto_denies() -> None:
     assert any(event["type"] == "tool_error" for event in events)
 
 
+async def test_permission_waits_until_resolved() -> None:
+    """Without a timeout, ask waits until on_permission returns."""
+    gate = asyncio.Event()
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        await gate.wait()
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "echo hi"}, call_id="c1"),
+            _text_step("after approve"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=on_permission,
+    )
+    task = asyncio.create_task(runner.run("p", "build", "m", "build", opts))
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    gate.set()
+    result = await asyncio.wait_for(task, timeout=2.0)
+    assert result.output == "after approve"
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
 async def test_deny_tool_not_offered_to_provider() -> None:
     """Deny-decision tools are filtered from the provider tool schemas."""
     provider = FakeProvider([_text_step("no tools needed")])
@@ -329,6 +488,121 @@ async def test_explore_agent_filters_edit_tools() -> None:
     assert "edit" not in offered
     assert "write" not in offered
     assert "read" in offered
+
+
+async def test_explore_research_bash_skips_ask() -> None:
+    """Explore allows find/rg-style bash without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "find /workspace -name '*.py'"}),
+            _text_step("found"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, on_permission=on_permission)
+    result = await runner.run("research", "explore", "m", "build", opts)
+    assert result.output == "found"
+    assert called == []
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_triggers_ask_gate() -> None:
+    """Bash touching /etc hits the ask gate even when bash allows."""
+
+    async def approve(**kwargs):  # type: ignore[no-untyped-def]
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("gated"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=approve
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "gated"
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_auto_denies_without_callback() -> None:
+    """Without on_permission the external ask gate denies (failure path)."""
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("skipped"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, agent_rules={"bash": "allow"})
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "skipped"
+    errors = [event for event in events if event["type"] == "tool_error"]
+    assert errors and "external directory" in errors[0]["error"]
+
+
+async def test_workspace_bash_skips_external_gate() -> None:
+    """Workspace-scoped bash needs no permission callback (happy path)."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "ls /workspace/foo"}, call_id="c1"),
+            _text_step("listed"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=on_permission
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "listed"
+    assert called == []
+
+
+async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
+    """Combined ask is logged even when the global evaluator default-allows."""
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _capture(event: str, **kwargs: Any) -> None:
+        captured.append((event, kwargs))
+
+    monkeypatch.setattr("apps.harness.runner.log.debug", _capture)
+    monkeypatch.setattr("apps.harness.runner.log.info", _capture)
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "find /workspace"}),
+            _text_step("ok"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, on_permission=on_permission)
+    opts.session_id = "plan-1"
+    await runner.run("plan it", "plan", "m", "plan", opts)
+    decisions = [item for item in captured if item[0] == "permission_decision"]
+    pending = [item for item in captured if item[0] == "permission_ask_pending"]
+    assert decisions
+    assert decisions[0][1]["decision"] == "ask"
+    assert decisions[0][1]["tool"] == "bash"
+    assert decisions[0][1]["session_id"] == "plan-1"
+    assert pending
+    assert pending[0][1]["session_id"] == "plan-1"
 
 
 async def test_unknown_agent_raises() -> None:
@@ -708,3 +982,77 @@ async def test_send_logs_emitter_errors_without_raising() -> None:
         emit=boom,
     )
     await runner._send({"type": "step_start"})
+
+
+class _FlakyTimeoutProvider(FakeProvider):
+    """Fail the first N stream attempts with a timeout, then succeed."""
+
+    def __init__(self, failures: int, steps: list[list[Delta]]) -> None:
+        super().__init__(steps)
+        self.failures = failures
+        self.attempts = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts: ChatOptions | None = None,
+    ) -> AsyncIterator[Delta]:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderTimeoutError("SSE read timed out", provider="fake")
+        async for delta in super().chat_stream(model, messages, tools, opts):
+            yield delta
+
+
+async def test_transient_timeout_retries_then_succeeds(monkeypatch) -> None:
+    """A single timeout is retried and the run completes."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    provider = _FlakyTimeoutProvider(1, [_text_step("recovered")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "recovered"
+    assert provider.attempts == 2
+
+
+async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None:
+    """Six timeouts (1 + 5 retries) surface the original error."""
+    from apps.harness.provider_retry import RETRY_MAX_RETRIES
+
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    provider = _FlakyTimeoutProvider(99, [_text_step("never")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    with pytest.raises(ProviderTimeoutError, match="SSE read timed out"):
+        await runner.run("go", "build", "m", "build", opts)
+    assert provider.attempts == RETRY_MAX_RETRIES + 1
+
+
+async def test_auth_error_is_not_retried(monkeypatch) -> None:
+    """Auth failures fail the step immediately."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+
+    class AuthFailProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.attempts = 0
+
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            self.attempts += 1
+            raise ProviderAuthError("nope", provider="fake")
+            yield Delta(text="unused")  # pragma: no cover
+
+    provider = AuthFailProvider()
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    with pytest.raises(ProviderAuthError):
+        await runner.run("go", "build", "m", "build", opts)
+    assert provider.attempts == 1

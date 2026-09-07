@@ -3,8 +3,10 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
+import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 
 vi.mock('@/services/harness.api', async () => {
@@ -42,10 +44,6 @@ const catalog: ProviderModel[] = [
 ]
 
 const dropdownStubs = {
-  RouterLink: {
-    template: '<a :href="to"><slot /></a>',
-    props: ['to'],
-  },
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
@@ -67,6 +65,7 @@ describe('HarnessChatInput', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    resetProviderCatalogCache()
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
@@ -108,16 +107,58 @@ describe('HarnessChatInput', () => {
     )
   })
 
-  it('shows org settings CTA when provider config is missing', async () => {
+  it('starts as a single line and caps growth at 200px', async () => {
+    const wrapper = mountInput()
+    const textarea = wrapper.find('[data-testid="composer-textarea"]')
+    expect(textarea.classes()).toContain('min-h-10')
+    expect(textarea.classes()).toContain('md:min-h-9')
+    expect(textarea.classes()).toContain('max-h-[200px]')
+  })
+
+  it('clamps autosize height at 200px when content overflows', async () => {
+    const wrapper = mountInput()
+    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 500 })
+    await wrapper.find('textarea').setValue('line\n'.repeat(20))
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('200px')
+    expect(el.style.overflowY).toBe('auto')
+  })
+
+  it('resets to one line after send', async () => {
+    const wrapper = mountInput()
+    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 80 })
+    await wrapper.find('textarea').setValue('hello world')
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('80px')
+    await wrapper.find('textarea').trigger('keydown', { key: 'Enter' })
+    await wrapper.vm.$nextTick()
+    expect(el.style.height).toBe('')
+    expect(el.style.overflowY).toBe('')
+  })
+
+  it('opens the provider tab via event (no router navigation) when provider config is missing', async () => {
     getProviderConfigMock.mockRejectedValue(new Error('not found'))
     const wrapper = mountInput()
     await vi.waitFor(() => {
       expect(getProviderConfigMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    const link = wrapper.find('a[href="/org-settings?tab=provider"]')
-    expect(link.exists()).toBe(true)
-    expect(link.text()).toContain('Configure OpenRouter in Org Settings')
+    const events: Array<{ tab?: string }> = []
+    const listener = (e: Event) =>
+      events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
+    window.addEventListener(OPEN_SETTINGS_EVENT, listener)
+    try {
+      const cta = wrapper.find('[data-testid="composer-provider-cta"]')
+      expect(cta.exists()).toBe(true)
+      expect(cta.element.tagName).toBe('BUTTON')
+      expect(cta.text()).toContain('Configure OpenRouter in Org Settings')
+      await cta.trigger('click')
+      expect(events).toEqual([{ tab: 'provider' }])
+    } finally {
+      window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
+    }
   })
 
   it('shows org settings CTA when provider config has no API key', async () => {
@@ -134,7 +175,7 @@ describe('HarnessChatInput', () => {
       expect(getProviderConfigMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('a[href="/org-settings?tab=provider"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
     expect(listProviderModelsMock).not.toHaveBeenCalled()
   })
 
@@ -305,9 +346,19 @@ describe('HarnessChatInput', () => {
     const wrapper = mountInput({ attached: true })
     const card = wrapper.find('[data-testid="composer-card"]')
     expect(card.exists()).toBe(true)
-    expect(card.classes()).toContain('rounded-xl')
+    expect(card.classes()).toContain('rounded-3xl')
     expect(card.classes()).toContain('focus-within:border-primary')
+    expect(card.classes()).toContain('focus-within:shadow-md')
     expect(card.classes()).not.toContain('rounded-t-none')
     expect(card.classes()).not.toContain('border-t-0')
+  })
+
+  it('styles the stop button with primary accent colors when stoppable', () => {
+    const wrapper = mountInput({ stoppable: true })
+    const stop = wrapper.find('[data-testid="composer-stop"]')
+    expect(stop.exists()).toBe(true)
+    expect(stop.classes()).toContain('bg-primary')
+    expect(stop.classes()).toContain('text-primary-foreground')
+    expect(stop.classes()).not.toContain('bg-destructive')
   })
 })

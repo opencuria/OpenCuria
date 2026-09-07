@@ -9,7 +9,14 @@ import structlog
 from django.utils import timezone
 
 from . import models as perm_models
-from .evaluator import ALLOW, ASK, DENY, Decision, PermissionEvaluator
+from .evaluator import (
+    ALLOW,
+    ASK,
+    DEFAULT_GLOBAL_RULES,
+    DENY,
+    Decision,
+    PermissionEvaluator,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -76,6 +83,21 @@ class PermissionRequestRepository:
         """Return pending requests for *session_id*, optionally filtered by tool."""
         query = perm_models.PermissionRequest.objects.filter(
             session_id=session_id,
+            status=perm_models.PermissionRequestStatus.PENDING,
+        )
+        if tool:
+            query = query.filter(tool=tool)
+        return list(query.order_by("created_at"))
+
+    @staticmethod
+    def list_pending_for_sessions(
+        session_ids: list[uuid.UUID], *, tool: str | None = None
+    ) -> list[perm_models.PermissionRequest]:
+        """Return pending requests for any of *session_ids*."""
+        if not session_ids:
+            return []
+        query = perm_models.PermissionRequest.objects.filter(
+            session_id__in=session_ids,
             status=perm_models.PermissionRequestStatus.PENDING,
         )
         if tool:
@@ -152,7 +174,9 @@ class PermissionService:
         requests: type[PermissionRequestRepository] | None = None,
         allowlist: type[AllowlistRepository] | None = None,
     ) -> None:
-        self.evaluator = evaluator or PermissionEvaluator()
+        self.evaluator = evaluator or PermissionEvaluator(
+            global_rules=dict(DEFAULT_GLOBAL_RULES)
+        )
         self.requests = requests or PermissionRequestRepository
         self.allowlist = allowlist or AllowlistRepository
 

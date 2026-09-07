@@ -134,3 +134,113 @@ async def test_before_after_hooks_run_in_order(fake_accessor) -> None:
     result = await registry.execute("dummy", {"text": "x"}, _ctx(fake_accessor))
     assert result.output == "x"
     assert calls == ["before:dummy", "after:dummy:x"]
+
+
+async def test_registry_bash_tail_spills_full_output(fake_accessor) -> None:
+    """Bash (tail) spills the full output and hints at the spill path."""
+    big = "\n".join(f"line-{i}" for i in range(2100))
+
+    class _Bashish(_DummyTool):
+        name = "bashish"
+        truncate_direction = "tail"
+
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            return ToolResult(output=big)
+
+    registry = ToolRegistry()
+    registry.register(_Bashish())
+    result = await registry.execute(
+        "bashish", {}, _ctx(fake_accessor)
+    )
+    assert result.truncated is True
+    assert result.output.startswith("...")
+    assert "Full output: /workspace/.opencuria/tool-output/" in result.output
+    assert result.metadata["output_path"].startswith(
+        "/workspace/.opencuria/tool-output/"
+    )
+    assert result.metadata["output_path"].endswith(".log")
+    assert fake_accessor.files[result.metadata["output_path"]].decode() == big
+
+
+async def test_registry_head_default_spills_with_suffix_hint(fake_accessor) -> None:
+    """Head tools spill with a suffix hint and truncated metadata."""
+    from apps.harness.tools.truncate import MAX_BYTES as _MAX_BYTES
+
+    big = "y" * (_MAX_BYTES + 100)
+
+    class _Headish(_DummyTool):
+        name = "headish"
+
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            return ToolResult(output=big)
+
+    registry = ToolRegistry()
+    registry.register(_Headish())
+    result = await registry.execute("headish", {}, _ctx(fake_accessor))
+    assert result.truncated is True
+    assert "\n\nFull output: /workspace/.opencuria/tool-output/" in result.output
+    assert result.metadata["truncated"] is True
+    assert ".log" in result.metadata["output_path"]
+
+
+async def test_registry_task_hint_when_subagent_available(fake_accessor) -> None:
+    """Spill hint names the task tool when depth allows subagents."""
+    from apps.harness.tools.base import ToolContext
+
+    big = "z" * 60000
+
+    class _Taskish(_DummyTool):
+        name = "taskish"
+
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            return ToolResult(output=big)
+
+    registry = ToolRegistry()
+    registry.register(_Taskish())
+    registry.register(_DummyTool())  # dummy has name "dummy"; add task below
+
+    class _TaskTool(_DummyTool):
+        name = "task"
+
+    registry.register(_TaskTool())
+    ctx = ToolContext(
+        session_id="s", workspace_id="w", accessor=fake_accessor,
+        depth=0, max_depth=1, registry=registry,
+    )
+    result = await registry.execute("taskish", {}, ctx)
+    assert "Use the task tool (explore agent)" in result.output
+
+
+async def test_registry_spill_failure_does_not_break_tool(fake_accessor) -> None:
+    """Write failures during spill are swallowed; the preview survives."""
+    big = "q" * 60000
+
+    class _FailSpill(_DummyTool):
+        name = "failspill"
+
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            return ToolResult(output=big)
+
+    class _BrokenAccessor:
+        async def write_file(self, path, content, mode=0o644):  # type: ignore[no-untyped-def]
+            raise RuntimeError("disk gone")
+
+    from apps.harness.tools.base import ToolContext
+
+    registry = ToolRegistry()
+    registry.register(_FailSpill())
+    ctx = ToolContext(session_id="s", workspace_id="w", accessor=_BrokenAccessor())  # type: ignore[arg-type]
+    result = await registry.execute("failspill", {}, ctx)
+    assert result.truncated is True
+    assert "Full output:" not in result.output
+    assert "output_path" not in result.metadata
+
+
+async def test_registry_no_spill_when_not_truncated(fake_accessor) -> None:
+    """Small outputs never touch the accessor's write path."""
+    registry = ToolRegistry()
+    registry.register(_DummyTool())
+    before = dict(fake_accessor.files)
+    result = await registry.execute("dummy", {"text": "hi"}, _ctx(fake_accessor))
+    assert result.truncated is False
+    assert fake_accessor.files == before

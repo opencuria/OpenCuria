@@ -11,6 +11,13 @@ from datetime import datetime
 from typing import Any
 
 from ninja import Schema
+from pydantic import field_validator
+
+from .desktop import (
+    DEFAULT_DESKTOP_HEIGHT,
+    DEFAULT_DESKTOP_WIDTH,
+    validate_desktop_dimension,
+)
 
 # ---------------------------------------------------------------------------
 # Runner schemas
@@ -104,6 +111,8 @@ class WorkspaceOut(Schema):
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    desktop_width: int = DEFAULT_DESKTOP_WIDTH
+    desktop_height: int = DEFAULT_DESKTOP_HEIGHT
     created_by_id: int
     last_activity_at: datetime
     auto_stop_timeout_minutes: int | None = None
@@ -133,7 +142,19 @@ class WorkspaceCreateIn(Schema):
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    desktop_width: int = DEFAULT_DESKTOP_WIDTH
+    desktop_height: int = DEFAULT_DESKTOP_HEIGHT
     image_artifact_id: uuid.UUID
+
+    @field_validator("desktop_width")
+    @classmethod
+    def _validate_desktop_width(cls, value: int) -> int:
+        return validate_desktop_dimension(value, kind="width")
+
+    @field_validator("desktop_height")
+    @classmethod
+    def _validate_desktop_height(cls, value: int) -> int:
+        return validate_desktop_dimension(value, kind="height")
 
 
 class WorkspaceUpdateIn(Schema):
@@ -144,6 +165,22 @@ class WorkspaceUpdateIn(Schema):
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    desktop_width: int | None = None
+    desktop_height: int | None = None
+
+    @field_validator("desktop_width")
+    @classmethod
+    def _validate_desktop_width(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        return validate_desktop_dimension(value, kind="width")
+
+    @field_validator("desktop_height")
+    @classmethod
+    def _validate_desktop_height(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        return validate_desktop_dimension(value, kind="height")
 
 
 class WorkspaceUpdateOut(Schema):
@@ -158,6 +195,8 @@ class WorkspaceUpdateOut(Schema):
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    desktop_width: int = DEFAULT_DESKTOP_WIDTH
+    desktop_height: int = DEFAULT_DESKTOP_HEIGHT
 
 
 class WorkspaceCreateOut(Schema):
@@ -246,6 +285,37 @@ class DesktopClipboardReadOut(Schema):
     """Response schema for reading plain text from the VM clipboard."""
 
     text: str
+
+
+# ---------------------------------------------------------------------------
+# Background process schemas
+# ---------------------------------------------------------------------------
+
+
+class ProcessStartIn(Schema):
+    """Request schema for starting a background process."""
+
+    command: str
+    workdir: str = "/workspace"
+    env: dict[str, str] = {}
+    name: str = ""
+
+
+class ProcessOut(Schema):
+    """Response schema for a workspace background process."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    name: str
+    command: str
+    workdir: str
+    pid: int | None = None
+    log_path: str = ""
+    status: str
+    exit_code: int | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    updated_at: datetime
 
 
 # ---------------------------------------------------------------------------

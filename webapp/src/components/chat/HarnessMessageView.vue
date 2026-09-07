@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { User, ChevronDown } from '@lucide/vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
-import { formatMessageUsage, resolveMessageUsage } from '@/lib/harnessUsage'
+import { formatMessageHoverLine } from '@/lib/harnessUsage'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
 import {
   Collapsible,
   CollapsibleContent,
@@ -22,6 +24,7 @@ const props = defineProps<{
   message: HarnessMessage
   streaming?: boolean
   childSessionIds?: Record<string, string>
+  models?: ProviderModel[]
 }>()
 
 const emit = defineEmits<{
@@ -40,15 +43,36 @@ const showThinking = computed(
   () => props.streaming === true && !hasRunningToolOrSubtask(props.message.parts),
 )
 
+const catalog = ref<ProviderModel[]>(props.models ?? [])
+
 const usageLine = computed(() => {
   if (props.streaming || props.message.role !== 'assistant') return null
-  return formatMessageUsage(resolveMessageUsage(props.message))
+  return formatMessageHoverLine(props.message, props.models ?? catalog.value)
+})
+
+const streamingModelLine = computed(() => {
+  if (!props.streaming || props.message.role !== 'assistant') return null
+  const modelId = (props.message.model ?? '').trim()
+  const effort = (props.message.reasoning_effort ?? '').trim()
+  if (!modelId && !effort) return null
+  return formatHarnessModelEffort(modelId, effort, props.models ?? catalog.value)
+})
+
+onMounted(async () => {
+  if (props.models) return
+  try {
+    catalog.value = await loadProviderModelsCached()
+  } catch {
+    catalog.value = []
+  }
 })
 
 function childIdFor(part: HarnessPart): string | null {
   const fromMeta = part.meta?.['child_session_id']
   if (typeof fromMeta === 'string' && fromMeta) return fromMeta
-  const fromMap = props.childSessionIds?.[String(part.meta?.['subtask_id'] ?? '')]
+  const fromMap =
+    props.childSessionIds?.[String(part.meta?.['subtask_id'] ?? '')] ??
+    props.childSessionIds?.[part.id]
   return fromMap ?? null
 }
 
@@ -128,6 +152,7 @@ function setCompactionOpen(partId: string, open: boolean): void {
               v-if="block.part.type === 'subtask'"
               :part="block.part"
               :child-session-id="childIdFor(block.part)"
+              :models="models ?? catalog"
               @open-subtask="emit('openSubtask', $event)"
             />
             <HarnessPatchCard v-else-if="block.part.type === 'patch'" :part="block.part" />
@@ -180,13 +205,19 @@ function setCompactionOpen(partId: string, open: boolean): void {
       </div>
       <HarnessThinking v-if="showThinking" :class="blocks.length ? 'mt-2' : ''" />
       <p
+        v-if="streamingModelLine"
+        data-testid="harness-message-running-model"
+        class="mt-1 text-xs text-muted-foreground"
+      >
+        {{ streamingModelLine }}
+      </p>
+      <p
         v-if="usageLine"
         data-testid="harness-message-usage"
         class="mt-1 h-4 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
       >
         {{ usageLine }}
       </p>
-      <p v-if="message.error" class="mt-2 text-xs text-destructive">{{ message.error }}</p>
     </div>
   </div>
 </template>

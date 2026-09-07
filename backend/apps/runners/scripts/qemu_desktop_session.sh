@@ -96,7 +96,7 @@ desktop:
   resolution:
     width: 1920
     height: 1080
-  allow_resize: true
+  allow_resize: false
 network:
   protocol: http
   interface: 0.0.0.0
@@ -567,8 +567,9 @@ mkdir -p /root/.vnc
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
 # Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
+GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
 /usr/bin/Xvnc :1 \
-    -geometry 1920x1080 \
+    -geometry "$GEOMETRY" \
     -depth 24 \
     -rfbport 5901 \
     -SecurityTypes None \
@@ -579,9 +580,9 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
     -AlwaysShared \
     -AcceptKeyEvents \
     -AcceptPointerEvents \
-    -AcceptSetDesktopSize \
     -SendCutText \
     -AcceptCutText \
+    -AcceptSetDesktopSize=0 \
     >>/root/.vnc/server.log 2>&1 &
 
 for _ in $(seq 1 120); do
@@ -600,8 +601,8 @@ cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
 #!/bin/bash
 # Stop Xvnc and the XFCE session (including Plank / skippy-xd).
 for pattern in \
-    'Xvnc.*:1' \
-    'Xtigervnc.*:1' \
+    '^(/usr/bin/)?Xvnc :1' \
+    '^(/usr/bin/)?Xtigervnc :1' \
     'xfce4-session' \
     'xfwm4' \
     'xfce4-panel' \

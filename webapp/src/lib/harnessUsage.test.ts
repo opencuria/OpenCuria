@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
-import { formatMessageUsage, resolveMessageUsage } from './harnessUsage'
+import type { ProviderModel } from './harnessModels'
+import { formatMessageHoverLine, formatMessageUsage, resolveMessageUsage } from './harnessUsage'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -77,5 +78,53 @@ describe('formatMessageUsage', () => {
     expect(
       formatMessageUsage({ cost: 0, promptTokens: 0, completionTokens: 0 }),
     ).toBeNull()
+  })
+})
+
+const catalog: ProviderModel[] = [
+  {
+    id: 'acme/think',
+    name: 'Think',
+    reasoning_efforts: ['low', 'high'],
+    default_effort: 'high',
+    supports_tools: true,
+    context_length: 128_000,
+    max_output_tokens: 16_384,
+  },
+]
+
+describe('formatMessageHoverLine', () => {
+  it('joins catalog name, effort, and usage', () => {
+    expect(
+      formatMessageHoverLine(
+        makeMessage({
+          model: 'acme/think',
+          reasoning_effort: 'high',
+          cost: 0.0123,
+          tokens: { prompt: 1204, completion: 318, total: 1522 },
+        }),
+        catalog,
+      ),
+    ).toBe('Think · High · $0.0123 · 1,204 in · 318 out')
+  })
+
+  it('falls back to the model id and omits empty effort', () => {
+    expect(
+      formatMessageHoverLine(
+        makeMessage({
+          model: 'unknown/model',
+          cost: 0.01,
+          tokens: { prompt: 10, completion: 4, total: 14 },
+        }),
+        catalog,
+      ),
+    ).toBe('unknown/model · $0.0100 · 10 in · 4 out')
+  })
+
+  it('shows Auto and model when usage is zero', () => {
+    expect(formatMessageHoverLine(makeMessage({}), catalog)).toBe('Auto')
+    expect(
+      formatMessageHoverLine(makeMessage({ model: 'acme/think', reasoning_effort: 'low' }), catalog),
+    ).toBe('Think · Low')
   })
 })

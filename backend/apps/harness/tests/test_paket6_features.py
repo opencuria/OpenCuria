@@ -439,3 +439,28 @@ def test_question_request_model_persists() -> None:
     fresh = QuestionRequestRepository.get_by_id(request.id)
     assert fresh is not None
     assert fresh.answers == ["Ada"]
+
+
+@pytest.mark.django_db
+def test_list_pending_questions_for_session() -> None:
+    """Pending questions are listed per session and skip resolved rows."""
+    org_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    pending = QuestionRequestRepository.create(
+        organization_id=org_id,
+        session_id=session_id,
+        questions=[{"question": "Color?"}],
+    )
+    answered = QuestionRequestRepository.create(
+        organization_id=org_id,
+        session_id=session_id,
+        questions=[{"question": "Name?"}],
+    )
+    QuestionRequestRepository.resolve(answered, answers=["Ada"], status="answered")
+    QuestionRequestRepository.create(
+        organization_id=org_id,
+        session_id=uuid.uuid4(),
+        questions=[{"question": "Other session"}],
+    )
+    rows = QuestionRequestRepository.list_pending_for_session(session_id)
+    assert [row.id for row in rows] == [pending.id]

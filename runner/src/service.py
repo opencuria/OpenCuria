@@ -21,7 +21,7 @@ import tarfile
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -85,6 +85,10 @@ DESKTOP_DISPLAY = ":1"
 DESKTOP_HOME = "/root"
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
+MIN_DESKTOP_WIDTH = 800
+MAX_DESKTOP_WIDTH = 3840
+MIN_DESKTOP_HEIGHT = 600
+MAX_DESKTOP_HEIGHT = 2160
 COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_HOLDER_VIEWER = "viewer"
@@ -103,6 +107,157 @@ _CLICK_BUTTONS = {
     2: 2,
     3: 3,
 }
+# Ubuntu 22.04 ships xdotool 3.20160805, which has almost no key aliases
+# and treats a bare "--" as an invalid option. Map LLM-friendly names to
+# X11 keysyms that this version actually sends.
+_XDOTOOL_KEY_ALIASES = {
+    "enter": "Return",
+    "return": "Return",
+    "esc": "Escape",
+    "escape": "Escape",
+    "tab": "Tab",
+    "space": "space",
+    "spacebar": "space",
+    "backspace": "BackSpace",
+    "bksp": "BackSpace",
+    "delete": "Delete",
+    "del": "Delete",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "arrowup": "Up",
+    "arrowdown": "Down",
+    "arrowleft": "Left",
+    "arrowright": "Right",
+    "pageup": "Page_Up",
+    "pagedown": "Page_Down",
+    "pgup": "Page_Up",
+    "pgdn": "Page_Down",
+    "home": "Home",
+    "end": "End",
+    "insert": "Insert",
+    "ins": "Insert",
+    "capslock": "Caps_Lock",
+}
+_XDOTOOL_MODIFIER_ALIASES = {
+    "control": "ctrl",
+    "ctrl": "ctrl",
+    "command": "super",
+    "cmd": "super",
+    "meta": "super",
+    "win": "super",
+    "windows": "super",
+    "super": "super",
+    "option": "alt",
+    "alt": "alt",
+    "shift": "shift",
+}
+_XDOTOOL_KEY_FAILURE_MARKERS = (
+    "No such key name",
+    "Ignoring it",
+    "Invalid --option",
+)
+_XDOTOOL_FUNCTION_KEY_RE = re.compile(r"^f([1-9]|1[0-9]|2[0-4])$")
+
+BACKGROUND_PROCESS_DIR = "/workspace/.opencuria/processes"
+_BACKGROUND_PROCESS_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_BACKGROUND_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_BACKGROUND_STOP_GRACE_S = 2.0
+_BACKGROUND_STOP_POLL_S = 0.2
+
+
+def _collapse_xdotool_token(token: str) -> str:
+    """Return a case- and separator-insensitive lookup key."""
+    return token.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+
+
+def _normalize_xdotool_token(token: str, *, modifier: bool = False) -> str:
+    """Map one key or modifier name to an xdotool 3.20160805 token."""
+    raw = str(token).strip()
+    if not raw:
+        raise ValueError("key token must not be empty")
+    collapsed = _collapse_xdotool_token(raw)
+    if modifier:
+        alias = _XDOTOOL_MODIFIER_ALIASES.get(collapsed)
+        if alias is not None:
+            return alias
+        key_alias = _XDOTOOL_KEY_ALIASES.get(collapsed)
+        if key_alias is not None:
+            return key_alias
+        return raw
+    alias = _XDOTOOL_KEY_ALIASES.get(collapsed)
+    if alias is not None:
+        return alias
+    modifier_alias = _XDOTOOL_MODIFIER_ALIASES.get(collapsed)
+    if modifier_alias is not None:
+        return modifier_alias
+    function_key = _XDOTOOL_FUNCTION_KEY_RE.fullmatch(collapsed)
+    if function_key:
+        return f"F{function_key.group(1)}"
+    return raw
+
+
+def _normalize_xdotool_key_combo(key: str, modifiers: list[Any]) -> str:
+    """Build an xdotool key combo from a key name and optional modifiers."""
+    if not isinstance(modifiers, list):
+        raise ValueError("modifiers must be a list")
+    mod_tokens: list[str] = []
+    for item in modifiers:
+        if not isinstance(item, str):
+            raise ValueError("modifiers must be a list of strings")
+        stripped = item.strip()
+        if not stripped:
+            continue
+        mod_tokens.append(_normalize_xdotool_token(stripped, modifier=True))
+    parts = [part.strip() for part in str(key).split("+") if part.strip()]
+    if not parts:
+        raise ValueError("key must not be empty")
+    *combo_mods, key_part = parts
+    tokens = [
+        *mod_tokens,
+        *(
+            _normalize_xdotool_token(part, modifier=True)
+            for part in combo_mods
+        ),
+        _normalize_xdotool_token(key_part),
+    ]
+    return "+".join(tokens)
+
+
+def _xdotool_type_command(text: str) -> str:
+    """Build an xdotool type command compatible with Ubuntu 22.04."""
+    quoted = shlex.quote(text)
+    if text.startswith("-"):
+        return (
+            f"printf '%s' {quoted} | "
+            "xdotool type --delay 0 --clearmodifiers --file -"
+        )
+    return f"xdotool type --delay 0 --clearmodifiers {quoted}"
+
+
+def _xdotool_key_failed(exit_code: int, output: str) -> bool:
+    """Return True when xdotool did not actually deliver the key."""
+    if exit_code != 0:
+        return True
+    return any(marker in output for marker in _XDOTOOL_KEY_FAILURE_MARKERS)
+
+
+@dataclass
+class BackgroundProcess:
+    """Detached background process tracked in memory (runner owns liveness)."""
+
+    process_id: str
+    workspace_id: uuid.UUID
+    pid: int
+    command: str
+    workdir: str
+    log_path: str
+    exit_path: str
+    name: str = ""
+    started_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 @dataclass
@@ -147,8 +302,416 @@ class WorkspaceService:
         # Self-healing: tracks when each workspace was first found unreachable.
         # Cleared once the workspace becomes reachable again.
         self._unreachable_since: dict[uuid.UUID, float] = {}
+        # Background processes: workspace-scoped detached processes.
+        # The runner owns liveness (in-memory); the backend owns list/history.
+        self._background_processes: dict[uuid.UUID, dict[str, BackgroundProcess]] = {}
+        self._background_lock = asyncio.Lock()
 
-    # -- cache management ------------------------------------------------------
+    # -- background processes --------------------------------------------------
+
+    @staticmethod
+    def _sanitize_process_id(process_id: str) -> str:
+        """Validate a backend-assigned background process id."""
+        cleaned = (process_id or "").strip()
+        if not cleaned or not _BACKGROUND_PROCESS_ID_RE.match(cleaned):
+            raise ValueError(f"Invalid process_id: {process_id!r}")
+        return cleaned
+
+    @staticmethod
+    def _build_background_start_shell(
+        command: str,
+        log_path: str,
+        exit_path: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        """Build a detached start shell for a background process.
+
+        The wrapper sources the persistent credential env file, applies
+        per-process env overrides, then runs the command detached via
+        ``setsid`` and records the exit code in *exit_path*.
+
+        The command runs in a subshell so shell-terminating commands
+        (e.g. ``exit 3``) only terminate the subshell and the outer
+        shell still writes ``$?`` to the exit file.
+        """
+        env_assignments = " ".join(
+            f"{key}={shlex.quote(str(value))}"
+            for key, value in (extra_env or {}).items()
+            if _BACKGROUND_ENV_KEY_RE.match(str(key))
+        )
+        source = (
+            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
+            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi"
+        )
+        if env_assignments:
+            runner_cmd = f"{source}; export {env_assignments}; ( {command} )"
+        else:
+            runner_cmd = f"{source}; ( {command} )"
+        return (
+            f"mkdir -p {shlex.quote(BACKGROUND_PROCESS_DIR)} && "
+            f"rm -f {shlex.quote(exit_path)} && "
+            f"setsid bash -c {shlex.quote(runner_cmd + '; echo $? > ' + exit_path)}"
+            f" > {shlex.quote(log_path)} 2>&1 < /dev/null & echo $!"
+        )
+
+    async def _probe_background_pid(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        pid: int,
+    ) -> bool:
+        """Return True when *pid* is still alive inside the workspace."""
+        exit_code, _ = await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", f"kill -0 {int(pid)} 2>/dev/null"],
+            workdir="/workspace",
+        )
+        return exit_code == 0
+
+    async def _read_background_exit_code(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        exit_path: str,
+    ) -> int | None:
+        """Read the exit code recorded in *exit_path*, if any."""
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["cat", exit_path],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            return None
+        try:
+            return int(output.strip().split()[0])
+        except (IndexError, ValueError):
+            return None
+
+    async def _kill_background_pid(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        pid: int,
+        signal: str,
+    ) -> None:
+        """Best-effort signal delivery to a background process group."""
+        script = (
+            f"kill -{signal} -{int(pid)} 2>/dev/null || "
+            f"kill -{signal} {int(pid)} 2>/dev/null || true"
+        )
+        await runtime.exec_command_wait(
+            instance_id,
+            command=["sh", "-lc", script],
+            workdir="/workspace",
+        )
+
+    async def start_background_process(
+        self,
+        workspace_id: uuid.UUID,
+        process_id: str,
+        command: str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Start a detached background process inside a workspace.
+
+        Args:
+            workspace_id: Target workspace.
+            process_id: Backend-assigned unique id (used for log/exit files).
+            command: Shell command to run detached (non-empty).
+            workdir: Working directory, must be under ``/workspace``.
+            env: Optional per-process environment overrides.
+            name: Optional human-readable process name.
+
+        Returns:
+            Dict with ``process_id``, ``pid``, ``log_path``, ``exit_path``.
+        """
+        cleaned_process_id = self._sanitize_process_id(process_id)
+        if not (command or "").strip():
+            raise ValueError("command must not be empty")
+        safe_workdir = self._sanitize_path(workdir)
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+
+        extra_env = dict(env or {})
+        for key in extra_env:
+            if not _BACKGROUND_ENV_KEY_RE.match(str(key)):
+                raise ValueError(f"Invalid env key: {key!r}")
+
+        log_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log"
+        exit_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit"
+        start_shell = self._build_background_start_shell(
+            command.strip(), log_path, exit_path, extra_env
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=["sh", "-lc", start_shell],
+            workdir=safe_workdir,
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to start background process: {output}")
+        try:
+            pid = int(output.strip().split()[-1])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError(
+                f"Failed to parse background process pid: {output!r}"
+            ) from exc
+
+        entry = BackgroundProcess(
+            process_id=cleaned_process_id,
+            workspace_id=workspace_id,
+            pid=pid,
+            command=command.strip(),
+            workdir=safe_workdir,
+            log_path=log_path,
+            exit_path=exit_path,
+            name=name or "",
+        )
+        async with self._background_lock:
+            self._background_processes.setdefault(workspace_id, {})[
+                cleaned_process_id
+            ] = entry
+        logger.info(
+            "background_process_started",
+            workspace_id=str(workspace_id),
+            process_id=cleaned_process_id,
+            pid=pid,
+        )
+        return {
+            "process_id": cleaned_process_id,
+            "pid": pid,
+            "log_path": log_path,
+            "exit_path": exit_path,
+        }
+
+    async def _background_status_locked(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        entry: BackgroundProcess,
+    ) -> dict[str, Any]:
+        """Compute a live status dict for a tracked background process."""
+        running = await self._probe_background_pid(runtime, instance_id, entry.pid)
+        if running:
+            return {
+                "process_id": entry.process_id,
+                "status": "running",
+                "exit_code": None,
+                "pid": entry.pid,
+            }
+        exit_code = await self._read_background_exit_code(
+            runtime, instance_id, entry.exit_path
+        )
+        if exit_code is None:
+            return {
+                "process_id": entry.process_id,
+                "status": "unknown",
+                "exit_code": None,
+                "pid": entry.pid,
+            }
+        return {
+            "process_id": entry.process_id,
+            "status": "exited",
+            "exit_code": exit_code,
+            "pid": entry.pid,
+        }
+
+    def _get_background_entry(
+        self,
+        workspace_id: uuid.UUID,
+        process_id: str,
+    ) -> BackgroundProcess:
+        """Return the tracked entry or raise for unknown process ids."""
+        cleaned = self._sanitize_process_id(process_id)
+        entry = self._background_processes.get(workspace_id, {}).get(cleaned)
+        if entry is None:
+            raise ValueError(
+                f"Background process {cleaned} not found "
+                f"for workspace {workspace_id}"
+            )
+        return entry
+
+    async def get_background_status(
+        self,
+        workspace_id: uuid.UUID,
+        process_id: str,
+    ) -> dict[str, Any]:
+        """Return the live status of one tracked background process."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        async with self._background_lock:
+            entry = self._get_background_entry(workspace_id, process_id)
+        return await self._background_status_locked(runtime, info.instance_id, entry)
+
+    async def list_background_processes(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> list[dict[str, Any]]:
+        """Return live statuses for all tracked background processes."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        async with self._background_lock:
+            entries = list(self._background_processes.get(workspace_id, {}).values())
+        results: list[dict[str, Any]] = []
+        for entry in entries:
+            status = await self._background_status_locked(
+                runtime, info.instance_id, entry
+            )
+            results.append(
+                {
+                    **status,
+                    "command": entry.command,
+                    "workdir": entry.workdir,
+                    "log_path": entry.log_path,
+                    "name": entry.name,
+                    "started_at": entry.started_at.isoformat(),
+                }
+            )
+        return results
+
+    async def stop_background_process(
+        self,
+        workspace_id: uuid.UUID,
+        process_id: str,
+    ) -> dict[str, Any]:
+        """Stop a tracked background process and drop it from tracking.
+
+        Sends SIGTERM, waits up to a short grace period, then escalates to
+        SIGKILL. Already exited processes are cleaned up and reported as
+        exited.
+        """
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        async with self._background_lock:
+            entry = self._get_background_entry(workspace_id, process_id)
+
+        if not await self._probe_background_pid(runtime, info.instance_id, entry.pid):
+            exit_code = await self._read_background_exit_code(
+                runtime, info.instance_id, entry.exit_path
+            )
+            async with self._background_lock:
+                self._background_processes.get(workspace_id, {}).pop(
+                    entry.process_id, None
+                )
+            logger.info(
+                "background_process_already_exited",
+                workspace_id=str(workspace_id),
+                process_id=entry.process_id,
+                exit_code=exit_code,
+            )
+            return {
+                "process_id": entry.process_id,
+                "stopped": False,
+                "status": "exited" if exit_code is not None else "unknown",
+                "exit_code": exit_code,
+                "pid": entry.pid,
+            }
+
+        await self._kill_background_pid(runtime, info.instance_id, entry.pid, "TERM")
+        elapsed = 0.0
+        stopped = False
+        while elapsed <= _BACKGROUND_STOP_GRACE_S:
+            if not await self._probe_background_pid(
+                runtime, info.instance_id, entry.pid
+            ):
+                stopped = True
+                break
+            await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
+            elapsed += _BACKGROUND_STOP_POLL_S
+        if not stopped:
+            await self._kill_background_pid(
+                runtime, info.instance_id, entry.pid, "KILL"
+            )
+            stopped = True
+        exit_code = await self._read_background_exit_code(
+            runtime, info.instance_id, entry.exit_path
+        )
+        async with self._background_lock:
+            self._background_processes.get(workspace_id, {}).pop(
+                entry.process_id, None
+            )
+        logger.info(
+            "background_process_stopped",
+            workspace_id=str(workspace_id),
+            process_id=entry.process_id,
+            pid=entry.pid,
+        )
+        return {
+            "process_id": entry.process_id,
+            "stopped": stopped,
+            "status": "exited" if exit_code is not None else "unknown",
+            "exit_code": exit_code,
+            "pid": entry.pid,
+        }
+
+    async def _kill_all_background_processes(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        reason: str,
+    ) -> None:
+        """Best-effort kill of every tracked process for a workspace."""
+        async with self._background_lock:
+            entries = list(self._background_processes.get(workspace_id, {}).values())
+        if not entries:
+            return
+        try:
+            info = self._cache.get(workspace_id)
+            if info is None:
+                return
+            runtime = self._runtimes.get(info.runtime_type)
+            if runtime is None or not info.instance_id:
+                return
+            for entry in entries:
+                try:
+                    if await self._probe_background_pid(
+                        runtime, info.instance_id, entry.pid
+                    ):
+                        await self._kill_background_pid(
+                            runtime, info.instance_id, entry.pid, "TERM"
+                        )
+                except Exception:
+                    logger.exception(
+                        "background_process_kill_failed",
+                        workspace_id=str(workspace_id),
+                        process_id=entry.process_id,
+                        reason=reason,
+                    )
+            for entry in entries:
+                try:
+                    if await self._probe_background_pid(
+                        runtime, info.instance_id, entry.pid
+                    ):
+                        await self._kill_background_pid(
+                            runtime, info.instance_id, entry.pid, "KILL"
+                        )
+                except Exception:
+                    logger.exception(
+                        "background_process_kill_failed",
+                        workspace_id=str(workspace_id),
+                        process_id=entry.process_id,
+                        reason=reason,
+                    )
+        finally:
+            async with self._background_lock:
+                self._background_processes.pop(workspace_id, None)
+        logger.info(
+            "background_processes_killed",
+            workspace_id=str(workspace_id),
+            count=len(entries),
+            reason=reason,
+        )
+
+    # -- cache management --------------------------------------------------
 
     async def sync_from_runtime(self) -> None:
         """Rebuild the in-memory cache from live runtime state.
@@ -784,6 +1347,7 @@ class WorkspaceService:
             raise RuntimeError("Workspace has no instance assigned")
 
         await self.remove_workspace_credentials(runtime, info.instance_id, log)
+        await self._kill_all_background_processes(workspace_id, reason="stop")
         await self.release_desktop(
             workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
         )
@@ -889,6 +1453,7 @@ class WorkspaceService:
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove a workspace and clean up resources."""
         log = logger.bind(workspace_id=str(workspace_id))
+        await self._kill_all_background_processes(workspace_id, reason="remove")
         info = self._cache.pop(workspace_id, None)
         self._desktop_sessions.pop(workspace_id, None)
         self._desktop_recordings = {
@@ -911,6 +1476,9 @@ class WorkspaceService:
         was attempted. Returns ``False`` when the workspace was already absent.
         """
         log = logger.bind(workspace_id=str(workspace_id))
+        await self._kill_all_background_processes(
+            workspace_id, reason="cleanup_unknown"
+        )
         info = self._cache.pop(workspace_id, None)
         self._unreachable_since.pop(workspace_id, None)
 
@@ -1092,7 +1660,8 @@ class WorkspaceService:
                     "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
                     'sys.exit(0 if rc == 0 else 1)"; '
                     "else "
-                    "pgrep -f 'Xvnc.*:1|Xtigervnc.*:1' >/dev/null; "
+                    "pgrep -f '^(/usr/bin/)?Xvnc :1|^(/usr/bin/)?Xtigervnc :1' "
+                    ">/dev/null; "
                     "fi"
                 ),
             ],
@@ -1132,6 +1701,42 @@ class WorkspaceService:
                         "desktop_session_health_check_failed",
                         workspace_id=str(workspace_id),
                     )
+
+            processes: list[dict[str, Any]] = []
+            for entry in self._background_processes.get(workspace_id, {}).values():
+                try:
+                    info_for_proc = self._cache.get(workspace_id)
+                    runtime_for_proc = (
+                        self._runtimes.get(info_for_proc.runtime_type)
+                        if info_for_proc is not None
+                        else None
+                    )
+                    if info_for_proc is None or runtime_for_proc is None:
+                        raise RuntimeError("runtime unavailable")
+                    if not info_for_proc.instance_id:
+                        raise RuntimeError("no instance assigned")
+                    processes.append(
+                        await self._background_status_locked(
+                            runtime_for_proc,
+                            info_for_proc.instance_id,
+                            entry,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "background_heartbeat_failed",
+                        workspace_id=str(workspace_id),
+                        process_id=entry.process_id,
+                    )
+                    processes.append(
+                        {
+                            "process_id": entry.process_id,
+                            "status": "unknown",
+                            "exit_code": None,
+                            "pid": entry.pid,
+                        }
+                    )
+            item["processes"] = processes
 
             payload.append(item)
 
@@ -1338,9 +1943,74 @@ class WorkspaceService:
             computer_use_active=bool(session.computeruse_run_ids),
         )
 
+    @staticmethod
+    def _resolve_desktop_geometry(
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """Return a sanitized even framebuffer size for Xvnc."""
+
+        def _coerce(value: int | None, default: int, minimum: int, maximum: int) -> int:
+            if value is None:
+                return default
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            if parsed % 2 != 0:
+                parsed -= 1
+            return max(minimum, min(maximum, parsed))
+
+        return (
+            _coerce(
+                width, DEFAULT_DESKTOP_WIDTH, MIN_DESKTOP_WIDTH, MAX_DESKTOP_WIDTH
+            ),
+            _coerce(
+                height, DEFAULT_DESKTOP_HEIGHT, MIN_DESKTOP_HEIGHT, MAX_DESKTOP_HEIGHT
+            ),
+        )
+
+    @staticmethod
+    def _desktop_start_command(width: int, height: int) -> str:
+        """Return the shell used to start Xvnc at a fixed geometry.
+
+        Must not call ``opencuria-desktop-stop``. That script uses
+        ``pgrep -f 'Xvnc.*:1'``, which matches this ``bash -lc`` argv and
+        would kill the start process before Xvnc is launched.
+        """
+        geometry = f"{width}x{height}"
+        return (
+            "set -e\n"
+            "export DISPLAY=:1\n"
+            "export HOME=/root\n"
+            "mkdir -p /root/.vnc\n"
+            "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
+            f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
+            "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
+            "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
+            "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
+            "-AcceptPointerEvents -SendCutText -AcceptCutText "
+            "-AcceptSetDesktopSize=0 "
+            ">>/root/.vnc/server.log 2>&1 &\n"
+            "for _ in $(seq 1 120); do\n"
+            "  if [ -e /tmp/.X11-unix/X1 ]; then\n"
+            "    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\n"
+            '    echo "Desktop session started on :1 (ws port 6901)"\n'
+            "    exit 0\n"
+            "  fi\n"
+            "  sleep 0.25\n"
+            "done\n"
+            'echo "Desktop session failed to start" >&2\n'
+            "tail -n 50 /root/.vnc/server.log >&2 || true\n"
+            "exit 1\n"
+        )
+
     async def ensure_desktop_process(
         self,
         workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Start the shared KasmVNC process without acquiring a lease.
 
@@ -1378,12 +2048,29 @@ class WorkspaceService:
 
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
+        resolved_width, resolved_height = self._resolve_desktop_geometry(width, height)
 
         log = logger.bind(workspace_id=str(workspace_id))
 
+        # Stop first as its own exec. The baked stop script matches
+        # ``Xvnc.*:1`` in any process argv, so it must not run inside the
+        # start command whose command line contains those bytes.
+        await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "bash",
+                "-lc",
+                "/usr/local/bin/opencuria-desktop-stop >/dev/null 2>&1 || true",
+            ],
+            env={"HOME": "/root"},
+        )
+
+        start_command = self._desktop_start_command(
+            resolved_width, resolved_height
+        )
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
-            ["/usr/local/bin/opencuria-desktop-start"],
+            ["bash", "-lc", start_command],
             env={"HOME": "/root", "DISPLAY": ":1"},
         )
         if exit_code != 0:
@@ -1406,10 +2093,16 @@ class WorkspaceService:
         *,
         holder: str,
         run_id: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Ensure the desktop process and acquire a viewer or computer-use lease."""
         kind = self._parse_desktop_holder(holder)
-        session = await self.ensure_desktop_process(workspace_id)
+        session = await self.ensure_desktop_process(
+            workspace_id,
+            width=width,
+            height=height,
+        )
         if kind == DESKTOP_HOLDER_VIEWER:
             session.viewer_held = True
         else:
@@ -1491,9 +2184,17 @@ class WorkspaceService:
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
     ) -> DesktopSession:
         """Acquire the viewer lease and ensure the desktop process is running."""
-        return await self.acquire_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+        return await self.acquire_desktop(
+            workspace_id,
+            holder=DESKTOP_HOLDER_VIEWER,
+            width=width,
+            height=height,
+        )
 
     async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
         """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
@@ -1630,7 +2331,11 @@ class WorkspaceService:
         log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
 
         if action == "ensure":
-            session = await self.ensure_desktop_process(workspace_id)
+            session = await self.ensure_desktop_process(
+                workspace_id,
+                width=payload.get("desktop_width"),
+                height=payload.get("desktop_height"),
+            )
             return {
                 "ok": True,
                 "display": DESKTOP_DISPLAY,
@@ -1643,6 +2348,8 @@ class WorkspaceService:
                 workspace_id,
                 holder=holder,
                 run_id=payload.get("run_id"),
+                width=payload.get("desktop_width"),
+                height=payload.get("desktop_height"),
             )
             return {
                 "ok": True,
@@ -1805,7 +2512,7 @@ class WorkspaceService:
                 raise ValueError("text must not be empty")
             exit_code, output = await self._exec_desktop_shell(
                 workspace_id,
-                f"xdotool type --delay 0 -- {shlex.quote(text)}",
+                _xdotool_type_command(text),
             )
             if exit_code != 0:
                 raise RuntimeError(f"Failed to type text: {output}")
@@ -1816,14 +2523,12 @@ class WorkspaceService:
             if not key:
                 raise ValueError("key must not be empty")
             modifiers = payload.get("modifiers") or []
-            if not isinstance(modifiers, list):
-                raise ValueError("modifiers must be a list")
-            combo = "+".join([*modifiers, key])
+            combo = _normalize_xdotool_key_combo(key, modifiers)
             exit_code, output = await self._exec_desktop_shell(
                 workspace_id,
-                f"xdotool key -- {shlex.quote(combo)}",
+                f"xdotool key --clearmodifiers {shlex.quote(combo)}",
             )
-            if exit_code != 0:
+            if _xdotool_key_failed(exit_code, output):
                 raise RuntimeError(f"Failed to send key: {output}")
             return {"ok": True}
 
@@ -2014,6 +2719,38 @@ class WorkspaceService:
 
         return filename
 
+    async def _realpath_under_workspace(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        path: str,
+    ) -> str:
+        """Resolve symlinks for *path* and ensure it stays in /workspace.
+
+        Runs ``realpath -m`` inside the workspace, which resolves symlinks
+        and ``..`` segments. Raises ``ValueError`` (fail-closed) when the
+        resolved path escapes ``/workspace``. Falls back to *path* when
+        ``realpath`` is unavailable in the image (coreutils ships it on
+        Ubuntu, so this is only a safety net). Note: check-then-use is
+        inherently TOCTOU-prone if the workspace mutates the link between
+        the check and the file operation; accepted here as defense-in-depth
+        on top of the ``/workspace`` sandbox.
+        """
+        exit_code, output = await runtime.exec_command_wait(
+            instance_id,
+            command=["realpath", "-m", path],
+            workdir="/workspace",
+        )
+        if exit_code != 0:
+            return path
+        resolved = output.strip().splitlines()
+        if not resolved or not resolved[0]:
+            return path
+        real = resolved[0].strip()
+        if real != "/workspace" and not real.startswith("/workspace/"):
+            raise ValueError(f"Path escapes /workspace: {path}")
+        return real
+
     @staticmethod
     def _build_single_file_tar(filename: str, content: bytes) -> bytes:
         """Build a tar archive containing exactly one file."""
@@ -2060,6 +2797,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
@@ -2216,28 +2956,33 @@ class WorkspaceService:
                 )
 
         async with sem:
+            safe_path = await self._realpath_under_workspace(
+                runtime, info.instance_id, safe_path
+            )
             # Combine stat + read into a single SSH exec to halve the number
             # of SSH channels opened compared to two sequential commands.
             # Output format:
             #   line 1 = file size (bytes)
             #   line 2 = MIME type
             #   rest   = base64 content
-            # Single quotes in safe_path are already prevented by _sanitize_path
-            # (normpath keeps paths clean), so direct interpolation is safe here.
+            # Paths are embedded via shlex.quote so a quote in the path
+            # cannot break out of the shell quoting.
+            qpath = shlex.quote(safe_path)
             shell_cmd = (
                 # Guard: exit 1 immediately if the file does not exist.
                 # Without this, the else-branch's `head | base64` pipeline
                 # exits 0 even on a missing file, causing a ValueError when
                 # we try to parse the empty first line as an integer.
-                f"test -f '{safe_path}' || exit 1; "
-                f"SZ=$(stat -c '%s' '{safe_path}'); "
-                f"MT=$(file --mime-type -b '{safe_path}' 2>/dev/null || echo 'application/octet-stream'); "
+                f"test -f {qpath} || exit 1; "
+                f"SZ=$(stat -c '%s' {qpath}); "
+                f"MT=$(file --mime-type -b {qpath} 2>/dev/null "
+                "|| echo 'application/octet-stream'); "
                 f'echo "$SZ"; '
                 f'echo "$MT"; '
                 f'if [ "$SZ" -le {read_limit} ]; then '
-                f"  base64 '{safe_path}'; "
+                f"  base64 {qpath}; "
                 f"else "
-                f"  head -c {read_limit} '{safe_path}' | base64; "
+                f"  head -c {read_limit} {qpath} | base64; "
                 f"fi"
             )
             exit_code, output = await runtime.exec_command_wait(
@@ -2288,6 +3033,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         # Check upload size
         raw_size = len(content_b64) * 3 // 4  # approximate decoded size
@@ -2341,6 +3089,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
         # Check if it's a directory
         exit_code, _ = await runtime.exec_command_wait(
@@ -2351,13 +3102,14 @@ class WorkspaceService:
         is_dir = exit_code == 0
 
         if is_dir:
+            qp_dir = shlex.quote(os.path.dirname(safe_path))
+            qp_base = shlex.quote(os.path.basename(safe_path))
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=[
                     "sh",
                     "-c",
-                    f"tar czf - -C '{os.path.dirname(safe_path)}' "
-                    f"'{os.path.basename(safe_path)}' | base64",
+                    f"tar czf - -C {qp_dir} {qp_base} | base64",
                 ],
                 workdir="/workspace",
             )
@@ -2393,14 +3145,18 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
 
+        qpath = shlex.quote(safe_path)
         shell_cmd = (
-            f"if [ -e '{safe_path}' ]; then "
-            f"if [ -d '{safe_path}' ]; then echo 'dir'; "
-            f"du -sb '{safe_path}' | cut -f1; "
+            f"if [ -e {qpath} ]; then "
+            f"if [ -d {qpath} ]; then echo 'dir'; "
+            f"du -sb {qpath} | cut -f1; "
             f"echo 'inode/directory'; "
-            f"else stat -c '%s' '{safe_path}'; "
-            f"file --mime-type -b '{safe_path}' 2>/dev/null "
+            f"else stat -c '%s' {qpath}; "
+            f"file --mime-type -b {qpath} 2>/dev/null "
             "|| echo 'application/octet-stream'; "
             f"fi; else echo 'missing'; fi"
         )
@@ -2444,6 +3200,9 @@ class WorkspaceService:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
         try:
             decoded = base64.b64decode(content_b64, validate=True)
         except Exception as exc:

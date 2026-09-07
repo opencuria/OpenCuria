@@ -147,7 +147,10 @@ export function applyPartDelta(
       call_id: delta.call_id ?? opts.partId,
       tool: delta.tool_started,
       title: delta.title ?? delta.tool_started,
-      input: delta.call_id ? { call_id: delta.call_id } : {},
+      input: {
+        tool: delta.tool_started,
+        arguments: delta.arguments ?? '',
+      },
       output: '',
       meta: opts.step !== undefined ? { step: opts.step } : {},
     }
@@ -289,6 +292,8 @@ export function applySubtaskStarted(
       subtask_id: event.subtask_id,
       agent: event.agent,
       ...(event.child_session_id ? { child_session_id: event.child_session_id } : {}),
+      ...(event.model ? { model: event.model } : {}),
+      ...(event.reasoning_effort ? { reasoning_effort: event.reasoning_effort } : {}),
     },
   }
   message.parts.push(part)
@@ -337,4 +342,26 @@ export function mergeBusyFetchedMessages(
     nextLast.content = prevLast.content
   }
   return incoming
+}
+
+const STREAM_PART_TYPES = new Set(['text', 'reasoning'])
+
+/**
+ * Coerce leftover running/pending text and reasoning parts to completed.
+ *
+ * Idle fetches of older sessions can still have those parts stuck in
+ * `running` because the backend used to leave them open after a turn.
+ */
+export function settleOpenStreamParts(messages: HarnessMessage[]): HarnessMessage[] {
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (
+        STREAM_PART_TYPES.has(part.type) &&
+        (part.state === 'running' || part.state === 'pending')
+      ) {
+        part.state = 'completed'
+      }
+    }
+  }
+  return messages
 }

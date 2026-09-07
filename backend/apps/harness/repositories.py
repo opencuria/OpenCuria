@@ -18,6 +18,7 @@ from .models import (
     HarnessSessionStatus,
     ProviderConfig,
     QuestionRequest,
+    QuestionRequestStatus,
     Todo,
 )
 
@@ -155,6 +156,34 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def list_descendant_ids(session_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return *session_id* followed by descendant ids (breadth-first)."""
+        ids: list[uuid.UUID] = [session_id]
+        queue: list[uuid.UUID] = [session_id]
+        seen: set[uuid.UUID] = {session_id}
+        while queue:
+            current = queue.pop(0)
+            children = list(
+                HarnessSession.objects.filter(parent_id=current).values_list(
+                    "id", flat=True
+                )
+            )
+            for child_id in children:
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                ids.append(child_id)
+                queue.append(child_id)
+        return ids
+
+    @staticmethod
+    def list_by_ids(session_ids: list[uuid.UUID]) -> list[HarnessSession]:
+        """Return sessions for *session_ids* (order not guaranteed)."""
+        if not session_ids:
+            return []
+        return list(HarnessSession.objects.filter(id__in=session_ids))
+
+    @staticmethod
     def list_busy_computeruse_for_workspace(
         workspace_id: uuid.UUID,
     ) -> list[HarnessSession]:
@@ -271,6 +300,7 @@ class HarnessMessageRepository:
         role: str,
         content: str = "",
         model: str = "",
+        reasoning_effort: str = "",
         provider: str = "",
     ) -> HarnessMessage:
         """Create a user or assistant message shell."""
@@ -279,6 +309,7 @@ class HarnessMessageRepository:
             role=role,
             content=content or "",
             model=model or "",
+            reasoning_effort=reasoning_effort or "",
             provider=provider or "",
         )
 
@@ -366,6 +397,7 @@ class HarnessPartRepository:
         call_id: str = "",
         title: str = "",
         input: dict | None = None,
+        output: str = "",
         meta: dict | None = None,
     ) -> HarnessPart:
         """Create a streamed part shell for an assistant message."""
@@ -376,6 +408,7 @@ class HarnessPartRepository:
             call_id=call_id or "",
             title=title or "",
             input=dict(input or {}),
+            output=output or "",
             meta=dict(meta or {}),
         )
 
@@ -529,6 +562,30 @@ class QuestionRequestRepository:
     def get_by_id(request_id: uuid.UUID) -> QuestionRequest | None:
         """Fetch a question request by primary key."""
         return QuestionRequest.objects.filter(id=request_id).first()
+
+    @staticmethod
+    def list_pending_for_session(session_id: uuid.UUID) -> list[QuestionRequest]:
+        """Return pending question requests for *session_id*."""
+        return list(
+            QuestionRequest.objects.filter(
+                session_id=session_id,
+                status=QuestionRequestStatus.PENDING,
+            ).order_by("created_at")
+        )
+
+    @staticmethod
+    def list_pending_for_sessions(
+        session_ids: list[uuid.UUID],
+    ) -> list[QuestionRequest]:
+        """Return pending question requests for any of *session_ids*."""
+        if not session_ids:
+            return []
+        return list(
+            QuestionRequest.objects.filter(
+                session_id__in=session_ids,
+                status=QuestionRequestStatus.PENDING,
+            ).order_by("created_at")
+        )
 
     @staticmethod
     def resolve(

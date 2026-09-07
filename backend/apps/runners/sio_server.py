@@ -495,6 +495,52 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:desktop_action_result", data, runner_id=runner_id
         )
 
+    # --- Background process replies from runner ---
+
+    @sio.on("harness:process_start_result")
+    async def on_harness_process_start_result(sid: str, data: dict):
+        """Route process start results to the owning process waiter."""
+        runner_id = await _require_runner_id(sio, sid, "harness:process_start_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_process_reply)(
+            "harness:process_start_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:process_list_result")
+    async def on_harness_process_list_result(sid: str, data: dict):
+        """Route process list results to the owning process waiter."""
+        runner_id = await _require_runner_id(sio, sid, "harness:process_list_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_process_reply)(
+            "harness:process_list_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:process_get_result")
+    async def on_harness_process_get_result(sid: str, data: dict):
+        """Route process status results to the owning process waiter."""
+        runner_id = await _require_runner_id(sio, sid, "harness:process_get_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_process_reply)(
+            "harness:process_get_result", data, runner_id=runner_id
+        )
+
+    @sio.on("harness:process_stop_result")
+    async def on_harness_process_stop_result(sid: str, data: dict):
+        """Route process stop results to the owning process waiter."""
+        runner_id = await _require_runner_id(sio, sid, "harness:process_stop_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_process_reply)(
+            "harness:process_stop_result", data, runner_id=runner_id
+        )
+
     # --- Terminal events from runner ---
 
     @sio.on("terminal:started")

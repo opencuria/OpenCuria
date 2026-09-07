@@ -5,11 +5,18 @@ import type { MentionCandidate } from '@/lib/harnessMentions'
  * One entry of the composer sheet stack.
  *
  * Sheets are ordered by interaction priority (highest first): `mention` >
- * `question` > `permission` > `context` > `todos`. Only the topmost sheet is
- * interactive; lower sheets render as non-interactive peek edges, iOS
- * sheet-stack style.
+ * `question` > `permission` > `notice` > `processes` > `context` > `todos`.
+ * Only the topmost sheet is interactive; lower sheets render as
+ * non-interactive peek edges, iOS sheet-stack style.
  */
-export type ComposerSheetKind = 'mention' | 'question' | 'permission' | 'context' | 'todos'
+export type ComposerSheetKind =
+  | 'mention'
+  | 'question'
+  | 'permission'
+  | 'notice'
+  | 'processes'
+  | 'context'
+  | 'todos'
 
 export interface ContextSheetState {
   used: number
@@ -17,6 +24,12 @@ export interface ContextSheetState {
   percent: number
   promptTokens?: number
   completionTokens?: number
+}
+
+export interface NoticeSheetState {
+  messageId: string
+  text: string
+  tone: 'error' | 'info'
 }
 
 export interface MentionSheetState {
@@ -33,6 +46,7 @@ export interface ComposerSheet {
   permission?: HarnessPermissionRequest
   /** All pending permission requests (for the `i of N` pager). */
   permissions?: HarnessPermissionRequest[]
+  notice?: NoticeSheetState
   todos?: HarnessTodo[]
   context?: ContextSheetState
 }
@@ -41,7 +55,9 @@ export interface ComposerSheetInput {
   mention?: MentionSheetState | null
   questions?: HarnessQuestionRequest[]
   permissions?: HarnessPermissionRequest[]
+  notice?: NoticeSheetState | null
   todos?: HarnessTodo[]
+  processesOpen?: boolean
   contextOpen?: boolean
   context?: ContextSheetState | null
 }
@@ -51,8 +67,10 @@ const SHEET_ORDER: Record<ComposerSheetKind, number> = {
   mention: 0,
   question: 1,
   permission: 2,
-  context: 3,
-  todos: 4,
+  notice: 3,
+  processes: 4,
+  context: 5,
+  todos: 6,
 }
 
 /**
@@ -71,6 +89,12 @@ export function buildComposerSheets(input: ComposerSheetInput): ComposerSheet[] 
   const permissions = input.permissions ?? []
   if (permissions.length > 0 && permissions[0]) {
     sheets.push({ kind: 'permission', permission: permissions[0], permissions })
+  }
+  if (input.notice) {
+    sheets.push({ kind: 'notice', notice: input.notice })
+  }
+  if (input.processesOpen) {
+    sheets.push({ kind: 'processes' })
   }
   if (input.contextOpen && input.context) {
     sheets.push({ kind: 'context', context: input.context })

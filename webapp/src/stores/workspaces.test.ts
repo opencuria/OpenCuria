@@ -41,6 +41,8 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     qemu_vcpus: overrides.qemu_vcpus ?? null,
     qemu_memory_mb: overrides.qemu_memory_mb ?? null,
     qemu_disk_size_gb: overrides.qemu_disk_size_gb ?? null,
+    desktop_width: overrides.desktop_width ?? 1920,
+    desktop_height: overrides.desktop_height ?? 1080,
     created_by_id: overrides.created_by_id ?? 1,
     last_activity_at: overrides.last_activity_at ?? '2026-03-29T10:00:00.000Z',
     auto_stop_timeout_minutes: overrides.auto_stop_timeout_minutes ?? null,
@@ -129,6 +131,8 @@ describe('workspace credential updates', () => {
       qemu_vcpus: null,
       qemu_memory_mb: null,
       qemu_disk_size_gb: null,
+      desktop_width: 1920,
+      desktop_height: 1080,
     })
 
     const success = await store.updateWorkspace('workspace-1', {
@@ -166,6 +170,8 @@ describe('workspace credential updates', () => {
       qemu_vcpus: null,
       qemu_memory_mb: null,
       qemu_disk_size_gb: null,
+      desktop_width: 1920,
+      desktop_height: 1080,
     })
 
     await store.updateWorkspace('workspace-1', { credential_ids: [] })

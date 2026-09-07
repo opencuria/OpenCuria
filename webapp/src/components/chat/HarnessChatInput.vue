@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -22,12 +21,14 @@ import {
 } from '@lucide/vue'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
-import { getProviderConfig, listProviderModels } from '@/services/harness.api'
+import { getProviderConfig } from '@/services/harness.api'
 import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
 import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   applyMentionCandidate,
@@ -156,6 +157,16 @@ watch(
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
 const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
 
+/**
+ * Öffnet das Provider-Tab direkt per Window-Event — bewusst OHNE Router-Navigation:
+ * Der Host hängt global in AppLayout, der `/?settings=`-Deep-Link bleibt für
+ * Redirects/e2e erhalten. So kann der Banner-Klick keine Navigation abbrechen
+ * oder eine Replace-Schleife auslösen (gemeldeter "Page Unresponsive"-Hänger).
+ */
+function openProviderSettings(): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
+}
+
 async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
@@ -167,7 +178,7 @@ async function loadProviderModels(): Promise<void> {
       catalog.value = []
       return
     }
-    catalog.value = await listProviderModels()
+    catalog.value = await loadProviderModelsCached()
   } catch {
     providerMissing.value = true
     catalog.value = []
@@ -180,6 +191,10 @@ onMounted(() => {
   const cached = loadFromCache()
   if (cached) prompt.value = cached
   void loadProviderModels()
+  void nextTick(() => {
+    resizeTextarea()
+    observeTextareaResize()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -188,6 +203,8 @@ onBeforeUnmount(() => {
     clearTimeout(mentionFindTimer)
     mentionFindTimer = null
   }
+  textareaResizeObserver?.disconnect()
+  textareaResizeObserver = null
 })
 
 watch(
@@ -230,6 +247,7 @@ watch(
 
 watch(prompt, (value) => {
   saveToCache(value)
+  void nextTick(resizeTextarea)
 })
 
 function handleSend(): void {
@@ -391,6 +409,43 @@ function textareaEl(): HTMLTextAreaElement | null {
   return el instanceof HTMLTextAreaElement ? el : null
 }
 
+const MAX_COMPOSER_HEIGHT = 200
+let textareaResizeObserver: ResizeObserver | null = null
+
+/**
+ * Grow the composer to fit its content, capped at MAX_COMPOSER_HEIGHT.
+ * Empty input resets to CSS min-height so it stays one line.
+ */
+function resizeTextarea(): void {
+  const el = textareaEl()
+  if (!el) return
+  if (!el.value) {
+    el.style.height = ''
+    el.style.overflowY = ''
+    return
+  }
+  el.style.height = 'auto'
+  const content = el.scrollHeight
+  if (content <= 0) return
+  el.style.height = `${Math.min(content, MAX_COMPOSER_HEIGHT)}px`
+  el.style.overflowY = content > MAX_COMPOSER_HEIGHT ? 'auto' : 'hidden'
+}
+
+function observeTextareaResize(): void {
+  if (typeof ResizeObserver === 'undefined') return
+  const el = textareaEl()
+  if (!el) return
+  textareaResizeObserver?.disconnect()
+  let lastWidth = el.offsetWidth
+  textareaResizeObserver = new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width ?? 0
+    if (width === lastWidth) return
+    lastWidth = width
+    resizeTextarea()
+  })
+  textareaResizeObserver.observe(el)
+}
+
 function closeComposerQuery(): void {
   mentionOpen.value = false
   mentionIndex.value = 0
@@ -545,16 +600,18 @@ function onComposerKeydown(e: KeyboardEvent): void {
     @keydown="onComposerKeydown"
   >
     <div
-      class="flex flex-col rounded-xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary"
+      class="flex flex-col rounded-3xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary focus-within:shadow-md"
       data-testid="composer-card"
     >
-      <RouterLink
+      <button
         v-if="providerMissing"
-        to="/org-settings?tab=provider"
-        class="mx-4 mt-3 w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+        type="button"
+        data-testid="composer-provider-cta"
+        class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+        @click="openProviderSettings"
       >
         Configure OpenRouter in Org Settings
-      </RouterLink>
+      </button>
 
       <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">
         <span
@@ -581,7 +638,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
           :disabled="disabled"
           :rows="1"
           placeholder="Plan, Build, / for skills, @ for context"
-          class="min-h-[50px] max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-3 text-base !shadow-none !outline-none !ring-0 focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0"
+          class="min-h-10 max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-2 text-base !shadow-none !outline-none !ring-0 transition-[height] duration-100 ease-out focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0 md:min-h-9"
           data-testid="composer-textarea"
           @keydown="handleKeydown"
           @input="onPromptInput"
@@ -737,7 +794,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             class="h-8 w-8 shrink-0 rounded-full transition-all"
             :class="
               canStop
-                ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                 : 'bg-muted text-muted-foreground'
             "
             title="Stop current run"
@@ -767,11 +824,6 @@ function onComposerKeydown(e: KeyboardEvent): void {
     </div>
     <p v-if="busyMessage" class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400">
       {{ busyMessage }}
-    </p>
-    <p v-else class="mt-2 hidden text-center text-xs text-muted-foreground sm:block">
-      Press <kbd class="font-mono font-medium text-foreground">Enter</kbd> to send,
-      <kbd class="font-mono font-medium text-foreground">Shift+Enter</kbd> for newline,
-      <kbd class="font-mono font-medium text-foreground">Shift+Tab</kbd> to switch mode
     </p>
   </div>
 </template>

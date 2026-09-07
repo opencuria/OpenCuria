@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from .base import ToolRegistry
+from .computeruse import COMPUTER_USE_TOOL_NAMES, computeruse_tools
 from .files import EditTool, ReadTool, WriteTool
+from .process import (
+    ProcessGetTool,
+    ProcessListTool,
+    ProcessStartTool,
+    ProcessStopTool,
+)
 from .question import QuestionTool
 from .shell import BashTool, GlobTool, GrepTool, ListTool
 from .subagents import TaskTool, WebfetchTool
 from .todos import TodoWriteTool
-from .computeruse import COMPUTER_USE_TOOL_NAMES, computeruse_tools
 
 
 def default_tool_registry() -> ToolRegistry:
@@ -26,6 +32,10 @@ def default_tool_registry() -> ToolRegistry:
         QuestionTool(),
         TaskTool(),
         WebfetchTool(),
+        ProcessStartTool(),
+        ProcessListTool(),
+        ProcessGetTool(),
+        ProcessStopTool(),
     ):
         registry.register(tool)
     return registry
@@ -46,6 +56,10 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "ListTool",
+    "ProcessGetTool",
+    "ProcessListTool",
+    "ProcessStartTool",
+    "ProcessStopTool",
     "QuestionTool",
     "ReadTool",
     "TaskTool",

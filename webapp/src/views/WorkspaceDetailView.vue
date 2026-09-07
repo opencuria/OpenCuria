@@ -5,6 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
 import { useTerminalStore } from '@/stores/terminal'
 import { useDesktopStore } from '@/stores/desktop'
+import { useProcessesStore } from '@/stores/processes'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { usePolling } from '@/composables/usePolling'
@@ -16,35 +17,30 @@ import {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
-import HarnessChatSidebar from '@/components/chat/HarnessChatSidebar.vue'
-import WorkspaceActions from '@/components/workspaces/WorkspaceActions.vue'
+import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
-import { Badge } from '@/components/ui/badge'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { ArrowLeft, Loader2, MessageSquare } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const desktopStore = useDesktopStore()
+const processesStore = useProcessesStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
 const fileExplorerStore = useFileExplorerStore()
 const workspaceImageStore = useWorkspaceImageStore()
-const renaming = ref(false)
-const editingName = ref(false)
-const workspaceNameInput = ref('')
+const renamingWorkspace = ref(false)
 const terminalHeight = ref(300)
+const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
-const mobileChatListOpen = ref(false)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -58,46 +54,22 @@ const canPrompt = computed(
     workspace.value?.runner_online &&
     !workspace.value?.active_operation,
 )
-const workspaceTransitionLabel = computed(() =>
-  workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),
-)
 const isRunnerOfflineState = computed(
   () =>
     !workspace.value?.runner_online &&
     workspace.value?.status !== WorkspaceStatus.DELETED &&
     workspace.value?.status !== WorkspaceStatus.REMOVED,
 )
-
-const statusVariant = computed((): 'secondary' | 'outline' | 'destructive' | 'default' => {
-  if (isRunnerOfflineState.value) {
-    return 'secondary'
-  }
-  switch (workspace.value?.status) {
-    case WorkspaceStatus.RUNNING:
-      return 'secondary'
-    case WorkspaceStatus.CREATING:
-      return 'outline'
-    case WorkspaceStatus.STOPPED:
-      return 'secondary'
-    case WorkspaceStatus.FAILED:
-    case WorkspaceStatus.DELETE_FAILED:
-      return 'destructive'
-    default:
-      return 'secondary'
-  }
-})
-const statusLabel = computed(() => {
-  if (isRunnerOfflineState.value) {
-    return 'Runner offline'
-  }
-  return workspace.value?.status ?? ''
-})
-const showWorkspaceTransitionLabel = computed(
-  () => Boolean(workspaceTransitionLabel.value) && !isRunnerOfflineState.value,
+const workspaceTransitionLabel = computed(() =>
+  workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),
 )
 const autoStopCountdownLabel = computed(() =>
   workspace.value?.auto_stop_at ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}` : null,
 )
+const navbarStatusLabel = computed(() => {
+  if (!showImminentAutoStop.value || !autoStopCountdownLabel.value) return null
+  return autoStopCountdownLabel.value
+})
 const showImminentAutoStop = computed(() => {
   if (!workspace.value?.auto_stop_at || workspace.value.status !== WorkspaceStatus.RUNNING) {
     return false
@@ -108,27 +80,74 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-const hasHarnessChats = computed(() => harnessStore.rootSessions.length > 0)
+const activeChatTitle = computed(
+  () => harnessStore.activeSession?.title?.trim() || null,
+)
 
-function handleSelectHarnessSession(sessionId: string): void {
-  harnessStore.setActiveSession(sessionId)
-}
-
-function handleCreateHarnessChat(): void {
+function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
 }
 
-async function handleRenameHarnessSession(sessionId: string, title: string): Promise<void> {
-  await harnessStore.renameSession(sessionId, title)
+function handleToggleTerminal(): void {
+  if (!canPrompt.value) return
+  if (!terminalStore.isOpen) {
+    terminalStore.open()
+    return
+  }
+  if (terminalStore.isMinimized) {
+    terminalStore.restore()
+    return
+  }
+  terminalStore.minimize()
 }
 
-async function handleDeleteHarnessSession(sessionId: string): Promise<void> {
-  await harnessStore.removeSession(sessionId)
+function handleToggleDesktop(): void {
+  if (!canPrompt.value) return
+  if (!desktopStore.isOpen) {
+    desktopStore.open()
+    return
+  }
+  if (desktopStore.isMinimized) {
+    desktopStore.restore()
+    return
+  }
+  desktopStore.minimize()
+}
+
+function handleDeleteWorkspace(): void {
+  if (!workspace.value) return
+  if (confirm('Are you sure you want to remove this workspace? This action cannot be undone.')) {
+    void workspaceStore.removeWorkspace(workspace.value.id)
+  }
+}
+
+function handleStartWorkspace(): void {
+  if (!workspace.value) return
+  void workspaceStore.resumeWorkspace(workspace.value.id)
+}
+
+function handleStopWorkspace(): void {
+  if (!workspace.value) return
+  void workspaceStore.stopWorkspace(workspace.value.id)
 }
 
 const isDesktopPanelVisible = computed(
   () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
 )
+
+const runningProcessCount = computed(() =>
+  processesStore.runningCountFor(workspaceId.value),
+)
+const isProcessesPanelVisible = computed(
+  () => processesOpen.value && canPrompt.value,
+)
+
+function toggleProcessesPanel(): void {
+  processesOpen.value = !processesOpen.value
+  if (processesOpen.value) {
+    void processesStore.fetchProcesses(workspaceId.value)
+  }
+}
 
 const chatPanelTarget = computed<HTMLElement | null>(() => {
   if (isDesktopPanelVisible.value) {
@@ -190,6 +209,14 @@ function setupSocketListeners(): void {
     onEvent('runner:online', (data) => {
       if (data.workspace_id === workspaceId.value) {
         workspaceStore.updateWorkspaceRunnerOnline(data.workspace_id, true)
+      }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('process:status_changed', (data) => {
+      if (data.workspace_id === workspaceId.value) {
+        void processesStore.handleStatusChanged(data)
       }
     }),
   )
@@ -280,21 +307,18 @@ const { start, stop } = usePolling(
   5000,
 )
 
+// Polling fallback for background processes (socket is the live path)
+const {
+  start: startProcessesPolling,
+  stop: stopProcessesPolling,
+} = usePolling(() => processesStore.fetchProcesses(workspaceId.value), 10000)
+
 onMounted(() => {
   lgQuery.addEventListener('change', onBreakpointChange)
   start()
+  startProcessesPolling()
   setupSocketListeners()
 })
-
-watch(
-  () => workspace.value?.name,
-  (name) => {
-    if (name && !editingName.value) {
-      workspaceNameInput.value = name
-    }
-  },
-  { immediate: true },
-)
 
 watch(isDesktop, (desktop) => {
   if (!desktop) {
@@ -305,9 +329,11 @@ watch(isDesktop, (desktop) => {
 onUnmounted(() => {
   lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
+  stopProcessesPolling()
   cleanupSocket()
   desktopStore.reset()
   terminalStore.reset()
+  processesStore.reset()
   fileExplorerStore.reset()
   workspaceImageStore.reset()
   harnessStore.reset()
@@ -319,9 +345,12 @@ watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
     desktopStore.reset()
+    processesStore.clearWorkspace(oldId)
+    processesOpen.value = false
     fileExplorerStore.reset()
     harnessStore.reset()
     workspaceStore.fetchWorkspaceDetail(newId)
+    void processesStore.fetchProcesses(newId)
     setupSocketListeners()
   }
 })
@@ -334,35 +363,15 @@ function goBack(): void {
   }
 }
 
-function startEditingName(): void {
-  if (!workspace.value || workspaceTransitionLabel.value) return
-  workspaceNameInput.value = workspace.value.name
-  editingName.value = true
-}
-
-function cancelEditingName(): void {
-  if (workspace.value) {
-    workspaceNameInput.value = workspace.value.name
-  }
-  editingName.value = false
-}
-
-async function saveWorkspaceName(): Promise<void> {
+async function handleSaveWorkspaceName(name: string): Promise<void> {
   if (!workspace.value || workspaceTransitionLabel.value) return
 
-  const trimmed = workspaceNameInput.value.trim()
-  if (!trimmed || trimmed === workspace.value.name) {
-    cancelEditingName()
-    return
-  }
+  const trimmed = name.trim()
+  if (!trimmed || trimmed === workspace.value.name) return
 
-  renaming.value = true
-  const success = await workspaceStore.renameWorkspace(workspace.value.id, trimmed)
-  renaming.value = false
-
-  if (success) {
-    editingName.value = false
-  }
+  renamingWorkspace.value = true
+  await workspaceStore.renameWorkspace(workspace.value.id, trimmed)
+  renamingWorkspace.value = false
 }
 
 // --- Terminal resize drag ---
@@ -393,92 +402,32 @@ function onDragStart(e: MouseEvent): void {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- Workspace header -->
-    <div class="border-b border-border bg-header px-3 py-2.5 lg:px-6 lg:py-3 shrink-0">
-      <div class="flex items-center justify-between gap-2 min-w-0">
-        <!-- Left: back + workspace info -->
-        <div class="flex items-center gap-2 min-w-0 flex-1">
-          <Button variant="ghost" size="icon-sm" class="shrink-0" @click="goBack">
-            <ArrowLeft :size="16" />
-          </Button>
-
-          <div v-if="workspace" class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5 min-w-0">
-              <template v-if="editingName">
-                <div class="flex items-center gap-2 flex-1 min-w-0">
-                  <Input
-                    v-model="workspaceNameInput"
-                    class="h-8 min-w-0"
-                    maxlength="255"
-                    @keydown.enter.prevent="saveWorkspaceName"
-                    @keydown.esc.prevent="cancelEditingName"
-                  />
-                  <Button size="sm" :disabled="renaming" @click="saveWorkspaceName">
-                    Save
-                  </Button>
-                  <Button size="sm" variant="outline" :disabled="renaming" @click="cancelEditingName">
-                    Cancel
-                  </Button>
-                </div>
-              </template>
-              <template v-else>
-                <h2 class="font-semibold text-foreground text-sm truncate">
-                  {{ workspace.name }}
-                </h2>
-                <Badge :variant="statusVariant" class="shrink-0">
-                  {{ statusLabel }}
-                </Badge>
-                <Badge
-                  v-if="showImminentAutoStop && autoStopCountdownLabel"
-                  variant="outline"
-                  class="shrink-0"
-                >
-                  {{ autoStopCountdownLabel }}
-                </Badge>
-                <Badge
-                  v-if="showWorkspaceTransitionLabel"
-                  variant="default"
-                  class="shrink-0 flex items-center gap-1"
-                >
-                  <Loader2 :size="12" class="animate-spin" />
-                  {{ workspaceTransitionLabel }}
-                </Badge>
-                <button
-                  class="hidden sm:flex items-center text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 px-1"
-                  :disabled="showWorkspaceTransitionLabel"
-                  @click="startEditingName"
-                >
-                  Rename
-                </button>
-              </template>
-            </div>
-            <div class="hidden sm:flex items-center gap-3 mt-0.5">
-              <span class="text-xs text-muted-foreground font-mono">{{ workspace.id.slice(0, 12) }}…</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right: mobile chats button + workspace actions -->
-        <div class="flex items-center gap-1 shrink-0">
-          <Button
-            v-if="hasHarnessChats"
-            variant="ghost"
-            size="icon-sm"
-            class="md:hidden"
-            title="Switch chat"
-            @click="mobileChatListOpen = true"
-          >
-            <MessageSquare :size="16" />
-          </Button>
-          <WorkspaceActions
-            v-if="workspace"
-            :workspace="workspace"
-            @capture-image="imageArtifactDialogOpen = true"
-            hide-destructive
-          />
-        </div>
-      </div>
-    </div>
+    <WorkspaceChatHeader
+      v-if="workspace"
+      :workspace="workspace"
+      :active-chat-title="activeChatTitle"
+      :transition-label="workspaceTransitionLabel"
+      :auto-stop-label="navbarStatusLabel"
+      :runner-offline="isRunnerOfflineState"
+      :file-explorer-open="fileExplorerStore.isOpen"
+      :terminal-open="terminalStore.isOpen"
+      :terminal-minimized="terminalStore.isMinimized"
+      :desktop-open="desktopStore.isOpen"
+      :desktop-minimized="desktopStore.isMinimized"
+      :processes-active="isProcessesPanelVisible"
+      :running-process-count="runningProcessCount"
+      :can-prompt="canPrompt"
+      @new-chat="handleNewHarnessChat"
+      @start-workspace="handleStartWorkspace"
+      @stop-workspace="handleStopWorkspace"
+      @save-workspace-name="handleSaveWorkspaceName"
+      @toggle-files="fileExplorerStore.toggle()"
+      @toggle-terminal="handleToggleTerminal"
+      @toggle-desktop="handleToggleDesktop"
+      @toggle-processes="toggleProcessesPanel"
+      @capture-image="imageArtifactDialogOpen = true"
+      @delete-workspace="handleDeleteWorkspace"
+    />
 
     <!-- Loading state -->
     <div v-if="workspaceStore.loading && !workspace" class="flex-1 flex items-center justify-center">
@@ -500,18 +449,6 @@ function onDragStart(e: MouseEvent): void {
           </WorkspaceDesktop>
 
           <template v-else>
-            <HarnessChatSidebar
-              :sessions="harnessStore.rootSessions"
-              :child-sessions-by-parent="harnessStore.childSessionsByParent"
-              :active-session-id="harnessStore.activeSessionId"
-              :mobile-open="mobileChatListOpen"
-              @select="handleSelectHarnessSession"
-              @create="handleCreateHarnessChat"
-              @rename="handleRenameHarnessSession"
-              @delete="handleDeleteHarnessSession"
-              @close="mobileChatListOpen = false"
-            />
-
             <!-- Harness chat area -->
             <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <FileViewer
@@ -550,13 +487,13 @@ function onDragStart(e: MouseEvent): void {
           </div>
         </template>
 
-
         <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
           <HarnessChatPanel
             :workspace-id="workspaceId"
             :can-prompt="canPrompt"
-            :show-workspace-toolbar="isDesktop && !isDesktopPanelVisible"
+            :processes-open="isProcessesPanelVisible"
             class="min-h-0 flex-1"
+            @close-processes="processesOpen = false"
           />
         </Teleport>
       </div>

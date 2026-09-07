@@ -232,6 +232,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         activeWorkspace.value.qemu_vcpus = fresh.qemu_vcpus
         activeWorkspace.value.qemu_memory_mb = fresh.qemu_memory_mb
         activeWorkspace.value.qemu_disk_size_gb = fresh.qemu_disk_size_gb
+        activeWorkspace.value.desktop_width = fresh.desktop_width
+        activeWorkspace.value.desktop_height = fresh.desktop_height
         activeWorkspace.value.last_activity_at = fresh.last_activity_at
         activeWorkspace.value.auto_stop_timeout_minutes = fresh.auto_stop_timeout_minutes
         activeWorkspace.value.auto_stop_at = fresh.auto_stop_at
@@ -275,6 +277,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       qemu_vcpus: number | null
       qemu_memory_mb: number | null
       qemu_disk_size_gb: number | null
+      desktop_width: number
+      desktop_height: number
     },
   ): void {
     const ws = workspaces.value.find((w) => w.id === id)
@@ -287,6 +291,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ws.qemu_vcpus = updated.qemu_vcpus
       ws.qemu_memory_mb = updated.qemu_memory_mb
       ws.qemu_disk_size_gb = updated.qemu_disk_size_gb
+      ws.desktop_width = updated.desktop_width
+      ws.desktop_height = updated.desktop_height
     }
 
     if (activeWorkspace.value?.id === id) {
@@ -298,6 +304,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       activeWorkspace.value.qemu_vcpus = updated.qemu_vcpus
       activeWorkspace.value.qemu_memory_mb = updated.qemu_memory_mb
       activeWorkspace.value.qemu_disk_size_gb = updated.qemu_disk_size_gb
+      activeWorkspace.value.desktop_width = updated.desktop_width
+      activeWorkspace.value.desktop_height = updated.desktop_height
     }
   }
 
@@ -316,6 +324,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         ...(data.qemu_vcpus !== undefined ? { qemu_vcpus: data.qemu_vcpus } : {}),
         ...(data.qemu_memory_mb !== undefined ? { qemu_memory_mb: data.qemu_memory_mb } : {}),
         ...(data.qemu_disk_size_gb !== undefined ? { qemu_disk_size_gb: data.qemu_disk_size_gb } : {}),
+        ...(data.desktop_width !== undefined ? { desktop_width: data.desktop_width } : {}),
+        ...(data.desktop_height !== undefined ? { desktop_height: data.desktop_height } : {}),
       }
 
       const updated = await workspacesApi.updateWorkspace(id, payload)

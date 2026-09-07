@@ -28,15 +28,17 @@ function makeTodo(id: string): HarnessTodo {
 }
 
 describe('buildComposerSheets', () => {
-  it('orders sheets by priority: mention > question > permission > context > todos', () => {
+  it('orders sheets by priority: mention > question > permission > notice > processes > context > todos', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
       questions: [makeQuestion('q1')],
+      notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
       mention: {
         candidates: [{ kind: 'file', label: 'a.ts', insert: 'file:a.ts' }],
         activeIndex: 0,
       },
+      processesOpen: true,
       contextOpen: true,
       context: { used: 1000, limit: 10_000, percent: 10 },
     })
@@ -45,6 +47,8 @@ describe('buildComposerSheets', () => {
       'mention',
       'question',
       'permission',
+      'notice',
+      'processes',
       'context',
       'todos',
     ])
@@ -54,6 +58,15 @@ describe('buildComposerSheets', () => {
     const sheets = buildComposerSheets({
       contextOpen: false,
       context: { used: 1000, limit: 10_000, percent: 10 },
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['todos'])
+  })
+
+  it('omits the processes sheet when it is closed', () => {
+    const sheets = buildComposerSheets({
+      processesOpen: false,
       todos: [makeTodo('t1')],
     })
 
@@ -79,10 +92,14 @@ describe('buildComposerSheets', () => {
     ])
   })
 
-  it('returns an empty stack when nothing is active', () => {
-    expect(
-      buildComposerSheets({ mention: null, questions: [], permissions: [], todos: [] }),
-    ).toEqual([])
+  it('includes a notice sheet when a run error is present', () => {
+    const sheets = buildComposerSheets({
+      notice: { messageId: 'msg-1', text: 'boom', tone: 'error' },
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['notice', 'todos'])
+    expect(sheets[0]?.notice?.text).toBe('boom')
   })
 
   it('skips empty sources instead of rendering placeholder sheets', () => {

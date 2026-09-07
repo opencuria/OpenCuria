@@ -280,7 +280,9 @@ and executed there. The runner exposes plain operations the harness calls via
 - `desktop_action(workspace_id, action, args)` — desktop ensure/hold/release,
   screenshot, xdotool input, ffmpeg record/stop (no agent logic). Viewer
   `task:start_desktop`/`task:stop_desktop` acquire/release a viewer lease;
-  Xvnc stops only when no computer-use hold remains.
+  Xvnc stops only when no computer-use hold remains. Framebuffer size is
+  fixed per workspace (`desktop_width`/`desktop_height`, default 1920×1080);
+  viewers scale in the browser and never remote-resize the display.
 
 ### 4.6 Interfaces
 
@@ -478,6 +480,9 @@ Agents are static code definitions in `backend/apps/harness/agents/definitions.p
 (`build`/`plan` primary, `general`/`explore`/hidden `title`+`compaction`
 subagents, plus `computeruse` for desktop automation) — no DB records. Modes
 (`plan`/`build`) and per-agent permission rules come from the same definitions.
+`explore` allows research bash (`find`/`rg`/…) and denies edits plus
+destructive shell (`rm`/`sudo`/…); pending permission/question gates of
+child sessions surface on the parent composer (and on `GET …/parts`).
 The `computeruse` subagent exposes desktop tools only (spawned via `task`);
 session recordings are written under `.opencuria/computeruse/` and appended to
 chat as markdown video refs. Computer-use acquires a desktop lease for the
@@ -497,8 +502,11 @@ the summary is persisted as a `compaction` part with `tail_start_id`, and
 `_build_history` sends only the in-memory checkpoint plus the retained tail.
 The current user prompt is kept; the summary is not re-sent as a user message.
 The composer shows a context-usage ring (left of the paperclip) and a Context
-Usage sheet in the todos/questions stack; compaction renders as a “Session
-compacted” divider in chat.
+Usage sheet in the todos/questions stack. An opened background-process sheet
+sits above context/todos (name, command, status, log path with copy, stop).
+Aborted or failed runs surface a dismissible notice sheet in that same stack
+(above processes/context/todos). Compaction renders as a “Session compacted”
+divider in chat.
 
 **@ mentions:** typing `@` searches workspace files via Socket.IO `files:find`
 (capped at 50, prunes `.git`/`node_modules`/etc.). The mention sheet ranks
@@ -659,7 +667,7 @@ The runner connects to the backend as a socketio client. Events:
 | Direction | Event | Payload |
 |-----------|-------|---------|
 | Runner -> Backend | `runner:register` | `{supported_runtimes: ["docker", "qemu"], status}` |
-| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?}]}` |
+| Runner -> Backend | `runner:heartbeat` | `{workspaces: [{workspace_id, status, runtime_type, desktop?, processes?}]}` (each `processes` entry: `{process_id, status, exit_code, pid}`) |
 | Backend -> Runner | `task:create_workspace` | `{task_id, workspace_id, repos, runtime_type, env_vars, files, ssh_keys, image_tag/base_image_path}` |
 | Runner -> Backend | `workspace:created` | `{task_id, workspace_id, status, credentials_present}` |
 | Backend -> Runner | `task:resume_workspace` | `{task_id, workspace_id, qemu_*, env_vars, files, ssh_keys}` |
@@ -670,10 +678,19 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `harness:process_start` | `{request_id, workspace_id, process_id, command, workdir, env, name}` |
+| Runner -> Backend | `harness:process_start_result` | `{request_id, workspace_id, process_id, pid, log_path, status}` |
+| Backend -> Runner | `harness:process_list` | `{request_id, workspace_id}` |
+| Runner -> Backend | `harness:process_list_result` | `{request_id, workspace_id, processes}` |
+| Backend -> Runner | `harness:process_get` | `{request_id, workspace_id, process_id}` |
+| Runner -> Backend | `harness:process_get_result` | `{request_id, workspace_id, process}` |
+| Backend -> Runner | `harness:process_stop` | `{request_id, workspace_id, process_id}` |
+| Runner -> Backend | `harness:process_stop_result` | `{request_id, workspace_id, process_id, stopped, ...}` |
 | Backend -> Runner | `files:find` | `{request_id, workspace_id, query, limit}` |
 | Runner -> Backend | `files:find_result` | `{request_id, workspace_id, query, paths, truncated}` |
-| Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` |
+| Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` (`ensure`/`hold` include `desktop_width`/`desktop_height`) |
 | Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
+| Backend -> Runner | `task:start_desktop` | `{task_id, workspace_id, desktop_width, desktop_height}` |
 | Runner -> Backend | `desktop:started` | viewer lease acquired (`task_id`, routing, `viewer`, `computer_use`) |
 | Runner -> Backend | `desktop:process` | live Xvnc for proxy routing after reconnect (not a viewer acquire) |
 | Runner -> Backend | `desktop:stopped` | Xvnc process ended |
@@ -712,6 +729,7 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `desktop:started` | `{workspace_id, task_id, proxy_url, computer_use_active?}` |
 | Backend -> Frontend | `desktop:stopped` | `{workspace_id, task_id}` |
 | Backend -> Frontend | `desktop:viewer_released` | `{workspace_id, task_id, computer_use_active}` |
+| Backend -> Frontend | `process:status_changed` | `{workspace_id, process_id, status, exit_code, pid}` |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.
 Frontend Socket.IO authentication: JWT token passed in `auth: { token }` on connect (validated server-side).

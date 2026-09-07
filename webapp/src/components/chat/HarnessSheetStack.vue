@@ -2,7 +2,9 @@
 import { ref, watch } from 'vue'
 import HarnessContextSheet from '@/components/chat/HarnessContextSheet.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
+import HarnessNoticeSheet from '@/components/chat/HarnessNoticeSheet.vue'
 import HarnessPermissionSheet from '@/components/chat/HarnessPermissionSheet.vue'
+import HarnessProcessSheet from '@/components/chat/HarnessProcessSheet.vue'
 import HarnessQuestionSheet from '@/components/chat/HarnessQuestionSheet.vue'
 import HarnessTodoSheet from '@/components/chat/HarnessTodoSheet.vue'
 import type { MentionCandidate } from '@/lib/harnessMentions'
@@ -22,15 +24,17 @@ const emit = defineEmits<{
   'question-skip': [requestId: string]
   resolve: [requestId: string, response: HarnessPermissionResponse]
   'close-context': []
+  'close-processes': []
+  'dismiss-notice': [messageId: string]
 }>()
 
-const todoOpen = ref(true)
+const todoOpen = ref(false)
 
 watch(
   () => props.sheets,
   (sheets) => {
     if (sheets.some((sheet) => sheet.kind === 'todos')) return
-    todoOpen.value = true
+    todoOpen.value = false
   },
 )
 
@@ -83,6 +87,15 @@ function peekOffset(index: number): number {
             :resolving="permissionResolving"
             @resolve="(requestId, response) => emit('resolve', requestId, response)"
           />
+        </template>
+        <template v-else-if="sheets[0]?.kind === 'notice' && sheets[0]?.notice">
+          <HarnessNoticeSheet
+            :notice="sheets[0].notice!"
+            @dismiss="(messageId) => emit('dismiss-notice', messageId)"
+          />
+        </template>
+        <template v-else-if="sheets[0]?.kind === 'processes'">
+          <HarnessProcessSheet @close="emit('close-processes')" />
         </template>
         <template v-else-if="sheets[0]?.kind === 'context' && sheets[0]?.context">
           <HarnessContextSheet :context="sheets[0].context!" @close="emit('close-context')" />

@@ -10,6 +10,7 @@ from .models import (
     RunnerSystemMetrics,
     Task,
     Workspace,
+    WorkspaceProcess,
 )
 
 
@@ -32,8 +33,6 @@ class TaskAdmin(admin.ModelAdmin):
     list_display = ["id", "runner", "type", "status", "created_at", "completed_at"]
     list_filter = ["type", "status"]
     readonly_fields = ["id", "created_at"]
-
-
 @admin.register(RunnerSystemMetrics)
 class RunnerSystemMetricsAdmin(admin.ModelAdmin):
     list_display = ["runner", "timestamp", "cpu_usage_percent", "ram_used_bytes", "disk_used_bytes"]
@@ -80,3 +79,10 @@ class ImageBuildJobAdmin(admin.ModelAdmin):
     list_display = ["id", "image_definition", "runner", "status", "built_at", "updated_at"]
     list_filter = ["status", "runner", "image_definition"]
     search_fields = ["image_definition__name", "runner__name", "image_instance__runner_ref"]
+
+
+@admin.register(WorkspaceProcess)
+class WorkspaceProcessAdmin(admin.ModelAdmin):
+    list_display = ["id", "workspace", "name", "status", "pid", "exit_code", "started_at"]
+    list_filter = ["status"]
+    readonly_fields = ["id", "started_at", "ended_at", "updated_at"]

@@ -12,6 +12,7 @@ Tools and their required permissions
 - list_workspaces        → workspaces:read
 - get_workspace          → workspaces:read
 - create_workspace       → workspaces:create
+- update_workspace       → workspaces:update
 - stop_workspace         → workspaces:stop
 - resume_workspace       → workspaces:resume
 - remove_workspace       → workspaces:delete
@@ -48,6 +49,10 @@ Tools and their required permissions
 - list_harness_conversations → harness:read
 - list_org_credential_services       → org_credential_services:read
 - toggle_org_credential_service_activation → org_credential_services:write
+- list_processes         → workspaces:processes_read
+- get_process            → workspaces:processes_read
+- start_process          → workspaces:processes_run
+- stop_process           → workspaces:processes_run
 """
 
 from __future__ import annotations
@@ -134,8 +139,42 @@ _TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "Optional image artifact UUID to start workspace from.",
                 },
+                "desktop_width": {
+                    "type": "integer",
+                    "description": "Fixed desktop width in pixels (default 1920).",
+                },
+                "desktop_height": {
+                    "type": "integer",
+                    "description": "Fixed desktop height in pixels (default 1080).",
+                },
             },
             "required": ["name"],
+        },
+    ),
+    Tool(
+        name="update_workspace",
+        description="Update workspace metadata, including the fixed desktop size.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Workspace UUID.",
+                },
+                "name": {"type": "string", "description": "New workspace name."},
+                "desktop_width": {
+                    "type": "integer",
+                    "description": "Fixed desktop width in pixels.",
+                },
+                "desktop_height": {
+                    "type": "integer",
+                    "description": "Fixed desktop height in pixels.",
+                },
+                "qemu_vcpus": {"type": "integer"},
+                "qemu_memory_mb": {"type": "integer"},
+                "qemu_disk_size_gb": {"type": "integer"},
+            },
+            "required": ["workspace_id"],
         },
     ),
     Tool(
@@ -427,7 +466,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_harness_parts",
-        description="List messages and parts of a harness session.",
+        description="List messages, parts, and pending permission/question gates of a harness session.",
         inputSchema={
             "type": "object",
             "properties": {"session_id": {"type": "string"}},
@@ -534,6 +573,68 @@ _TOOLS: list[Tool] = [
             "required": ["service_id", "active"],
         },
     ),
+    Tool(
+        name="list_processes",
+        description="List background processes of a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."}
+            },
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="get_process",
+        description="Get the status of one background process.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID.",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
+    Tool(
+        name="start_process",
+        description="Start a detached background process in a workspace.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "command": {"type": "string", "description": "Shell command."},
+                "workdir": {
+                    "type": "string",
+                    "description": "Working directory (default /workspace).",
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables.",
+                },
+                "name": {"type": "string", "description": "Process display name."},
+            },
+            "required": ["workspace_id", "command"],
+        },
+    ),
+    Tool(
+        name="stop_process",
+        description="Stop a background process (SIGTERM, then SIGKILL after grace).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID.",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
 ]
 
 # Map tool name → required permission
@@ -541,6 +642,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspaces": APIKeyPermission.WORKSPACES_READ,
     "get_workspace": APIKeyPermission.WORKSPACES_READ,
     "create_workspace": APIKeyPermission.WORKSPACES_CREATE,
+    "update_workspace": APIKeyPermission.WORKSPACES_UPDATE,
     "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
     "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
@@ -578,6 +680,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "resolve_harness_question": APIKeyPermission.HARNESS_PERMISSIONS,
     "list_org_credential_services": APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ,
     "toggle_org_credential_service_activation": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
+    "list_processes": APIKeyPermission.WORKSPACES_PROCESSES_READ,
+    "get_process": APIKeyPermission.WORKSPACES_PROCESSES_READ,
+    "start_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
+    "stop_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
 }
 
 
@@ -616,13 +722,19 @@ def _error(msg: str) -> list[TextContent]:
     return [TextContent(type="text", text=f"Error: {msg}")]
 
 
+def _runner_service():
+    """Return the process-wide RunnerService (lazy import, no cycle)."""
+    from apps.runners.sio_server import get_runner_service
+
+    return get_runner_service()
+
+
 def _get_owned_workspace_or_error(api_key, org_id, workspace_id):
     """Return an owned workspace or an MCP-formatted error payload."""
-    from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
-    svc = get_runner_service()
+    svc = _runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     try:
@@ -698,6 +810,8 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "status": str(workspace.status),
         "runner_id": str(workspace.runner_id),
         "runtime_type": str(workspace.runtime_type),
+        "desktop_width": workspace.desktop_width,
+        "desktop_height": workspace.desktop_height,
         "created_at": workspace.created_at.isoformat(),
     }
     return _text(result)
@@ -725,6 +839,8 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
     repos = args.get("repos", [])
     runtime_type = args.get("runtime_type", "docker")
+    desktop_width = args.get("desktop_width")
+    desktop_height = args.get("desktop_height")
     image_artifact_id = None
     if args.get("image_artifact_id"):
         try:
@@ -744,6 +860,8 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             credentials=[],
             runner_id=runner_id,
             image_artifact_id=image_artifact_id,
+            desktop_width=desktop_width,
+            desktop_height=desktop_height,
             user=api_key.user,
             organization_id=org_id,
         )
@@ -761,7 +879,57 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
                 "message": "Workspace creation started. Use get_workspace to check status.",
             }
         )
-    except (NotFoundError, ConflictError) as e:
+    except (NotFoundError, ConflictError, ValueError) as e:
+        return _error(str(e))
+
+
+def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
+    """Update mutable workspace metadata, including desktop geometry."""
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import NotFoundError, ConflictError
+
+    import asyncio
+    import uuid as _uuid
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+
+    svc = get_runner_service()
+
+    async def _update():
+        return await svc.update_workspace(
+            workspace_id,
+            name=args.get("name"),
+            qemu_vcpus=args.get("qemu_vcpus"),
+            qemu_memory_mb=args.get("qemu_memory_mb"),
+            qemu_disk_size_gb=args.get("qemu_disk_size_gb"),
+            desktop_width=args.get("desktop_width"),
+            desktop_height=args.get("desktop_height"),
+        )
+
+    try:
+        loop = asyncio.new_event_loop()
+        updated = loop.run_until_complete(_update())
+        loop.close()
+        return _text(
+            {
+                "id": str(updated.id),
+                "name": updated.name,
+                "desktop_width": updated.desktop_width,
+                "desktop_height": updated.desktop_height,
+                "updated_at": updated.updated_at.isoformat(),
+            }
+        )
+    except (NotFoundError, ConflictError, ValueError) as e:
         return _error(str(e))
 
 
@@ -1453,7 +1621,7 @@ def _get_harness_service():
     return get_harness_service()
 
 
-def _session_dict(session) -> dict:
+def _session_dict(session, *, unread: bool = False) -> dict:
     """Serialize a HarnessSession ORM row for MCP responses."""
     return {
         "id": str(session.id),
@@ -1466,9 +1634,15 @@ def _session_dict(session) -> dict:
         "status": session.status,
         "cost": float(session.cost or 0.0),
         "tokens": dict(session.tokens or {}),
+        "unread": unread,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
+
+
+def _session_dict_with_unread(service, session) -> dict:
+    """Serialize a session and compute its unread flag."""
+    return _session_dict(session, unread=service.is_session_unread(session))
 
 
 def _owned_harness_session_or_error(api_key, org_id, session_id):
@@ -1552,7 +1726,13 @@ def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent
 
     service = _get_harness_service()
     sessions = service.list_sessions(workspace_id)
-    return _text([_session_dict(session) for session in sessions])
+    unread_map = service.unread_for_sessions(sessions)
+    return _text(
+        [
+            _session_dict(session, unread=unread_map.get(session.id, False))
+            for session in sessions
+        ]
+    )
 
 
 async def _call_create_harness_session(
@@ -1602,7 +1782,9 @@ async def _call_create_harness_session(
             skill_ids=list(args.get("skill_ids") or []),
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return _text(_session_dict(fresh))
+        return _text(
+            await sync_to_async(_session_dict_with_unread)(service, fresh)
+        )
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -1656,7 +1838,9 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
             skill_ids=list(args.get("skill_ids") or []) or None,
         )
         fresh = await sync_to_async(service.get_session)(current.id)
-        return _text(_session_dict(fresh))
+        return _text(
+            await sync_to_async(_session_dict_with_unread)(service, fresh)
+        )
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -1685,7 +1869,7 @@ def _call_abort_harness_session(api_key, org_id, args: dict) -> list[TextContent
     loop = asyncio.new_event_loop()
     updated = loop.run_until_complete(_abort())
     loop.close()
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1752,18 +1936,20 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 "call_id": part.call_id or "",
                 "title": part.title or "",
                 "output": part.output or "",
+                "input": dict(part.input or {}),
                 "meta": dict(part.meta or {}),
             }
         )
     return _text(
         {
-            "session": _session_dict(session),
+            "session": _session_dict_with_unread(service, session),
             "messages": [
                 {
                     "id": str(message.id),
                     "role": message.role,
                     "content": message.content or "",
                     "model": message.model or "",
+                    "reasoning_effort": message.reasoning_effort or "",
                     "cost": float(message.cost or 0.0),
                     "tokens": dict(message.tokens or {}),
                     "finish": message.finish or "",
@@ -1778,6 +1964,12 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 }
                 for message in messages
             ],
+            "permissions": service.list_pending_permissions(
+                session.id, include_descendants=True
+            ),
+            "questions": service.list_pending_questions(
+                session.id, include_descendants=True
+            ),
         }
     )
 
@@ -1867,7 +2059,7 @@ def _call_patch_harness_session(api_key, org_id, args: dict) -> list[TextContent
         updated = service.update_title(session.id, title)
     except ValueError as exc:
         return _error(str(exc))
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_set_harness_session_mode(api_key, org_id, args: dict) -> list[TextContent]:
@@ -1894,7 +2086,7 @@ def _call_set_harness_session_mode(api_key, org_id, args: dict) -> list[TextCont
         updated = service.set_mode(session.id, mode)
     except ValueError as exc:
         return _error(str(exc))
-    return _text(_session_dict(updated))
+    return _text(_session_dict_with_unread(service, updated))
 
 
 def _call_delete_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
@@ -2005,6 +2197,158 @@ def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextCont
         return _error(str(exc))
 
 
+def _process_payload(process) -> dict:
+    """Serialize a WorkspaceProcess ORM row for MCP responses."""
+    started_at = getattr(process, "started_at", None)
+    ended_at = getattr(process, "ended_at", None)
+    updated_at = getattr(process, "updated_at", None)
+    return {
+        "id": str(getattr(process, "id", "")),
+        "workspace_id": str(getattr(process, "workspace_id", "")),
+        "name": getattr(process, "name", "") or "",
+        "command": getattr(process, "command", "") or "",
+        "workdir": getattr(process, "workdir", "") or "",
+        "pid": getattr(process, "pid", None),
+        "log_path": getattr(process, "log_path", "") or "",
+        "status": str(getattr(process, "status", "") or ""),
+        "exit_code": getattr(process, "exit_code", None),
+        "started_at": started_at.isoformat() if started_at else None,
+        "ended_at": ended_at.isoformat() if ended_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+def _parse_process_args(args: dict, *required: str) -> tuple:
+    """Parse workspace/process UUIDs from MCP args or return an error."""
+    import uuid as _uuid
+
+    values: dict[str, _uuid.UUID] = {}
+    for key in required:
+        raw = args.get(key)
+        if not raw:
+            return None, _error(f"{key} is required")
+        try:
+            values[key] = _uuid.UUID(str(raw))
+        except ValueError:
+            return None, _error(f"Invalid {key} UUID")
+    return values, None
+
+
+async def _call_list_processes(api_key, org_id, args: dict) -> list[TextContent]:
+    """List background processes of an owned workspace (no nested loop)."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    svc = _runner_service()
+    try:
+        processes = await svc.list_processes(workspace.id)
+    except Exception as exc:
+        return _error(str(exc))
+    return _text([_process_payload(process) for process in processes])
+
+
+async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Return one background process scoped to an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.get_process(workspace.id, parsed["process_id"])
+    except NotFoundError as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
+async def _call_start_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Start a detached background process in an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    command = (args.get("command") or "").strip()
+    if not args.get("workspace_id"):
+        return _error("workspace_id is required")
+    if not command:
+        return _error("command is required")
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.start_process(
+            workspace.id,
+            command,
+            workdir=str(args.get("workdir") or "/workspace"),
+            env=dict(args.get("env") or {}),
+            name=str(args.get("name") or ""),
+            user=api_key.user,
+        )
+    except (NotFoundError, ConflictError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
+async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Stop a background process in an owned workspace."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    if error is not None:
+        return error
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.stop_process(
+            workspace.id,
+            parsed["process_id"],
+        )
+    except (NotFoundError, ConflictError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
 def _call_list_org_credential_services(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
@@ -2098,6 +2442,7 @@ _TOOL_HANDLERS = {
     "list_workspaces": _call_list_workspaces,
     "get_workspace": _call_get_workspace,
     "create_workspace": _call_create_workspace,
+    "update_workspace": _call_update_workspace,
     "stop_workspace": _call_stop_workspace,
     "resume_workspace": _call_resume_workspace,
     "remove_workspace": _call_remove_workspace,
@@ -2135,6 +2480,10 @@ _TOOL_HANDLERS = {
     "resolve_harness_question": _call_resolve_harness_question,
     "list_org_credential_services": _call_list_org_credential_services,
     "toggle_org_credential_service_activation": _call_toggle_org_credential_service_activation,
+    "list_processes": _call_list_processes,
+    "get_process": _call_get_process,
+    "start_process": _call_start_process,
+    "stop_process": _call_stop_process,
 }
 
 

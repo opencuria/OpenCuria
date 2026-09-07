@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { Loader2 } from '@lucide/vue'
+import { computed, onMounted, ref } from 'vue'
+import { ChevronRight, Loader2 } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
+  buildChildSessionIdMap,
+  resolveChildSessionId,
 } from '@/lib/harnessSubtaskActivity'
+import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
+import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
 const props = defineProps<{
   part: HarnessPart
   childSessionId?: string | null
+  models?: ProviderModel[]
 }>()
 
 const emit = defineEmits<{
@@ -21,10 +27,18 @@ const harness = useHarnessStore()
 
 /** The child session id links parent/child (backend `parent` FK). */
 const childId = computed(() => {
-  const fromMeta = props.part.meta?.['child_session_id']
-  if (typeof fromMeta === 'string' && fromMeta) return fromMeta
-  return props.childSessionId ?? null
+  const map = buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
+  const subtaskId = String(props.part.meta?.['subtask_id'] ?? '')
+  const fromProp = props.childSessionId
+    ? {
+        [props.part.id]: props.childSessionId,
+        ...(subtaskId ? { [subtaskId]: props.childSessionId } : {}),
+      }
+    : {}
+  return resolveChildSessionId(props.part, harness.sessions, { ...map, ...fromProp })
 })
+
+const catalog = ref<ProviderModel[]>(props.models ?? [])
 
 const agentLabel = computed(() => {
   const raw = props.part.meta?.['agent']
@@ -36,11 +50,51 @@ const childMessages = computed(() => {
   return harness.messagesBySession[childId.value] ?? []
 })
 
+const childSession = computed(() => {
+  if (!childId.value) return null
+  return harness.sessions.find((session) => session.id === childId.value) ?? null
+})
+
+function metaString(key: string): string {
+  const raw = props.part.meta?.[key]
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+const modelLabel = computed(() => {
+  const lastAssistant = [...childMessages.value]
+    .reverse()
+    .find((message) => message.role === 'assistant')
+  const modelId =
+    metaString('model') ||
+    (childSession.value?.model ?? '').trim() ||
+    (lastAssistant?.model ?? '').trim()
+  const effort =
+    metaString('reasoning_effort') ||
+    (childSession.value?.reasoning_effort ?? '').trim() ||
+    (lastAssistant?.reasoning_effort ?? '').trim()
+  if (!modelId && !effort) return null
+  return formatHarnessModelEffort(modelId, effort, props.models ?? catalog.value)
+})
+
+onMounted(async () => {
+  if (props.models) return
+  try {
+    catalog.value = await loadProviderModelsCached()
+  } catch {
+    catalog.value = []
+  }
+})
+
 const activity = computed(() =>
   subtaskActivityLabel(props.part, childMessages.value),
 )
 
 const isRunning = computed(() => props.part.state === 'running')
+
+const showDesktopMini = computed(() => {
+  const agent = String(props.part.meta?.['agent'] ?? '').toLowerCase()
+  return agent === 'computeruse' && isRunning.value
+})
 
 function handleOpen(): void {
   if (childId.value) emit('openSubtask', childId.value)
@@ -51,7 +105,8 @@ function handleOpen(): void {
   <button
     type="button"
     data-testid="harness-subtask-row"
-    class="flex w-full min-w-0 items-start gap-2 py-0.5 text-left disabled:cursor-default"
+    class="flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-default"
+    :class="childId ? 'cursor-pointer hover:bg-muted/60' : ''"
     :disabled="!childId"
     @click="handleOpen"
   >
@@ -83,6 +138,18 @@ function handleOpen(): void {
         >
           {{ agentLabel }}
         </span>
+        <span
+          v-if="modelLabel"
+          data-testid="harness-subtask-model"
+          class="shrink-0 text-xs font-normal text-muted-foreground"
+        >
+          {{ modelLabel }}
+        </span>
+        <ChevronRight
+          v-if="childId"
+          :size="14"
+          class="ml-auto shrink-0 text-muted-foreground"
+        />
       </span>
       <span
         v-if="activity"
@@ -91,6 +158,7 @@ function handleOpen(): void {
       >
         {{ activity }}
       </span>
+      <HarnessDesktopMini v-if="showDesktopMini" />
     </span>
   </button>
 </template>

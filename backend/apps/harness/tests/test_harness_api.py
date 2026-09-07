@@ -14,8 +14,16 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.service import PermissionService
+from apps.harness.permissions.service import (
+    PermissionRequestRepository,
+    PermissionService,
+)
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
+from apps.harness.repositories import (
+    HarnessMessageRepository,
+    HarnessPartRepository,
+    QuestionRequestRepository,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -210,6 +218,39 @@ def test_create_session_persists_reasoning_effort(harness_setup, fake_harness_se
 
 
 @pytest.mark.django_db(transaction=True)
+def test_parts_include_message_reasoning_effort(
+    harness_setup, fake_harness_service
+):
+    """GET parts returns the effort snapshotted on the assistant message."""
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {
+                "prompt": "hello",
+                "mode": "build",
+                "model": "fake-model",
+                "reasoning_effort": "high",
+            }
+        ),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    session_id = created.json()["id"]
+    parts = client.get(f"/api/v1/harness/sessions/{session_id}/parts")
+    assert parts.status_code == 200, parts.content[:500]
+    messages = parts.json()["messages"]
+    assistant = next(message for message in messages if message["role"] == "assistant")
+    assert assistant["model"] == "fake-model"
+    assert assistant["reasoning_effort"] == "high"
+
+
+
+@pytest.mark.django_db(transaction=True)
 def test_create_session_invalid_reasoning_effort_is_400(
     harness_setup, fake_harness_service
 ):
@@ -300,6 +341,8 @@ def test_parts_todos_abort_flow(harness_setup, fake_harness_service):
     parts = read_client.get(f"/api/v1/harness/sessions/{session_id}/parts")
     assert parts.status_code == 200
     assert "messages" in parts.json()
+    assert parts.json()["permissions"] == []
+    assert parts.json()["questions"] == []
 
     todos = read_client.get(f"/api/v1/harness/sessions/{session_id}/todos")
     assert todos.status_code == 200
@@ -307,6 +350,168 @@ def test_parts_todos_abort_flow(harness_setup, fake_harness_service):
 
     abort = run_client.post(f"/api/v1/harness/sessions/{session_id}/abort")
     assert abort.status_code == 200
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_tool_input(harness_setup, fake_harness_service):
+    """GET parts returns the persisted tool input payload."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="read a file",
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-1",
+        title="Read a.txt",
+        input={"tool": "read", "arguments": '{"path":"a.txt"}'},
+    )
+    HarnessPartRepository.mark_state(part, "completed", output="hello")
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.get(f"/api/v1/harness/sessions/{session.id}/parts")
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assistant_out = next(
+        message for message in messages if message["role"] == "assistant" and message["parts"]
+    )
+    tool_part = next(part for part in assistant_out["parts"] if part["type"] == "tool")
+    assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
+    assert tool_part["output"] == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_pending_permissions_and_questions(
+    harness_setup, fake_harness_service
+):
+    """GET parts returns pending permission and question gates."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="need a decision",
+    )
+    permission = PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+        call_id="call-perm",
+    )
+    question = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Which color?"}],
+        call_id="call-q",
+    )
+    answered = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Already answered?"}],
+    )
+    QuestionRequestRepository.resolve(answered, answers=["done"], status="answered")
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.get(f"/api/v1/harness/sessions/{session.id}/parts")
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
+    assert body["permissions"][0]["tool"] == "bash"
+    assert body["permissions"][0]["pattern"] == "reboot"
+    assert body["permissions"][0]["status"] == "pending"
+    assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
+    assert body["questions"][0]["questions"] == [{"question": "Which color?"}]
+    assert body["questions"][0]["status"] == "pending"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_descendant_pending_gates(
+    harness_setup, fake_harness_service
+):
+    """GET parts on a parent includes child gates, not sibling-tree gates."""
+    parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="parent",
+    )
+    child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="explore",
+        agent_name="explore",
+        parent_id=parent.id,
+        title="Explore backend",
+    )
+    other_parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="other",
+    )
+    other_child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="other child",
+        agent_name="explore",
+        parent_id=other_parent.id,
+    )
+    child_perm = PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=child.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="find /workspace",
+        title="$ find /workspace",
+    )
+    PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=other_child.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="rm -rf /tmp",
+        title="$ rm -rf /tmp",
+    )
+    child_question = QuestionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=child.id,
+        workspace_id=harness_setup["owned"].id,
+        questions=[{"question": "Which file?"}],
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    parent_body = client.get(
+        f"/api/v1/harness/sessions/{parent.id}/parts"
+    ).json()
+    assert [item["request_id"] for item in parent_body["permissions"]] == [
+        str(child_perm.id)
+    ]
+    assert parent_body["permissions"][0]["session_id"] == str(child.id)
+    assert parent_body["permissions"][0]["agent_name"] == "explore"
+    assert [item["request_id"] for item in parent_body["questions"]] == [
+        str(child_question.id)
+    ]
+    assert parent_body["questions"][0]["agent_name"] == "explore"
+
+    child_body = client.get(f"/api/v1/harness/sessions/{child.id}/parts").json()
+    assert [item["request_id"] for item in child_body["permissions"]] == [
+        str(child_perm.id)
+    ]
+    other_body = client.get(
+        f"/api/v1/harness/sessions/{other_parent.id}/parts"
+    ).json()
+    assert [item["session_id"] for item in other_body["permissions"]] == [
+        str(other_child.id)
+    ]
 
 
 @pytest.mark.django_db(transaction=True)

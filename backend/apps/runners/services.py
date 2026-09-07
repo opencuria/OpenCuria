@@ -27,12 +27,18 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_uuid, hash_token, verify_token
 
 from .enums import (
+    ProcessStatus,
     RunnerStatus,
     RuntimeType,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
     WorkspaceStatus,
+)
+from .desktop import (
+    DEFAULT_DESKTOP_HEIGHT,
+    DEFAULT_DESKTOP_WIDTH,
+    validate_desktop_geometry,
 )
 from .exceptions import (
     NoAvailableRunnerError,
@@ -48,6 +54,7 @@ from .repositories import (
     RunnerRepository,
     ImageBuildJobRepository,
     TaskRepository,
+    WorkspaceProcessRepository,
     WorkspaceRepository,
 )
 
@@ -80,11 +87,16 @@ class RunnerService:
         self.image_instances = ImageInstanceRepository
         self.image_definitions = ImageDefinitionRepository
         self.build_jobs = ImageBuildJobRepository
+        self.processes = WorkspaceProcessRepository
         # Tracks unknown runtime workspaces for which a cleanup request has
         # already been sent, to avoid emitting duplicate cleanup tasks on every
         # heartbeat while one is still in flight.
         self._pending_unknown_workspace_cleanup: set[tuple[str, str]] = set()
         self._pending_credential_inject: set[tuple[str, str]] = set()
+        # In-flight background-process RPCs: request_id -> Future[dict].
+        # Runner harness:process_* handlers only emit *_result events (no
+        # Socket.IO ACK), so correlation uses request_id futures.
+        self._process_pending: dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------
     # Runner lifecycle
@@ -719,6 +731,8 @@ class RunnerService:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        desktop_width: int | None = None,
+        desktop_height: int | None = None,
         env_vars: dict[str, str] | None = None,
         files: list | None = None,
         ssh_keys: list[str] | None = None,
@@ -846,6 +860,11 @@ class RunnerService:
                 requested_disk_size_gb=resolved_qemu_disk_size_gb,
             )
 
+        resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
+            DEFAULT_DESKTOP_WIDTH if desktop_width is None else desktop_width,
+            DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height,
+        )
+
         # Create records
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, repos, workspace_id)
@@ -857,6 +876,8 @@ class RunnerService:
             qemu_vcpus=resolved_qemu_vcpus,
             qemu_memory_mb=resolved_qemu_memory_mb,
             qemu_disk_size_gb=resolved_qemu_disk_size_gb,
+            desktop_width=resolved_desktop_width,
+            desktop_height=resolved_desktop_height,
             base_image_instance=selected_image,
             created_by=user,
         )
@@ -925,6 +946,8 @@ class RunnerService:
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        desktop_width: int | None = None,
+        desktop_height: int | None = None,
     ) -> "Workspace":
         """Update mutable workspace metadata and attached credentials."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
@@ -1062,6 +1085,23 @@ class RunnerService:
                             "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
                         },
                     )
+
+        if desktop_width is not None or desktop_height is not None:
+            resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
+                workspace.desktop_width if desktop_width is None else desktop_width,
+                workspace.desktop_height if desktop_height is None else desktop_height,
+            )
+            if (
+                resolved_desktop_width != workspace.desktop_width
+                or resolved_desktop_height != workspace.desktop_height
+            ):
+                workspace = await sync_to_async(
+                    self.workspaces.update_desktop_geometry
+                )(
+                    workspace,
+                    desktop_width=resolved_desktop_width,
+                    desktop_height=resolved_desktop_height,
+                )
 
         return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
 
@@ -1333,6 +1373,7 @@ class RunnerService:
             self._pending_credential_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
+            self.mark_processes_killed(str(workspace.id), reason="workspace_stopped")
         self._cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
@@ -1515,6 +1556,7 @@ class RunnerService:
         workspace = task.workspace
         if workspace:
             self.workspaces.mark_deleted(workspace.id)
+            self.mark_processes_killed(str(workspace.id), reason="workspace_removed")
         self._cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
@@ -1841,6 +1883,8 @@ class RunnerService:
             {
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
+                "desktop_width": workspace.desktop_width,
+                "desktop_height": workspace.desktop_height,
             },
         )
 
@@ -2210,6 +2254,585 @@ class RunnerService:
         self._desktop_workspace_runner.pop(workspace_id, None)
 
     # ------------------------------------------------------------------
+    # Background processes (workspace-bound, no auto-restart)
+    # ------------------------------------------------------------------
+
+    # Runner harness:process_* handlers only emit *_result events (no
+    # Socket.IO ACK payload), so process RPCs correlate via request_id
+    # futures stored in ``self._process_pending`` (cf. harness accessor).
+    _PROCESS_RPC_TIMEOUT_SECONDS = 30
+    _PROCESS_LIVE_TIMEOUT_SECONDS = 10
+
+    _PROCESS_RESULT_EVENTS = frozenset(
+        {
+            "harness:process_start_result",
+            "harness:process_list_result",
+            "harness:process_get_result",
+            "harness:process_stop_result",
+        }
+    )
+
+    def _resolve_process_future(self, request_id: str, payload: dict) -> bool:
+        """Resolve the pending process RPC future for *request_id* (sync).
+
+        Thread-safe: Socket.IO replies arrive via ``sync_to_async`` worker
+        threads while waiters live on the main event loop.
+        """
+        future = self._process_pending.get(request_id)
+        if future is None or future.done():
+            logger.warning(
+                "process reply for unknown request_id %s", request_id
+            )
+            return False
+
+        def _set() -> None:
+            if not future.done():
+                future.set_result(payload)
+
+        try:
+            loop = future.get_loop()
+        except RuntimeError:
+            loop = None
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is not None and loop.is_running() and running is not loop:
+            loop.call_soon_threadsafe(_set)
+        else:
+            _set()
+        return True
+
+    def handle_process_reply(
+        self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> None:
+        """Route a harness:process_*_result reply to its waiter (sync).
+
+        Called from Socket.IO handlers via ``sync_to_async``. Validates
+        that the workspace belongs to the sending runner, then resolves
+        the correlated request future.
+        """
+        if event not in self._PROCESS_RESULT_EVENTS:
+            return
+        workspace_id = str(data.get("workspace_id", ""))
+        request_id = str(data.get("request_id", ""))
+        if not request_id:
+            logger.warning("%s rejected: missing request_id", event)
+            return
+        if runner_id and workspace_id:
+            try:
+                workspace_uuid = uuid.UUID(workspace_id)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "%s rejected: invalid workspace_id %s",
+                    event,
+                    workspace_id,
+                )
+                return
+            if not self._validate_harness_workspace_runner(
+                workspace_uuid, runner_id
+            ):
+                return
+        self._resolve_process_future(request_id, data)
+
+    async def _await_process_result(
+        self,
+        *,
+        request_id: str,
+        event: str,
+        payload: dict,
+        runner: "Runner",
+        timeout: float,
+    ) -> dict:
+        """Emit a process RPC and wait for its correlated result."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._process_pending[request_id] = future
+        try:
+            await self._emit_to_runner(runner, event, payload)
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError as exc:
+            raise ConflictError(
+                f"Runner did not respond to '{event}' within {timeout:.0f}s"
+            ) from exc
+        finally:
+            self._process_pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+
+    def _ensure_process_dispatchable(self, workspace: "Workspace") -> "Runner":
+        """Validate that a process RPC may be dispatched (sync).
+
+        Processes never set ``active_operation``; only deletion states and
+        non-running status block dispatch.
+        """
+        if workspace.status in (
+            WorkspaceStatus.PENDING_DELETION,
+            WorkspaceStatus.DELETING,
+            WorkspaceStatus.DELETED,
+        ):
+            raise WorkspaceStateError(
+                f"Workspace '{workspace.id}' is pending deletion and "
+                "cannot run background processes"
+            )
+        if workspace.status != WorkspaceStatus.RUNNING:
+            raise WorkspaceStateError(
+                f"Workspace '{workspace.id}' is '{workspace.status}', "
+                f"must be '{WorkspaceStatus.RUNNING}' for background processes"
+            )
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+        return runner
+
+    def _push_process_status(
+        self,
+        *,
+        workspace_id: str,
+        process_id: str,
+        status: str,
+        exit_code: int | None = None,
+        pid: int | None = None,
+    ) -> None:
+        """Forward a background-process status change to the frontend."""
+        self._forward_to_frontend(
+            "process:status_changed",
+            {
+                "workspace_id": workspace_id,
+                "process_id": process_id,
+                "status": status,
+                "exit_code": exit_code,
+                "pid": pid,
+            },
+            workspace_id,
+        )
+
+    async def start_process(
+        self,
+        workspace_id: uuid.UUID,
+        command: str,
+        *,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        name: str = "",
+        user=None,
+        session_id: uuid.UUID | str | None = None,
+    ) -> "WorkspaceProcess":
+        """Start a detached background process in a workspace.
+
+        The backend assigns the process_id, persists a running record,
+        then asks the runner to spawn the OS process. Log content stays
+        decentralised as a file inside the workspace.
+
+        Raises:
+            WorkspaceNotFoundError: Unknown workspace.
+            WorkspaceStateError: Workspace not running / pending deletion.
+            RunnerOfflineError: Owning runner is offline.
+            ConflictError: Runner reported an error or timed out.
+        """
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        runner = self._ensure_process_dispatchable(workspace)
+
+        cleaned_command = (command or "").strip()
+        if not cleaned_command:
+            raise ValueError("command must not be empty")
+        safe_workdir = (workdir or "/workspace").strip() or "/workspace"
+        if session_id is not None and not isinstance(session_id, uuid.UUID):
+            try:
+                session_id = uuid.UUID(str(session_id))
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid session_id: {session_id}") from exc
+
+        process_id = generate_uuid()
+        process = await sync_to_async(self.processes.create)(
+            process_id=process_id,
+            workspace=workspace,
+            command=cleaned_command,
+            workdir=safe_workdir,
+            name=name or "",
+            created_by=user,
+            session_id=session_id,
+        )
+
+        request_id = uuid.uuid4().hex
+        try:
+            result = await self._await_process_result(
+                request_id=request_id,
+                event="harness:process_start",
+                payload={
+                    "request_id": request_id,
+                    "workspace_id": str(workspace_id),
+                    "process_id": str(process_id),
+                    "command": cleaned_command,
+                    "workdir": safe_workdir,
+                    "env": dict(env or {}),
+                    "name": name or "",
+                },
+                runner=runner,
+                timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
+            )
+        except (ConflictError, RunnerOfflineError, RuntimeError):
+            await sync_to_async(self.processes.mark_finished)(
+                process_id,
+                status=ProcessStatus.FAILED,
+                exit_code=None,
+            )
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process_id),
+                status=ProcessStatus.FAILED,
+            )
+            raise
+
+        error = result.get("error")
+        if error:
+            await sync_to_async(self.processes.mark_finished)(
+                process_id,
+                status=ProcessStatus.FAILED,
+                exit_code=None,
+            )
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process_id),
+                status=ProcessStatus.FAILED,
+            )
+            raise ConflictError(f"Runner failed to start process: {error}")
+
+        pid = result.get("pid")
+        log_path = str(result.get("log_path") or "")
+        await sync_to_async(self.processes.update_status)(
+            process_id,
+            status=ProcessStatus.RUNNING,
+            pid=int(pid) if pid is not None else None,
+            log_path=log_path or None,
+        )
+        refreshed = await sync_to_async(self.processes.get_by_id)(process_id)
+        process = refreshed or process
+        self._push_process_status(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+            status=ProcessStatus.RUNNING,
+            pid=process.pid,
+        )
+        logger.info(
+            "Started background process %s in workspace %s (pid=%s)",
+            process_id,
+            workspace_id,
+            process.pid,
+        )
+        return process
+
+    async def list_processes(
+        self, workspace_id: uuid.UUID
+    ) -> list["WorkspaceProcess"]:
+        """Return DB processes, merged with live runner state when online.
+
+        Falls back to plain DB records when the runner is offline or the
+        live lookup times out.
+        """
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+
+        if workspace.status == WorkspaceStatus.RUNNING and workspace.runner.is_online:
+            try:
+                request_id = uuid.uuid4().hex
+                result = await self._await_process_result(
+                    request_id=request_id,
+                    event="harness:process_list",
+                    payload={
+                        "request_id": request_id,
+                        "workspace_id": str(workspace_id),
+                    },
+                    runner=workspace.runner,
+                    timeout=self._PROCESS_LIVE_TIMEOUT_SECONDS,
+                )
+                if not result.get("error"):
+                    reported = result.get("processes") or []
+                    if isinstance(reported, list):
+                        await sync_to_async(self.reconcile_workspace_processes)(
+                            str(workspace_id), reported
+                        )
+            except (ConflictError, RunnerOfflineError, RuntimeError):
+                logger.debug(
+                    "Live process list unavailable for workspace %s, "
+                    "falling back to DB",
+                    workspace_id,
+                )
+
+        queryset = await sync_to_async(self.processes.list_by_workspace)(
+            workspace_id
+        )
+        return await sync_to_async(list)(queryset)
+
+    async def get_process(
+        self, workspace_id: uuid.UUID, process_id: uuid.UUID
+    ) -> "WorkspaceProcess":
+        """Return one process scoped to a workspace, live-merged when online."""
+        process = await sync_to_async(self.processes.get_for_workspace)(
+            process_id, workspace_id
+        )
+        if process is None:
+            raise WorkspaceNotFoundError(str(process_id))
+
+        if (
+            process.status == ProcessStatus.RUNNING
+            and process.pid is not None
+            and process.workspace.status == WorkspaceStatus.RUNNING
+            and process.workspace.runner.is_online
+        ):
+            try:
+                request_id = uuid.uuid4().hex
+                result = await self._await_process_result(
+                    request_id=request_id,
+                    event="harness:process_get",
+                    payload={
+                        "request_id": request_id,
+                        "workspace_id": str(workspace_id),
+                        "process_id": str(process_id),
+                    },
+                    runner=process.workspace.runner,
+                    timeout=self._PROCESS_LIVE_TIMEOUT_SECONDS,
+                )
+                live = result.get("process") or {}
+                if isinstance(live, dict) and not result.get("error"):
+                    live_status = str(live.get("status") or "")
+                    live_exit = live.get("exit_code")
+                    if live_status == "exited" or (
+                        live_status == "unknown" and live_exit is not None
+                    ):
+                        exit_code = (
+                            int(live_exit) if live_exit is not None else None
+                        )
+                        await sync_to_async(self.processes.mark_finished)(
+                            process_id,
+                            status=ProcessStatus.EXITED,
+                            exit_code=exit_code,
+                        )
+                        self._push_process_status(
+                            workspace_id=str(workspace_id),
+                            process_id=str(process_id),
+                            status=ProcessStatus.EXITED,
+                            exit_code=exit_code,
+                            pid=process.pid,
+                        )
+                        refreshed = await sync_to_async(
+                            self.processes.get_for_workspace
+                        )(process_id, workspace_id)
+                        process = refreshed or process
+            except (ConflictError, RunnerOfflineError, RuntimeError):
+                logger.debug(
+                    "Live process lookup unavailable for %s, using DB record",
+                    process_id,
+                )
+        return process
+
+    async def stop_process(
+        self,
+        workspace_id: uuid.UUID,
+        process_id: uuid.UUID,
+    ) -> "WorkspaceProcess":
+        """Stop a tracked background process (SIGTERM, then SIGKILL after grace).
+
+        Already-finished records are returned unchanged (idempotent).
+        """
+        stored = await sync_to_async(self.processes.get_for_workspace)(
+            process_id, workspace_id
+        )
+        if stored is None:
+            raise WorkspaceNotFoundError(str(process_id))
+        if stored.status != ProcessStatus.RUNNING:
+            return stored
+
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        runner = self._ensure_process_dispatchable(workspace)
+
+        request_id = uuid.uuid4().hex
+        result = await self._await_process_result(
+            request_id=request_id,
+            event="harness:process_stop",
+            payload={
+                "request_id": request_id,
+                "workspace_id": str(workspace_id),
+                "process_id": str(process_id),
+            },
+            runner=runner,
+            timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
+        )
+
+        error = result.get("error")
+        if error:
+            if "not found" in str(error).lower():
+                # Runner lost track of the process (e.g. after a restart) —
+                # it is effectively gone.
+                await sync_to_async(self.processes.mark_finished)(
+                    process_id,
+                    status=ProcessStatus.EXITED,
+                    exit_code=None,
+                )
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=str(process_id),
+                    status=ProcessStatus.EXITED,
+                    pid=stored.pid,
+                )
+                refreshed = await sync_to_async(
+                    self.processes.get_for_workspace
+                )(process_id, workspace_id)
+                return refreshed or stored
+            raise ConflictError(f"Runner failed to stop process: {error}")
+
+        live_exit = result.get("exit_code")
+        exit_code = int(live_exit) if live_exit is not None else None
+        status = (
+            ProcessStatus.EXITED
+            if str(result.get("status") or "") == "exited"
+            else ProcessStatus.KILLED
+        )
+        await sync_to_async(self.processes.mark_finished)(
+            process_id,
+            status=status,
+            exit_code=exit_code,
+        )
+        self._push_process_status(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+            status=status,
+            exit_code=exit_code,
+            pid=stored.pid,
+        )
+        logger.info(
+            "Stopped background process %s in workspace %s (status=%s)",
+            process_id,
+            workspace_id,
+            status,
+        )
+        refreshed = await sync_to_async(self.processes.get_for_workspace)(
+            process_id, workspace_id
+        )
+        return refreshed or stored
+
+    def reconcile_workspace_processes(
+        self,
+        workspace_id: str,
+        reported: list[dict],
+    ) -> list[uuid.UUID]:
+        """Reconcile DB running processes with a runner heartbeat list (sync).
+
+        *reported* holds ``{process_id, status, exit_code, pid}`` dicts.
+        Running records the runner reports as exited become exited; running
+        records missing from the report (e.g. after a runner restart that
+        wiped in-memory tracking) become exited with unknown exit code.
+        Records without a confirmed pid are skipped — the runner has not
+        acknowledged their start yet. Pushes frontend updates per change.
+
+        Returns IDs of changed processes.
+        """
+        try:
+            workspace_uuid = uuid.UUID(str(workspace_id))
+        except (ValueError, TypeError):
+            return []
+        by_id: dict[str, dict] = {}
+        for entry in reported or []:
+            if isinstance(entry, dict) and entry.get("process_id"):
+                by_id[str(entry["process_id"])] = entry
+
+        changed: list[uuid.UUID] = []
+        running = list(
+            self.processes.list_running_by_workspace(workspace_uuid)
+        )
+        for process in running:
+            if process.pid is None:
+                continue
+            live = by_id.get(str(process.id))
+            if live is None:
+                self.processes.mark_finished(
+                    process.id,
+                    status=ProcessStatus.EXITED,
+                    exit_code=None,
+                )
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=str(process.id),
+                    status=ProcessStatus.EXITED,
+                    pid=process.pid,
+                )
+                logger.info(
+                    "Process %s vanished from runner report, marking exited",
+                    process.id,
+                )
+                changed.append(process.id)
+                continue
+            live_status = str(live.get("status") or "")
+            live_exit = live.get("exit_code")
+            if live_status == "exited" or (
+                live_status == "unknown" and live_exit is not None
+            ):
+                exit_code = int(live_exit) if live_exit is not None else None
+                self.processes.mark_finished(
+                    process.id,
+                    status=ProcessStatus.EXITED,
+                    exit_code=exit_code,
+                )
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=str(process.id),
+                    status=ProcessStatus.EXITED,
+                    exit_code=exit_code,
+                    pid=process.pid,
+                )
+                logger.info(
+                    "Process %s exited on runner (exit_code=%s)",
+                    process.id,
+                    exit_code,
+                )
+                changed.append(process.id)
+        return changed
+
+    def mark_processes_killed(
+        self, workspace_id: str, *, reason: str = "workspace_stopped"
+    ) -> int:
+        """Mark all running processes of a workspace killed (sync).
+
+        Called on workspace stop/remove — processes are workspace-bound
+        and die with it. Pushes a frontend update per process.
+        """
+        try:
+            workspace_uuid = uuid.UUID(str(workspace_id))
+        except (ValueError, TypeError):
+            return 0
+        running = list(
+            self.processes.list_running_by_workspace(workspace_uuid)
+        )
+        if not running:
+            return 0
+        self.processes.mark_processes_killed(
+            workspace_uuid,
+            status=ProcessStatus.KILLED,
+        )
+        for process in running:
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process.id),
+                status=ProcessStatus.KILLED,
+                pid=process.pid,
+            )
+        logger.info(
+            "Marked %d processes killed for workspace %s (%s)",
+            len(running),
+            workspace_id,
+            reason,
+        )
+        return len(running)
+
+    # ------------------------------------------------------------------
     # File explorer (stateless passthrough — no DB models)
     # ------------------------------------------------------------------
 
@@ -2483,6 +3106,9 @@ class RunnerService:
                     )
                     self.workspaces.update_status(ws, WorkspaceStatus.FAILED)
                     self._forward_workspace_status(ws, status="failed")
+                    self.mark_processes_killed(
+                        ws_id_str, reason="workspace_missing_from_runner"
+                    )
                 self._cleanup_desktop_state(ws_id_str)
             else:
                 # Map Docker container status to workspace status
@@ -2510,6 +3136,17 @@ class RunnerService:
                     or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
                 ):
                     self._cleanup_desktop_state(ws_id_str)
+                    effective = new_status or ws.status
+                    if effective == WorkspaceStatus.STOPPED:
+                        try:
+                            self.mark_processes_killed(
+                                ws_id_str, reason="workspace_stopped"
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed killing processes for workspace %s",
+                                ws_id_str,
+                            )
                     continue
 
                 has_credentials = ws.credentials.exists()
@@ -2517,6 +3154,27 @@ class RunnerService:
                     ws.credentials_present and not has_credentials
                 ):
                     credential_sync_ids.append(ws.id)
+
+                # Reconcile background processes with the reported list.
+                # Only while the workspace is running: a missing process
+                # means it is gone (runner restart wipes in-memory state).
+                reported_processes = runner_payload.get("processes")
+                if isinstance(reported_processes, list) and (
+                    new_status == WorkspaceStatus.RUNNING
+                    or (
+                        new_status is None
+                        and ws.status == WorkspaceStatus.RUNNING
+                    )
+                ):
+                    try:
+                        self.reconcile_workspace_processes(
+                            ws_id_str, reported_processes
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed reconciling processes for workspace %s",
+                            ws_id_str,
+                        )
 
                 if "desktop" in runner_payload:
                     self._sync_desktop_state_from_heartbeat(
@@ -2920,14 +3578,14 @@ RUN apt-get update && apt-get install -y \\
 RUN mkdir -p /root/.vnc \\
     && touch /root/.vnc/.de-was-selected \\
     && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
-    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: true\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
+    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: false\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
     && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry 1920x1080 -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -AcceptSetDesktopSize -SendCutText -AcceptCutText >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
-    && printf '#!/bin/bash\\nfor pid in $(pgrep -f "Xvnc.*:1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry "$GEOMETRY" -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -SendCutText -AcceptCutText -AcceptSetDesktopSize=0 >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
+    && printf '#!/bin/bash\\nfor pid in $(pgrep -f "^(/usr/bin/)?Xvnc :1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
     && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 """
 
@@ -4194,12 +4852,16 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             qemu_vcpus = source_workspace.qemu_vcpus
             qemu_memory_mb = source_workspace.qemu_memory_mb
             qemu_disk_size_gb = source_workspace.qemu_disk_size_gb
+            desktop_width = source_workspace.desktop_width
+            desktop_height = source_workspace.desktop_height
         elif image.build_job is not None:
             runner = image.build_job.runner
             runtime_type = image.build_job.image_definition.runtime_type
             qemu_vcpus = None
             qemu_memory_mb = None
             qemu_disk_size_gb = None
+            desktop_width = DEFAULT_DESKTOP_WIDTH
+            desktop_height = DEFAULT_DESKTOP_HEIGHT
         else:
             raise ValueError(
                 f"Image artifact '{image_artifact_id}' is missing its source runtime metadata"
@@ -4255,6 +4917,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\n/usr/
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            desktop_width=desktop_width,
+            desktop_height=desktop_height,
             base_image_instance=image,
             created_by=user,
         )

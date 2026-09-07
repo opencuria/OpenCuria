@@ -9,9 +9,18 @@ describe('HarnessTodoSheet', () => {
     { id: 't2', content: 'second', status: 'in_progress', priority: 'high', order: 0 },
   ] as const
 
-  it('renders the progress count and sorted rows', () => {
+  it('starts collapsed by default', () => {
     const wrapper = mount(HarnessTodoSheet, {
       props: { todos: [...todos] },
+    })
+
+    expect(wrapper.find('[data-testid="composer-todo-count"]').text()).toBe('1/2')
+    expect(wrapper.findAll('[data-testid="composer-todo-row"]')).toHaveLength(0)
+  })
+
+  it('renders the progress count and sorted rows when open', () => {
+    const wrapper = mount(HarnessTodoSheet, {
+      props: { todos: [...todos], open: true },
     })
 
     expect(wrapper.find('[data-testid="composer-todo-count"]').text()).toBe('1/2')
@@ -24,11 +33,11 @@ describe('HarnessTodoSheet', () => {
 
   it('toggles the collapsible content', async () => {
     const wrapper = mount(HarnessTodoSheet, {
-      props: { todos: [...todos], open: true },
+      props: { todos: [...todos], open: false },
     })
-    expect(wrapper.findAll('[data-testid="composer-todo-row"]')).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid="composer-todo-row"]')).toHaveLength(0)
 
     await wrapper.find('[data-testid="composer-todo-trigger"]').trigger('click')
-    expect(wrapper.emitted('update:open')).toEqual([[false]])
+    expect(wrapper.emitted('update:open')).toEqual([[true]])
   })
 })

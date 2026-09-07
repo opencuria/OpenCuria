@@ -10,6 +10,7 @@ import {
   findPart,
   mergeBusyFetchedMessages,
   resetHarnessPartCounter,
+  settleOpenStreamParts,
 } from './harnessReducer'
 
 function makeMessages(): HarnessMessage[] {
@@ -49,7 +50,7 @@ describe('harnessReducer', () => {
     applyPartDelta(
       messages,
       'session-1',
-      { tool_started: 'bash', title: '$ ls', call_id: 'call-1' },
+      { tool_started: 'bash', title: '$ ls', call_id: 'call-1', arguments: 'ls -la' },
       { step: 2, partId: 'part-tool-1' },
     )
 
@@ -57,6 +58,7 @@ describe('harnessReducer', () => {
     let tool = findPart(assistant, { callId: 'call-1' })
     expect(tool?.state).toBe('running')
     expect(tool?.title).toBe('$ ls')
+    expect(tool?.input).toEqual({ tool: 'bash', arguments: 'ls -la' })
 
     applyPartDelta(
       messages,
@@ -153,10 +155,14 @@ describe('harnessReducer', () => {
       agent: 'explore',
       description: 'research the codebase',
       child_session_id: 'child-1',
+      model: 'acme/think',
+      reasoning_effort: 'high',
     })
     expect(started.state).toBe('running')
     expect(started.meta?.['subtask_id']).toBe('sub-1')
     expect(started.meta?.['child_session_id']).toBe('child-1')
+    expect(started.meta?.['model']).toBe('acme/think')
+    expect(started.meta?.['reasoning_effort']).toBe('high')
 
     const finished = applySubtaskFinished(assistant, {
       workspace_id: 'workspace-1',
@@ -307,5 +313,48 @@ describe('harnessReducer', () => {
     expect(last!.id).toBe('server-assistant')
     expect(last!.content).toBe('Hello world')
     expect(last!.parts[0]!.output).toBe('Hello world')
+  })
+
+  it('settles leftover running text and reasoning parts without touching tools', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [
+          {
+            id: 'r1',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'planning',
+          },
+          {
+            id: 't1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'pending',
+            title: '',
+            output: 'done',
+          },
+          {
+            id: 'tool-1',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'running',
+            title: 'bash',
+            output: '',
+          },
+        ],
+      },
+    ]
+
+    const settled = settleOpenStreamParts(messages)
+    expect(settled[0]!.parts[0]!.state).toBe('completed')
+    expect(settled[0]!.parts[0]!.output).toBe('planning')
+    expect(settled[0]!.parts[1]!.state).toBe('completed')
+    expect(settled[0]!.parts[2]!.state).toBe('running')
   })
 })

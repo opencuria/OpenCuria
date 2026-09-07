@@ -36,8 +36,22 @@ vi.mock('@/components/chat/HarnessContextSheet.vue', () => ({
 
 vi.mock('@/components/chat/HarnessTodoSheet.vue', () => ({
   default: {
+    name: 'HarnessTodoSheet',
     props: ['todos', 'open'],
     template: '<div data-testid="todo-stub">{{ todos.length }}</div>',
+  },
+}))
+
+vi.mock('@/components/chat/HarnessNoticeSheet.vue', () => ({
+  default: {
+    props: ['notice'],
+    template: '<div data-testid="notice-stub">{{ notice.text }}:{{ notice.tone }}</div>',
+  },
+}))
+
+vi.mock('@/components/chat/HarnessProcessSheet.vue', () => ({
+  default: {
+    template: '<div data-testid="process-stub" />',
   },
 }))
 
@@ -178,5 +192,54 @@ describe('HarnessSheetStack', () => {
     const context = wrapper.findComponent({ name: 'HarnessContextSheet' })
     context.vm.$emit('close')
     expect(wrapper.emitted('close-context')).toEqual([[]])
+  })
+
+  it('renders the notice sheet and forwards dismiss', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [
+          {
+            kind: 'notice',
+            notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
+          },
+          { kind: 'todos', todos: [makeTodo('t1')] },
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'notice',
+    )
+    expect(wrapper.find('[data-testid="notice-stub"]').text()).toBe('Run stopped by user:info')
+    const notice = wrapper.findComponent({ name: 'HarnessNoticeSheet' })
+    notice.vm.$emit('dismiss', 'msg-1')
+    expect(wrapper.emitted('dismiss-notice')).toEqual([['msg-1']])
+  })
+
+  it('renders the todos sheet collapsed by default', () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: { sheets: [{ kind: 'todos', todos: [makeTodo('t1')] }] },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'todos',
+    )
+    expect(wrapper.getComponent({ name: 'HarnessTodoSheet' }).props('open')).toBe(false)
+  })
+
+  it('renders the processes sheet on top of todos and forwards close', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [{ kind: 'processes' }, { kind: 'todos', todos: [makeTodo('t1')] }],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'processes',
+    )
+    expect(wrapper.find('[data-testid="process-stub"]').exists()).toBe(true)
+    const processes = wrapper.findComponent({ name: 'HarnessProcessSheet' })
+    processes.vm.$emit('close')
+    expect(wrapper.emitted('close-processes')).toEqual([[]])
   })
 })

@@ -89,7 +89,7 @@ onMounted(async () => {
     <Card class="w-full max-w-sm">
       <CardContent class="pt-6">
         <div class="flex items-center gap-3 mb-6 justify-center">
-          <OpenCuriaLogo class="h-11 w-auto" alt="OpenCuria" />
+          <OpenCuriaLogo class="h-14 w-auto" alt="OpenCuria" />
         </div>
 
         <CardHeader class="px-0 pb-4 text-center">

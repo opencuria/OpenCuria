@@ -4,8 +4,11 @@ OpenRouter provider adapter (OpenAI-compatible, SSE streaming).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -17,8 +20,10 @@ from .base import (
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
+    ProviderHeaderTimeoutError,
     ProviderRateLimitError,
     ProviderResponseError,
+    ProviderStreamTimeoutError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
@@ -28,6 +33,57 @@ log = structlog.get_logger(__name__)
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
+HTTPX_POOL_TIMEOUT_SECONDS = 5.0
+
+#: Cap for the enriched ``response_body`` stored on provider errors.
+RESPONSE_BODY_MAX_CHARS = 2000
+
+
+def positive_timeout(value: float | None) -> float | None:
+    """Return *value* when it is a positive timeout, otherwise ``None``."""
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def httpx_stream_timeout(opts: ChatOptions) -> httpx.Timeout:
+    """Build httpx timeouts: connect/write follow header timeout, read is off.
+
+    SSE idle and header waits are enforced with ``asyncio.wait_for`` so
+    httpx does not treat a long reasoning pause as a read timeout.
+    """
+    header = positive_timeout(opts.header_timeout_seconds)
+    return httpx.Timeout(
+        None,
+        connect=header,
+        read=None,
+        write=header,
+        pool=HTTPX_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def effective_timeout(
+    phase_seconds: float | None,
+    deadline: float | None,
+) -> float | None:
+    """Combine a phase timeout with an optional wall-clock deadline."""
+    phase = positive_timeout(phase_seconds)
+    if deadline is None:
+        return phase
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0.0
+    if phase is None:
+        return remaining
+    return min(phase, remaining)
+
+
+def stream_deadline(opts: ChatOptions) -> float | None:
+    """Return a monotonic deadline when a total timeout is configured."""
+    total = positive_timeout(opts.timeout_seconds)
+    if total is None:
+        return None
+    return time.monotonic() + total
 
 
 class OpenRouterAdapter(ProviderAdapter):
@@ -70,7 +126,9 @@ class OpenRouterAdapter(ProviderAdapter):
         Raises:
             ProviderAuthError: On HTTP 401/403.
             ProviderRateLimitError: On HTTP 429.
-            ProviderTimeoutError: On network timeouts.
+            ProviderHeaderTimeoutError: When headers do not arrive in time.
+            ProviderStreamTimeoutError: When the SSE stream goes idle.
+            ProviderTimeoutError: On network or total-request timeouts.
             ProviderResponseError: On other HTTP errors or
                 malformed SSE payloads.
         """
@@ -81,36 +139,42 @@ class OpenRouterAdapter(ProviderAdapter):
             "Content-Type": "application/json",
         }
         url = f"{self._base_url}{CHAT_COMPLETIONS_PATH}"
-        timeout = httpx.Timeout(options.timeout_seconds)
+        timeout = httpx_stream_timeout(options)
         logger = log.bind(provider=self.name, model=model)
+        deadline = stream_deadline(options)
 
         try:
             if self._client is not None:
-                async with self._client.stream(
-                    "POST",
+                async for delta in self._stream_request(
+                    self._client,
                     url,
-                    json=payload,
-                    headers=headers,
-                    timeout=timeout,
-                ) as response:
-                    async for delta in self._parse_stream(response):
-                        yield delta
+                    payload,
+                    headers,
+                    timeout,
+                    options,
+                    deadline,
+                ):
+                    yield delta
             else:
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream(
-                        "POST",
+                    async for delta in self._stream_request(
+                        client,
                         url,
-                        json=payload,
-                        headers=headers,
-                        timeout=timeout,
-                    ) as response:
-                        async for delta in self._parse_stream(response):
-                            yield delta
+                        payload,
+                        headers,
+                        timeout,
+                        options,
+                        deadline,
+                    ):
+                        yield delta
         except ProviderAuthError:
             logger.warning("provider_auth_error")
             raise
         except ProviderRateLimitError:
             logger.warning("provider_rate_limit_error")
+            raise
+        except ProviderTimeoutError:
+            logger.warning("provider_timeout")
             raise
         except ProviderResponseError:
             logger.warning("provider_response_error")
@@ -118,7 +182,7 @@ class OpenRouterAdapter(ProviderAdapter):
         except httpx.TimeoutException as exc:
             logger.warning("provider_timeout")
             raise ProviderTimeoutError(
-                f"OpenRouter request timed out: {exc}",
+                "OpenRouter request timed out",
                 provider=self.name,
             ) from exc
         except httpx.HTTPError as exc:
@@ -165,6 +229,69 @@ class OpenRouterAdapter(ProviderAdapter):
             payload["reasoning"] = {"effort": effort}
         return payload
 
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout: httpx.Timeout,
+        options: ChatOptions,
+        deadline: float | None,
+    ) -> AsyncIterator[Delta]:
+        """Open one SSE stream with header and chunk idle timeouts."""
+        stream_cm = client.stream(
+            "POST",
+            url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+        try:
+            header_timeout = effective_timeout(
+                options.header_timeout_seconds, deadline
+            )
+            try:
+                if header_timeout is None:
+                    response = await stream_cm.__aenter__()
+                else:
+                    response = await asyncio.wait_for(
+                        stream_cm.__aenter__(), timeout=header_timeout
+                    )
+            except TimeoutError as exc:
+                raise self._header_or_total_timeout(
+                    options, deadline, header_timeout
+                ) from exc
+            async for delta in self._parse_stream(
+                response,
+                chunk_timeout=options.chunk_timeout_seconds,
+                deadline=deadline,
+                total_timeout=options.timeout_seconds,
+            ):
+                yield delta
+        finally:
+            with suppress(Exception):
+                await stream_cm.__aexit__(None, None, None)
+
+    def _header_or_total_timeout(
+        self,
+        options: ChatOptions,
+        deadline: float | None,
+        waited: float | None,
+    ) -> ProviderTimeoutError:
+        """Choose header vs total timeout after a wait_for expiry."""
+        if deadline is not None and (deadline - time.monotonic()) <= 0:
+            total = positive_timeout(options.timeout_seconds) or 0.0
+            return ProviderTimeoutError(
+                f"OpenRouter request timed out after {int(total * 1000)}ms",
+                provider=self.name,
+            )
+        seconds = waited if waited is not None else 0.0
+        return ProviderHeaderTimeoutError(
+            provider=self.name,
+            timeout_seconds=seconds,
+        )
+
     @staticmethod
     def _message_to_dict(message: LLMMessage) -> dict[str, Any]:
         """Convert an LLMMessage to the OpenAI wire format."""
@@ -192,29 +319,58 @@ class OpenRouterAdapter(ProviderAdapter):
             data["tool_call_id"] = message.tool_call_id
         return data
 
-    async def _parse_stream(self, response: httpx.Response) -> AsyncIterator[Delta]:
+    async def _parse_stream(
+        self,
+        response: httpx.Response,
+        *,
+        chunk_timeout: float | None = None,
+        deadline: float | None = None,
+        total_timeout: float | None = None,
+    ) -> AsyncIterator[Delta]:
         """Validate the HTTP status and parse SSE lines into deltas."""
         if response.status_code in (401, 403):
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderAuthError(
                 f"OpenRouter auth failed ({response.status_code}): {body}",
                 provider=self.name,
+                status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
         if response.status_code == 429:
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderRateLimitError(
                 f"OpenRouter rate limit ({response.status_code}): {body}",
                 provider=self.name,
+                status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
         if response.status_code >= 400:
             body = await self._read_body_snippet(response)
+            headers = self._response_headers(response)
+            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
             raise ProviderResponseError(
                 f"OpenRouter error ({response.status_code}): {body}",
                 provider=self.name,
                 status_code=response.status_code,
+                response_headers=headers,
+                response_body=full_body,
+                is_retryable=self._should_retry_hint(headers),
             )
 
-        async for line in response.aiter_lines():
+        async for line in self._aiter_lines(
+            response,
+            chunk_timeout=chunk_timeout,
+            deadline=deadline,
+            total_timeout=total_timeout,
+        ):
             stripped = line.strip()
             if not stripped or stripped.startswith(":"):
                 continue
@@ -227,14 +383,79 @@ class OpenRouterAdapter(ProviderAdapter):
             if delta is not None:
                 yield delta
 
+    async def _aiter_lines(
+        self,
+        response: httpx.Response,
+        *,
+        chunk_timeout: float | None,
+        deadline: float | None,
+        total_timeout: float | None,
+    ) -> AsyncIterator[str]:
+        """Yield SSE lines, aborting after chunk idle or total deadline."""
+        iterator = response.aiter_lines()
+        while True:
+            timeout = effective_timeout(chunk_timeout, deadline)
+            try:
+                if timeout is None:
+                    line = await anext(iterator)
+                else:
+                    line = await asyncio.wait_for(anext(iterator), timeout=timeout)
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                raise self._chunk_or_total_timeout(
+                    deadline, total_timeout
+                ) from exc
+            yield line
+
+    def _chunk_or_total_timeout(
+        self,
+        deadline: float | None,
+        total_timeout: float | None,
+    ) -> ProviderTimeoutError:
+        """Choose stream vs total timeout after a wait_for expiry."""
+        if deadline is not None and (deadline - time.monotonic()) <= 0:
+            total = positive_timeout(total_timeout) or 0.0
+            return ProviderTimeoutError(
+                f"OpenRouter request timed out after {int(total * 1000)}ms",
+                provider=self.name,
+            )
+        return ProviderStreamTimeoutError(provider=self.name)
+
     @staticmethod
     async def _read_body_snippet(response: httpx.Response) -> str:
         """Read a short error-body snippet without raising."""
+        return await OpenRouterAdapter._read_body(response, 500)
+
+    @staticmethod
+    async def _read_body(response: httpx.Response, limit: int) -> str:
+        """Read up to *limit* chars of the response body without raising."""
         try:
             body = await response.aread()
-            return body.decode("utf-8", errors="replace")[:500]
+            return body.decode("utf-8", errors="replace")[:limit]
         except Exception:
             return "<unreadable body>"
+
+    @staticmethod
+    def _response_headers(response: httpx.Response) -> dict[str, str]:
+        """Return response headers with lowercased names and str values."""
+        headers: dict[str, str] = {}
+        try:
+            for name, value in response.headers.items():
+                headers[name.lower()] = str(value)
+        except Exception:
+            return {}
+        return headers
+
+    @staticmethod
+    def _should_retry_hint(headers: dict[str, str]) -> bool | None:
+        """Parse the ``x-should-retry`` header (Pi provider-retry parity)."""
+        hint = headers.get("x-should-retry", "").strip().lower()
+        if hint == "true":
+            return True
+        if hint == "false":
+            return False
+        return None
 
     def _parse_chunk(self, data: str) -> Delta | None:
         """Parse one SSE data payload into a Delta.

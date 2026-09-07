@@ -32,6 +32,10 @@ class APIKeyPermission(str, enum.Enum):
     # Terminal
     TERMINAL_ACCESS = "terminal:access"
 
+    # Background processes (additive; existing keys are never auto-granted these)
+    WORKSPACES_PROCESSES_READ = "workspaces:processes_read"
+    WORKSPACES_PROCESSES_RUN = "workspaces:processes_run"
+
     # Runners
     RUNNERS_READ = "runners:read"
     RUNNERS_CREATE = "runners:create"

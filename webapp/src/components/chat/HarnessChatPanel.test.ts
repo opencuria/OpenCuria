@@ -5,6 +5,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
+import { markHarnessSessionRead } from '@/services/harness.api'
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
@@ -30,6 +31,7 @@ vi.mock('@/services/harness.api', async () => {
       api_key_hint: '',
     }),
     listProviderModels: vi.fn().mockResolvedValue([]),
+    markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),
   }
 })
 
@@ -86,7 +88,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -99,32 +100,35 @@ describe('HarnessChatPanel', () => {
     expect(input.props('disabled')).toBe(false)
   })
 
-  it('renders workspace toolbar controls inline with the input row', () => {
+  it('hides composer panel chrome (toggles live in the chat header) when viewing any session', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
         stubs,
       },
     })
+    await flushPromises()
 
-    const buttons = wrapper.findAll('button[title]')
-    const titles = buttons.map((button) => button.attributes('title'))
-    expect(titles).toContain('Open file explorer')
-    expect(titles).toContain('Open terminal')
-    expect(titles).toContain('Open desktop')
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const titles = wrapper.findAll('button[title]').map((button) => button.attributes('title'))
+    expect(titles).not.toContain('Open file explorer')
+    expect(titles).not.toContain('Open terminal')
+    expect(titles).not.toContain('Open desktop')
   })
 
-  it('hides the input and workspace toolbar when viewing a subagent session', async () => {
+  it('hides the input when viewing a subagent session', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -147,10 +151,6 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(false)
-    const titles = wrapper.findAll('button[title]').map((button) => button.attributes('title'))
-    expect(titles).not.toContain('Open file explorer')
-    expect(titles).not.toContain('Open terminal')
-    expect(titles).not.toContain('Open desktop')
   })
 
   it('keeps the input when viewing a root session', async () => {
@@ -158,7 +158,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -180,7 +179,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -212,5 +210,195 @@ describe('HarnessChatPanel', () => {
     expect(stack.element.parentElement).toBe(input.element.parentElement)
     const sheets = stack.props('sheets') as Array<{ kind: string }>
     expect(sheets.map((sheet) => sheet.kind)).toEqual(['permission', 'todos'])
+  })
+
+  it('marks an idle session read when it becomes the active viewing chat', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ unread: true })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+
+    expect(store.viewingSessionId).toBe('session-root')
+    expect(vi.mocked(markHarnessSessionRead)).toHaveBeenCalledWith('session-root')
+    expect(store.sessions[0]?.unread).toBe(false)
+    wrapper.unmount()
+    expect(store.viewingSessionId).toBeNull()
+  })
+
+  it('surfaces abort and error notices in the composer sheet stack', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'msg-user',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'msg-abort',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: '',
+        finish: 'aborted',
+        error: 'aborted by user',
+        parts: [],
+      },
+    ]
+    await wrapper.vm.$nextTick()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const sheets = stack.props('sheets') as Array<{ kind: string; notice?: { text: string } }>
+    expect(sheets.map((sheet) => sheet.kind)).toContain('notice')
+    expect(sheets.find((sheet) => sheet.kind === 'notice')?.notice?.text).toBe(
+      'Run stopped by user',
+    )
+
+    stack.vm.$emit('dismiss-notice', 'msg-abort')
+    await wrapper.vm.$nextTick()
+    const after = stack.props('sheets') as Array<{ kind: string }>
+    expect(after.map((sheet) => sheet.kind)).not.toContain('notice')
+  })
+
+  it('includes the processes sheet when processesOpen is true', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+        processesOpen: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const sheets = stack.props('sheets') as Array<{ kind: string }>
+    expect(sheets.map((sheet) => sheet.kind)).toContain('processes')
+
+    stack.vm.$emit('close-processes')
+    expect(wrapper.emitted('close-processes')).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('syncs the session query so a subtask click is not snapped back', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'Computer use',
+        agent_name: 'computeruse',
+      }),
+    ]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-root')
+
+    store.setActiveSession('session-child')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-child')
+
+    store.sessions = [...store.sessions]
+    await wrapper.vm.$nextTick()
+    expect(store.activeSessionId).toBe('session-child')
+    expect(router.currentRoute.value.query.session).toBe('session-child')
+  })
+
+  it('opens a subtask immediately even if that session is not listed yet', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    await flushPromises()
+    expect(store.activeSessionId).toBe('session-child')
+  })
+
+  it('does not snap back to the query session when the session list refreshes', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'Computer use',
+        agent_name: 'computeruse',
+      }),
+    ]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    expect(router.currentRoute.value.query.session).toBe('session-root')
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    store.sessions = [...store.sessions]
+    await wrapper.vm.$nextTick()
+    expect(store.activeSessionId).toBe('session-child')
   })
 })

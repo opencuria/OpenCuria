@@ -16,6 +16,56 @@ from typing import Any
 
 HARNESS_WORKSPACE_ROOT = "/workspace"
 
+#: Env vars never forwarded to the workspace (injected shell/runtime
+#: hijack surface). Matched case-insensitively by prefix; exact names
+#: in :data:`BLOCKED_ENV_EXACT` are always denied.
+BLOCKED_ENV_PREFIXES = (
+    "LD_",
+    "PYTHON",
+    "PATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+    "ENV",
+    "BASH_ENV",
+)
+
+#: Exact env names denied even if a prefix rule is relaxed later.
+BLOCKED_ENV_EXACT = {
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "HOME",
+    "SHELL",
+}
+
+
+def validate_harness_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Return a copy of *env* with dangerous keys rejected.
+
+    Args:
+        env: Caller-provided extra environment (``None`` means empty).
+
+    Raises:
+        ValueError: If a key matches :data:`BLOCKED_ENV_EXACT` or a
+            prefix in :data:`BLOCKED_ENV_PREFIXES` (case-insensitive).
+    """
+    if not env:
+        return {}
+    for key in env:
+        upper = str(key).upper()
+        blocked = upper in BLOCKED_ENV_EXACT or any(
+            upper.startswith(prefix) for prefix in BLOCKED_ENV_PREFIXES
+        )
+        if blocked:
+            raise ValueError(
+                f"env var '{key}' is blocked: it would override "
+                "shell/runtime search paths or home/shell resolution"
+            )
+    return dict(env)
+
 
 def sanitize_harness_path(path: str) -> str:
     """Validate that *path* stays inside the harness workspace root.
@@ -163,3 +213,31 @@ class WorkspaceAccessor(abc.ABC):
         (e.g. ``ok``, ``image_b64``, ``width``, ``height`` for screenshots).
         Raises on runner-reported ``error``.
         """
+
+    @abc.abstractmethod
+    async def process_start(
+        self,
+        command: str,
+        workdir: str = HARNESS_WORKSPACE_ROOT,
+        env: dict[str, str] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Start a detached background process in the workspace.
+
+        Returns a JSON-serializable dict (``process_id``, ``status``,
+        ``pid``, ``exit_code``, ``log_path``, ...). The backend assigns
+        the process id; logs stay in the workspace and are read back
+        via ``read_file`` using the returned ``log_path``.
+        """
+
+    @abc.abstractmethod
+    async def process_list(self) -> list[dict[str, Any]]:
+        """List background processes of the workspace (newest first)."""
+
+    @abc.abstractmethod
+    async def process_get(self, process_id: str) -> dict[str, Any]:
+        """Return one background process scoped to the workspace."""
+
+    @abc.abstractmethod
+    async def process_stop(self, process_id: str) -> dict[str, Any]:
+        """Stop a background process (SIGTERM, then SIGKILL after grace)."""

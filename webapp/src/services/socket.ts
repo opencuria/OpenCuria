@@ -18,6 +18,7 @@ import type {
   FilesContentResultEvent,
   FilesUploadResultEvent,
   FilesDownloadResultEvent,
+  ProcessStatusChangedEvent,
 } from '@/types'
 import type {
   HarnessPartUpdatedEvent,
@@ -167,6 +168,7 @@ type EventMap = {
   'files:download_result': FilesDownloadResultEvent
   'runner:offline': RunnerOfflineEvent
   'runner:online': RunnerOnlineEvent
+  'process:status_changed': ProcessStatusChangedEvent
 }
 
 type EventName = keyof EventMap

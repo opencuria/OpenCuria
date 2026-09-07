@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { onMounted, computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import {
@@ -47,7 +47,11 @@ const credentialStore = useCredentialStore()
 const imageStore = useImageStore()
 const router = useRouter()
 
-const open = ref(false)
+const emit = defineEmits<{
+  created: [workspaceId: string | null]
+}>()
+
+const open = defineModel<boolean>('open', { default: false })
 const activeTab = ref<'basic' | 'advanced'>('basic')
 const name = ref('')
 const selectedCredentialIds = ref<string[]>([])
@@ -353,6 +357,7 @@ async function handleSubmit(): Promise<void> {
   submitting.value = true
 
   let success: boolean
+  let createdWorkspaceId: string | null = null
   if (isCapturedClone.value) {
     const workspaceId = await imageStore.createWorkspaceFromImageArtifact(
       selectedOption.imageArtifact?.id || '',
@@ -362,6 +367,7 @@ async function handleSubmit(): Promise<void> {
       },
     )
     success = !!workspaceId
+    createdWorkspaceId = workspaceId
   } else {
     addRepo()
 
@@ -375,6 +381,7 @@ async function handleSubmit(): Promise<void> {
       return
     }
 
+    const beforeIds = new Set(workspaceStore.workspaces.map((entry) => entry.id))
     success = await workspaceStore.createWorkspace({
       name: name.value.trim(),
       repos: repos.value,
@@ -389,12 +396,17 @@ async function handleSubmit(): Promise<void> {
           }
         : {}),
     })
+    if (success) {
+      const created = workspaceStore.workspaces.find((entry) => !beforeIds.has(entry.id))
+      createdWorkspaceId = created?.id ?? null
+    }
   }
 
   submitting.value = false
 
   if (success) {
     handleClose()
+    emit('created', createdWorkspaceId)
   }
 }
 
@@ -417,7 +429,8 @@ function handleClose(): void {
 
 async function navigateToCredentials(): Promise<void> {
   handleClose()
-  await router.push({ name: 'credentials' })
+  // Settings-Routen sind Redirects aufs Sheet (Schritt 6): Deep-Link nutzen.
+  await router.push({ path: '/', query: { settings: 'credentials' } })
 }
 
 const isValid = computed(
@@ -435,7 +448,9 @@ const isValid = computed(
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
     <DialogTrigger as-child>
-      <Button @click="open = true">Create Workspace</Button>
+      <slot>
+        <Button @click="open = true">Create Workspace</Button>
+      </slot>
     </DialogTrigger>
 
     <DialogContent>

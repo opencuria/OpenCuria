@@ -27,14 +27,15 @@ test.describe('05 — Credentials', () => {
     }
     test.skip(!serviceId, 'No credential service available');
 
-    await page.goto(`${BASE_URL}/credentials`);
+    await page.goto(`${BASE_URL}/?settings=credentials`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // Click Add Credential
     await page.getByRole('button', { name: /add credential/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const credName = `${testState.prefix}-env-cred`;
 
     // Service selector is a native-style combobox — use selectOption by visible text
@@ -138,7 +139,8 @@ test.describe('05 — Credentials', () => {
     });
 
     // Verify on UI
-    await page.goto(`${BASE_URL}/credentials`);
+    await page.goto(`${BASE_URL}/?settings=credentials`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
     await expect(page.getByText(`${testState.prefix}-env-cred-renamed`)).toBeVisible({ timeout: 10_000 });
 
@@ -149,7 +151,8 @@ test.describe('05 — Credentials', () => {
   });
 
   test('should list credentials on the page', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/credentials`);
+    await page.goto(`${BASE_URL}/?settings=credentials`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // At least our test credentials should appear

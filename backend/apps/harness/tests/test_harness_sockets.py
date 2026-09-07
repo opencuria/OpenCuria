@@ -77,7 +77,9 @@ async def test_socket_event_payloads(harness_workspace) -> None:
         by_event.setdefault(item["event"], []).append(item)
     assert FRONTEND_EVENT_STATUS in by_event
     assert by_event[FRONTEND_EVENT_STATUS][0]["status"] == "busy"
+    assert by_event[FRONTEND_EVENT_STATUS][0]["model"] == "fake-model"
     assert by_event[FRONTEND_EVENT_STATUS][-1]["status"] == "idle"
+    assert by_event[FRONTEND_EVENT_STATUS][-1]["model"] == "fake-model"
     part_events = by_event[FRONTEND_EVENT_PART]
     assert part_events
     assert all(
@@ -118,6 +120,8 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
             "subtask_id": "sub-1",
             "agent": "explore",
             "description": "research",
+            "model": "child-model",
+            "reasoning_effort": "high",
         },
     )
     part = HarnessPartRepository.list_for_session(session.id)
@@ -145,8 +149,76 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
     assert started["subtask_id"] == "sub-1"
     assert started["part_id"]
     assert started.get("child_session_id", "") == ""
+    assert started["model"] == "child-model"
+    assert started["reasoning_effort"] == "high"
     finished = by_event[FRONTEND_EVENT_SUBTASK_FINISHED][0]
     assert finished["status"] == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_subtask_part_persists_child_session_id(harness_workspace) -> None:
+    """subtask_started/finished store child_session_id on the part meta."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+    )
+    assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "subtask_started",
+            "subtask_id": "sub-1",
+            "agent": "explore",
+            "description": "research",
+            "child_session_id": "child-session-1",
+            "model": "child-model",
+            "reasoning_effort": "high",
+        },
+    )
+    started_parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "subtask"
+    ]
+    assert len(started_parts) == 1
+    assert started_parts[0].meta.get("child_session_id") == "child-session-1"
+    assert started_parts[0].meta.get("model") == "child-model"
+    assert started_parts[0].meta.get("reasoning_effort") == "high"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "subtask_finished",
+            "subtask_id": "sub-1",
+            "agent": "explore",
+            "status": "completed",
+            "summary": "found it",
+            "child_session_id": "child-session-1",
+        },
+    )
+    finished_parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "subtask"
+    ]
+    assert finished_parts[0].meta.get("child_session_id") == "child-session-1"
+    assert finished_parts[0].meta.get("status") == "completed"
+    assert finished_parts[0].state == "completed"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -184,6 +256,7 @@ async def test_permission_event_emitted_once_with_request_id(
     assert permission_events[0]["request_id"]
     assert permission_events[0]["tool"] == "bash"
     assert permission_events[0]["call_id"] == "call-9"
+    assert permission_events[0]["agent_name"] == session.agent_name
     await service.resolve_permission(
         session=session,
         request_id=uuid.UUID(permission_events[0]["request_id"]),

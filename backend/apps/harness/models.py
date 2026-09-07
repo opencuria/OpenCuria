@@ -198,6 +198,12 @@ class HarnessMessage(models.Model):
     role = models.CharField(max_length=16, choices=HarnessMessageRole.choices)
     content = models.TextField(blank=True, default="")
     model = models.CharField(max_length=255, blank=True, default="")
+    reasoning_effort = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        help_text="OpenRouter reasoning effort snapshotted for this turn.",
+    )
     provider = models.CharField(max_length=64, blank=True, default="")
     cost = models.FloatField(default=0.0)
     tokens = models.JSONField(

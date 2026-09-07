@@ -53,6 +53,8 @@ from .schemas import (
     ImageBuildJobCreateIn,
     ImageBuildJobOut,
     ImageBuildJobUpdateIn,
+    ProcessOut,
+    ProcessStartIn,
     TaskOut,
     TerminalStartIn,
     WorkspaceFromImageArtifactIn,
@@ -139,6 +141,8 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         qemu_vcpus=workspace.qemu_vcpus,
         qemu_memory_mb=workspace.qemu_memory_mb,
         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+        desktop_width=workspace.desktop_width,
+        desktop_height=workspace.desktop_height,
         created_by_id=workspace.created_by_id,
         last_activity_at=workspace.last_activity_at,
         auto_stop_timeout_minutes=auto_stop_timeout_minutes,
@@ -573,6 +577,8 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
+            desktop_width=payload.desktop_width,
+            desktop_height=payload.desktop_height,
             env_vars=resolved.env_vars,
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
@@ -937,6 +943,8 @@ async def update_workspace(
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
+            desktop_width=payload.desktop_width,
+            desktop_height=payload.desktop_height,
         )
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
@@ -948,6 +956,8 @@ async def update_workspace(
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+            desktop_width=workspace.desktop_width,
+            desktop_height=workspace.desktop_height,
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -1023,6 +1033,151 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
 
         task = await service.remove_workspace(workspace_id)
         return 202, task
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+# ===========================================================================
+# Background process routers (workspace-bound, no auto-restart)
+# ===========================================================================
+
+
+def _process_to_out(process) -> ProcessOut:
+    """Map a WorkspaceProcess ORM instance to ProcessOut."""
+    return ProcessOut(
+        id=process.id,
+        workspace_id=process.workspace_id,
+        name=process.name or "",
+        command=process.command,
+        workdir=process.workdir,
+        pid=process.pid,
+        log_path=process.log_path or "",
+        status=process.status,
+        exit_code=process.exit_code,
+        started_at=process.started_at,
+        ended_at=process.ended_at,
+        updated_at=process.updated_at,
+    )
+
+
+@workspace_router.get(
+    "/{workspace_id}/processes/",
+    response={200: list[ProcessOut], 403: ErrorOut, 404: ErrorOut},
+    summary="List background processes",
+)
+async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
+    """List background processes of a workspace (DB + live merge)."""
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_READ
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        processes = await service.list_processes(workspace_id)
+        return 200, [_process_to_out(process) for process in processes]
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/processes/",
+    response={
+        201: ProcessOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
+    summary="Start a background process",
+)
+async def start_process(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: ProcessStartIn
+):
+    """Start a detached background process in a workspace."""
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        process = await service.start_process(
+            workspace_id,
+            payload.command,
+            workdir=payload.workdir,
+            env=dict(payload.env or {}),
+            name=payload.name or "",
+            user=request.user,
+        )
+        return 201, _process_to_out(process)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.get(
+    "/{workspace_id}/processes/{process_id}/",
+    response={200: ProcessOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Get a background process",
+)
+async def get_process(
+    request: HttpRequest, workspace_id: uuid.UUID, process_id: uuid.UUID
+):
+    """Return one background process scoped to a workspace."""
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_READ
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        process = await service.get_process(workspace_id, process_id)
+        return 200, _process_to_out(process)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/processes/{process_id}/stop/",
+    response={200: ProcessOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Stop a background process",
+)
+async def stop_process(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    process_id: uuid.UUID,
+):
+    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        process = await service.stop_process(
+            workspace_id,
+            process_id,
+        )
+        return 200, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

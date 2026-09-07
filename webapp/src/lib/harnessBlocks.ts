@@ -1,20 +1,21 @@
 /**
  * Group harness message parts into render blocks for the chat timeline.
  *
- * Parts stay in chronological order. Consecutive tool/reasoning work items
- * collapse into a "Worked" group when two or more occur in a row.
+ * Parts stay in chronological order. Consecutive simple tool calls collapse
+ * into a "Worked" group. Reasoning and failed tools break the run and render
+ * as standalone rows. Subtasks and patches stay as top-level cards.
  */
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
 import { isTaskToolPart } from '@/lib/harnessSubtaskActivity'
 
-const WORK_ITEM_TYPES = new Set<HarnessPartType>(['tool', 'reasoning'])
+const GROUPABLE_TYPES = new Set<HarnessPartType>(['tool'])
 const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch', 'agent'])
 const SKIP_TYPES = new Set<HarnessPartType>(['step-start', 'step-finish'])
 
-/** A work item that can join a consecutive "Worked" run. */
+/** A simple tool call that can join a consecutive "Worked" run. */
 export function isWorkItem(part: HarnessPart): boolean {
-  return WORK_ITEM_TYPES.has(part.type)
+  return GROUPABLE_TYPES.has(part.type) && part.state !== 'error'
 }
 
 /** Top-level card parts that break a work run. */
@@ -39,9 +40,13 @@ function isEmptyText(part: HarnessPart): boolean {
   return part.type === 'text' && !part.output
 }
 
+function isStandaloneWork(part: HarnessPart): boolean {
+  return part.type === 'reasoning' || (part.type === 'tool' && part.state === 'error')
+}
+
 /**
- * Collapse consecutive tool/reasoning parts into a group when two or more
- * work items appear in a row. Step markers are skipped entirely.
+ * Collapse consecutive successful/running tool parts into a group when two
+ * or more appear in a row. Reasoning, errors, text, and cards flush the run.
  */
 export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
   const blocks: RenderBlock[] = []
@@ -75,6 +80,11 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
       blocks.push({ kind: 'compaction', part })
       continue
     }
+    if (isStandaloneWork(part)) {
+      flushRun()
+      blocks.push({ kind: 'single', part })
+      continue
+    }
     if (isWorkItem(part)) {
       run.push(part)
       continue
@@ -87,7 +97,7 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
   return blocks
 }
 
-/** Number of tool/reasoning rows inside a work run. */
+/** Number of grouped tool rows inside a work run. */
 export function countWorkItems(parts: HarnessPart[]): number {
   return parts.filter(isWorkItem).length
 }

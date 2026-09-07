@@ -31,12 +31,6 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
 describe('HarnessWorkedGroup', () => {
   const completedParts: HarnessPart[] = [
     makePart({ id: 'tool-1', title: 'Read index.ts' }),
-    makePart({
-      id: 'r1',
-      type: 'reasoning',
-      title: '',
-      output: 'checking',
-    }),
     makePart({ id: 'tool-2', tool: 'grep', title: 'Grep RouteMeta' }),
   ]
 
@@ -46,10 +40,10 @@ describe('HarnessWorkedGroup', () => {
     })
 
     expect(wrapper.text()).toContain('Worked')
-    expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('3')
+    expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('2')
   })
 
-  it('stays collapsed when no part is running', () => {
+  it('stays collapsed by default when no part is running', () => {
     const wrapper = mount(HarnessWorkedGroup, {
       props: { parts: completedParts },
     })
@@ -64,13 +58,12 @@ describe('HarnessWorkedGroup', () => {
 
     await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
     const rows = wrapper.findAll('[data-testid="harness-work-row"]')
-    expect(rows).toHaveLength(3)
+    expect(rows).toHaveLength(2)
     expect(rows[0]!.text()).toContain('Read index.ts')
-    expect(rows[1]!.text()).toContain('Thought')
-    expect(rows[2]!.text()).toContain('Grep RouteMeta')
+    expect(rows[1]!.text()).toContain('Grep RouteMeta')
   })
 
-  it('opens while a contained part is running', () => {
+  it('stays collapsed while running and shows the live tool title', () => {
     const wrapper = mount(HarnessWorkedGroup, {
       props: {
         parts: [
@@ -86,8 +79,8 @@ describe('HarnessWorkedGroup', () => {
       },
     })
 
-    const rows = wrapper.findAll('[data-testid="harness-work-row"]')
-    expect(rows).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid="harness-work-row"]')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="harness-worked-live"]').text()).toBe('Grep foo')
     expect(wrapper.find('.loading-stub').exists()).toBe(true)
   })
 
@@ -113,7 +106,7 @@ describe('HarnessWorkedGroup', () => {
     })
 
     expect(wrapper.get('[data-testid="harness-worked-running"]').text()).toBe('2 running')
-    expect(wrapper.findAll('.loading-stub')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="harness-worked-live"]').text()).toBe('Grep foo')
   })
 
   it('does not render step-finish rows inside the group', async () => {

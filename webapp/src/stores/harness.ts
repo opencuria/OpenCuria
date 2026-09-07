@@ -32,6 +32,7 @@ import {
   sendHarnessMessage,
   setSessionMode,
 } from '@/services/harness.api'
+import { hydrateHarnessPart } from '@/lib/toolDisplay'
 import {
   applyPartDelta,
   applySubtaskFinished,
@@ -39,9 +40,11 @@ import {
   applyTodoUpdate,
   ensureAssistantMessage,
   mergeBusyFetchedMessages,
+  settleOpenStreamParts,
 } from '@/lib/harnessReducer'
-import { collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
+import { collectDescendantSessionIds, collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
 import { useNotificationStore } from './notifications'
+import { useHarnessConversationStore } from './harnessConversations'
 
 export const useHarnessStore = defineStore('harness', () => {
   // --- State ---
@@ -55,12 +58,16 @@ export const useHarnessStore = defineStore('harness', () => {
   /** Pending question requests keyed by request id. */
   const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
   const activeSessionId = ref<string | null>(null)
+  /** Session currently open in the chat panel; cleared when the panel unmounts. */
+  const viewingSessionId = ref<string | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
   /** Model picker value; empty string means "org default". */
   const modelInput = ref('')
   /** Reasoning effort for the next run; empty uses the model default. */
   const effortInput = ref('')
+  /** Message ids whose error/abort notice the user dismissed. */
+  const dismissedNoticeIds = ref<Record<string, true>>({})
 
   // --- Getters ---
   const activeSession = computed(
@@ -75,17 +82,31 @@ export const useHarnessStore = defineStore('harness', () => {
     () => (activeSessionId.value ? (todosBySession.value[activeSessionId.value] ?? []) : []),
   )
 
+  const activeLineageIds = computed(() => {
+    if (!activeSessionId.value) return new Set<string>()
+    return new Set(collectDescendantSessionIds(activeSessionId.value, sessions.value))
+  })
+
   const activePermissionRequests = computed<HarnessPermissionRequest[]>(() =>
-    Object.values(pendingPermissions.value).filter(
-      (request) => request.session_id === activeSessionId.value,
-    ),
+    Object.values(pendingPermissions.value)
+      .filter((request) => activeLineageIds.value.has(request.session_id))
+      .map((request) => enrichGateAgent(request)),
   )
 
   const activeQuestionRequests = computed<HarnessQuestionRequest[]>(() =>
-    Object.values(pendingQuestions.value).filter(
-      (request) => request.session_id === activeSessionId.value,
-    ),
+    Object.values(pendingQuestions.value)
+      .filter((request) => activeLineageIds.value.has(request.session_id))
+      .map((request) => enrichGateAgent(request)),
   )
+
+  function enrichGateAgent<T extends { session_id: string; agent_name?: string }>(
+    request: T,
+  ): T {
+    if (request.agent_name) return request
+    const session = sessions.value.find((item) => item.id === request.session_id)
+    if (!session?.agent_name) return request
+    return { ...request, agent_name: session.agent_name }
+  }
 
   const rootSessions = computed(() =>
     sessions.value.filter((session) => !session.parent_id),
@@ -121,10 +142,12 @@ export const useHarnessStore = defineStore('harness', () => {
     loading.value = true
     error.value = null
     try {
+      const previous = sessions.value
       sessions.value = await listHarnessSessions(workspaceId)
       if (
         activeSessionId.value &&
-        !sessions.value.some((session) => session.id === activeSessionId.value)
+        !sessions.value.some((session) => session.id === activeSessionId.value) &&
+        previous.some((session) => session.id === activeSessionId.value)
       ) {
         activeSessionId.value = null
       }
@@ -139,6 +162,22 @@ export const useHarnessStore = defineStore('harness', () => {
     activeSessionId.value = sessionId
   }
 
+  function setViewingSession(sessionId: string | null): void {
+    viewingSessionId.value = sessionId
+    if (!sessionId) return
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (session?.status === 'idle') {
+      void markSessionRead(sessionId)
+    }
+  }
+
+  async function markSessionRead(sessionId: string): Promise<void> {
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (session) session.unread = false
+    const conversationStore = useHarnessConversationStore()
+    await conversationStore.markAsRead(sessionId)
+  }
+
   async function fetchParts(
     sessionId: string,
     hydrateChildren = true,
@@ -148,13 +187,33 @@ export const useHarnessStore = defineStore('harness', () => {
       const incoming = response.messages.map((message) => ({
         ...message,
         session_id: sessionId,
-        parts: message.parts ?? [],
+        parts: (message.parts ?? []).map(hydrateHarnessPart),
       }))
       const session = sessions.value.find((item) => item.id === sessionId)
       messagesBySession.value[sessionId] =
         session?.status === 'busy'
           ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
-          : incoming
+          : settleOpenStreamParts(incoming)
+      const nextPermissions = { ...pendingPermissions.value }
+      for (const id of Object.keys(nextPermissions)) {
+        if (nextPermissions[id]?.session_id === sessionId) {
+          delete nextPermissions[id]
+        }
+      }
+      for (const request of response.permissions ?? []) {
+        nextPermissions[request.request_id] = { ...request, status: 'pending' }
+      }
+      pendingPermissions.value = nextPermissions
+      const nextQuestions = { ...pendingQuestions.value }
+      for (const id of Object.keys(nextQuestions)) {
+        if (nextQuestions[id]?.session_id === sessionId) {
+          delete nextQuestions[id]
+        }
+      }
+      for (const request of response.questions ?? []) {
+        nextQuestions[request.request_id] = { ...request, status: 'pending' }
+      }
+      pendingQuestions.value = nextQuestions
       if (hydrateChildren) {
         const childIds = collectRunningChildSessionIds(
           messagesBySession.value[sessionId] ?? [],
@@ -317,6 +376,7 @@ export const useHarnessStore = defineStore('harness', () => {
       step: opts.step,
       partId: opts.partId,
     })
+    stampRunModel(sessionId)
   }
 
   function handleTodoUpdated(sessionId: string, todos: HarnessTodo[]): void {
@@ -334,6 +394,8 @@ export const useHarnessStore = defineStore('harness', () => {
       description: string
       part_id?: string
       child_session_id?: string
+      model?: string
+      reasoning_effort?: string
     },
   ): void {
     const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
@@ -345,7 +407,10 @@ export const useHarnessStore = defineStore('harness', () => {
       description: event.description,
       part_id: event.part_id,
       child_session_id: event.child_session_id,
+      model: event.model,
+      reasoning_effort: event.reasoning_effort,
     })
+    stampRunModel(sessionId)
   }
 
   function handleSubtaskFinished(
@@ -370,9 +435,46 @@ export const useHarnessStore = defineStore('harness', () => {
     })
   }
 
-  function handleSessionStatus(sessionId: string, status: HarnessSession['status']): void {
+  function stampRunModel(
+    sessionId: string,
+    extras?: { model?: string; reasoning_effort?: string },
+  ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
-    if (session) session.status = status
+    const messages = messagesBySession.value[sessionId]
+    const last = messages?.[messages.length - 1]
+    if (!last || last.role !== 'assistant' || last.completed_at != null) return
+    const model = extras?.model || session?.model || ''
+    const effort =
+      extras?.reasoning_effort !== undefined
+        ? extras.reasoning_effort
+        : (session?.reasoning_effort ?? '')
+    if (!last.model && model) last.model = model
+    if (!last.reasoning_effort && effort) last.reasoning_effort = effort
+  }
+
+  function handleSessionStatus(
+    sessionId: string,
+    status: HarnessSession['status'],
+    extras?: { model?: string; reasoning_effort?: string },
+  ): void {
+    const session = sessions.value.find((s) => s.id === sessionId)
+    if (session) {
+      session.status = status
+      if (extras?.model) session.model = extras.model
+      if (extras?.reasoning_effort !== undefined) {
+        session.reasoning_effort = extras.reasoning_effort
+      }
+    }
+    stampRunModel(sessionId, extras)
+    if (status === 'idle') {
+      if (viewingSessionId.value === sessionId) {
+        void markSessionRead(sessionId)
+        return
+      }
+      if (session) session.unread = true
+      return
+    }
+    if (session) session.unread = false
   }
 
   function handlePermissionRequired(request: HarnessPermissionRequest): void {
@@ -433,6 +535,10 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  function dismissNotice(messageId: string): void {
+    dismissedNoticeIds.value = { ...dismissedNoticeIds.value, [messageId]: true }
+  }
+
   function reset(): void {
     sessions.value = []
     messagesBySession.value = {}
@@ -440,8 +546,10 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions.value = {}
     pendingQuestions.value = {}
     activeSessionId.value = null
+    viewingSessionId.value = null
     loading.value = false
     error.value = null
+    dismissedNoticeIds.value = {}
   }
 
   return {
@@ -452,10 +560,12 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions,
     pendingQuestions,
     activeSessionId,
+    viewingSessionId,
     loading,
     error,
     modelInput,
     effortInput,
+    dismissedNoticeIds,
     // Getters
     activeSession,
     activeMessages,
@@ -467,6 +577,8 @@ export const useHarnessStore = defineStore('harness', () => {
     // Actions
     fetchSessions,
     setActiveSession,
+    setViewingSession,
+    markSessionRead,
     fetchParts,
     fetchTodos,
     createSession,
@@ -475,6 +587,7 @@ export const useHarnessStore = defineStore('harness', () => {
     removeSession,
     updateSessionMode,
     abortSession,
+    dismissNotice,
     resolvePermission,
     resolveQuestion,
     // Real-time

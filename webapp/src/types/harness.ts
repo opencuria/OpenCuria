@@ -48,6 +48,7 @@ export interface HarnessMessage {
   role: 'user' | 'assistant'
   content: string
   model?: string
+  reasoning_effort?: string
   cost?: number
   tokens?: Record<string, number>
   finish?: string
@@ -75,6 +76,7 @@ export interface HarnessSession {
   reasoning_effort?: string
   status: HarnessSessionStatus
   skill_ids?: string[]
+  unread?: boolean
   cost: number
   tokens: Record<string, number>
   created_at?: string
@@ -101,6 +103,8 @@ export interface HarnessPermissionRequest {
   title: string
   call_id?: string
   status?: 'pending' | 'approved' | 'rejected'
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string
 }
 
 /** Permission resolution choice (M6 `HarnessPermissionResolveIn`). */
@@ -126,6 +130,8 @@ export interface HarnessQuestionRequest {
   questions: HarnessQuestionItem[]
   call_id?: string
   status?: 'pending' | 'answered' | 'rejected' | 'timed_out'
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string
 }
 
 // --- REST payloads (M6 `backend/apps/harness/api.py`) ----------------------
@@ -165,6 +171,8 @@ export interface HarnessConversation {
   status: HarnessSessionStatus
   mode: HarnessSessionMode
   agent_name: string
+  model: string
+  reasoning_effort?: string
   unread: boolean
   updated_at: string
 }
@@ -184,6 +192,7 @@ export interface HarnessPartDelta {
   tool_error?: string
   title?: string
   call_id?: string
+  arguments?: string
   output?: string
   patch?: string
   compaction?: boolean
@@ -207,6 +216,7 @@ export interface HarnessPermissionRequiredEvent {
   call_id?: string
   decision?: string
   remember?: string
+  agent_name?: string
 }
 
 export interface HarnessPermissionResolvedEvent {
@@ -224,6 +234,7 @@ export interface HarnessQuestionRequiredEvent {
   questions: HarnessQuestionItem[]
   call_id?: string
   status?: string
+  agent_name?: string
 }
 
 export interface HarnessQuestionResolvedEvent {
@@ -237,6 +248,8 @@ export interface HarnessSessionStatusEvent {
   workspace_id: string
   session_id: string
   status: HarnessSessionStatus
+  model?: string
+  reasoning_effort?: string
 }
 
 export interface HarnessTodoUpdatedEvent {
@@ -254,6 +267,8 @@ export interface HarnessSubtaskStartedEvent {
   description: string
   part_id?: string
   child_session_id?: string
+  model?: string
+  reasoning_effort?: string
 }
 
 export interface HarnessSubtaskFinishedEvent {

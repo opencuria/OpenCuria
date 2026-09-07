@@ -495,10 +495,16 @@ class TypeTextArgs(BaseModel):
 class PressKeyArgs(BaseModel):
     """Arguments for press_key."""
 
-    key: str = Field(min_length=1, description="Examples: enter, tab, escape, a, 1")
+    key: str = Field(
+        min_length=1,
+        description=(
+            "Key to press. Examples: enter, tab, escape, Return, a, 1. "
+            "Combos like ctrl+enter are also accepted."
+        ),
+    )
     modifiers: list[str] = Field(
         default_factory=list,
-        description="Examples: control, shift, alt, command",
+        description="Examples: control, shift, alt, super",
     )
 
 

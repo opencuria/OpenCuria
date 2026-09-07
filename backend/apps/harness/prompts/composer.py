@@ -23,6 +23,7 @@ logic lives here on purpose.
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -187,16 +188,28 @@ async def compose_system_prompt(
     env_lines = [
         "# Environment",
         f"Date: {moment.strftime('%Y-%m-%d')}",
+        f"Platform: {platform.system()} {platform.machine()}",
+        f"Workspace root: {HARNESS_WORKSPACE_ROOT}",
         f"Working directory: {cwd}",
         f"Mode: {mode} (plan = propose, do not mutate without approval; "
         "build = implement Hunted changes directly)",
     ]
+    if mode == "plan":
+        env_lines.append(
+            "Plan mode: investigate read-only; "
+            "ask before edits/mutating commands."
+        )
     sections.append("\n".join(env_lines))
 
     if tools:
         tool_lines = ["# Available tools"]
         for schema in tools:
             tool_lines.append(f"- {schema.name}: {schema.description}")
+        if any(schema.name == "process_start" for schema in tools):
+            tool_lines.append(
+                "Background servers via process_start; read logs from the "
+                "returned log_path."
+            )
         tool_lines.append(
             "Independent tool calls in one assistant message run in parallel. "
             "Issue multiple tool calls in a single step for independent work; "

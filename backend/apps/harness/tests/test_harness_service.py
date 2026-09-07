@@ -16,16 +16,23 @@ from django.core.exceptions import SynchronousOnlyOperation
 from apps.harness.harness_service import (
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
+    FRONTEND_EVENT_QUESTION,
+    FRONTEND_EVENT_STATUS,
     HarnessService,
 )
-from apps.harness.models import HarnessSession, Todo
+from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.service import PermissionService
+from apps.harness.permissions.models import PermissionRequest
+from apps.harness.permissions.service import (
+    PermissionRequestRepository,
+    PermissionService,
+)
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -33,7 +40,9 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
+    QuestionRequestRepository,
 )
+from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
 
 
@@ -202,11 +211,14 @@ async def test_double_run_rejected_with_conflict(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_abort_marks_message_and_parts(harness_workspace) -> None:
-    """Abort cancels the task and marks message/parts as aborted."""
+    """Abort cancels the task and keeps streamed reasoning content."""
     gate = asyncio.Event()
+    streamed = asyncio.Event()
 
     class HangingProvider(FakeProvider):
         async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            yield Delta(reasoning="considering the layout")
+            streamed.set()
             await gate.wait()
             yield Delta(text="never", usage=Usage(1, 1, 2))
 
@@ -219,7 +231,8 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(streamed.wait(), timeout=2)
+    await _wait_for_part(session.id, part_type="reasoning")
     assert service.is_running(session.id)
     aborted = await service.abort_run(session.id)
     assert aborted.status == "idle"
@@ -228,7 +241,169 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "aborted"
+    assert assistant.error == "aborted by user"
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "considering the layout"
     assert [e["event"] for e in events][-1] == "harness.session_status"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_rejects_pending_permission_and_question(
+    harness_workspace,
+) -> None:
+    """Abort marks leftover user gates rejected and notifies the frontend."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Continue?"}],
+    )
+    await service.abort_run(session.id)
+
+    stored_permission = await sync_to_async(PermissionRequest.objects.get)(
+        id=permission.id
+    )
+    stored_question = await sync_to_async(QuestionRequest.objects.get)(id=question.id)
+    assert stored_permission.status == "rejected"
+    assert stored_question.status == "rejected"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("decision") == "reject"
+        for event in events
+    )
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("status") == "rejected"
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_settles_open_text_and_reasoning_parts(
+    harness_workspace,
+) -> None:
+    """A finished run persists leftover text/reasoning parts as completed."""
+    provider = FakeProvider(
+        [
+            [
+                Delta(reasoning="planning the change"),
+                Delta(text="hello", usage=Usage(1, 1, 2)),
+            ]
+        ]
+    )
+    service, _, _events = _service(provider=provider)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "do the thing",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    text = [p for p in parts if p.type == "text"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "planning the change"
+    assert text
+    assert text[0].state == "completed"
+    assert "hello" in (text[0].output or "")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_run_error_preserves_stream_content_and_fails_tools(
+    harness_workspace,
+) -> None:
+    """A provider crash completes thoughts and fails leftover tools."""
+
+    class FailingProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            yield Delta(reasoning="almost there")
+            raise RuntimeError("provider exploded")
+
+    service, _, _events = _service(provider=FailingProvider([]))
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "will fail",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assistant = [m for m in stored if m.role == "assistant"][0]
+    assert assistant.finish == "error"
+    assert "provider exploded" in (assistant.error or "")
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert reasoning
+    assert reasoning[0].state == "completed"
+    assert reasoning[0].output == "almost there"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_fail_open_parts_preserves_partial_tool_output(
+    harness_workspace,
+) -> None:
+    """Abort keeps partial tool output instead of overwriting it."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id,
+        role="assistant",
+        content="",
+    )
+    reasoning = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="reasoning",
+        state="running",
+    )
+    await sync_to_async(HarnessPartRepository.append_output)(
+        reasoning, "already thought this"
+    )
+    tool_partial = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="tool",
+        state="running",
+        title="bash",
+    )
+    await sync_to_async(HarnessPartRepository.append_output)(tool_partial, "stdout…")
+    tool_empty = await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id,
+        type="tool",
+        state="running",
+        title="read",
+    )
+
+    await service._fail_open_parts(assistant, state="error", output="aborted")
+
+    reasoning.refresh_from_db()
+    tool_partial.refresh_from_db()
+    tool_empty.refresh_from_db()
+    assert reasoning.state == "completed"
+    assert reasoning.output == "already thought this"
+    assert tool_partial.state == "error"
+    assert tool_partial.output == "stdout…"
+    assert tool_empty.state == "error"
+    assert tool_empty.output == "aborted"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -278,6 +453,43 @@ async def test_spawn_background_detaches_asgiref_executor() -> None:
 
     assert "executor" in seen
     assert seen["executor"] is not sentinel
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_failed_run_persists_error_without_task_exception(
+    harness_workspace, monkeypatch
+) -> None:
+    """Provider failures persist error finish and do not leak task exceptions."""
+    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+
+    class TimeoutProvider(FakeProvider):
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            raise ProviderTimeoutError("SSE read timed out", provider="fake")
+            yield Delta(text="unused")  # pragma: no cover
+
+    service, _, _ = _service(provider=TimeoutProvider([]))
+    session = await _db_create_session(harness_workspace)
+    assistant = await service.start_run(
+        session,
+        "will timeout",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    task = service._tasks.get(str(session.id))
+    if task is not None:
+        await task
+        assert task.exception() is None
+    assistant.refresh_from_db()
+    assert assistant.finish == "error"
+    assert "timed out" in (assistant.error or "")
+    session.refresh_from_db()
+    assert session.status == "idle"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -712,6 +924,98 @@ async def test_build_history_includes_tool_calls(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_build_history_truncates_huge_tool_output(harness_workspace) -> None:
+    """Persisted oversized tool parts are clipped before the provider sees them."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="grep Force"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role="assistant",
+        content="searching",
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-grep",
+        title="grep Force",
+        input={"tool": "grep", "arguments": '{"pattern":"Force"}'},
+        output="x" * (MAX_BYTES + 8_000),
+    )
+    history = await service._build_history(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, str)
+    preview = tool_msg.content.split("\n\n...", 1)[0]
+    assert len(preview.encode("utf-8")) <= MAX_BYTES
+    assert len(tool_msg.content) < len(part.output)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_compaction_event_persists_output(harness_workspace) -> None:
+    """Compaction parts store the summary via create(output=)."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "compaction",
+            "summary": "## Objective\n- recovered",
+            "auto": True,
+            "overflow": True,
+            "tail_start_id": "user-1",
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "compaction"
+    ]
+    assert len(parts) == 1
+    assert parts[0].output == "## Objective\n- recovered"
+    assert parts[0].meta.get("tail_start_id") == "user-1"
+    assert parts[0].state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
+    """Patch parts store the unified diff via create(output=)."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "patch",
+            "call_id": "c1",
+            "title": "Patch a.txt",
+            "path": "/workspace/a.txt",
+            "unified_diff": "--- a\n+++ b\n",
+            "old_content": "a",
+            "new_content": "b",
+            "tool": "edit",
+            "step": 1,
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "patch"
+    ]
+    assert len(parts) == 1
+    assert parts[0].output == "--- a\n+++ b\n"
+
+
+@pytest.mark.django_db(transaction=True)
 def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None:
     """Users cannot prompt subagent child sessions; root sessions stay open."""
     service, _, _ = _service()
@@ -843,6 +1147,112 @@ def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_start_run_snapshots_reasoning_effort_on_assistant(
+    harness_workspace,
+) -> None:
+    """Assistant shells store the session effort used for that turn."""
+    service, _, _ = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="think hard",
+        mode="build",
+        model="fake-model",
+        reasoning_effort="high",
+    )
+    assistant = await service.start_run(
+        session,
+        "think hard",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert assistant.model == "fake-model"
+    assert assistant.reasoning_effort == "high"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_run_snapshots_org_default_when_session_model_empty(
+    harness_workspace, monkeypatch
+) -> None:
+    """Auto (empty session.model) snapshots org default onto the assistant."""
+    from apps.harness.providers.models_catalog import ProviderModel
+    from apps.harness.providers.openrouter import OpenRouterAdapter
+    from apps.harness.services import ProviderConfigService
+
+    org_id = harness_workspace.runner.organization_id
+    ProviderConfigService().save_config(
+        organization_id=org_id,
+        api_key="sk-test",
+        base_url="https://example.com/v1",
+        default_model="org-default-model",
+        small_model="",
+    )
+    session = await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="auto model",
+        agent_name="build",
+        mode="build",
+        model="",
+        reasoning_effort="medium",
+    )
+
+    async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        yield Delta(text="hello", usage=Usage(1, 1, 2))
+
+    monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        return [
+            ProviderModel(
+                id="org-default-model",
+                name="Org Default",
+                reasoning_efforts=("medium",),
+                default_effort="medium",
+                supports_tools=True,
+                context_length=128_000,
+                max_output_tokens=8_192,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
+
+    collected: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        collected.append({"event": event, **data})
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+    )
+    assistant = await service.start_run(
+        session,
+        "say hello",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert assistant.model == "org-default-model"
+    assert assistant.reasoning_effort == "medium"
+    refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert refreshed is not None
+    assert refreshed.model == ""
+    busy = next(
+        item
+        for item in collected
+        if item.get("event") == FRONTEND_EVENT_STATUS and item.get("status") == "busy"
+    )
+    assert busy["model"] == "org-default-model"
+    assert busy["reasoning_effort"] == "medium"
+    await service._tasks[str(session.id)]
+    refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert refreshed is not None
+    assert refreshed.model == ""
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
     """set_mode(plan) also sets agent_name to plan."""
     service, _, _ = _service()
@@ -879,6 +1289,22 @@ async def test_missing_provider_config_raises(harness_workspace) -> None:
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
+
+
+async def _wait_for_part(
+    session_id: uuid.UUID, *, part_type: str, timeout: float = 2.0
+):
+    """Poll until a part of *part_type* exists for *session_id*."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+            session_id
+        )
+        match = [part for part in parts if part.type == part_type]
+        if match:
+            return match[0]
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no {part_type} part within {timeout}s")
 
 
 async def _db_create_session(harness_workspace):  # type: ignore[no-untyped-def]

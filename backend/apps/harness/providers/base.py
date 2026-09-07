@@ -75,13 +75,90 @@ class ProviderError(Exception):
 class ProviderAuthError(ProviderError):
     """Raised when the provider rejects credentials (401/403)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
+    ) -> None:
+        """Create an auth error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
+        self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
+        super().__init__(message, provider=provider)
+
 
 class ProviderRateLimitError(ProviderError):
     """Raised when the provider rate-limits the request (429)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
+    ) -> None:
+        """Create a rate-limit error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
+        self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
+        super().__init__(message, provider=provider)
+
 
 class ProviderTimeoutError(ProviderError):
     """Raised when the provider request times out."""
+
+
+class ProviderHeaderTimeoutError(ProviderTimeoutError):
+    """Raised when response headers do not arrive in time."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        provider: str = "",
+        timeout_seconds: float = 0.0,
+    ) -> None:
+        ms = int(timeout_seconds * 1000)
+        super().__init__(
+            message or f"Provider response headers timed out after {ms}ms",
+            provider=provider,
+        )
+        self.timeout_seconds = timeout_seconds
+
+
+class ProviderStreamTimeoutError(ProviderTimeoutError):
+    """Raised when the SSE stream goes idle between chunks."""
+
+    def __init__(self, message: str = "", *, provider: str = "") -> None:
+        super().__init__(message or "SSE read timed out", provider=provider)
 
 
 class ProviderResponseError(ProviderError):
@@ -93,18 +170,50 @@ class ProviderResponseError(ProviderError):
         *,
         provider: str = "",
         status_code: int | None = None,
+        response_headers: dict[str, str] | None = None,
+        response_body: str = "",
+        is_retryable: bool | None = None,
     ) -> None:
+        """Create a response error with optional HTTP response context.
+
+        Args:
+            message: Human-readable error description.
+            provider: Provider name (e.g. ``"openrouter"``).
+            status_code: HTTP status code, if known.
+            response_headers: Response headers (lowercased names).
+            response_body: Truncated raw response body for classification.
+            is_retryable: Provider retry hint (``None`` when unknown).
+        """
         self.status_code = status_code
+        self.response_headers: dict[str, str] = dict(response_headers or {})
+        self.response_body = response_body
+        self.is_retryable = is_retryable
         super().__init__(message, provider=provider)
+
+
+#: OpenCode ``headerTimeout`` default (ms → seconds).
+DEFAULT_HEADER_TIMEOUT_SECONDS = 300.0
+
+#: OpenCode ``chunkTimeout`` default (ms → seconds).
+DEFAULT_CHUNK_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
 class ChatOptions:
-    """Optional per-request settings for a chat completion."""
+    """Optional per-request settings for a chat completion.
+
+    Timeouts match OpenCode's fetch wrapper: wait up to
+    ``header_timeout_seconds`` for response headers, then up to
+    ``chunk_timeout_seconds`` of idle time between SSE chunks. ``None``
+    or ``<= 0`` disables that phase. ``timeout_seconds`` is an optional
+    wall-clock cap with no default.
+    """
 
     temperature: float | None = None
     max_tokens: int | None = None
-    timeout_seconds: float = 60.0
+    header_timeout_seconds: float | None = DEFAULT_HEADER_TIMEOUT_SECONDS
+    chunk_timeout_seconds: float | None = DEFAULT_CHUNK_TIMEOUT_SECONDS
+    timeout_seconds: float | None = None
     reasoning_effort: str | None = None
     tool_choice: str | None = None
 

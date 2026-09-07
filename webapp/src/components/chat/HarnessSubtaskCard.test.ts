@@ -6,6 +6,19 @@ import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
 import type { HarnessPart } from '@/types/harness'
 
+vi.mock('./HarnessDesktopMini.vue', () => ({
+  default: { template: '<div data-testid="harness-desktop-mini" />' },
+}))
+
+vi.mock('@/services/harness.api', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
+  return {
+    ...actual,
+    listProviderModels: vi.fn().mockResolvedValue([]),
+  }
+})
+
 function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: 'part-sub-1',
@@ -90,14 +103,84 @@ describe('HarnessSubtaskCard', () => {
     )
   })
 
-  it('emits openSubtask when the row is clicked', async () => {
+  it('opens the only child session even when titles differ', async () => {
+    const store = useHarnessStore()
+    store.sessions = [
+      {
+        id: 'session-parent',
+        workspace_id: 'workspace-1',
+        parent_id: null,
+        title: 'parent',
+        mode: 'build',
+        agent_name: 'build',
+        model: 'm',
+        status: 'idle',
+        cost: 0,
+        tokens: {},
+      },
+      {
+        id: 'session-child',
+        workspace_id: 'workspace-1',
+        parent_id: 'session-parent',
+        title: 'Generated login test title',
+        mode: 'build',
+        agent_name: 'computeruse',
+        model: 'm',
+        status: 'idle',
+        cost: 0,
+        tokens: {},
+      },
+    ]
+
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          title: 'Webapp Login und Dashboard testen',
+          meta: { subtask_id: 'sub-1', agent: 'computeruse' },
+        }),
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-row"]').classes()).toContain(
+      'cursor-pointer',
+    )
+    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
+    expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+  })
+
+  it('highlights the row on hover when it is clickable', () => {
     const wrapper = mount(HarnessSubtaskCard, {
       props: { part: makeSubtaskPart(), childSessionId: 'session-child' },
     })
 
-    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
+    const classes = wrapper.get('[data-testid="harness-subtask-row"]').classes()
+    expect(classes).toContain('hover:bg-muted/60')
+    expect(classes).toContain('cursor-pointer')
+  })
 
-    expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+  it('shows a live desktop mini only for a running computer-use subtask', () => {
+    const running = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          state: 'running',
+          output: '',
+          meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
+        }),
+        childSessionId: 'cu-1',
+      },
+    })
+    expect(running.get('[data-testid="harness-subtask-type"]').text()).toBe('Computer use')
+    expect(running.find('[data-testid="harness-desktop-mini"]').exists()).toBe(true)
+
+    const done = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
+        }),
+        childSessionId: 'cu-1',
+      },
+    })
+    expect(done.find('[data-testid="harness-desktop-mini"]').exists()).toBe(false)
   })
 
   it('shows Failed when the subtask errored', () => {
@@ -106,6 +189,35 @@ describe('HarnessSubtaskCard', () => {
     })
 
     expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe('Failed')
+  })
+
+  it('shows the child model next to the subagent type', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: {
+        part: makeSubtaskPart({
+          meta: {
+            subtask_id: 'sub-1',
+            agent: 'explore',
+            model: 'acme/think',
+            reasoning_effort: 'high',
+          },
+        }),
+        models: [
+          {
+            id: 'acme/think',
+            name: 'Think',
+            reasoning_efforts: ['high'],
+            default_effort: 'high',
+            supports_tools: true,
+            context_length: 1,
+            max_output_tokens: 1,
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-subtask-type"]').text()).toBe('Explorer')
+    expect(wrapper.get('[data-testid="harness-subtask-model"]').text()).toBe('Think High')
   })
 
   it('store keeps the parent/child link for navigation', () => {

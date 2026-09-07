@@ -52,6 +52,12 @@ from typing import Any
 
 import structlog
 
+from apps.runners.exceptions import (
+    RunnerOfflineError,
+    WorkspaceNotFoundError,
+)
+from common.exceptions import ConflictError
+
 from .base import (
     DirEntry,
     ExecChunk,
@@ -130,6 +136,35 @@ def _normalize_command(command: list[str] | str) -> list[str] | str:
     return args
 
 
+def _serialize_process(process: Any) -> dict[str, Any]:
+    """Convert a ``WorkspaceProcess`` ORM row to a JSON-safe dict."""
+    ended_at = getattr(process, "ended_at", None)
+    started_at = getattr(process, "started_at", None)
+    updated_at = getattr(process, "updated_at", None)
+    return {
+        "process_id": str(getattr(process, "id", "")),
+        "workspace_id": str(getattr(process, "workspace_id", "")),
+        "name": getattr(process, "name", "") or "",
+        "command": getattr(process, "command", "") or "",
+        "workdir": getattr(process, "workdir", "") or "",
+        "pid": getattr(process, "pid", None),
+        "log_path": getattr(process, "log_path", "") or "",
+        "status": str(getattr(process, "status", "") or ""),
+        "exit_code": getattr(process, "exit_code", None),
+        "started_at": started_at.isoformat() if started_at else None,
+        "ended_at": ended_at.isoformat() if ended_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+def _parse_process_uuid(process_id: str) -> uuid.UUID:
+    """Parse *process_id* into a UUID or raise ValueError."""
+    try:
+        return uuid.UUID(str(process_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"Invalid process_id: {process_id}") from exc
+
+
 class RunnerWorkspaceAccessor(WorkspaceAccessor):
     """Workspace accessor that forwards operations to a runner.
 
@@ -144,10 +179,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         *,
         emit: EmitFn,
         default_timeout: float = DEFAULT_TIMEOUT,
+        desktop_geometry: Callable[[], Awaitable[tuple[int, int]]] | None = None,
     ) -> None:
         super().__init__(workspace_id)
         self._emit = emit
         self._default_timeout = default_timeout
+        self._desktop_geometry = desktop_geometry
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         try:
@@ -519,6 +556,11 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> dict[str, Any]:
         """Run a desktop automation action in the workspace."""
+        payload_args = dict(args or {})
+        if action in {"ensure", "hold"} and self._desktop_geometry is not None:
+            width, height = await self._desktop_geometry()
+            payload_args.setdefault("desktop_width", width)
+            payload_args.setdefault("desktop_height", height)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
             request_id,
@@ -527,12 +569,84 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 "request_id": request_id,
                 "workspace_id": self.workspace_id,
                 "action": action,
-                "args": dict(args or {}),
+                "args": payload_args,
             },
             timeout,
         )
         self._raise_for_error(result, "harness:desktop_action")
         return result
+
+    # -- Background processes (direct RunnerService calls) ----------------
+
+    def _runner_service(self) -> Any:
+        """Return the process-wide RunnerService (lazy import, no cycle)."""
+        from apps.runners.sio_server import get_runner_service
+
+        return get_runner_service()
+
+    def _workspace_uuid(self) -> uuid.UUID:
+        """Parse this accessor's workspace id into a UUID."""
+        try:
+            return uuid.UUID(str(self.workspace_id))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(
+                f"Invalid workspace_id: {self.workspace_id}"
+            ) from exc
+
+    async def process_start(
+        self,
+        command: str,
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Start a detached background process via RunnerService."""
+        if not (command or "").strip():
+            raise ValueError("command must not be empty")
+        safe_workdir = sanitize_harness_path(workdir or "/workspace")
+        service = self._runner_service()
+        try:
+            process = await service.start_process(
+                self._workspace_uuid(),
+                command.strip(),
+                workdir=safe_workdir,
+                env=dict(env or {}),
+                name=name or "",
+            )
+        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            raise RunnerAccessorError(f"process_start failed: {exc}") from exc
+        return _serialize_process(process)
+
+    async def process_list(self) -> list[dict[str, Any]]:
+        """List background processes via RunnerService (live-merged)."""
+        service = self._runner_service()
+        try:
+            processes = await service.list_processes(self._workspace_uuid())
+        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            raise RunnerAccessorError(f"process_list failed: {exc}") from exc
+        return [_serialize_process(process) for process in processes]
+
+    async def process_get(self, process_id: str) -> dict[str, Any]:
+        """Return one background process via RunnerService."""
+        parsed = _parse_process_uuid(process_id)
+        service = self._runner_service()
+        try:
+            process = await service.get_process(self._workspace_uuid(), parsed)
+        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            raise RunnerAccessorError(f"process_get failed: {exc}") from exc
+        return _serialize_process(process)
+
+    async def process_stop(self, process_id: str) -> dict[str, Any]:
+        """Stop a background process via RunnerService."""
+        parsed = _parse_process_uuid(process_id)
+        service = self._runner_service()
+        try:
+            process = await service.stop_process(
+                self._workspace_uuid(), parsed
+            )
+        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            raise RunnerAccessorError(f"process_stop failed: {exc}") from exc
+        return _serialize_process(process)
 
 
 def _resolve_future(
@@ -596,8 +710,23 @@ async def create_harness_accessor(
         except RunnerOfflineError as exc:
             raise RunnerAccessorError(f"{event} failed: {exc}") from exc
 
+    from apps.runners.desktop import (
+        DEFAULT_DESKTOP_HEIGHT,
+        DEFAULT_DESKTOP_WIDTH,
+    )
+
+    async def _desktop_geometry() -> tuple[int, int]:
+        """Return the workspace's configured desktop framebuffer size."""
+        current = await sync_to_async(service.workspaces.get_by_id)(
+            _uuid.UUID(workspace_id)
+        )
+        if current is None:
+            return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+        return int(current.desktop_width), int(current.desktop_height)
+
     return RunnerWorkspaceAccessor(
         workspace_id,
         emit=_emit,
         default_timeout=default_timeout,
+        desktop_geometry=_desktop_geometry,
     )

@@ -9,6 +9,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import type { HarnessConversation, HarnessSessionStatus } from '@/types/harness'
+import { extractActiveConversations } from '@/lib/conversationGroups'
 import { listHarnessConversations, markHarnessSessionRead } from '@/services/harness.api'
 import { WorkspaceStatus } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspaces'
@@ -49,6 +50,8 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     return [...ids]
   })
 
+  const activeConversations = computed(() => extractActiveConversations(conversations.value))
+
   async function fetchConversations(): Promise<void> {
     loading.value = true
     error.value = null
@@ -75,13 +78,17 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     }
   }
 
-  function updateSessionStatus(sessionId: string, status: HarnessSessionStatus): void {
+  function updateSessionStatus(
+    sessionId: string,
+    status: HarnessSessionStatus,
+    viewed = false,
+  ): void {
     const conv = conversations.value.find((row) => row.session_id === sessionId)
     if (!conv) return
     conv.status = status
     conv.updated_at = new Date().toISOString()
     if (status === 'idle') {
-      conv.unread = true
+      conv.unread = !viewed
     } else {
       conv.unread = false
     }
@@ -106,6 +113,7 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     searchQuery,
     filteredConversations,
     uniqueWorkspaceIds,
+    activeConversations,
     fetchConversations,
     markAsRead,
     updateSessionStatus,

@@ -40,15 +40,24 @@ async def _stream_with_timeout(agen, timeout_s: float):
     iterator = agen.__aiter__()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError()
-        try:
-            item = await asyncio.wait_for(iterator.__anext__(), remaining)
-        except StopAsyncIteration:
-            return
-        yield item
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                item = await asyncio.wait_for(iterator.__anext__(), remaining)
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        # Never orphan the wrapped runtime generator: on timeout or
+        # cancellation the remote exec would otherwise keep running
+        # with no consumer left draining it.
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await aclose()
 
 
 @dataclass
@@ -849,7 +858,11 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
-                session = await self._service.start_desktop(workspace_id)
+                session = await self._service.start_desktop(
+                    workspace_id,
+                    width=data.get("desktop_width"),
+                    height=data.get("desktop_height"),
+                )
 
                 # Get container IP for backend proxy
                 container_ip = self._service.get_desktop_container_ip(workspace_id)
@@ -989,14 +1002,14 @@ class WebSocketInterface(Interface):
             task_key = f"harness:{request_id}"
 
             async def _run() -> None:
+                coro = self._service.exec_harness_command_stream(
+                    workspace_id,
+                    data.get("command", []),
+                    workdir=data.get("workdir", "/workspace"),
+                    env=data.get("env", {}),
+                )
                 try:
                     timeout_s = float(timeout) if timeout is not None else None
-                    coro = self._service.exec_harness_command_stream(
-                        workspace_id,
-                        data.get("command", []),
-                        workdir=data.get("workdir", "/workspace"),
-                        env=data.get("env", {}),
-                    )
                     if timeout_s is not None:
                         async for stream, text in _stream_with_timeout(coro, timeout_s):
                             if stream == "exit":
@@ -1063,6 +1076,10 @@ class WebSocketInterface(Interface):
                     log.exception("harness_exec_stream_failed")
                 finally:
                     self._running_tasks.pop(task_key, None)
+                    # Close the service generator so a timed-out or
+                    # cancelled exec does not linger without a consumer.
+                    with contextlib.suppress(Exception):
+                        await coro.aclose()
 
             task = asyncio.create_task(_run())
             self._running_tasks[task_key] = task
@@ -1074,48 +1091,63 @@ class WebSocketInterface(Interface):
             timeout = data.get("timeout")
             log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="exec_wait")
+            task_key = f"harness:{request_id}"
+
+            async def _run() -> None:
+                try:
+                    timeout_s = float(timeout) if timeout is not None else None
+                    coro = self._service.exec_harness_command(
+                        workspace_id,
+                        data.get("command", []),
+                        workdir=data.get("workdir", "/workspace"),
+                        env=data.get("env", {}),
+                    )
+                    if timeout_s is not None:
+                        outcome = await asyncio.wait_for(coro, timeout_s)
+                    else:
+                        outcome = await coro
+                    exit_code, stdout, stderr = outcome
+                    await _harness_result(
+                        "harness:exec_wait_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "exit_code": exit_code,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        },
+                    )
+                except asyncio.TimeoutError:
+                    await _harness_result(
+                        "harness:exec_wait_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "error": "Execution timed out",
+                        },
+                    )
+                    log.warning("harness_exec_timeout")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await _harness_result(
+                        "harness:exec_wait_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
+                    log.exception("harness_exec_wait_failed")
+                finally:
+                    self._running_tasks.pop(task_key, None)
+
+            task = asyncio.create_task(_run())
+            self._running_tasks[task_key] = task
             try:
-                timeout_s = float(timeout) if timeout is not None else None
-                coro = self._service.exec_harness_command(
-                    workspace_id,
-                    data.get("command", []),
-                    workdir=data.get("workdir", "/workspace"),
-                    env=data.get("env", {}),
-                )
-                if timeout_s is not None:
-                    exit_code, stdout, stderr = await asyncio.wait_for(coro, timeout_s)
-                else:
-                    exit_code, stdout, stderr = await coro
-                await _harness_result(
-                    "harness:exec_wait_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "exit_code": exit_code,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                    },
-                )
-            except asyncio.TimeoutError:
-                await _harness_result(
-                    "harness:exec_wait_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "error": "Execution timed out",
-                    },
-                )
-                log.warning("harness_exec_timeout")
-            except Exception as exc:
-                await _harness_result(
-                    "harness:exec_wait_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "error": str(exc),
-                    },
-                )
-                log.exception("harness_exec_wait_failed")
+                await task
+            except asyncio.CancelledError:
+                pass
 
         @sio.on("harness:read_file")
         async def on_harness_read_file(data: dict) -> None:
@@ -1271,6 +1303,135 @@ class WebSocketInterface(Interface):
                     },
                 )
                 logger.exception("harness_desktop_action_failed")
+
+        @sio.on("harness:process_start")
+        async def on_harness_process_start(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            log = logger.bind(
+                workspace_id=str(workspace_id), request_id=request_id
+            )
+            log.info("harness_received", task="process_start")
+            try:
+                result = await self._service.start_background_process(
+                    workspace_id,
+                    process_id,
+                    str(data.get("command", "")),
+                    workdir=data.get("workdir", "/workspace"),
+                    env=data.get("env"),
+                    name=str(data.get("name", "") or ""),
+                )
+                await _harness_result(
+                    "harness:process_start_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": result["process_id"],
+                        "pid": result["pid"],
+                        "log_path": result["log_path"],
+                        "exit_path": result["exit_path"],
+                        "status": "running",
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_start_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "error": str(exc),
+                    },
+                )
+                log.exception("harness_process_start_failed")
+
+        @sio.on("harness:process_list")
+        async def on_harness_process_list(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            try:
+                processes = await self._service.list_background_processes(
+                    workspace_id
+                )
+                await _harness_result(
+                    "harness:process_list_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": processes,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_list_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": [],
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_list_failed")
+
+        @sio.on("harness:process_get")
+        async def on_harness_process_get(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            try:
+                process = await self._service.get_background_status(
+                    workspace_id, process_id
+                )
+                await _harness_result(
+                    "harness:process_get_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process": process,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_get_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_get_failed")
+
+        @sio.on("harness:process_stop")
+        async def on_harness_process_stop(data: dict) -> None:
+            workspace_id = uuid.UUID(data["workspace_id"])
+            request_id = data.get("request_id", "")
+            process_id = str(data.get("process_id", ""))
+            try:
+                result = await self._service.stop_background_process(
+                    workspace_id, process_id
+                )
+                await _harness_result(
+                    "harness:process_stop_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        **result,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_stop_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "process_id": process_id,
+                        "stopped": False,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_stop_failed")
 
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:

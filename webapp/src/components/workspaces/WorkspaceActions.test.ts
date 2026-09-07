@@ -32,6 +32,8 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,
+    desktop_width: 1920,
+    desktop_height: 1080,
     created_by_id: 1,
     last_activity_at: '2026-04-01T10:00:00.000Z',
     auto_stop_timeout_minutes: null,

@@ -57,6 +57,7 @@ from .runner import HarnessRunner, RunOptions
 from .tools import default_tool_registry
 from .tools.subagents import TaskArgs
 from .tools.todos import TodoWriteTool, repository_for_session
+from .tools.truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
 
@@ -254,7 +255,6 @@ class HarnessService:
         """List root sessions across owned workspaces (conversations feed)."""
         sessions = self.sessions.list_for_workspaces(workspace_ids)
         workspace_names: dict[str, str] = {}
-        latest_assistant_at: dict[uuid.UUID, Any] = {}
         if sessions:
             from apps.runners.models import Workspace
 
@@ -262,11 +262,7 @@ class HarnessService:
                 id__in={session.workspace_id for session in sessions}
             ).only("id", "name")
             workspace_names = {str(row.id): row.name for row in rows}
-            latest_assistant_at = (
-                self.messages.latest_assistant_completed_at_by_session(
-                    [session.id for session in sessions]
-                )
-            )
+        unread_map = self.unread_for_sessions(sessions)
         return [
             {
                 "session_id": str(session.id),
@@ -276,10 +272,9 @@ class HarnessService:
                 "status": session.status,
                 "mode": session.mode,
                 "agent_name": session.agent_name,
-                "unread": self._is_conversation_unread(
-                    session,
-                    latest_assistant_at.get(session.id),
-                ),
+                "model": session.model or "",
+                "reasoning_effort": session.reasoning_effort or "",
+                "unread": unread_map.get(session.id, False),
                 "updated_at": session.updated_at.isoformat(),
             }
             for session in sessions
@@ -289,6 +284,27 @@ class HarnessService:
         """Persist that the user opened a harness session."""
         session = self.get_session(session_id)
         return self.sessions.mark_read(session)
+
+    def unread_for_sessions(
+        self, sessions: list[HarnessSession]
+    ) -> dict[uuid.UUID, bool]:
+        """Return unread flags keyed by session id."""
+        if not sessions:
+            return {}
+        latest_assistant_at = self.messages.latest_assistant_completed_at_by_session(
+            [session.id for session in sessions]
+        )
+        return {
+            session.id: self._is_conversation_unread(
+                session,
+                latest_assistant_at.get(session.id),
+            )
+            for session in sessions
+        }
+
+    def is_session_unread(self, session: HarnessSession) -> bool:
+        """Return whether a single session has unread assistant work."""
+        return self.unread_for_sessions([session]).get(session.id, False)
 
     @staticmethod
     def _is_conversation_unread(
@@ -310,24 +326,29 @@ class HarnessService:
         session: HarnessSession,
         *,
         provider: ProviderAdapter | None = None,
-    ) -> None:
+    ) -> str:
         """Ensure provider config and model are present before starting a run.
+
+        Returns the resolved model id for this turn. An empty session model
+        (Auto) is filled from the org default without pinning ``session.model``.
 
         Raises:
             NotFoundError: When no ProviderConfig exists for the org.
             ValueError: When API key or model is missing.
         """
+        session_model = (session.model or "").strip()
         if provider is not None or self._provider_factory is not None:
-            return
+            return session_model
         from .services import ProviderConfigService
 
         config_service = ProviderConfigService()
         config = config_service.get_config(organization_id)
         if not config.api_key_encrypted:
             raise ValueError("Provider API key not configured")
-        model = (session.model or "").strip() or (config.default_model or "").strip()
+        model = session_model or (config.default_model or "").strip()
         if not model:
             raise ValueError("No model configured for harness run")
+        return model
 
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
         """Return all sessions of a workspace."""
@@ -354,6 +375,71 @@ class HarnessService:
                 "status": row.status,
                 "priority": row.priority,
                 "order": row.order,
+            }
+            for row in rows
+        ]
+
+    def list_pending_permissions(
+        self, session_id: uuid.UUID, *, include_descendants: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return pending permission gates for *session_id* as dicts.
+
+        When *include_descendants* is true, also include pending gates of
+        child (and nested) sessions so a parent parts fetch can surface
+        subagent asks.
+        """
+        self.get_session(session_id)
+        session_ids = (
+            self.sessions.list_descendant_ids(session_id)
+            if include_descendants
+            else [session_id]
+        )
+        rows = self.permissions.requests.list_pending_for_sessions(session_ids)
+        names = {
+            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
+        }
+        return [
+            {
+                "request_id": str(row.id),
+                "session_id": str(row.session_id),
+                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+                "tool": row.tool,
+                "pattern": row.pattern,
+                "title": row.title or "",
+                "call_id": row.call_id or "",
+                "status": "pending",
+                "agent_name": names.get(row.session_id, ""),
+            }
+            for row in rows
+        ]
+
+    def list_pending_questions(
+        self, session_id: uuid.UUID, *, include_descendants: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return pending question gates for *session_id* as dicts.
+
+        When *include_descendants* is true, also include pending gates of
+        child (and nested) sessions.
+        """
+        self.get_session(session_id)
+        session_ids = (
+            self.sessions.list_descendant_ids(session_id)
+            if include_descendants
+            else [session_id]
+        )
+        rows = QuestionRequestRepository.list_pending_for_sessions(session_ids)
+        names = {
+            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
+        }
+        return [
+            {
+                "request_id": str(row.id),
+                "session_id": str(row.session_id),
+                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+                "questions": list(row.questions or []),
+                "call_id": row.call_id or "",
+                "status": "pending",
+                "agent_name": names.get(row.session_id, ""),
             }
             for row in rows
         ]
@@ -396,7 +482,7 @@ class HarnessService:
                 user_id=user_id,
                 organization_id=org_id,
             )
-        await sync_to_async(self.validate_provider_for_run)(
+        resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id, session, provider=provider
         )
         prior_user_messages = await sync_to_async(
@@ -413,7 +499,8 @@ class HarnessService:
             session_id=session.id,
             role="assistant",
             content="",
-            model=session.model or "",
+            model=resolved_model,
+            reasoning_effort=session.reasoning_effort or "",
             provider=(provider.name if provider is not None else ""),
         )
         await sync_to_async(self.sessions.mark_status)(
@@ -453,7 +540,7 @@ class HarnessService:
             )
         )
         self._tasks[key] = task
-        task.add_done_callback(lambda _t, _k=key: self._tasks.pop(_k, None))
+        task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
         if session.parent_id is None and prior_user_messages == 0:
             self._spawn_background(
                 self._generate_title(
@@ -464,11 +551,11 @@ class HarnessService:
             )
         await self._emit_frontend(
             FRONTEND_EVENT_STATUS,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": key,
-                "status": "busy",
-            },
+            self._session_status_payload(
+                session,
+                "busy",
+                model=resolved_model,
+            ),
             str(session.workspace_id),
         )
         log.info(
@@ -479,7 +566,7 @@ class HarnessService:
         return assistant
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
-        """Cancel the active run task and mark message/parts aborted."""
+        """Cancel the active run task, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
         children = await sync_to_async(self.sessions.list_children)(session_id)
         key = str(session.id)
@@ -509,6 +596,7 @@ class HarnessService:
                     session, HarnessSessionStatus.IDLE
                 )
                 session.status = HarnessSessionStatus.IDLE
+        await self._reject_pending_user_gates(session)
         for child in children:
             await self.abort_run(child.id)
         return session
@@ -697,10 +785,11 @@ class HarnessService:
                 )
             )
             for part in tool_parts:
+                clipped = truncate_tool_output(part.output or "")
                 history.append(
                     LLMMessage(
                         role="tool",
-                        content=part.output or "",
+                        content=clipped.content,
                         tool_call_id=part.call_id,
                     )
                 )
@@ -831,6 +920,19 @@ class HarnessService:
             self._await_in_thread_sensitive_context(coro),
             context=contextvars.Context(),
         )
+
+    def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
+        """Drop the run task and retrieve any leftover exception."""
+        self._tasks.pop(key, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "harness_background_task_failed",
+                session_id=key,
+                error=str(exc),
+            )
 
     @staticmethod
     async def _await_in_thread_sensitive_context(coro: Awaitable[None]) -> None:
@@ -984,6 +1086,7 @@ class HarnessService:
             await sync_to_async(self.messages.complete)(
                 assistant, finish=result.finish_reason
             )
+            await self._settle_open_stream_parts(assistant)
         except asyncio.CancelledError:
             await sync_to_async(self.messages.complete)(
                 assistant, finish="aborted", error="aborted by user"
@@ -996,7 +1099,6 @@ class HarnessService:
             )
             await self._fail_open_parts(assistant, state="error", output=str(exc))
             log.exception("harness_run_failed", session_id=key)
-            raise
         finally:
             self._runs.pop(key, None)
             self._tasks.pop(key, None)
@@ -1006,18 +1108,42 @@ class HarnessService:
             )
             await self._emit_frontend(
                 FRONTEND_EVENT_STATUS,
-                {
-                    "workspace_id": str(session.workspace_id),
-                    "session_id": key,
-                    "status": "idle",
-                },
+                self._session_status_payload(
+                    session,
+                    "idle",
+                    model=assistant.model or "",
+                ),
                 str(session.workspace_id),
             )
+
+    async def _settle_open_stream_parts(self, assistant: HarnessMessage) -> None:
+        """Mark leftover running text/reasoning parts completed.
+
+        The runner closes these in-memory on ``step_finish``, but the DB
+        rows stay ``running`` unless we persist the completed state.
+        """
+        open_parts = await sync_to_async(
+            lambda: list(
+                self.parts.model.objects.filter(
+                    message_id=assistant.id,
+                    type__in=("text", "reasoning"),
+                    state__in=("pending", "running"),
+                )
+            )
+        )()
+        for part in open_parts:
+            await sync_to_async(self.parts.mark_state)(part, "completed")
 
     async def _fail_open_parts(
         self, assistant: HarnessMessage, *, state: str, output: str
     ) -> None:
-        """Mark pending/running parts of *assistant* as failed/aborted."""
+        """Mark pending/running parts of *assistant* as failed/aborted.
+
+        Text and reasoning keep their streamed content and are marked
+        completed — aborting a run does not abort a thought that already
+        happened. Tool/subtask parts become *state* and keep any partial
+        output already written.
+        """
         open_parts = await sync_to_async(
             lambda: list(
                 self.parts.model.objects.filter(
@@ -1027,7 +1153,12 @@ class HarnessService:
             )
         )()
         for part in open_parts:
-            await sync_to_async(self.parts.mark_state)(part, state, output=output)
+            if part.type in ("text", "reasoning"):
+                await sync_to_async(self.parts.mark_state)(part, "completed")
+                continue
+            await sync_to_async(self.parts.mark_state)(
+                part, state, output=part.output or output
+            )
 
     async def _on_permission(
         self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any
@@ -1060,6 +1191,7 @@ class HarnessService:
                 "pattern": action,
                 "title": title,
                 "call_id": call_id,
+                "agent_name": session.agent_name or "",
             },
             str(session.workspace_id),
         )
@@ -1095,6 +1227,7 @@ class HarnessService:
                 "questions": questions,
                 "call_id": call_id,
                 "status": "pending",
+                "agent_name": session.agent_name or "",
             },
             str(session.workspace_id),
         )
@@ -1220,6 +1353,7 @@ class HarnessService:
                         "tool_started": event.get("tool", ""),
                         "title": event.get("title", ""),
                         "call_id": event.get("call_id", ""),
+                        "arguments": event.get("arguments", ""),
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -1259,6 +1393,19 @@ class HarnessService:
                 },
                 workspace_id,
             )
+        elif etype in ("retry_scheduled", "retry_attempt"):
+            # Lightweight forward without a DB part, mirroring
+            # step_start/step_finish (no persisted part, frontend-only).
+            await self._emit_frontend(
+                FRONTEND_EVENT_PART,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "delta": {etype: event.get("attempt")},
+                    "step": event.get("step"),
+                },
+                workspace_id,
+            )
         elif etype == "todo_updated":
             await self._emit_frontend(
                 FRONTEND_EVENT_TODO,
@@ -1279,6 +1426,9 @@ class HarnessService:
                 meta={
                     "subtask_id": event.get("subtask_id", ""),
                     "agent": event.get("agent", ""),
+                    "child_session_id": event.get("child_session_id", ""),
+                    "model": event.get("model", ""),
+                    "reasoning_effort": event.get("reasoning_effort", ""),
                 },
             )
             self._runs.get(session_id, {}).get("subtask_parts", {})[
@@ -1294,6 +1444,8 @@ class HarnessService:
                     "agent": event.get("agent", ""),
                     "description": event.get("description", ""),
                     "part_id": str(part.id),
+                    "model": event.get("model", ""),
+                    "reasoning_effort": event.get("reasoning_effort", ""),
                 },
                 workspace_id,
             )
@@ -1462,6 +1614,7 @@ class HarnessService:
                 "subtask_id": subtask_id,
                 "agent": event.get("agent", ""),
                 "status": status,
+                "child_session_id": event.get("child_session_id", ""),
             },
         )
 
@@ -1472,6 +1625,54 @@ class HarnessService:
             lock = asyncio.Lock()
             self._event_locks[session_id] = lock
         return lock
+
+    async def _reject_pending_user_gates(self, session: HarnessSession) -> None:
+        """Reject leftover permission and question gates after abort."""
+        pending_perms = await sync_to_async(
+            self.permissions.requests.list_pending_for_session
+        )(session.id)
+        pending_questions = await sync_to_async(
+            QuestionRequestRepository.list_pending_for_session
+        )(session.id)
+        workspace_id = str(session.workspace_id)
+        session_id = str(session.id)
+        for request in pending_perms:
+            await sync_to_async(self.permissions.requests.mark_resolved)(
+                request, approved=False, remember="once"
+            )
+            future = self._pending_permissions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+            await self._emit_frontend(
+                FRONTEND_EVENT_PERMISSION,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "request_id": str(request.id),
+                    "decision": "reject",
+                    "remember": "once",
+                },
+                workspace_id,
+            )
+        for request in pending_questions:
+            await sync_to_async(QuestionRequestRepository.resolve)(
+                request,
+                answers=[],
+                status="rejected",
+            )
+            future = self._pending_questions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+            await self._emit_frontend(
+                FRONTEND_EVENT_QUESTION,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "request_id": str(request.id),
+                    "status": "rejected",
+                },
+                workspace_id,
+            )
 
     async def _resolve_sibling_permissions(
         self,
@@ -1507,6 +1708,22 @@ class HarnessService:
                 },
                 str(session.workspace_id),
             )
+
+    def _session_status_payload(
+        self,
+        session: HarnessSession,
+        status: str,
+        *,
+        model: str = "",
+    ) -> dict[str, Any]:
+        """Shape a ``harness.session_status`` frontend payload."""
+        return {
+            "workspace_id": str(session.workspace_id),
+            "session_id": str(session.id),
+            "status": status,
+            "model": (model or session.model or "").strip(),
+            "reasoning_effort": session.reasoning_effort or "",
+        }
 
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
@@ -1626,6 +1843,8 @@ class HarnessService:
                 "child_session_id": str(child.id),
                 "agent": agent,
                 "description": args.description,
+                "model": child.model or "",
+                "reasoning_effort": child.reasoning_effort or "",
             },
         )
         status = "completed"

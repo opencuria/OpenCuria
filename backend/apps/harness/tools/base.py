@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from ..access.base import WorkspaceAccessor
 from ..providers.base import ToolSchema
+from .truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
 
@@ -67,7 +68,7 @@ class ToolContext:
     run_subagent: Any | None = None
     call_id: str = ""
     on_question: Callable[..., Awaitable[list[Any]]] | None = None
-    question_timeout: float = 600.0
+    question_timeout: float | None = None
     computer_use: Any | None = None
 
 
@@ -92,6 +93,7 @@ class Tool(abc.ABC):
     description: str = ""
     args_schema: type[BaseModel] = BaseModel
     permission_key: str = ""
+    truncate_direction: str = "head"
 
     def title(self, args: BaseModel) -> str:
         """Return a short human-readable title for this invocation."""
@@ -219,5 +221,27 @@ class ToolRegistry:
         )
         await self.run_before(tool.name, validated, ctx)
         result = await tool.execute(validated, ctx)
+        direction = getattr(tool, "truncate_direction", "head")
+        if direction not in ("head", "tail"):
+            direction = "head"
+        clipped = truncate_tool_output(
+            result.output,
+            direction=direction,  # type: ignore[arg-type]
+        )
+        if clipped.truncated:
+            from .spill import build_spill_hint, spill_full_output, task_available
+
+            spill_path = await spill_full_output(ctx, result.output)
+            result.output = clipped.content
+            result.truncated = True
+            metadata: dict[str, Any] = dict(result.metadata or {})
+            metadata["truncated"] = True
+            if spill_path is not None:
+                metadata["output_path"] = spill_path
+                result.output += build_spill_hint(
+                    spill_path,
+                    task_hint=task_available(ctx),
+                )
+            result.metadata = metadata
         await self.run_after(tool.name, validated, ctx, result)
         return result
