@@ -337,49 +337,49 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <WorkspaceChatHeader
-      v-if="workspace"
-      :workspace="workspace"
-      :active-chat-title="activeChatTitle"
-      :transition-label="workspaceTransitionLabel"
-      :auto-stop-label="navbarStatusLabel"
-      :runner-offline="isRunnerOfflineState"
-      :side-panel-open="sidePanelStore.isOpen"
-      :processes-active="isProcessesPanelVisible"
-      :running-process-count="runningProcessCount"
-      :can-prompt="canPrompt"
-      @new-chat="handleNewHarnessChat"
-      @start-workspace="handleStartWorkspace"
-      @stop-workspace="handleStopWorkspace"
-      @save-workspace-name="handleSaveWorkspaceName"
-      @toggle-side-panel="sidePanelStore.toggle()"
-      @toggle-processes="toggleProcessesPanel"
-      @capture-image="imageArtifactDialogOpen = true"
-      @delete-workspace="handleDeleteWorkspace"
-    />
-
     <!-- Loading state -->
     <div v-if="workspaceStore.loading && !workspace" class="flex-1 flex items-center justify-center">
       <LoadingSpinner :size="24" />
     </div>
 
-    <!-- Chat area + side panel -->
+    <!-- Chat column + full-height side panel -->
     <template v-else-if="workspace">
-      <div class="flex flex-col flex-1 min-h-0">
-        <!-- Chat content area -->
-        <div class="flex flex-1 min-h-0">
-          <WorkspaceDesktop
-            v-if="isDesktopPanelVisible"
-            :workspace-id="workspaceId"
-          >
-            <template #sidebar-content>
-              <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
-            </template>
-          </WorkspaceDesktop>
+      <div class="flex flex-1 min-h-0">
+        <!-- Left column: chat header + chat content -->
+        <div class="flex min-w-0 flex-1 flex-col">
+          <WorkspaceChatHeader
+            :workspace="workspace"
+            :active-chat-title="activeChatTitle"
+            :transition-label="workspaceTransitionLabel"
+            :auto-stop-label="navbarStatusLabel"
+            :runner-offline="isRunnerOfflineState"
+            :side-panel-open="sidePanelStore.isOpen"
+            :processes-active="isProcessesPanelVisible"
+            :running-process-count="runningProcessCount"
+            :can-prompt="canPrompt"
+            @new-chat="handleNewHarnessChat"
+            @start-workspace="handleStartWorkspace"
+            @stop-workspace="handleStopWorkspace"
+            @save-workspace-name="handleSaveWorkspaceName"
+            @toggle-side-panel="sidePanelStore.toggle()"
+            @toggle-processes="toggleProcessesPanel"
+            @capture-image="imageArtifactDialogOpen = true"
+            @delete-workspace="handleDeleteWorkspace"
+          />
 
-          <template v-else>
+          <!-- Chat content area -->
+          <div class="flex flex-1 min-h-0 flex-col">
+            <WorkspaceDesktop
+              v-if="isDesktopPanelVisible"
+              :workspace-id="workspaceId"
+            >
+              <template #sidebar-content>
+                <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
+              </template>
+            </WorkspaceDesktop>
+
             <!-- Harness chat area -->
-            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+            <div v-else class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <FileViewer
                 v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
                 :workspace-id="workspaceId"
@@ -390,26 +390,26 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
                 class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
               ></div>
             </div>
+          </div>
 
-            <!-- Side panel (Git / Desktop / Terminal / Files) -->
-            <WorkspaceSidePanel
-              v-if="canPrompt && sidePanelStore.hasOpened"
-              v-show="sidePanelStore.isOpen"
-              :key="workspaceId"
+          <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
+            <HarnessChatPanel
               :workspace-id="workspaceId"
+              :can-prompt="canPrompt"
+              :processes-open="isProcessesPanelVisible"
+              class="min-h-0 flex-1"
+              @close-processes="processesOpen = false"
             />
-          </template>
+          </Teleport>
         </div>
 
-        <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
-          <HarnessChatPanel
-            :workspace-id="workspaceId"
-            :can-prompt="canPrompt"
-            :processes-open="isProcessesPanelVisible"
-            class="min-h-0 flex-1"
-            @close-processes="processesOpen = false"
-          />
-        </Teleport>
+        <!-- Side panel (Git / Desktop / Terminal / Files), full-height column -->
+        <WorkspaceSidePanel
+          v-if="canPrompt && sidePanelStore.hasOpened && !isDesktopPanelVisible"
+          v-show="sidePanelStore.isOpen"
+          :key="workspaceId"
+          :workspace-id="workspaceId"
+        />
       </div>
     </template>
 

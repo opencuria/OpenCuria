@@ -5,9 +5,11 @@
  * Kein Balken: transparent, ohne Border. Links steht der Chat-Name groß,
  * darunter Workspace-Name (per Klick/Pencil inline editierbar) plus Status.
  * Rechts: New chat, Background processes, `…`-Menü mit Start/Stop, Capture
- * und Delete, dann der Side-Panel-Toggle (Git/Desktop/Terminal/Files).
- * Die Chatliste lebt ausschließlich in der globalen Sidebar; Chat-Rename/
- * Delete passiert dort.
+ * und Delete, dann der Side-Panel-Toggle. Der Header spannt nur den
+ * Chat-Bereich — bei geöffnetem Side-Panel liegen diese Buttons also immer
+ * links neben dem Panel, dessen eigene Tab-Leiste (Git/Desktop/Terminal/
+ * Files) die volle Panel-Breite einnimmt. Die Chatliste lebt ausschließlich
+ * in der globalen Sidebar; Chat-Rename/Delete passiert dort.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'

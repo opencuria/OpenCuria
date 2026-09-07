@@ -15,9 +15,6 @@ const tabStubs = {
   WorkspaceTerminal: { template: '<div data-testid="stub-terminal" />', props: ['workspaceId'] },
   SidePanelDesktop: { template: '<div data-testid="stub-desktop" />', props: ['workspaceId'] },
   FileExplorerPanel: { template: '<div data-testid="stub-files" />', props: ['workspaceId'] },
-  Button: {
-    template: '<button v-bind="$attrs"><slot /></button>',
-  },
 }
 
 function stubWideLayout(): void {
@@ -85,6 +82,25 @@ describe('WorkspaceSidePanel', () => {
     ).toBeDefined()
   })
 
+  it('switches tabs via the tab bar', async () => {
+    const store = useSidePanelStore()
+    store.open('terminal')
+    const wrapper = mountPanel()
+
+    await wrapper.find('[data-testid="side-panel-tab-files"]').trigger('mousedown')
+    expect(store.activeTab).toBe('files')
+  })
+
+  it('closes the panel via the mobile close button', async () => {
+    const store = useSidePanelStore()
+    store.open('terminal')
+    const wrapper = mountPanel()
+
+    // The close button is only visible below lg (panel overlays the header toggle there).
+    await wrapper.find('[data-testid="side-panel-close"]').trigger('click')
+    expect(store.isOpen).toBe(false)
+  })
+
   it('lazily mounts tab contents on first activation', async () => {
     const store = useSidePanelStore()
     store.open('git')
@@ -102,15 +118,6 @@ describe('WorkspaceSidePanel', () => {
     const terminal = wrapper.find('[data-testid="stub-terminal"]')
     expect(terminal.exists()).toBe(true)
     expect(terminal.isVisible()).toBe(false)
-  })
-
-  it('closes the panel via the close button', async () => {
-    const store = useSidePanelStore()
-    store.open('terminal')
-    const wrapper = mountPanel()
-
-    await wrapper.find('[data-testid="side-panel-close"]').trigger('click')
-    expect(store.isOpen).toBe(false)
   })
 
   it('renders at the persisted width and resizes via the drag handle', async () => {

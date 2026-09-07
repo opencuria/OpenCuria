@@ -4,9 +4,14 @@
  * the right of the workspace chat.
  *
  * Hosts the Git (placeholder), Desktop (live preview), Terminal and Files
- * tabs. Tab contents are lazily mounted and kept alive via v-show so the
- * terminal session and desktop stream survive tab switches and panel
- * collapse. Below the lg breakpoint the panel overlays the chat full-width.
+ * tabs. The panel is a full-height column: its tab bar spans the full panel
+ * width at the top (same bg-card surface as the content), so the chat
+ * header buttons always sit left of the panel. Closing happens via the
+ * side-panel toggle in the chat header; below the lg breakpoint (where the
+ * panel overlays the chat full-width and covers that toggle) the tab bar
+ * shows its own close button. Tab contents are lazily mounted and kept
+ * alive via v-show so the terminal session and desktop stream survive tab
+ * switches and panel collapse.
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
@@ -14,7 +19,7 @@ import { useSidePanelStore } from '@/stores/sidePanel'
 import type { SidePanelTab } from '@/lib/sidePanel'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
-import { GitBranch, Monitor, TerminalSquare, FolderTree, X } from '@lucide/vue'
+import { GitBranch, Monitor, TerminalSquare, FolderTree, PanelRightClose } from '@lucide/vue'
 import WorkspaceTerminal from './WorkspaceTerminal.vue'
 import SidePanelDesktop from './SidePanelDesktop.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
@@ -117,35 +122,36 @@ onBeforeUnmount(() => {
       @dblclick="onResizeDoubleClick"
     />
 
-    <!-- Tab bar -->
+    <!-- Tab bar (full panel width; closing happens via the chat header toggle) -->
     <div class="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1.5">
       <Tabs
         :model-value="sidePanel.activeTab"
         class="min-w-0 flex-1"
         @update:model-value="handleTabChange"
       >
-        <TabsList class="h-8 w-full">
+        <TabsList class="w-full">
           <TabsTrigger
             v-for="tab in tabs"
             :key="tab.id"
             :value="tab.id"
-            class="min-w-0 gap-1 px-1.5 text-xs"
+            class="min-w-0 gap-1.5"
             :data-testid="`side-panel-tab-${tab.id}`"
           >
-            <component :is="tab.icon" :size="13" />
+            <component :is="tab.icon" />
             <span class="truncate">{{ tab.label }}</span>
           </TabsTrigger>
         </TabsList>
       </Tabs>
+      <!-- Below lg the panel overlays the chat header toggle, so it needs its own close button -->
       <Button
         variant="ghost"
         size="icon-sm"
-        class="h-6 w-6 shrink-0"
+        class="h-6 w-6 shrink-0 lg:hidden"
         title="Close panel"
         data-testid="side-panel-close"
         @click="sidePanel.close()"
       >
-        <X :size="13" />
+        <PanelRightClose :size="14" />
       </Button>
     </div>
 
