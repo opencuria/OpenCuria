@@ -88,7 +88,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -101,32 +100,35 @@ describe('HarnessChatPanel', () => {
     expect(input.props('disabled')).toBe(false)
   })
 
-  it('renders workspace toolbar controls inline with the input row', () => {
+  it('hides composer panel chrome (toggles live in the chat header) when viewing any session', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
         stubs,
       },
     })
+    await flushPromises()
 
-    const buttons = wrapper.findAll('button[title]')
-    const titles = buttons.map((button) => button.attributes('title'))
-    expect(titles).toContain('Open file explorer')
-    expect(titles).toContain('Open terminal')
-    expect(titles).toContain('Open desktop')
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const titles = wrapper.findAll('button[title]').map((button) => button.attributes('title'))
+    expect(titles).not.toContain('Open file explorer')
+    expect(titles).not.toContain('Open terminal')
+    expect(titles).not.toContain('Open desktop')
   })
 
-  it('hides the input and workspace toolbar when viewing a subagent session', async () => {
+  it('hides the input when viewing a subagent session', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -149,10 +151,6 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(false)
-    const titles = wrapper.findAll('button[title]').map((button) => button.attributes('title'))
-    expect(titles).not.toContain('Open file explorer')
-    expect(titles).not.toContain('Open terminal')
-    expect(titles).not.toContain('Open desktop')
   })
 
   it('keeps the input when viewing a root session', async () => {
@@ -160,7 +158,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],
@@ -182,7 +179,6 @@ describe('HarnessChatPanel', () => {
       props: {
         workspaceId: 'ws-1',
         canPrompt: true,
-        showWorkspaceToolbar: true,
       },
       global: {
         plugins: [router],

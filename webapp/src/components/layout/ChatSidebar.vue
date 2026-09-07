@@ -235,7 +235,7 @@ function handleMarkAllRead(group: WorkspaceGroup): void {
   void Promise.all(unread.map((conv) => conversationStore.markAsRead(conv.session_id)))
 }
 
-// --- Inline Rename / Delete (wie HarnessChatSidebar) ------------------------
+// --- Inline Rename / Delete (Gruppen-Chats der globalen Sidebar) ------------------------
 
 function startRename(conv: HarnessConversation): void {
   editingSessionId.value = conv.session_id

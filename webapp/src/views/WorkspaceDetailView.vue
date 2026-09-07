@@ -17,8 +17,7 @@ import {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
-import HarnessChatSidebar from '@/components/chat/HarnessChatSidebar.vue'
-import ChatNavbar from '@/components/chat/ChatNavbar.vue'
+import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
@@ -38,12 +37,10 @@ const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
 const fileExplorerStore = useFileExplorerStore()
 const workspaceImageStore = useWorkspaceImageStore()
-const renamingSession = ref(false)
 const renamingWorkspace = ref(false)
 const terminalHeight = ref(300)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
-const mobileChatListOpen = ref(false)
 
 const lgQuery = window.matchMedia('(min-width: 1024px)')
 const isDesktop = ref(lgQuery.matches)
@@ -83,27 +80,12 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-const hasHarnessChats = computed(() => harnessStore.rootSessions.length > 0)
+const activeChatTitle = computed(
+  () => harnessStore.activeSession?.title?.trim() || null,
+)
 
-function handleSelectHarnessSession(sessionId: string): void {
-  harnessStore.setActiveSession(sessionId)
-}
-
-function handleCreateHarnessChat(): void {
+function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
-}
-
-async function handleRenameHarnessSession(sessionId: string, title: string): Promise<void> {
-  renamingSession.value = true
-  try {
-    await harnessStore.renameSession(sessionId, title)
-  } finally {
-    renamingSession.value = false
-  }
-}
-
-async function handleDeleteHarnessSession(sessionId: string): Promise<void> {
-  await harnessStore.removeSession(sessionId)
 }
 
 function handleToggleTerminal(): void {
@@ -137,6 +119,16 @@ function handleDeleteWorkspace(): void {
   if (confirm('Are you sure you want to remove this workspace? This action cannot be undone.')) {
     void workspaceStore.removeWorkspace(workspace.value.id)
   }
+}
+
+function handleStartWorkspace(): void {
+  if (!workspace.value) return
+  void workspaceStore.resumeWorkspace(workspace.value.id)
+}
+
+function handleStopWorkspace(): void {
+  if (!workspace.value) return
+  void workspaceStore.stopWorkspace(workspace.value.id)
 }
 
 const isDesktopPanelVisible = computed(
@@ -410,11 +402,10 @@ function onDragStart(e: MouseEvent): void {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <ChatNavbar
+    <WorkspaceChatHeader
       v-if="workspace"
       :workspace="workspace"
-      :active-session="harnessStore.activeSession"
-      :has-harness-chats="hasHarnessChats"
+      :active-chat-title="activeChatTitle"
       :transition-label="workspaceTransitionLabel"
       :auto-stop-label="navbarStatusLabel"
       :runner-offline="isRunnerOfflineState"
@@ -426,10 +417,9 @@ function onDragStart(e: MouseEvent): void {
       :processes-active="isProcessesPanelVisible"
       :running-process-count="runningProcessCount"
       :can-prompt="canPrompt"
-      :renaming-session="renamingSession"
-      @back="goBack"
-      @open-mobile-chats="mobileChatListOpen = true"
-      @rename-session="handleRenameHarnessSession"
+      @new-chat="handleNewHarnessChat"
+      @start-workspace="handleStartWorkspace"
+      @stop-workspace="handleStopWorkspace"
       @save-workspace-name="handleSaveWorkspaceName"
       @toggle-files="fileExplorerStore.toggle()"
       @toggle-terminal="handleToggleTerminal"
@@ -459,18 +449,6 @@ function onDragStart(e: MouseEvent): void {
           </WorkspaceDesktop>
 
           <template v-else>
-            <HarnessChatSidebar
-              :sessions="harnessStore.rootSessions"
-              :child-sessions-by-parent="harnessStore.childSessionsByParent"
-              :active-session-id="harnessStore.activeSessionId"
-              :mobile-open="mobileChatListOpen"
-              @select="handleSelectHarnessSession"
-              @create="handleCreateHarnessChat"
-              @rename="handleRenameHarnessSession"
-              @delete="handleDeleteHarnessSession"
-              @close="mobileChatListOpen = false"
-            />
-
             <!-- Harness chat area -->
             <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <FileViewer
@@ -513,7 +491,6 @@ function onDragStart(e: MouseEvent): void {
           <HarnessChatPanel
             :workspace-id="workspaceId"
             :can-prompt="canPrompt"
-            :show-workspace-toolbar="isDesktop && !isDesktopPanelVisible"
             :processes-open="isProcessesPanelVisible"
             class="min-h-0 flex-1"
             @close-processes="processesOpen = false"
