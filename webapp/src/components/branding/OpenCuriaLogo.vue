@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, useAttrs } from 'vue'
+import type { ClassValue } from 'clsx'
 import { cn } from '@/lib/utils'
 
 defineOptions({ inheritAttrs: false })
@@ -18,12 +19,13 @@ withDefaults(
 const attrs = useAttrs()
 
 const svgAttrs = computed(() => {
-  const { class: _className, ...rest } = attrs
+  const rest = { ...attrs }
+  delete rest.class
   return rest
 })
 
-const iconClass = computed(() => cn('block size-8', attrs.class))
-const wordmarkClass = computed(() => cn('block h-10 w-auto', attrs.class))
+const iconClass = computed(() => cn('block size-8', attrs.class as ClassValue))
+const wordmarkClass = computed(() => cn('block h-10 w-auto', attrs.class as ClassValue))
 </script>
 
 <template>
