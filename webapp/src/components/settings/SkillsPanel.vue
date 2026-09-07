@@ -15,6 +15,7 @@ import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -188,7 +189,8 @@ async function handleDelete(): Promise<void> {
             Reusable markdown appended to harness prompts.
           </DialogDescription>
         </DialogHeader>
-        <form class="flex flex-col gap-4" @submit.prevent="handleCreate">
+        <DialogBody>
+        <form id="create-skill-form" class="flex flex-col gap-4" @submit.prevent="handleCreate">
           <div class="space-y-2">
             <Label for="create-skill-name">Name</Label>
             <Input
@@ -214,23 +216,25 @@ async function handleDelete(): Promise<void> {
             </Label>
             <Switch id="create-org-skill" v-model="createIsOrg" :disabled="createSubmitting" />
           </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              type="button"
-              :disabled="createSubmitting"
-              @click="showCreateDialog = false"
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              :disabled="!createName.trim() || !createBody.trim() || createSubmitting"
-            >
-              {{ createSubmitting ? 'Saving…' : 'Create Skill' }}
-            </Button>
-          </DialogFooter>
         </form>
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            type="button"
+            :disabled="createSubmitting"
+            @click="showCreateDialog = false"
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form="create-skill-form"
+            :disabled="!createName.trim() || !createBody.trim() || createSubmitting"
+          >
+            {{ createSubmitting ? 'Saving…' : 'Create Skill' }}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
 
@@ -240,7 +244,8 @@ async function handleDelete(): Promise<void> {
           <DialogTitle>Edit Skill</DialogTitle>
           <DialogDescription>Update the name or body of this skill.</DialogDescription>
         </DialogHeader>
-        <form class="flex flex-col gap-4" @submit.prevent="handleEdit">
+        <DialogBody>
+        <form id="edit-skill-form" class="flex flex-col gap-4" @submit.prevent="handleEdit">
           <div class="space-y-2">
             <Label for="edit-skill-name">Name</Label>
             <Input id="edit-skill-name" v-model="editName" :disabled="editSubmitting" />
@@ -249,20 +254,21 @@ async function handleDelete(): Promise<void> {
             <Label for="edit-skill-body">Body (Markdown)</Label>
             <Textarea id="edit-skill-body" v-model="editBody" :rows="6" :disabled="editSubmitting" />
           </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              type="button"
-              :disabled="editSubmitting"
-              @click="editingSkill = null"
-            >
-              Cancel
-            </Button>
-            <Button type="submit" :disabled="editSubmitting">
-              {{ editSubmitting ? 'Saving…' : 'Save Changes' }}
-            </Button>
-          </DialogFooter>
         </form>
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            type="button"
+            :disabled="editSubmitting"
+            @click="editingSkill = null"
+          >
+            Cancel
+          </Button>
+          <Button type="submit" form="edit-skill-form" :disabled="editSubmitting">
+            {{ editSubmitting ? 'Saving…' : 'Save Changes' }}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
 

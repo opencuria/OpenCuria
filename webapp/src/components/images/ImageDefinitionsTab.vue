@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/collapsible'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -691,9 +692,11 @@ onUnmounted(() => {
           <DialogTitle>Build log</DialogTitle>
           <DialogDescription>Latest output from the runner image build.</DialogDescription>
         </DialogHeader>
-        <pre class="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">{{
-          logText
-        }}</pre>
+        <DialogBody>
+          <pre class="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">{{
+            logText
+          }}</pre>
+        </DialogBody>
         <DialogFooter>
           <Button variant="outline" type="button" @click="logText = null">Close</Button>
         </DialogFooter>

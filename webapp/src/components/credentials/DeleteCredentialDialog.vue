@@ -5,8 +5,10 @@ import type { Credential } from '@/types'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -58,6 +60,7 @@ function handleClose(): void {
         <DialogDescription>This action cannot be undone.</DialogDescription>
       </DialogHeader>
 
+      <DialogBody>
       <div class="flex flex-col gap-4">
         <div v-if="credential" class="p-4 rounded-[var(--radius-md)] bg-destructive/10 border border-destructive/30">
           <p class="text-sm text-foreground">
@@ -69,13 +72,15 @@ function handleClose(): void {
           </p>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button variant="destructive" :disabled="deleting" @click="handleDelete">
-            {{ deleting ? 'Deleting…' : 'Delete' }}
-          </Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button variant="destructive" :disabled="deleting" @click="handleDelete">
+          {{ deleting ? 'Deleting…' : 'Delete' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

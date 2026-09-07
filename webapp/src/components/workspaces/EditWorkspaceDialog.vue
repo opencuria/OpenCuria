@@ -5,8 +5,10 @@ import { Pencil, Check, Key } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -186,13 +188,14 @@ async function navigateToCredentials(): Promise<void> {
       </Button>
     </DialogTrigger>
 
-    <DialogContent>
+    <DialogContent class="sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>Edit Workspace</DialogTitle>
         <DialogDescription>Update the workspace name, desktop size, and attached credentials.</DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="edit-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
           <Input v-model="name" :disabled="submitting || props.disabled" placeholder="Workspace name" />
@@ -304,13 +307,15 @@ async function navigateToCredentials(): Promise<void> {
           </div>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="submitting || props.disabled || !name.trim()">
-            {{ submitting ? 'Saving…' : 'Save Changes' }}
-          </Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="edit-workspace-form" :disabled="submitting || props.disabled || !name.trim()">
+          {{ submitting ? 'Saving…' : 'Save Changes' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

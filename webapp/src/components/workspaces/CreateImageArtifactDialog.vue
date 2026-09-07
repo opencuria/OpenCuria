@@ -7,8 +7,10 @@ import { ref, computed, onMounted } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -121,7 +123,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="create-image-artifact-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
           <Input v-model="name" placeholder="e.g. before-refactor" />
@@ -156,13 +159,15 @@ function handleClose(): void {
           </p>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="!isValid || submitting">
-            {{ submitting ? 'Capturing…' : 'Capture Image' }}
-          </Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="create-image-artifact-form" :disabled="!isValid || submitting">
+          {{ submitting ? 'Capturing…' : 'Capture Image' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

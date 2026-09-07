@@ -4,8 +4,10 @@ import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -453,7 +455,7 @@ const isValid = computed(
       </slot>
     </DialogTrigger>
 
-    <DialogContent>
+    <DialogContent class="sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>Create Workspace</DialogTitle>
         <DialogDescription>
@@ -461,7 +463,8 @@ const isValid = computed(
         </DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="create-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
       <div class="rounded-md border border-border bg-muted/50 p-1">
         <div class="grid grid-cols-2 gap-1">
           <Button type="button" size="sm" :variant="activeTab === 'basic' ? 'secondary' : 'ghost'" @click="activeTab = 'basic'">
@@ -646,18 +649,19 @@ const isValid = computed(
         </div>
       </div>
 
-      <!-- Actions -->
-      <div class="flex justify-end gap-2 pt-2">
-        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-        <Button type="submit" :disabled="!isValid || submitting">
-          {{
-            submitting
-              ? (selectedImageOption?.kind === 'captured' ? 'Cloning…' : 'Creating…')
-              : (selectedImageOption?.kind === 'captured' ? 'Clone from Image' : 'Create')
-          }}
-        </Button>
-      </div>
     </form>
+    </DialogBody>
+
+    <DialogFooter>
+      <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+      <Button type="submit" form="create-workspace-form" :disabled="!isValid || submitting">
+        {{
+          submitting
+            ? (selectedImageOption?.kind === 'captured' ? 'Cloning…' : 'Creating…')
+            : (selectedImageOption?.kind === 'captured' ? 'Clone from Image' : 'Create')
+        }}
+      </Button>
+    </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

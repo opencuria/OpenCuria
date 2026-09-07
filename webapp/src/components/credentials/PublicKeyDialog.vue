@@ -4,8 +4,10 @@ import { Copy, Check } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -84,6 +86,7 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
+      <DialogBody>
       <div class="flex flex-col gap-4">
         <div v-if="loading" class="text-sm text-muted-foreground">Loading public key...</div>
 
@@ -109,13 +112,15 @@ function handleClose(): void {
 
         <div v-else class="text-sm text-muted-foreground">No public key available.</div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" @click="handleClose">Close</Button>
-          <Button v-if="publicKey" @click="copyToClipboard">
-            {{ copied ? 'Copied!' : 'Copy Public Key' }}
-          </Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" @click="handleClose">Close</Button>
+        <Button v-if="publicKey" @click="copyToClipboard">
+          {{ copied ? 'Copied!' : 'Copy Public Key' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

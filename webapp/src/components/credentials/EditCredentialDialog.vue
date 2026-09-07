@@ -3,8 +3,10 @@ import { ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -85,7 +87,8 @@ function handleClose(): void {
         <DialogDescription>Update the credential name or replace its value.</DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div v-if="credential">
           <p class="text-sm text-muted-foreground mb-3">
             {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
@@ -102,7 +105,7 @@ function handleClose(): void {
           <Textarea
             v-if="credential?.credential_type === 'file'"
             v-model="value"
-            :rows="10"
+            :rows="6"
             placeholder="Leave empty to keep current file contents"
           />
           <Input
@@ -116,13 +119,15 @@ function handleClose(): void {
           </p>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="submitting">
-            {{ submitting ? 'Saving…' : 'Save Changes' }}
-          </Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="edit-credential-form" :disabled="submitting">
+          {{ submitting ? 'Saving…' : 'Save Changes' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

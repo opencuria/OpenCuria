@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Bot, ArrowLeft } from '@lucide/vue'
+import { ArrowLeft } from '@lucide/vue'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { Workspace } from '@/types'
 import { WorkspaceStatus } from '@/types'
@@ -12,8 +12,8 @@ import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -107,6 +107,7 @@ async function handleCreateSession(
         </DialogTitle>
       </DialogHeader>
 
+      <DialogBody>
       <div v-if="step === 'workspace'" class="space-y-3">
         <p class="text-sm text-muted-foreground">
           Choose a running workspace to start a harness session.
@@ -153,8 +154,7 @@ async function handleCreateSession(
           @send="handleCreateSession"
         />
       </div>
-
-      <DialogFooter />
+      </DialogBody>
     </DialogContent>
   </Dialog>
 </template>

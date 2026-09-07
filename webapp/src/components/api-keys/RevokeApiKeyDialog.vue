@@ -6,7 +6,9 @@ import { TriangleAlert } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -46,6 +48,7 @@ async function handleRevoke(): Promise<void> {
         <DialogTitle>Revoke API Key</DialogTitle>
       </DialogHeader>
 
+      <DialogBody>
       <div class="flex flex-col gap-4">
         <div class="flex items-start gap-3 rounded-[var(--radius-md)] border border-destructive/30 bg-destructive/10 px-3.5 py-3">
           <TriangleAlert :size="16" class="mt-0.5 shrink-0 text-destructive" />
@@ -62,17 +65,19 @@ async function handleRevoke(): Promise<void> {
           Are you sure you want to revoke <span class="font-medium text-foreground">{{ apiKey?.name }}</span>?
         </p>
 
-        <div class="flex justify-end gap-2">
-          <Button variant="outline" :disabled="submitting" @click="emit('close')">Cancel</Button>
-          <Button
-            variant="destructive"
-            :disabled="submitting"
-            @click="handleRevoke"
-          >
-            {{ submitting ? 'Revoking…' : 'Revoke Key' }}
-          </Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" :disabled="submitting" @click="emit('close')">Cancel</Button>
+        <Button
+          variant="destructive"
+          :disabled="submitting"
+          @click="handleRevoke"
+        >
+          {{ submitting ? 'Revoking…' : 'Revoke Key' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

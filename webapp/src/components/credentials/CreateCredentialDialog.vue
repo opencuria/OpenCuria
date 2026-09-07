@@ -4,8 +4,10 @@ import { Info } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -109,7 +111,8 @@ function handleClose(): void {
         <DialogDescription>Store a credential to be injected into workspaces.</DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="create-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Service</label>
           <Select v-model="selectedServiceId">
@@ -163,7 +166,7 @@ function handleClose(): void {
           <Textarea
             v-if="isFileCredential"
             v-model="value"
-            :rows="10"
+            :rows="6"
             :placeholder="selectedService ? `Paste the contents for ${selectedService.target_path}` : 'Credential file contents'"
           />
           <Input
@@ -189,13 +192,15 @@ function handleClose(): void {
           <Switch id="create-org-credential" v-model="isOrgCredential" />
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="!isValid || submitting">
-            {{ submitting ? 'Saving…' : 'Save Credential' }}
-          </Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="create-credential-form" :disabled="!isValid || submitting">
+          {{ submitting ? 'Saving…' : 'Save Credential' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

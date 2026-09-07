@@ -6,8 +6,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -64,7 +66,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form v-if="!createdToken" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form v-if="!createdToken" id="create-runner-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
           <Input
@@ -72,15 +75,6 @@ function handleClose(): void {
             placeholder="e.g. dev-runner-01"
           />
           <p class="text-xs text-muted-foreground mt-1">Optional. A friendly name for this runner.</p>
-        </div>
-
-        <div class="flex justify-end gap-2">
-          <Button variant="outline" type="button" @click="handleClose">
-            Cancel
-          </Button>
-          <Button type="submit" :disabled="submitting">
-            {{ submitting ? 'Registering…' : 'Register' }}
-          </Button>
         </div>
       </form>
 
@@ -102,10 +96,20 @@ function handleClose(): void {
           </div>
         </div>
 
-        <div class="flex justify-end">
-          <Button @click="handleClose">Done</Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter v-if="!createdToken">
+        <Button variant="outline" type="button" @click="handleClose">
+          Cancel
+        </Button>
+        <Button type="submit" form="create-runner-form" :disabled="submitting">
+          {{ submitting ? 'Registering…' : 'Register' }}
+        </Button>
+      </DialogFooter>
+      <DialogFooter v-else>
+        <Button @click="handleClose">Done</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

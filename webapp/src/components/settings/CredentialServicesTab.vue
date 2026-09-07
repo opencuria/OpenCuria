@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/select'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -311,7 +312,8 @@ async function createCredentialService(): Promise<void> {
           </DialogDescription>
         </DialogHeader>
 
-        <form class="space-y-4" @submit.prevent="createCredentialService">
+        <DialogBody>
+        <form id="create-credential-service-form" class="space-y-4" @submit.prevent="createCredentialService">
           <div class="space-y-2">
             <Label for="service-name">Name</Label>
             <Input id="service-name" v-model="serviceName" placeholder="GitHub Enterprise" />
@@ -383,22 +385,24 @@ async function createCredentialService(): Promise<void> {
             />
           </div>
 
-          <DialogFooter>
-            <Button
-              variant="outline"
-              type="button"
-              :disabled="createServiceLoading"
-              @click="closeCreateCredentialService"
-            >
-              Cancel
-            </Button>
-            <Button type="submit" :disabled="!isCreateServiceValid || createServiceLoading">
-              <LoadingSpinner v-if="createServiceLoading" :size="12" />
-              <Plus v-else />
-              Create Service
-            </Button>
-          </DialogFooter>
         </form>
+        </DialogBody>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            type="button"
+            :disabled="createServiceLoading"
+            @click="closeCreateCredentialService"
+          >
+            Cancel
+          </Button>
+          <Button type="submit" form="create-credential-service-form" :disabled="!isCreateServiceValid || createServiceLoading">
+            <LoadingSpinner v-if="createServiceLoading" :size="12" />
+            <Plus v-else />
+            Create Service
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   </div>

@@ -3,8 +3,10 @@ import { computed, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -132,7 +134,7 @@ function handleSave(): void {
     :open="open"
     @update:open="(v) => emit('update:open', v)"
   >
-    <DialogContent>
+    <DialogContent class="sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
         <DialogDescription>
@@ -140,7 +142,8 @@ function handleSave(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form class="space-y-4" @submit.prevent="handleSave">
+      <DialogBody>
+      <form id="image-definition-form" class="space-y-4" @submit.prevent="handleSave">
         <div class="rounded-md border border-border bg-muted/50 p-1">
           <div class="grid grid-cols-2 gap-1">
             <Button type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
@@ -235,11 +238,13 @@ function handleSave(): void {
           </div>
         </template>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="emit('update:open', false)">Cancel</Button>
-          <Button type="submit" :disabled="!isValid">Save</Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="emit('update:open', false)">Cancel</Button>
+        <Button type="submit" form="image-definition-form" :disabled="!isValid">Save</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

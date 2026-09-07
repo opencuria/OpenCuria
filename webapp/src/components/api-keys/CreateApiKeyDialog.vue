@@ -10,8 +10,10 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -113,7 +115,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form v-if="!createdKey" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form v-if="!createdKey" id="create-api-key-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
           <Input
@@ -183,12 +186,6 @@ function handleClose(): void {
           </div>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="!isValid || submitting">
-            {{ submitting ? 'Creating…' : 'Create Key' }}
-          </Button>
-        </div>
       </form>
 
       <div v-else class="flex flex-col gap-4">
@@ -244,10 +241,18 @@ function handleClose(): void {
           <p><span class="rounded bg-muted px-1 py-0.5 font-mono">/mcp/sse</span> — requires <span class="font-mono">mcp:access</span> permission</p>
         </div>
 
-        <div class="flex justify-end pt-1">
-          <Button @click="handleClose">Done</Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter v-if="!createdKey">
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="create-api-key-form" :disabled="!isValid || submitting">
+          {{ submitting ? 'Creating…' : 'Create Key' }}
+        </Button>
+      </DialogFooter>
+      <DialogFooter v-else>
+        <Button @click="handleClose">Done</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

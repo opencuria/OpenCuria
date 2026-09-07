@@ -8,8 +8,10 @@ import { Check, Key } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -94,7 +96,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form id="clone-from-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div class="rounded-md bg-muted/50 border border-border p-3 text-sm">
           <div class="font-medium text-foreground mb-1">{{ props.imageArtifact.name }}</div>
           <div class="text-muted-foreground text-xs">
@@ -140,13 +143,15 @@ function handleClose(): void {
           <p v-else class="text-xs text-muted-foreground">No credentials available.</p>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="!isValid || submitting">
-            {{ submitting ? 'Cloning…' : 'Clone Workspace' }}
-          </Button>
-        </div>
       </form>
+      </DialogBody>
+
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="clone-from-image-form" :disabled="!isValid || submitting">
+          {{ submitting ? 'Cloning…' : 'Clone Workspace' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>
