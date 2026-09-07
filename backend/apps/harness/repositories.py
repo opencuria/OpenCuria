@@ -209,10 +209,52 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def list_id_parent_for_workspaces(
+        workspace_ids: list[uuid.UUID],
+    ) -> list[tuple[uuid.UUID, uuid.UUID | None]]:
+        """Return ``(id, parent_id)`` for every session in *workspace_ids*."""
+        if not workspace_ids:
+            return []
+        return list(
+            HarnessSession.objects.filter(workspace_id__in=workspace_ids).values_list(
+                "id", "parent_id"
+            )
+        )
+
+    @staticmethod
+    def get_root_id(session: HarnessSession) -> uuid.UUID:
+        """Return the top-level session id for *session*."""
+        current_id = session.id
+        parent_id = session.parent_id
+        seen: set[uuid.UUID] = {current_id}
+        while parent_id is not None:
+            if parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = (
+                HarnessSession.objects.filter(id=parent_id)
+                .only("id", "parent_id")
+                .first()
+            )
+            if parent is None:
+                break
+            current_id = parent.id
+            parent_id = parent.parent_id
+        return current_id
+
+    @staticmethod
     def mark_read(session: HarnessSession) -> HarnessSession:
         """Record that the user opened this session."""
         session.last_read_at = timezone.now()
-        session.save(update_fields=["last_read_at", "updated_at"])
+        session.manual_unread_at = None
+        session.save(update_fields=["last_read_at", "manual_unread_at", "updated_at"])
+        return session
+
+    @staticmethod
+    def mark_unread(session: HarnessSession) -> HarnessSession:
+        """Record that the user explicitly marked this session unread."""
+        session.manual_unread_at = timezone.now()
+        session.save(update_fields=["manual_unread_at", "updated_at"])
         return session
 
     @staticmethod

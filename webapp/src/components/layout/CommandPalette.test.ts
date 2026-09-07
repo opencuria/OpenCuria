@@ -7,8 +7,7 @@ import { WorkspaceStatus } from '@/types'
 
 const routerPush = vi.fn()
 
-const conversationStore = {
-  conversations: [
+const baseConversations = [
     {
       session_id: 's-1',
       workspace_id: 'ws-1',
@@ -33,7 +32,10 @@ const conversationStore = {
       unread: false,
       updated_at: new Date().toISOString(),
     },
-  ],
+  ]
+
+const conversationStore = {
+  conversations: [...baseConversations],
   markAsRead: vi.fn(),
 }
 
@@ -91,6 +93,7 @@ function mountPalette(props = { open: true }) {
 describe('CommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    conversationStore.conversations = [...baseConversations]
   })
 
   it('lists actions, recent chats, and workspaces without a query', () => {
@@ -145,5 +148,30 @@ describe('CommandPalette', () => {
 
     const selected = wrapper.find('[aria-selected="true"]')
     expect(selected.text()).toContain('Workspaces verwalten')
+  })
+
+  it('lists action-required chats above recent chats', () => {
+    conversationStore.conversations = [
+      ...baseConversations,
+      {
+        session_id: 's-gate',
+        workspace_id: 'ws-1',
+        workspace_name: 'Alpha workspace',
+        title: 'Waiting chat',
+        status: 'busy',
+        mode: 'build',
+        agent_name: 'build',
+        model: '',
+        unread: false,
+        needs_attention: true,
+        attention_kind: 'question',
+        updated_at: new Date().toISOString(),
+      },
+    ]
+    const wrapper = mountPalette()
+
+    expect(wrapper.text()).toContain('Action required')
+    expect(wrapper.text()).toContain('Waiting chat')
+    expect(wrapper.find('[data-testid="palette-attention-badge"]').exists()).toBe(true)
   })
 })

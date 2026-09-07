@@ -64,6 +64,9 @@ export type HarnessSessionMode = 'plan' | 'build'
 /** Lifecycle state of a harness session. */
 export type HarnessSessionStatus = 'busy' | 'idle'
 
+/** Pending user-gate kind on a conversation (permission / question). */
+export type HarnessAttentionKind = 'permission' | 'question' | 'both' | ''
+
 /** One persistent agent conversation bound to a workspace. */
 export interface HarnessSession {
   id: string
@@ -77,6 +80,9 @@ export interface HarnessSession {
   status: HarnessSessionStatus
   skill_ids?: string[]
   unread?: boolean
+  manual_unread?: boolean
+  needs_attention?: boolean
+  attention_kind?: HarnessAttentionKind
   cost: number
   tokens: Record<string, number>
   created_at?: string
@@ -174,6 +180,9 @@ export interface HarnessConversation {
   model: string
   reasoning_effort?: string
   unread: boolean
+  manual_unread?: boolean
+  needs_attention?: boolean
+  attention_kind?: HarnessAttentionKind
   updated_at: string
 }
 
@@ -209,6 +218,7 @@ export interface HarnessPartUpdatedEvent {
 export interface HarnessPermissionRequiredEvent {
   workspace_id: string
   session_id: string
+  root_session_id?: string
   request_id?: string
   tool: string
   pattern: string
@@ -222,6 +232,7 @@ export interface HarnessPermissionRequiredEvent {
 export interface HarnessPermissionResolvedEvent {
   workspace_id: string
   session_id: string
+  root_session_id?: string
   request_id: string
   decision: string
   remember: string
@@ -230,6 +241,7 @@ export interface HarnessPermissionResolvedEvent {
 export interface HarnessQuestionRequiredEvent {
   workspace_id: string
   session_id: string
+  root_session_id?: string
   request_id: string
   questions: HarnessQuestionItem[]
   call_id?: string
@@ -240,6 +252,7 @@ export interface HarnessQuestionRequiredEvent {
 export interface HarnessQuestionResolvedEvent {
   workspace_id: string
   session_id: string
+  root_session_id?: string
   request_id: string
   status: string
 }

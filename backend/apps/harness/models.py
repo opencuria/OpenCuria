@@ -162,6 +162,11 @@ class HarnessSession(models.Model):
         blank=True,
         help_text="When the user last opened this session (null = never read).",
     )
+    manual_unread_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user explicitly marked this session unread.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

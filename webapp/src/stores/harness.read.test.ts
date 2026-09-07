@@ -79,6 +79,15 @@ describe('harness store read tracking', () => {
     expect(store.sessions[0]?.unread).toBe(false)
   })
 
+  it('keeps manual unread when an idle event arrives for the viewing session', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy', unread: true, manual_unread: true })]
+    store.setViewingSession('session-1')
+    store.handleSessionStatus('session-1', 'idle')
+    expect(markReadMock).not.toHaveBeenCalled()
+    expect(store.sessions[0]?.unread).toBe(true)
+  })
+
   it('marks unread when an idle event arrives for a session that is not viewed', () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ status: 'busy', unread: false })]

@@ -17,7 +17,11 @@ from apps.harness.models import HarnessMessage, HarnessMessageRole, HarnessSessi
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
-from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
+from apps.harness.repositories import (
+    HarnessMessageRepository,
+    HarnessSessionRepository,
+    QuestionRequestRepository,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -156,6 +160,9 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["model"] == "openrouter/test-model"
     assert row["reasoning_effort"] == "high"
     assert row["unread"] is False
+    assert row["manual_unread"] is False
+    assert row["needs_attention"] is False
+    assert row["attention_kind"] == ""
     assert "updated_at" in row
 
 
@@ -333,3 +340,140 @@ def test_list_sessions_unread_false_after_mark_read(conv_setup, fake_harness_ser
         f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
     )
     assert listed.json()[0]["unread"] is False
+
+
+@pytest.mark.django_db
+def test_manual_unread_true_when_busy(conv_setup, fake_harness_service):
+    """Explicit unread stays true even while the session is busy."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="running",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.BUSY)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    mark = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert mark.status_code == 204
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["unread"] is True
+    assert row["manual_unread"] is True
+
+
+@pytest.mark.django_db
+def test_mark_unread_cleared_by_mark_read(conv_setup, fake_harness_service):
+    """Mark-read clears an explicit unread flag."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="toggle",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.IDLE)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    unread = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert unread.status_code == 204
+    assert client.get("/api/v1/harness/conversations/").json()[0]["unread"] is True
+    read = client.post(f"/api/v1/harness/sessions/{session.id}/read")
+    assert read.status_code == 204
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["unread"] is False
+    assert row["manual_unread"] is False
+
+
+@pytest.mark.django_db
+def test_mark_unread_requires_harness_read(conv_setup, fake_harness_service):
+    """Run-only keys cannot mark sessions unread."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="perm",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=RUN)
+    response = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_mark_unread_foreign_session_is_404(conv_setup, fake_harness_service):
+    """Cannot mark another owner's session as unread."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["foreign"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="foreign",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    response = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_needs_attention_permission_and_question(conv_setup, fake_harness_service):
+    """Pending gates surface needs_attention and attention_kind on the feed."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="gates",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is False
+    assert row["attention_kind"] == ""
+
+    fake_harness_service.permissions.requests.create(
+        organization_id=conv_setup["org"].id,
+        session_id=session.id,
+        workspace_id=conv_setup["owned"].id,
+        tool="bash",
+        pattern="ls",
+        title="$ ls",
+    )
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "permission"
+
+    QuestionRequestRepository.create(
+        organization_id=conv_setup["org"].id,
+        session_id=session.id,
+        workspace_id=conv_setup["owned"].id,
+        questions=[{"question": "Which one?"}],
+    )
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "both"
+
+
+@pytest.mark.django_db
+def test_needs_attention_maps_child_gate_to_root(conv_setup, fake_harness_service):
+    """Subagent pending gates mark the root conversation as needing attention."""
+    parent = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="parent",
+    )
+    child = HarnessSessionRepository.create(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        title="child",
+        parent_id=parent.id,
+        agent_name="explore",
+    )
+    QuestionRequestRepository.create(
+        organization_id=conv_setup["org"].id,
+        session_id=child.id,
+        workspace_id=conv_setup["owned"].id,
+        questions=[{"question": "Child ask?"}],
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["session_id"] == str(parent.id)
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "question"
+
+    listed = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    ).json()
+    by_id = {item["id"]: item for item in listed}
+    assert by_id[str(parent.id)]["needs_attention"] is True
+    assert by_id[str(child.id)]["needs_attention"] is True
+    assert by_id[str(child.id)]["attention_kind"] == "question"
+    assert HarnessSessionRepository.get_root_id(child) == parent.id
+    assert HarnessSessionRepository.get_root_id(parent) == parent.id

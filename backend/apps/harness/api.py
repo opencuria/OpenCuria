@@ -117,6 +117,9 @@ class HarnessConversationOut(Schema):
     model: str = ""
     reasoning_effort: str = ""
     unread: bool = False
+    manual_unread: bool = False
+    needs_attention: bool = False
+    attention_kind: str = ""
     updated_at: datetime
 
 
@@ -172,6 +175,9 @@ class HarnessSessionOut(Schema):
     tokens: dict = {}
     skill_ids: list[str] = []
     unread: bool = False
+    manual_unread: bool = False
+    needs_attention: bool = False
+    attention_kind: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -332,7 +338,14 @@ def _delete_org_provider_config(org_id: uuid.UUID) -> None:
     ProviderConfigService().delete_config(org_id)
 
 
-def _session_to_out(session, *, unread: bool = False) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
+def _session_to_out(
+    session,
+    *,
+    unread: bool = False,
+    manual_unread: bool = False,
+    needs_attention: bool = False,
+    attention_kind: str = "",
+) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
     """Map a HarnessSession ORM row to HarnessSessionOut."""
     return HarnessSessionOut(
         id=session.id,
@@ -348,14 +361,24 @@ def _session_to_out(session, *, unread: bool = False) -> HarnessSessionOut:  # t
         tokens=dict(session.tokens or {}),
         skill_ids=[str(skill_id) for skill_id in (session.skill_ids or [])],
         unread=unread,
+        manual_unread=manual_unread,
+        needs_attention=needs_attention,
+        attention_kind=attention_kind,
         created_at=session.created_at,
         updated_at=session.updated_at,
     )
 
 
 def _session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
-    """Map a session and compute its unread flag."""
-    return _session_to_out(session, unread=service.is_session_unread(session))
+    """Map a session and compute its unread and attention flags."""
+    attention = service.attention_for_sessions([session]).get(session.id, {})
+    return _session_to_out(
+        session,
+        unread=service.is_session_unread(session),
+        manual_unread=session.manual_unread_at is not None,
+        needs_attention=attention.get("needs_attention", False),
+        attention_kind=attention.get("attention_kind", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +402,19 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
         service = _resolve_harness_service()
         sessions = service.list_sessions(workspace_id)
         unread_map = service.unread_for_sessions(sessions)
+        attention_map = service.attention_for_sessions(sessions)
         return 200, [
-            _session_to_out(session, unread=unread_map.get(session.id, False))
+            _session_to_out(
+                session,
+                unread=unread_map.get(session.id, False),
+                manual_unread=session.manual_unread_at is not None,
+                needs_attention=attention_map.get(session.id, {}).get(
+                    "needs_attention", False
+                ),
+                attention_kind=attention_map.get(session.id, {}).get(
+                    "attention_kind", ""
+                ),
+            )
             for session in sessions
         ]
     except NotFoundError as exc:
@@ -584,6 +618,9 @@ def list_harness_conversations(request: HttpRequest):
             model=row.get("model") or "",
             reasoning_effort=row.get("reasoning_effort") or "",
             unread=row["unread"],
+            manual_unread=bool(row.get("manual_unread")),
+            needs_attention=bool(row.get("needs_attention")),
+            attention_kind=row.get("attention_kind") or "",
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
         for row in rows
@@ -606,6 +643,27 @@ def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         service.mark_session_read(session.id)
+        return 204, None
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/unread",
+    response={204: None, 403: dict, 404: dict},
+    summary="Mark a harness session as unread",
+)
+def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
+    """Record that the user explicitly marked a harness session unread."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    org_id = _get_org_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = service.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        service.mark_session_unread(session.id)
         return 204, None
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

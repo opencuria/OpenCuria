@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
 import ActiveConversationsSection from './sidebar/ActiveConversationsSection.vue'
+import ActionRequiredSection from './sidebar/ActionRequiredSection.vue'
 import ConversationTimeList from './sidebar/ConversationTimeList.vue'
 import SidebarBrandHeader from './sidebar/SidebarBrandHeader.vue'
 import SidebarUserFooter from './sidebar/SidebarUserFooter.vue'
@@ -34,6 +35,7 @@ import { usePolling } from '@/composables/usePolling'
 import {
   countableWorkspaces,
   conversationTitle,
+  extractActionRequired,
   extractActiveConversations,
   selectSidebarWorkspaces,
 } from '@/lib/conversationGroups'
@@ -62,13 +64,20 @@ const { isMobile, setOpenMobile } = useSidebar()
 const searchOpen = ref(false)
 const deleteTarget = ref<HarnessConversation | null>(null)
 
+const actionRequiredConversations = computed(() =>
+  extractActionRequired(conversationStore.conversations),
+)
+
 const activeConversations = computed(() =>
   extractActiveConversations(conversationStore.conversations),
 )
 
 const timeListConversations = computed(() => {
-  const activeIds = new Set(activeConversations.value.map((row) => row.session_id))
-  return conversationStore.conversations.filter((row) => !activeIds.has(row.session_id))
+  const featuredIds = new Set([
+    ...actionRequiredConversations.value.map((row) => row.session_id),
+    ...activeConversations.value.map((row) => row.session_id),
+  ])
+  return conversationStore.conversations.filter((row) => !featuredIds.has(row.session_id))
 })
 
 const sidebarWorkspaces = computed(() =>
@@ -130,6 +139,10 @@ async function handleRename(conversation: HarnessConversation, title: string): P
 
 function handleMarkRead(conversation: HarnessConversation): void {
   void conversationStore.markAsRead(conversation.session_id)
+}
+
+function handleMarkUnread(conversation: HarnessConversation): void {
+  void conversationStore.markAsUnread(conversation.session_id)
 }
 
 function requestDelete(conversation: HarnessConversation): void {
@@ -200,6 +213,28 @@ function setupSocketListeners(): void {
   cleanupFns.push(
     onEvent('harness.part_updated', (data) => {
       conversationStore.touchConversation(data.session_id)
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.permission_required', (data) => {
+      const sessionId = data.root_session_id || data.session_id
+      if (data.decision) {
+        conversationStore.clearAttention(sessionId)
+        return
+      }
+      conversationStore.setAttention(sessionId, 'permission')
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.question_required', (data) => {
+      const sessionId = data.root_session_id || data.session_id
+      if (data.status && data.status !== 'pending') {
+        conversationStore.clearAttention(sessionId)
+        return
+      }
+      conversationStore.setAttention(sessionId, 'question')
     }),
   )
 
@@ -318,6 +353,16 @@ watch(
 
     <SidebarContent class="group-data-[collapsible=icon]:hidden">
       <div class="flex flex-col gap-3 pb-2">
+        <ActionRequiredSection
+          :conversations="actionRequiredConversations"
+          :active-session-id="activeSessionId"
+          @select="handleSelectConversation"
+          @rename="handleRename"
+          @delete="requestDelete"
+          @mark-read="handleMarkRead"
+          @mark-unread="handleMarkUnread"
+        />
+
         <ActiveConversationsSection
           :conversations="activeConversations"
           :active-session-id="activeSessionId"
@@ -325,6 +370,7 @@ watch(
           @rename="handleRename"
           @delete="requestDelete"
           @mark-read="handleMarkRead"
+          @mark-unread="handleMarkUnread"
           @mark-all-read="handleMarkAllRead"
         />
 
@@ -337,6 +383,7 @@ watch(
           @rename="handleRename"
           @delete="requestDelete"
           @mark-read="handleMarkRead"
+          @mark-unread="handleMarkUnread"
         />
 
         <WorkspaceSection

@@ -6,6 +6,7 @@ import { computed, nextTick, ref, watch, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   BookOpen,
+  CircleAlert,
   Layers,
   MessageSquare,
   Plus,
@@ -22,6 +23,7 @@ import {
 import { Input } from '@/components/ui/input'
 import {
   conversationTitle,
+  extractActionRequired,
   extractActiveConversations,
   selectSidebarWorkspaces,
   countableWorkspaces,
@@ -48,6 +50,7 @@ interface PaletteItem {
   label: string
   description?: string
   icon: Component
+  attention?: boolean
   run: () => void
 }
 
@@ -127,12 +130,14 @@ function openWorkspace(workspace: Workspace): void {
 }
 
 function chatItem(conversation: HarnessConversation, group: string): PaletteItem {
+  const attention = Boolean(conversation.needs_attention)
   return {
     id: `chat-${conversation.session_id}`,
     group,
     label: conversationTitle(conversation),
     description: conversation.workspace_name,
-    icon: MessageSquare,
+    icon: attention ? CircleAlert : MessageSquare,
+    attention,
     run: () => openConversation(conversation),
   }
 }
@@ -153,15 +158,21 @@ const items = computed<PaletteItem[]>(() => {
   const workspaces = countableWorkspaces(workspaceStore.workspaces)
 
   if (!q) {
+    const actionRequired = extractActionRequired(conversations)
+    const actionRequiredIds = new Set(actionRequired.map((row) => row.session_id))
     const active = extractActiveConversations(conversations)
-    const activeIds = new Set(active.map((row) => row.session_id))
+    const featuredIds = new Set([
+      ...actionRequiredIds,
+      ...active.map((row) => row.session_id),
+    ])
     const recent = conversations
-      .filter((row) => !activeIds.has(row.session_id))
+      .filter((row) => !featuredIds.has(row.session_id))
       .slice(0, 8)
     const sidebarWorkspaces = selectSidebarWorkspaces(workspaces, conversations, 5)
     return [
       ...actionItems,
-      ...active.map((row) => chatItem(row, 'Aktiv')),
+      ...actionRequired.map((row) => chatItem(row, 'Action required')),
+      ...active.map((row) => chatItem(row, 'Active')),
       ...recent.map((row) => chatItem(row, 'Zuletzt verwendet')),
       ...sidebarWorkspaces.map(workspaceItem),
     ]
@@ -308,7 +319,11 @@ function itemIndex(item: PaletteItem): number {
             @click="item.run()"
             @mousemove="activeIndex = itemIndex(item)"
           >
-            <component :is="item.icon" class="size-4 shrink-0 text-muted-foreground" />
+            <component
+              :is="item.icon"
+              class="size-4 shrink-0"
+              :class="item.attention ? 'text-amber-500' : 'text-muted-foreground'"
+            />
             <div class="min-w-0 flex-1">
               <div class="truncate text-[13px] font-medium text-foreground">
                 {{ item.label }}
@@ -320,6 +335,13 @@ function itemIndex(item: PaletteItem): number {
                 {{ item.description }}
               </div>
             </div>
+            <span
+              v-if="item.attention"
+              data-testid="palette-attention-badge"
+              class="shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300"
+            >
+              Action
+            </span>
           </button>
         </div>
 

@@ -173,3 +173,7 @@ export function listHarnessConversations(): Promise<HarnessConversation[]> {
 export function markHarnessSessionRead(sessionId: string): Promise<void> {
   return post<void>(`/harness/sessions/${sessionId}/read`)
 }
+
+export function markHarnessSessionUnread(sessionId: string): Promise<void> {
+  return post<void>(`/harness/sessions/${sessionId}/unread`)
+}

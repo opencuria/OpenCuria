@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute } from 'vue-router'
 import ChatSidebar from './ChatSidebar.vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import SettingsSheetHost from '@/components/settings/SettingsSheetHost.vue'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Separator } from '@/components/ui/separator'
+import { useAttentionTabTitle } from '@/composables/useAttentionTabTitle'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 
 const route = useRoute()
+const conversationStore = useHarnessConversationStore()
+const { attentionCount } = storeToRefs(conversationStore)
+useAttentionTabTitle(attentionCount)
+
 const showMobileTopBar = computed(() => !route.meta.hideTopBar)
 // Chat-Home ("/", meta.fullBleed) und Thread (workspace-detail) sind FullBleed;
 // weitere Routen können sich zusätzlich über meta.fullBleed einklinken.

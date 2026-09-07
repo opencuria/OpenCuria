@@ -61,6 +61,48 @@ describe('ConversationRow', () => {
     expect(wrapper.find('[data-testid="unread-dot"]').exists()).toBe(false)
   })
 
+  it('shows an attention icon instead of the busy spinner', () => {
+    const wrapper = mountRow({
+      status: 'busy',
+      needs_attention: true,
+      attention_kind: 'permission',
+    })
+
+    expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="busy-spinner"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="conversation-row"]').text()).toContain('First chat')
+  })
+
+  it('uses a question icon for question gates', () => {
+    const wrapper = mountRow({
+      needs_attention: true,
+      attention_kind: 'question',
+    })
+
+    expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="Chat First chat öffnen — Question waiting"]').exists()).toBe(true)
+  })
+
+  it('emits mark-unread from the row menu when the chat is read', async () => {
+    const wrapper = mountRow({ unread: false })
+
+    const unread = wrapper.findAll('button').find((button) => button.text().includes('Als ungelesen markieren'))
+    expect(unread).toBeTruthy()
+    await unread!.trigger('click')
+
+    expect(wrapper.emitted('mark-unread')?.[0]?.[0]).toMatchObject({ session_id: 's-1' })
+  })
+
+  it('emits mark-read from the row menu when the chat is unread', async () => {
+    const wrapper = mountRow({ unread: true })
+
+    const read = wrapper.findAll('button').find((button) => button.text().includes('Als gelesen markieren'))
+    expect(read).toBeTruthy()
+    await read!.trigger('click')
+
+    expect(wrapper.emitted('mark-read')?.[0]?.[0]).toMatchObject({ session_id: 's-1' })
+  })
+
   it('emits select on click', async () => {
     const wrapper = mountRow()
 

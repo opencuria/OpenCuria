@@ -63,19 +63,35 @@ export function formatTimeAgo(isoString: string, now = Date.now()): string {
 
 /**
  * Busy sessions first, then unread, newest first. Caps at `limit`.
+ * Conversations that need user action are excluded (they live in Action required).
  */
 export function extractActiveConversations(
   conversations: HarnessConversation[],
   limit = ACTIVE_CONVERSATION_LIMIT,
 ): HarnessConversation[] {
   return [...conversations]
-    .filter((conversation) => conversation.status === 'busy' || conversation.unread)
+    .filter(
+      (conversation) =>
+        !conversation.needs_attention &&
+        (conversation.status === 'busy' || conversation.unread),
+    )
     .sort((a, b) => {
       if (a.status === 'busy' && b.status !== 'busy') return -1
       if (a.status !== 'busy' && b.status === 'busy') return 1
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
     })
     .slice(0, limit)
+}
+
+/**
+ * Conversations waiting on a permission or question gate, newest first.
+ */
+export function extractActionRequired(
+  conversations: HarnessConversation[],
+): HarnessConversation[] {
+  return [...conversations]
+    .filter((conversation) => Boolean(conversation.needs_attention))
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
 }
 
 /**

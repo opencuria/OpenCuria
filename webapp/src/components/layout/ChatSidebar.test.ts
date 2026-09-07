@@ -64,6 +64,7 @@ const conversationStore = {
   uniqueWorkspaceIds: ['ws-1'],
   fetchConversations: vi.fn(),
   markAsRead: vi.fn(),
+  markAsUnread: vi.fn(),
   updateSessionStatus: vi.fn(),
   touchConversation: vi.fn(),
 }
@@ -199,12 +200,32 @@ describe('ChatSidebar', () => {
     const wrapper = mountSidebar()
 
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Active')
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha')
     expect(wrapper.text()).toContain('Alle Workspaces (2)')
     expect(wrapper.text()).not.toContain('Beta')
     expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
+  })
+
+  it('shows action-required chats in their own section', () => {
+    conversationStore.conversations = [
+      makeConversation({
+        session_id: 's-gate',
+        title: 'Needs a permission',
+        status: 'busy',
+        needs_attention: true,
+        attention_kind: 'permission',
+      }),
+    ]
+    const wrapper = mountSidebar()
+
+    expect(wrapper.find('[data-testid="action-required-section"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Action required')
+    expect(wrapper.text()).toContain('Needs a permission')
+    expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
   })
 
   it('renders new chat and search actions', () => {

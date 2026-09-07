@@ -112,6 +112,12 @@ def test_mcp_harness_tools_require_permissions():
     assert (
         _TOOL_PERMISSIONS["list_harness_conversations"] == APIKeyPermission.HARNESS_READ
     )
+    assert (
+        _TOOL_PERMISSIONS["mark_harness_session_read"] == APIKeyPermission.HARNESS_READ
+    )
+    assert (
+        _TOOL_PERMISSIONS["mark_harness_session_unread"] == APIKeyPermission.HARNESS_READ
+    )
     assert _TOOL_PERMISSIONS["list_provider_models"] == APIKeyPermission.HARNESS_READ
     assert _TOOL_PERMISSIONS["take_desktop_control"] == APIKeyPermission.HARNESS_RUN
     assert _TOOL_PERMISSIONS["update_workspace"] == APIKeyPermission.WORKSPACES_UPDATE

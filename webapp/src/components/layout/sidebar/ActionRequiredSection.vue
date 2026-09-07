@@ -1,11 +1,7 @@
 <script setup lang="ts">
 /**
- * Compact “Active” block: busy sessions first, then unread. Hidden when empty.
+ * Top sidebar block for chats waiting on a permission or question gate.
  */
-import { computed } from 'vue'
-import { CheckCheck } from '@lucide/vue'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { HarnessConversation } from '@/types/harness'
 import ConversationRow from './ConversationRow.vue'
 
@@ -20,35 +16,25 @@ const emit = defineEmits<{
   delete: [conversation: HarnessConversation]
   'mark-read': [conversation: HarnessConversation]
   'mark-unread': [conversation: HarnessConversation]
-  'mark-all-read': []
 }>()
-
-const unreadCount = computed(
-  () => props.conversations.filter((conversation) => conversation.unread).length,
-)
 </script>
 
 <template>
-  <section v-if="props.conversations.length > 0" data-testid="active-section" class="px-2">
-    <div class="flex h-7 items-center gap-1">
-      <span class="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-        Active
+  <section
+    v-if="props.conversations.length > 0"
+    data-testid="action-required-section"
+    class="px-2"
+  >
+    <div class="flex h-7 items-center gap-1.5">
+      <span class="text-[11px] font-medium tracking-wide text-amber-600 uppercase dark:text-amber-400">
+        Action required
       </span>
-      <Tooltip v-if="unreadCount > 0">
-        <TooltipTrigger as-child>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            class="ml-auto text-muted-foreground"
-            data-testid="mark-all-read"
-            aria-label="Alle als gelesen"
-            @click="emit('mark-all-read')"
-          >
-            <CheckCheck />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>Alle als gelesen</TooltipContent>
-      </Tooltip>
+      <span
+        data-testid="action-required-count"
+        class="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500/15 px-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300"
+      >
+        {{ props.conversations.length }}
+      </span>
     </div>
     <div class="flex flex-col gap-0.5">
       <ConversationRow

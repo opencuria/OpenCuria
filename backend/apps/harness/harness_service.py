@@ -263,6 +263,7 @@ class HarnessService:
             ).only("id", "name")
             workspace_names = {str(row.id): row.name for row in rows}
         unread_map = self.unread_for_sessions(sessions)
+        attention_map = self.attention_for_sessions(sessions)
         return [
             {
                 "session_id": str(session.id),
@@ -275,6 +276,13 @@ class HarnessService:
                 "model": session.model or "",
                 "reasoning_effort": session.reasoning_effort or "",
                 "unread": unread_map.get(session.id, False),
+                "manual_unread": session.manual_unread_at is not None,
+                "needs_attention": attention_map.get(session.id, {}).get(
+                    "needs_attention", False
+                ),
+                "attention_kind": attention_map.get(session.id, {}).get(
+                    "attention_kind", ""
+                ),
                 "updated_at": session.updated_at.isoformat(),
             }
             for session in sessions
@@ -284,6 +292,11 @@ class HarnessService:
         """Persist that the user opened a harness session."""
         session = self.get_session(session_id)
         return self.sessions.mark_read(session)
+
+    def mark_session_unread(self, session_id: uuid.UUID) -> HarnessSession:
+        """Persist that the user explicitly marked a session unread."""
+        session = self.get_session(session_id)
+        return self.sessions.mark_unread(session)
 
     def unread_for_sessions(
         self, sessions: list[HarnessSession]
@@ -311,7 +324,9 @@ class HarnessService:
         session: HarnessSession,
         latest_assistant_completed_at,
     ) -> bool:
-        """Return True when idle sessions have unread assistant work."""
+        """Return True when the session is manually unread or has new work."""
+        if session.manual_unread_at is not None:
+            return True
         if session.status != HarnessSessionStatus.IDLE:
             return False
         if latest_assistant_completed_at is None:
@@ -319,6 +334,52 @@ class HarnessService:
         if session.last_read_at is None:
             return True
         return latest_assistant_completed_at > session.last_read_at
+
+    def attention_for_sessions(
+        self, sessions: list[HarnessSession]
+    ) -> dict[uuid.UUID, dict[str, Any]]:
+        """Return pending-gate attention flags keyed by session id.
+
+        Child (subagent) gates count toward every ancestor in *sessions*,
+        so a root conversation is marked when a descendant is waiting.
+        """
+        if not sessions:
+            return {}
+        workspace_ids = list({session.workspace_id for session in sessions})
+        id_parents = self.sessions.list_id_parent_for_workspaces(workspace_ids)
+        children_map: dict[uuid.UUID, list[uuid.UUID]] = {}
+        all_ids: list[uuid.UUID] = []
+        for session_id, parent_id in id_parents:
+            all_ids.append(session_id)
+            if parent_id is None:
+                continue
+            children_map.setdefault(parent_id, []).append(session_id)
+        pending_perm_ids = {
+            row.session_id
+            for row in self.permissions.requests.list_pending_for_sessions(all_ids)
+        }
+        pending_question_ids = {
+            row.session_id
+            for row in QuestionRequestRepository.list_pending_for_sessions(all_ids)
+        }
+        result: dict[uuid.UUID, dict[str, Any]] = {}
+        for session in sessions:
+            tree = _descendant_ids(session.id, children_map)
+            has_permission = any(sid in pending_perm_ids for sid in tree)
+            has_question = any(sid in pending_question_ids for sid in tree)
+            if has_permission and has_question:
+                kind = "both"
+            elif has_permission:
+                kind = "permission"
+            elif has_question:
+                kind = "question"
+            else:
+                kind = ""
+            result[session.id] = {
+                "needs_attention": bool(kind),
+                "attention_kind": kind,
+            }
+        return result
 
     def validate_provider_for_run(
         self,
@@ -633,8 +694,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_PERMISSION,
             {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
+                **self._gate_ids(session),
                 "request_id": str(request_id),
                 "decision": result.decision,
                 "remember": result.remember,
@@ -680,8 +740,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
             {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
+                **self._gate_ids(session),
                 "request_id": str(question_id),
                 "status": status,
             },
@@ -1184,8 +1243,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_PERMISSION,
             {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
+                **self._gate_ids(session),
                 "request_id": str(request.id),
                 "tool": tool,
                 "pattern": action,
@@ -1221,8 +1279,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
             {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
+                **self._gate_ids(session),
                 "request_id": str(request.id),
                 "questions": questions,
                 "call_id": call_id,
@@ -1635,7 +1692,6 @@ class HarnessService:
             QuestionRequestRepository.list_pending_for_session
         )(session.id)
         workspace_id = str(session.workspace_id)
-        session_id = str(session.id)
         for request in pending_perms:
             await sync_to_async(self.permissions.requests.mark_resolved)(
                 request, approved=False, remember="once"
@@ -1646,8 +1702,7 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_PERMISSION,
                 {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
+                    **self._gate_ids(session),
                     "request_id": str(request.id),
                     "decision": "reject",
                     "remember": "once",
@@ -1666,8 +1721,7 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_QUESTION,
                 {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
+                    **self._gate_ids(session),
                     "request_id": str(request.id),
                     "status": "rejected",
                 },
@@ -1700,14 +1754,21 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_PERMISSION,
                 {
-                    "workspace_id": str(session.workspace_id),
-                    "session_id": str(session.id),
+                    **self._gate_ids(session),
                     "request_id": sid,
                     "decision": decision,
                     "remember": remember,
                 },
                 str(session.workspace_id),
             )
+
+    def _gate_ids(self, session: HarnessSession) -> dict[str, str]:
+        """Workspace, session, and root session ids for gate events."""
+        return {
+            "workspace_id": str(session.workspace_id),
+            "session_id": str(session.id),
+            "root_session_id": str(self.sessions.get_root_id(session)),
+        }
 
     def _session_status_payload(
         self,
@@ -2012,6 +2073,25 @@ def create_default_harness_service() -> HarnessService:
         return await create_harness_accessor(runner_service, workspace_id)
 
     return HarnessService(accessor_factory=accessor_factory)
+
+
+def _descendant_ids(
+    session_id: uuid.UUID,
+    children_map: dict[uuid.UUID, list[uuid.UUID]],
+) -> list[uuid.UUID]:
+    """Return *session_id* followed by descendant ids from *children_map*."""
+    ids: list[uuid.UUID] = [session_id]
+    queue: list[uuid.UUID] = [session_id]
+    seen: set[uuid.UUID] = {session_id}
+    while queue:
+        current = queue.pop(0)
+        for child_id in children_map.get(current, []):
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            ids.append(child_id)
+            queue.append(child_id)
+    return ids
 
 
 def get_harness_service() -> HarnessService:

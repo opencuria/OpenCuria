@@ -23,6 +23,7 @@ const emit = defineEmits<{
   rename: [conversation: HarnessConversation, title: string]
   delete: [conversation: HarnessConversation]
   'mark-read': [conversation: HarnessConversation]
+  'mark-unread': [conversation: HarnessConversation]
 }>()
 
 const expanded = ref(false)
@@ -58,6 +59,7 @@ const grouped = computed(() => {
           @rename="(row, title) => emit('rename', row, title)"
           @delete="emit('delete', $event)"
           @mark-read="emit('mark-read', $event)"
+          @mark-unread="emit('mark-unread', $event)"
         />
       </div>
 

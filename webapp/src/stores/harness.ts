@@ -166,14 +166,17 @@ export const useHarnessStore = defineStore('harness', () => {
     viewingSessionId.value = sessionId
     if (!sessionId) return
     const session = sessions.value.find((row) => row.id === sessionId)
-    if (session?.status === 'idle') {
+    if (session?.status === 'idle' && !session.manual_unread) {
       void markSessionRead(sessionId)
     }
   }
 
   async function markSessionRead(sessionId: string): Promise<void> {
     const session = sessions.value.find((row) => row.id === sessionId)
-    if (session) session.unread = false
+    if (session) {
+      session.unread = false
+      session.manual_unread = false
+    }
     const conversationStore = useHarnessConversationStore()
     await conversationStore.markAsRead(sessionId)
   }
@@ -467,14 +470,14 @@ export const useHarnessStore = defineStore('harness', () => {
     }
     stampRunModel(sessionId, extras)
     if (status === 'idle') {
-      if (viewingSessionId.value === sessionId) {
+      if (viewingSessionId.value === sessionId && !session?.manual_unread) {
         void markSessionRead(sessionId)
         return
       }
       if (session) session.unread = true
       return
     }
-    if (session) session.unread = false
+    if (session && !session.manual_unread) session.unread = false
   }
 
   function handlePermissionRequired(request: HarnessPermissionRequest): void {

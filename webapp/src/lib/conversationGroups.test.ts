@@ -6,6 +6,7 @@ import type { HarnessConversation } from '@/types/harness'
 import {
   capConversationGroups,
   conversationTitle,
+  extractActionRequired,
   extractActiveConversations,
   formatTimeAgo,
   groupConversationsByTime,
@@ -107,6 +108,41 @@ describe('extractActiveConversations', () => {
       'unread-3',
       'unread-4',
     ])
+  })
+
+  it('excludes chats that need attention', () => {
+    const active = extractActiveConversations([
+      conversation({ session_id: 'busy', status: 'busy' }),
+      conversation({
+        session_id: 'gate',
+        status: 'busy',
+        needs_attention: true,
+        attention_kind: 'permission',
+      }),
+      conversation({ session_id: 'unread', unread: true }),
+    ])
+    expect(active.map((row) => row.session_id)).toEqual(['busy', 'unread'])
+  })
+})
+
+describe('extractActionRequired', () => {
+  it('returns attention chats newest first', () => {
+    const rows = extractActionRequired([
+      conversation({ session_id: 'idle' }),
+      conversation({
+        session_id: 'old-gate',
+        needs_attention: true,
+        attention_kind: 'question',
+        updated_at: new Date(NOW - 20_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'new-gate',
+        needs_attention: true,
+        attention_kind: 'permission',
+        updated_at: new Date(NOW).toISOString(),
+      }),
+    ])
+    expect(rows.map((row) => row.session_id)).toEqual(['new-gate', 'old-gate'])
   })
 })
 

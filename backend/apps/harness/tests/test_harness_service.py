@@ -283,12 +283,14 @@ async def test_abort_rejects_pending_permission_and_question(
         event["event"] == FRONTEND_EVENT_PERMISSION
         and event.get("request_id") == str(permission.id)
         and event.get("decision") == "reject"
+        and event.get("root_session_id") == str(session.id)
         for event in events
     )
     assert any(
         event["event"] == FRONTEND_EVENT_QUESTION
         and event.get("request_id") == str(question.id)
         and event.get("status") == "rejected"
+        and event.get("root_session_id") == str(session.id)
         for event in events
     )
 

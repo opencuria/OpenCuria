@@ -43,6 +43,7 @@ Tools and their required permissions
 - resolve_harness_permission → harness:permissions
 - resolve_harness_question → harness:permissions
 - mark_harness_session_read → harness:read
+- mark_harness_session_unread → harness:read
 - patch_harness_session → harness:run
 - set_harness_session_mode → harness:run
 - delete_harness_session → harness:run
@@ -543,6 +544,15 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="mark_harness_session_unread",
+        description="Mark a harness session as unread (dashboard unread state).",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
         name="resolve_harness_question",
         description="Answer a pending harness question request.",
         inputSchema={
@@ -677,6 +687,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "delete_harness_session": APIKeyPermission.HARNESS_RUN,
     "list_harness_conversations": APIKeyPermission.HARNESS_READ,
     "mark_harness_session_read": APIKeyPermission.HARNESS_READ,
+    "mark_harness_session_unread": APIKeyPermission.HARNESS_READ,
     "resolve_harness_question": APIKeyPermission.HARNESS_PERMISSIONS,
     "list_org_credential_services": APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ,
     "toggle_org_credential_service_activation": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
@@ -2156,6 +2167,26 @@ def _call_mark_harness_session_read(api_key, org_id, args: dict) -> list[TextCon
     return _text({"session_id": str(session.id), "read": True})
 
 
+def _call_mark_harness_session_unread(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    service.mark_session_unread(session.id)
+    return _text({"session_id": str(session.id), "unread": True})
+
+
 def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextContent]:
     import asyncio
     import uuid as _uuid
@@ -2477,6 +2508,7 @@ _TOOL_HANDLERS = {
     "delete_harness_session": _call_delete_harness_session,
     "list_harness_conversations": _call_list_harness_conversations,
     "mark_harness_session_read": _call_mark_harness_session_read,
+    "mark_harness_session_unread": _call_mark_harness_session_unread,
     "resolve_harness_question": _call_resolve_harness_question,
     "list_org_credential_services": _call_list_org_credential_services,
     "toggle_org_credential_service_activation": _call_toggle_org_credential_service_activation,

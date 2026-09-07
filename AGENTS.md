@@ -386,9 +386,11 @@ Six separate routers:
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
 | `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
-| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/`, `GET /provider-config/models/` |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/`, `GET /provider-config/models/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
+
+Conversation and session list responses include `unread` (idle assistant work since last open, or an explicit `manual_unread_at`), plus `needs_attention` / `attention_kind` when a permission or question gate is pending (including descendant subagent sessions).
 
 **Parity requirement:** Every capability exposed via the REST API must also be
 available via MCP. When adding a new REST endpoint, add the corresponding MCP
