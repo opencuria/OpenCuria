@@ -25,7 +25,10 @@ class QuestionItem(BaseModel):
     question: str = Field(description="The question text.")
     options: list[QuestionOption] = Field(
         default_factory=list,
-        description="Selectable options (free-text when empty).",
+        description=(
+            "Selectable options. The user can always also type a custom "
+            "free-text answer, so never add an 'Other' or catch-all option."
+        ),
     )
     multiple: bool = Field(
         default=False,
@@ -48,7 +51,9 @@ class QuestionTool(Tool):
     name = "question"
     description = (
         "Ask the user one or more structured questions and pause until they "
-        "answer. Use when a decision or clarification is required mid-run."
+        "answer. Use when a decision or clarification is required mid-run. "
+        "The user can always answer with custom free text, even when options "
+        "are provided."
     )
     args_schema: type[BaseModel] = QuestionArgs
     permission_key = "question"

@@ -27,10 +27,15 @@ const emit = defineEmits<{
 
 const page = ref(0)
 /**
- * Raw answers per request id, one entry per question. Option selections are
- * stored separator-joined (multi-select) or as a single label.
+ * Raw option selections per request id, one entry per question. Multi-select
+ * values are stored separator-joined.
  */
 const answersByRequest = ref<Record<string, string[]>>({})
+/**
+ * Custom free-text answers per request id, one entry per question. Always
+ * available even when the question also offers selectable options.
+ */
+const customByRequest = ref<Record<string, string[]>>({})
 
 const total = computed(() => props.requests.length)
 const request = computed<HarnessQuestionRequest | null>(
@@ -39,13 +44,21 @@ const request = computed<HarnessQuestionRequest | null>(
 
 const sourceLabel = computed(() => gateSourceLabel(request.value?.agent_name))
 
-function answersFor(requestId: string, count: number): string[] {
-  let answers = answersByRequest.value[requestId]
-  if (!answers) {
-    answers = Array.from({ length: count }, () => '')
-    answersByRequest.value[requestId] = answers
+function slotsFor(store: Record<string, string[]>, requestId: string, count: number): string[] {
+  let slots = store[requestId]
+  if (!slots) {
+    slots = Array.from({ length: count }, () => '')
+    store[requestId] = slots
   }
-  return answers
+  return slots
+}
+
+function pruneStore(store: Record<string, string[]>, requests: HarnessQuestionRequest[]): void {
+  for (const id of Object.keys(store)) {
+    if (!requests.some((item) => item.request_id === id)) {
+      delete store[id]
+    }
+  }
 }
 
 watch(
@@ -55,13 +68,11 @@ watch(
       page.value = Math.max(0, requests.length - 1)
     }
     for (const item of requests) {
-      answersFor(item.request_id, item.questions.length)
+      slotsFor(answersByRequest.value, item.request_id, item.questions.length)
+      slotsFor(customByRequest.value, item.request_id, item.questions.length)
     }
-    for (const id of Object.keys(answersByRequest.value)) {
-      if (!requests.some((item) => item.request_id === id)) {
-        delete answersByRequest.value[id]
-      }
-    }
+    pruneStore(answersByRequest.value, requests)
+    pruneStore(customByRequest.value, requests)
   },
   { immediate: true },
 )
@@ -77,6 +88,17 @@ function setAnswer(requestId: string, questionIndex: number, value: string): voi
   answers[questionIndex] = value
 }
 
+function setCustom(requestId: string, questionIndex: number, value: string): void {
+  const customs = customByRequest.value[requestId]
+  if (!customs) return
+  customs[questionIndex] = value
+  const item = props.requests.find((request) => request.request_id === requestId)
+  const question = item?.questions[questionIndex]
+  if (question?.options?.length && !question.multiple) {
+    setAnswer(requestId, questionIndex, '')
+  }
+}
+
 function toggleOption(
   requestId: string,
   questionIndex: number,
@@ -89,9 +111,11 @@ function toggleOption(
       ? current.filter((item) => item !== label)
       : [...current, label]
     setAnswer(requestId, questionIndex, next.join(MULTI_SELECT_SEPARATOR))
-  } else {
-    setAnswer(requestId, questionIndex, label)
+    return
   }
+  setAnswer(requestId, questionIndex, label)
+  const customs = customByRequest.value[requestId]
+  if (customs) customs[questionIndex] = ''
 }
 
 function isOptionSelected(requestId: string, questionIndex: number, label: string): boolean {
@@ -100,13 +124,16 @@ function isOptionSelected(requestId: string, questionIndex: number, label: strin
 
 function collectAnswers(item: HarnessQuestionRequest): string[] {
   const raw = answersByRequest.value[item.request_id] ?? []
+  const customs = customByRequest.value[item.request_id] ?? []
   return item.questions.map((question, index) => {
-    if (question.options?.length) {
-      const selected = (raw[index] ?? '').split(MULTI_SELECT_SEPARATOR).filter(Boolean)
-      if (question.multiple) return selected.join(MULTI_SELECT_SEPARATOR)
-      return selected[0] ?? ''
+    const custom = (customs[index] ?? '').trim()
+    if (!question.options?.length) return custom
+    const selected = (raw[index] ?? '').split(MULTI_SELECT_SEPARATOR).filter(Boolean)
+    if (question.multiple) {
+      if (custom) selected.push(custom)
+      return selected.join(MULTI_SELECT_SEPARATOR)
     }
-    return (raw[index] ?? '').trim()
+    return custom || selected[0] || ''
   })
 }
 
@@ -242,14 +269,17 @@ function onKeydown(event: KeyboardEvent): void {
             </span>
           </Button>
         </div>
-        <div v-else class="space-y-1">
-          <Label :for="`composer-question-${request.request_id}-${qIndex}`">Your answer</Label>
+        <div class="space-y-1">
+          <Label :for="`composer-question-${request.request_id}-${qIndex}`">
+            {{ question.options?.length ? 'Own answer' : 'Your answer' }}
+          </Label>
           <Input
             :id="`composer-question-${request.request_id}-${qIndex}`"
-            :model-value="answersByRequest[request.request_id]?.[qIndex] ?? ''"
+            :model-value="customByRequest[request.request_id]?.[qIndex] ?? ''"
             :disabled="submitting"
-            placeholder="Type your answer"
-            @update:model-value="setAnswer(request.request_id, qIndex, String($event ?? ''))"
+            placeholder="Type your own answer"
+            data-testid="composer-question-custom"
+            @update:model-value="setCustom(request.request_id, qIndex, String($event ?? ''))"
           />
         </div>
       </div>

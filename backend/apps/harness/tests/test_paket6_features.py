@@ -124,6 +124,17 @@ async def test_question_tool_pauses_until_resolve() -> None:
     assert events[-1]["type"] != "tool_error"
 
 
+def test_question_tool_documents_always_available_freetext() -> None:
+    """Question tool schema tells the model free text is always allowed."""
+    from apps.harness.tools.question import QuestionItem, QuestionTool
+
+    tool = QuestionTool()
+    assert "custom free text" in tool.description.lower()
+    options_desc = (QuestionItem.model_fields["options"].description or "").lower()
+    assert "free-text" in options_desc
+    assert "other" in options_desc
+
+
 @pytest.mark.asyncio
 async def test_question_timeout_is_tool_error() -> None:
     """Question tool fails when on_question never resolves."""

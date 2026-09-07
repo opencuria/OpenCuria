@@ -70,4 +70,60 @@ describe('HarnessQuestionSheet', () => {
       .trigger('keydown', { key: 'Escape' })
     expect(wrapper.emitted('skip')).toEqual([['q-2']])
   })
+
+  it('always shows a free-text input even when options exist', () => {
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+
+    const customs = wrapper.findAll('[data-testid="composer-question-custom"]')
+    expect(customs).toHaveLength(2)
+    expect(wrapper.text()).toContain('Own answer')
+    expect(wrapper.text()).toContain('Your answer')
+  })
+
+  it('submits custom text instead of a selected option', async () => {
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+
+    await wrapper.findAll('[data-testid="composer-question-option"]')[0]!.trigger('click')
+    await wrapper.findAll('[data-testid="composer-question-custom"]')[0]!.setValue('neither')
+    await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([['q-1', ['neither', '']]])
+  })
+
+  it('appends custom text to multi-select answers', async () => {
+    const wrapper = mount(HarnessQuestionSheet, {
+      props: {
+        requests: [
+          makeRequest({
+            questions: [
+              {
+                question: 'Pick some',
+                multiple: true,
+                options: [
+                  { label: 'Option A', description: 'first' },
+                  { label: 'Option B', description: 'second' },
+                ],
+              },
+            ],
+          }),
+        ],
+      },
+    })
+
+    const options = wrapper.findAll('[data-testid="composer-question-option"]')
+    await options[0]!.trigger('click')
+    await options[1]!.trigger('click')
+    await wrapper.get('[data-testid="composer-question-custom"]').setValue('extra')
+    await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([
+      ['q-1', [`Option A${String.fromCharCode(0)}Option B${String.fromCharCode(0)}extra`]],
+    ])
+  })
+
+  it('submits the selected option when custom text is empty', async () => {
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+
+    await wrapper.findAll('[data-testid="composer-question-option"]')[0]!.trigger('click')
+    await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([['q-1', ['Option A', '']]])
+  })
 })
