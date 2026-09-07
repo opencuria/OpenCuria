@@ -110,6 +110,46 @@ def test_is_context_overflow_error_matches_phrases() -> None:
     assert not is_context_overflow_error(RuntimeError("rate limit exceeded"))
 
 
+def test_is_context_overflow_error_pi_patterns() -> None:
+    """Pi OVERFLOW_PATTERNS mark overflow; NON_OVERFLOW exclusions win."""
+    positives = [
+        "prompt is too long: 213462 tokens > 200000 maximum",
+        "request_too_large: request exceeds the maximum size",
+        "Your input exceeds the context window of this model",
+        "Requested token count exceeds the model's maximum context length",
+        "The input token count (1196265) exceeds the maximum number",
+        "This model's maximum prompt length is 131072",
+        "Please reduce the length of the messages or completion",
+        "This endpoint's maximum context length is 100000 tokens",
+        "Input length 10 exceeds the maximum allowed input length of 5",
+        "The input (10 tokens) is longer than the model's context length",
+        "the request exceeds the available context size",
+        "tokens to keep is greater than the context length",
+        "context window exceeds limit",
+        "Your request exceeded model token limit: 10 (requested: 20)",
+        "Prompt contains 10 tokens too large for model with 5 maximum",
+        "Prompt has 10 tokens, but the configured context size is 5 tokens",
+        "model_context_window_exceeded",
+        "prompt too long; exceeded max context length by 10 tokens",
+        "Range of input length should be [1, 100]",
+        "context_length_exceeded",
+        "too many tokens in request",
+        "token limit exceeded for model",
+        "400 (no body)",
+        "413 status code (no body)",
+    ]
+    for message in positives:
+        assert is_context_overflow_error(RuntimeError(message)), message
+    negatives = [
+        "Throttling error: Too many tokens, please wait before trying again.",
+        "Service unavailable: Too many tokens, try later.",
+        "rate limit exceeded, slow down",
+        "too many requests, retry later",
+    ]
+    for message in negatives:
+        assert not is_context_overflow_error(RuntimeError(message)), message
+
+
 def test_serialize_replaces_images_with_placeholder() -> None:
     """Image parts become ``[image]`` in compaction serialization."""
     message = LLMMessage(

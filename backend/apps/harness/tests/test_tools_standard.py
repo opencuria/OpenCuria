@@ -55,22 +55,22 @@ async def test_default_registry_has_standard_tools_plus_webfetch() -> None:
 
 
 async def test_read_happy_path(fake_accessor) -> None:
-    """Read returns file text with metadata."""
+    """Read returns numbered file text with metadata (0-based)."""
     tool = ReadTool()
     result = await tool.execute({"path": "a.txt"}, _ctx(fake_accessor))
-    assert result.output == "hello\nworld"
+    assert result.output == "0: hello\n1: world"
     assert result.metadata["lines"] == 2
     assert tool.title(ReadArgs(path="a.txt")) == "Read a.txt"
 
 
 async def test_read_line_range(fake_accessor) -> None:
-    """Offset/limit slice the file lines."""
+    """Offset/limit slice the file lines, keeping 0-based numbers."""
     tool = ReadTool()
     result = await tool.execute(
         {"path": "/workspace/a.txt", "offset": 1, "limit": 1},
         _ctx(fake_accessor),
     )
-    assert result.output == "world"
+    assert result.output == "1: world"
 
 
 async def test_read_rejects_binary() -> None:
@@ -92,15 +92,15 @@ async def test_read_paginates_large_file_instead_of_rejecting() -> None:
     assert "File too large" not in result.output
     assert "Use offset=" in result.output
     assert result.truncated is True
-    assert result.output.startswith("line-0\n")
+    assert result.output.startswith("0: line-0\n")
     next_offset = result.metadata["next_offset"]
     assert isinstance(next_offset, int) and next_offset > 0
     page2 = await tool.execute(
         {"path": "/workspace/big.py", "offset": next_offset},
         _ctx(accessor),
     )
-    assert f"line-{next_offset}" in page2.output
-    assert "line-0\n" not in page2.output
+    assert f"{next_offset}: line-{next_offset}" in page2.output
+    assert "0: line-0\n" not in page2.output
 
 
 async def test_read_caps_page_bytes_with_continue_hint() -> None:
@@ -150,6 +150,28 @@ async def test_read_runner_error_propagates() -> None:
     accessor = FakeAccessor(error=RunnerAccessorError("read_file failed"))
     with pytest.raises(ToolError, match="read_file failed"):
         await tool.execute({"path": "a.txt"}, _ctx(accessor))
+
+
+async def test_read_miss_suggests_siblings() -> None:
+    """A miss lists up to 3 same-directory basenames (permission edge)."""
+    tool = ReadTool()
+    accessor = FakeAccessor(
+        files={
+            "/workspace/notes.md": b"a",
+            "/workspace/notice.txt": b"b",
+            "/workspace/other.py": b"c",
+        }
+    )
+    with pytest.raises(ToolError, match="Did you mean one of these"):
+        await tool.execute({"path": "note.txt"}, _ctx(accessor))
+
+
+async def test_read_miss_without_siblings_has_no_suggestion() -> None:
+    """A miss in an empty directory stays a plain not-found error."""
+    tool = ReadTool()
+    accessor = FakeAccessor(files={})
+    with pytest.raises(ToolError, match="not found"):
+        await tool.execute({"path": "missing.txt"}, _ctx(accessor))
 
 
 async def test_write_happy_path(fake_accessor) -> None:
@@ -259,6 +281,54 @@ async def test_bash_runner_error_propagates() -> None:
     accessor = FakeAccessor(error=RunnerAccessorError("exec failed"))
     with pytest.raises(ToolError, match="exec failed"):
         await BashTool().execute({"command": "ls"}, _ctx(accessor))
+
+
+async def test_bash_allowed_env_passes_through() -> None:
+    """Benign env vars reach the accessor unchanged."""
+    accessor = FakeAccessor(
+        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
+    )
+    result = await BashTool().execute(
+        {"command": "echo hi", "env": {"FOO": "1", "MY_APP_X": "y"}},
+        _ctx(accessor),
+    )
+    assert result.output == "ok"
+
+
+async def test_bash_empty_env_ok() -> None:
+    """Missing/empty env is treated as {} and executes normally."""
+    accessor = FakeAccessor(
+        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
+    )
+    result = await BashTool().execute({"command": "echo hi"}, _ctx(accessor))
+    assert result.output == "ok"
+
+
+@pytest.mark.parametrize(
+    "key", ["LD_PRELOAD", "PATH", "PYTHONPATH", "HOME", "ld_preload"]
+)
+async def test_bash_blocked_env_rejected(key: str) -> None:
+    """Shell/runtime search-path overrides are blocked with a clear error."""
+    accessor = FakeAccessor(
+        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
+    )
+    with pytest.raises(ToolError, match=key.split("_")[0]):
+        await BashTool().execute(
+            {"command": "echo hi", "env": {key: "evil"}}, _ctx(accessor)
+        )
+    assert accessor.exec_calls == []
+
+
+def test_detect_external_directory_cases() -> None:
+    """External paths gate; workspace paths and devices do not."""
+    from apps.harness.tools.shell import detect_external_directory
+
+    assert detect_external_directory("cat /etc/passwd") is True
+    assert detect_external_directory("ls /workspace/foo") is False
+    assert detect_external_directory("echo hi") is False
+    assert detect_external_directory("cat /workspace/../etc/passwd") is True
+    assert detect_external_directory("cat /dev/null < /workspace/a") is False
+    assert detect_external_directory("") is False
 
 
 def test_truncate_output_caps_lines_and_bytes() -> None:

@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from ..access.base import HARNESS_WORKSPACE_ROOT, sanitize_harness_path
+from ..access.base import (
+    HARNESS_WORKSPACE_ROOT,
+    sanitize_harness_path,
+    validate_harness_env,
+)
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 
@@ -83,10 +87,14 @@ class ProcessStartTool(Tool):
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         try:
+            env = validate_harness_env(args.env or {})
+        except ValueError as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        try:
             record = await ctx.accessor.process_start(
                 args.command,
                 workdir=workdir,
-                env=dict(args.env or {}),
+                env=env,
                 name=args.name or "",
             )
         except (RunnerAccessorError, TimeoutError) as exc:

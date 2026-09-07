@@ -16,6 +16,56 @@ from typing import Any
 
 HARNESS_WORKSPACE_ROOT = "/workspace"
 
+#: Env vars never forwarded to the workspace (injected shell/runtime
+#: hijack surface). Matched case-insensitively by prefix; exact names
+#: in :data:`BLOCKED_ENV_EXACT` are always denied.
+BLOCKED_ENV_PREFIXES = (
+    "LD_",
+    "PYTHON",
+    "PATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+    "ENV",
+    "BASH_ENV",
+)
+
+#: Exact env names denied even if a prefix rule is relaxed later.
+BLOCKED_ENV_EXACT = {
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "HOME",
+    "SHELL",
+}
+
+
+def validate_harness_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Return a copy of *env* with dangerous keys rejected.
+
+    Args:
+        env: Caller-provided extra environment (``None`` means empty).
+
+    Raises:
+        ValueError: If a key matches :data:`BLOCKED_ENV_EXACT` or a
+            prefix in :data:`BLOCKED_ENV_PREFIXES` (case-insensitive).
+    """
+    if not env:
+        return {}
+    for key in env:
+        upper = str(key).upper()
+        blocked = upper in BLOCKED_ENV_EXACT or any(
+            upper.startswith(prefix) for prefix in BLOCKED_ENV_PREFIXES
+        )
+        if blocked:
+            raise ValueError(
+                f"env var '{key}' is blocked: it would override "
+                "shell/runtime search paths or home/shell resolution"
+            )
+    return dict(env)
+
 
 def sanitize_harness_path(path: str) -> str:
     """Validate that *path* stays inside the harness workspace root.

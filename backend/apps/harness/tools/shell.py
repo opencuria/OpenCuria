@@ -2,14 +2,37 @@
 
 from __future__ import annotations
 
+import os
+import re
 import shlex
 
 from pydantic import BaseModel, Field
 
-from ..access.base import HARNESS_WORKSPACE_ROOT, sanitize_harness_path
+from ..access.base import (
+    BLOCKED_ENV_EXACT,
+    BLOCKED_ENV_PREFIXES,
+    HARNESS_WORKSPACE_ROOT,
+    sanitize_harness_path,
+    validate_harness_env,
+)
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .truncate import MAX_BYTES, MAX_LINES
+
+__all__ = [
+    "BashArgs",
+    "BashTool",
+    "GlobArgs",
+    "GlobTool",
+    "GrepArgs",
+    "GrepTool",
+    "ListArgs",
+    "ListTool",
+    "BLOCKED_ENV_EXACT",
+    "BLOCKED_ENV_PREFIXES",
+    "truncate_output",
+    "detect_external_directory",
+]
 
 # Output truncation for bash, mirroring OpenCode's max_lines/max_bytes.
 BASH_MAX_LINES = MAX_LINES
@@ -20,20 +43,90 @@ BASH_DEFAULT_TIMEOUT = 60.0
 GLOB_MAX_RESULTS = 100
 GREP_MAX_RESULTS = 100
 
+#: Max characters per grep output line (Pi GREP_MAX_LINE_LENGTH parity).
+GREP_MAX_LINE_LENGTH = 500
+_GREP_LINE_SUFFIX = "... [truncated]"
 
-def truncate_output(text: str) -> tuple[str, bool]:
-    """Truncate *text* to BASH_MAX_LINES lines / BASH_MAX_BYTES bytes."""
+
+def truncate_output(text: str, direction: str = "tail") -> tuple[str, bool]:
+    """Truncate *text* to BASH_MAX_LINES lines / BASH_MAX_BYTES bytes.
+
+    ``direction="tail"`` keeps the last lines/bytes (build errors
+    surface at the end); ``"head"`` keeps the first lines/bytes.
+    """
     truncated = False
     lines = text.splitlines()
     if len(lines) > BASH_MAX_LINES:
-        lines = lines[:BASH_MAX_LINES]
+        if direction == "tail":
+            lines = lines[-BASH_MAX_LINES:]
+        else:
+            lines = lines[:BASH_MAX_LINES]
         truncated = True
     clipped = "\n".join(lines)
     encoded = clipped.encode("utf-8", errors="replace")
     if len(encoded) > BASH_MAX_BYTES:
-        clipped = encoded[:BASH_MAX_BYTES].decode("utf-8", errors="ignore")
+        if direction == "tail":
+            clipped = encoded[-BASH_MAX_BYTES:].decode("utf-8", errors="ignore")
+        else:
+            clipped = encoded[:BASH_MAX_BYTES].decode("utf-8", errors="ignore")
         truncated = True
     return clipped, truncated
+
+
+#: Absolute paths that never count as external (device aliases).
+SAFE_DEVICE_PATHS = frozenset(
+    {
+        "/dev/null",
+        "/dev/stdin",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/zero",
+        "/dev/urandom",
+    }
+)
+
+#: Absolute-path token pattern inside shell command lines.
+_EXTERNAL_PATH_RE = re.compile(r"(?<![\w.~-])/[\w.~-]+(?:/[\w.~-]+)*")
+
+
+def _is_external_path(path: str) -> bool:
+    """Return True when *path* escapes the /workspace sandbox."""
+    if not path.startswith("/"):
+        return False
+    if path in SAFE_DEVICE_PATHS:
+        return False
+    if path == HARNESS_WORKSPACE_ROOT or path.startswith(
+        HARNESS_WORKSPACE_ROOT + "/"
+    ):
+        normalized = os.path.normpath(path)
+        return not (
+            normalized == HARNESS_WORKSPACE_ROOT
+            or normalized.startswith(HARNESS_WORKSPACE_ROOT + "/")
+        )
+    return True
+
+
+def detect_external_directory(command: str) -> bool:
+    """Return True when *command* references paths outside /workspace.
+
+    Conservative: any absolute path outside ``/workspace`` counts,
+    including quoted strings and ``/workspace/../..`` escapes (resolved
+    via ``normpath``). Safe device aliases (``/dev/null`` et al.) and
+    ``/workspace`` paths are ignored. Empty commands return False.
+    """
+    if not command or not command.strip():
+        return False
+    for match in _EXTERNAL_PATH_RE.finditer(command):
+        if _is_external_path(match.group(0)):
+            return True
+    if ".." not in command:
+        return False
+    for match in _EXTERNAL_PATH_RE.finditer(command):
+        candidate = match.group(0)
+        if candidate.startswith(HARNESS_WORKSPACE_ROOT + "/"):
+            if _is_external_path(candidate):
+                return True
+    return False
 
 
 class BashArgs(BaseModel):
@@ -72,10 +165,14 @@ class BashTool(Tool):
     name = "bash"
     description = (
         "Run a shell command in the workspace. Returns exit code, "
-        "stdout, and stderr; non-zero exits raise a tool error."
+        "stdout, and stderr; non-zero exits raise a tool error. "
+        "Default timeout is 60s (max 600s). Output is tail-truncated "
+        "(last lines kept; full output spilled to a file when clipped). "
+        "Independent bash calls in one step run in parallel."
     )
     args_schema: type[BaseModel] = BashArgs
     permission_key = "bash"
+    truncate_direction = "tail"
 
     def title(self, args: BaseModel) -> str:
         """Return a short title for a bash invocation."""
@@ -94,14 +191,22 @@ class BashTool(Tool):
             raise ToolError("command must not be empty", tool=self.name)
         workdir = sanitize_harness_path(args.workdir or ctx.directory)
         try:
+            env = validate_harness_env(args.env or {})
+        except ValueError as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        try:
             result = await ctx.accessor.exec_wait(
                 args.command,
                 workdir=workdir,
-                env=dict(args.env or {}),
+                env=env,
                 timeout=args.timeout,
             )
         except TimeoutError as exc:
-            raise ToolError(f"Command timed out: {exc}", tool=self.name) from exc
+            raise ToolError(
+                f"Command timed out after {args.timeout:g}s: {exc} "
+                "(retry with larger timeout)",
+                tool=self.name,
+            ) from exc
         except RunnerAccessorError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         combined = ""
@@ -125,7 +230,7 @@ class BashTool(Tool):
 
 
 class GlobTool(Tool):
-    """Find files by glob pattern using find on the runner."""
+    """Find files by glob pattern (rg --files, find fallback)."""
 
     name = "glob"
     description = (
@@ -143,14 +248,18 @@ class GlobTool(Tool):
     async def execute(
         self, args: BaseModel | dict[str, object], ctx: ToolContext
     ) -> ToolResult:
-        """Search for files via find on the runner."""
+        """Search for files via rg --files (find fallback) on the runner."""
         validated = self.coerce_args(args)
         assert isinstance(validated, GlobArgs)
         args = validated
         base = sanitize_harness_path(args.path or ctx.directory)
         command = (
-            f"find {shlex.quote(base)} -path {shlex.quote(args.pattern)} "
-            f"-print 2>/dev/null | head -n {GLOB_MAX_RESULTS + 1}"
+            "(command -v rg >/dev/null 2>&1 && "
+            f"rg --files {shlex.quote(base)} "
+            f"--glob {shlex.quote(args.pattern)} 2>/dev/null || "
+            f"find {shlex.quote(base)} -type f -name "
+            f"{shlex.quote(args.pattern.rsplit('/', 1)[-1])} 2>/dev/null) "
+            f"| head -n {GLOB_MAX_RESULTS + 1}"
         )
         try:
             result = await ctx.accessor.exec_wait(
@@ -221,6 +330,12 @@ class GrepTool(Tool):
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         truncated = len(lines) > GREP_MAX_RESULTS
         lines = lines[:GREP_MAX_RESULTS]
+        capped: list[str] = []
+        for line in lines:
+            if len(line) > GREP_MAX_LINE_LENGTH:
+                line = f"{line[:GREP_MAX_LINE_LENGTH]}{_GREP_LINE_SUFFIX}"
+            capped.append(line)
+        lines = capped
         return ToolResult(
             output="\n".join(lines),
             truncated=truncated,

@@ -263,6 +263,133 @@ async def test_permission_ask_approve_runs_tool() -> None:
     assert any(event["type"] == "tool_completed" for event in events)
 
 
+async def test_once_approval_cached_within_run() -> None:
+    """A second identical ask call reuses the once-approval (1 callback)."""
+    calls: list[dict[str, Any]] = []
+
+    async def approve(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c1"),
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c2"),
+            _text_step("done twice"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=approve,
+    )
+    result = await runner.run("clean twice", "build", "m", "build", opts)
+    assert result.output == "done twice"
+    assert len(calls) == 1
+    assert sum(1 for e in events if e["type"] == "tool_completed") == 2
+
+
+async def test_always_approval_not_cached_as_once() -> None:
+    """'always' responses are not recorded in the once-approved cache."""
+    async def always(**kwargs):  # type: ignore[no-untyped-def]
+        return "always"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "rm -rf /tmp/x"}, call_id="c1"),
+            _text_step("done"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "ask"},
+        on_permission=always,
+    )
+    result = await runner.run("clean", "build", "m", "build", opts)
+    assert result.output == "done"
+    assert ("bash", "rm -rf /tmp/x") not in opts.once_approved
+
+
+async def test_mode_rules_reach_decide_and_schemas() -> None:
+    """Mode-specific rules apply via the wired mode layer (happy path)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    provider = FakeProvider([_text_step("planned")])
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(
+            mode_rules={"plan": {"bash": "deny"}},
+        ),
+        accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
+        emit=emit,
+    )
+    from apps.harness.agents.definitions import get_agent
+
+    agent = get_agent("build")
+    assert runner._decide(agent, "bash", "ls", "plan") == "deny"
+    assert runner._decide(agent, "bash", "ls", "build") == "allow"
+    schemas = runner._filtered_schemas(agent, "plan", depth=0, max_depth=1)
+    assert "bash" not in [schema.name for schema in schemas]
+    schemas_build = runner._filtered_schemas(
+        agent, "build", depth=0, max_depth=1
+    )
+    assert "bash" in [schema.name for schema in schemas_build]
+
+
+async def test_tool_errors_include_raw_arguments() -> None:
+    """Unknown tools and failures echo truncated raw args (failure path)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    from apps.harness.runner import _PendingToolCall
+    from apps.harness.tools.base import ToolContext
+
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=default_tool_registry(),
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    raw = '{"path": "missing.txt", "marker": "SNIFF-ARGS-123"}'
+    call = _PendingToolCall(
+        call_id="c1",
+        name="nope-tool",
+        arguments={},
+        raw_arguments=raw,
+    )
+    from apps.harness.agents.definitions import get_agent
+
+    outcome = await runner._dispatch_tool_call(
+        call=call,
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert "SNIFF-ARGS-123" in outcome.message.content
+    errors = [e for e in events if e["type"] == "tool_error"]
+    assert errors and "SNIFF-ARGS-123" in errors[0]["error"]
+
+
 async def test_permission_ask_deny_skips_tool() -> None:
     """Deny returns a tool message so the model can react, then finishes."""
 
@@ -383,6 +510,66 @@ async def test_explore_research_bash_skips_ask() -> None:
     assert result.output == "found"
     assert called == []
     assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_triggers_ask_gate() -> None:
+    """Bash touching /etc hits the ask gate even when bash allows."""
+
+    async def approve(**kwargs):  # type: ignore[no-untyped-def]
+        return "once"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("gated"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=approve
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "gated"
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_auto_denies_without_callback() -> None:
+    """Without on_permission the external ask gate denies (failure path)."""
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("skipped"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events, agent_rules={"bash": "allow"})
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "skipped"
+    errors = [event for event in events if event["type"] == "tool_error"]
+    assert errors and "external directory" in errors[0]["error"]
+
+
+async def test_workspace_bash_skips_external_gate() -> None:
+    """Workspace-scoped bash needs no permission callback (happy path)."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "ls /workspace/foo"}, call_id="c1"),
+            _text_step("listed"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=on_permission
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "listed"
+    assert called == []
 
 
 async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:

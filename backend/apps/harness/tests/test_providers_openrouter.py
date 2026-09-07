@@ -219,6 +219,57 @@ async def test_chat_stream_auth_error() -> None:
             pass
 
 
+async def test_chat_stream_error_enriches_response_context() -> None:
+    """HTTP errors carry status, lowercased headers, body, retry hint."""
+    from apps.harness.providers.base import ProviderRateLimitError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            content=b"slow down",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Retry-After": "2",
+                "X-Should-Retry": "true",
+            },
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = OpenRouterAdapter(api_key="k", client=client)
+    with pytest.raises(ProviderRateLimitError) as exc_info:
+        async for _ in adapter.chat_stream("m", [], []):
+            pass
+    error = exc_info.value
+    assert error.status_code == 429
+    assert error.response_headers.get("retry-after") == "2"
+    assert error.response_headers.get("x-should-retry") == "true"
+    assert "slow down" in error.response_body
+    assert error.is_retryable is True
+
+
+async def test_chat_stream_should_retry_false_hint() -> None:
+    """x-should-retry: false surfaces as is_retryable=False on 500 errors."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            content=b"upstream",
+            headers={"X-Should-Retry": "false"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = OpenRouterAdapter(api_key="k", client=client)
+    with pytest.raises(ProviderResponseError) as exc_info:
+        async for _ in adapter.chat_stream("m", [], []):
+            pass
+    error = exc_info.value
+    assert error.status_code == 500
+    assert error.is_retryable is False
+    assert "upstream" in error.response_body
+
+
 async def test_chat_stream_rate_limit_error() -> None:
     """HTTP 429 raises ProviderRateLimitError."""
     from apps.harness.providers.base import ProviderRateLimitError

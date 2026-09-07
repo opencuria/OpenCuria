@@ -436,3 +436,66 @@ async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) ->
     runner.save(update_fields=["status", "sid"])
     with pytest.raises(RunnerAccessorError, match="offline"):
         await accessor.list_dir("/workspace")
+
+
+async def test_cancelled_wait_still_emits_cancel() -> None:
+    """Cancelling exec_wait emits harness:cancel (abort-safety)."""
+    import asyncio as _asyncio
+
+    transport = FakeTransport()
+    accessor = _accessor(transport)
+
+    async def _never_reply(event: str, payload: dict) -> None:
+        return None
+
+    transport.auto_reply = _never_reply
+    task = _asyncio.create_task(accessor.exec_wait(["sleep", "9"], timeout=30.0))
+    await transport.event.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    events = [event for event, _ in transport.emitted]
+    assert "harness:cancel" in events
+
+
+async def test_cancel_never_classified_retryable() -> None:
+    """CancelledError is never a retryable provider error."""
+    import asyncio as _asyncio
+
+    from apps.harness.provider_retry import is_retryable_provider_error
+
+    assert is_retryable_provider_error(_asyncio.CancelledError()) is False
+    assert is_retryable_provider_error(GeneratorExit()) is False  # type: ignore[arg-type]
+
+
+async def test_cancel_during_retry_sleep_propagates() -> None:
+    """Cancel during the provider retry sleep is not swallowed as a retry."""
+    import asyncio as _asyncio
+
+    from apps.harness.runner import HarnessRunner
+
+    calls = {"n": 0}
+
+    class _SlowProvider:
+        async def chat_stream(self, model, messages, schemas, opts=None):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            from apps.harness.providers.base import ProviderTimeoutError
+
+            raise ProviderTimeoutError("slow", provider="fake")
+            yield  # pragma: no cover
+
+    from apps.harness.tools import default_tool_registry
+
+    runner = HarnessRunner(
+        provider=_SlowProvider(),  # type: ignore[arg-type]
+        tools=default_tool_registry(),
+    )
+    task = _asyncio.create_task(
+        runner._provider_step_with_transient_retry(
+            model="m", messages=[], schemas=[], step=1
+        )
+    )
+    await _asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(_asyncio.CancelledError):
+        await task

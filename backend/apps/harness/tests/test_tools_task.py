@@ -438,3 +438,35 @@ async def test_runner_denies_todowrite_in_child(fake_accessor) -> None:
     errors = [e for e in events if e["type"] == "tool_error"]
     assert errors and "todowrite" in errors[0]["error"]
     assert not [e for e in events if e["type"] == "todo_updated"]
+
+
+async def test_parent_deny_edit_inherited_by_child(fake_accessor) -> None:
+    """Parent edit deny hides edit from the child schema (permission)."""
+    from apps.harness.tools.subagents import _child_evaluator, _child_registry
+
+    parent_registry = default_tool_registry()
+    parent_evaluator = PermissionEvaluator(global_rules={"edit": "deny"})
+    child_registry = _child_registry(parent_registry, "general")
+    child_evaluator = _child_evaluator(parent_evaluator)
+    assert child_evaluator.evaluate("edit", "", mode="build") == "deny"
+
+    async def _emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    events: list[dict[str, Any]] = []
+    child = HarnessRunner(
+        provider=FakeProvider([_text_step("done")]),
+        tools=child_registry,
+        evaluator=child_evaluator,
+        accessor=fake_accessor,
+        emit=_emit,
+    )
+    from apps.harness.agents.definitions import get_agent
+
+    schemas = child._filtered_schemas(
+        get_agent("general"), "build", depth=1, max_depth=2
+    )
+    names = [schema.name for schema in schemas]
+    assert "edit" not in names
+    assert "write" not in names
+    assert "read" in names

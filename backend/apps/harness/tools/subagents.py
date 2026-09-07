@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -131,7 +134,7 @@ class TaskTool(Tool):
         child = HarnessRunner(
             provider=ctx.provider,
             tools=child_registry,
-            evaluator=ctx.evaluator,
+            evaluator=_child_evaluator(ctx.evaluator),
             accessor=ctx.accessor,
             emit=self._child_emit(ctx),
         )
@@ -270,11 +273,152 @@ def _child_registry(registry: Any, agent_name: str = "") -> Any:
     return child
 
 
+def _child_evaluator(parent_evaluator: Any) -> Any:
+    """Build the child evaluator with parent deny verdicts injected.
+
+    Only ``deny`` decisions are inherited (never allow/ask): every
+    tool in the default + computer-use tool sets is probed with an
+    empty action in build mode, and each tool-level ``deny`` becomes
+    an explicit ``{key: "deny"}`` rule on a delegating evaluator.
+    Granular (action-scoped) denies stay the parent's job at
+    dispatch time; this inheritance only guarantees parent-denied
+    tools never reach a child provider schema or direct call.
+    """
+    if parent_evaluator is None:
+        return None
+    from ..permissions.evaluator import DENY, PermissionEvaluator
+    from . import default_tool_registry
+    from .computeruse import COMPUTER_USE_TOOL_NAMES
+
+    names: set[str] = set()
+    perm_keys: dict[str, str] = {}
+    for tool in default_tool_registry().list():
+        tool_name = (tool.name or "").strip().lower()
+        perm = (tool.permission_key or tool_name).strip().lower()
+        perm_keys[tool_name] = perm or tool_name
+        names.add(tool_name)
+    names.update((n or "").strip().lower() for n in COMPUTER_USE_TOOL_NAMES)
+    deny_rules: dict[str, Any] = {}
+    for name in names:
+        candidate = perm_keys.get(name, name)
+        try:
+            if parent_evaluator.evaluate(candidate, "", mode="build") == DENY:
+                deny_rules[candidate] = "deny"
+        except Exception:  # pragma: no cover - best effort
+            continue
+    if not deny_rules:
+        return parent_evaluator
+    child_extra = PermissionEvaluator(agent_rules=dict(deny_rules))
+    parent = parent_evaluator
+
+    class _ChildEvaluator(PermissionEvaluator):
+        """Parent-delegating evaluator with injected child denies."""
+
+        def evaluate(
+            self,
+            tool: str,
+            action: str = "",
+            *,
+            mode: str = "",
+            external_directory: bool = False,
+            doom_loop: bool = False,
+        ) -> Any:
+            """Deny injected keys, else delegate to the parent."""
+            if (
+                child_extra.evaluate(
+                    tool,
+                    action,
+                    mode=mode,
+                    external_directory=external_directory,
+                    doom_loop=doom_loop,
+                )
+                == DENY
+            ):
+                return DENY
+            return parent.evaluate(
+                tool,
+                action,
+                mode=mode,
+                external_directory=external_directory,
+                doom_loop=doom_loop,
+            )
+
+    return _ChildEvaluator()
+
+
 class WebfetchArgs(BaseModel):
     """Arguments for the webfetch tool."""
 
     url: str = Field(description="https:// URL to fetch.")
     max_size: int = Field(default=WEBFETCH_MAX_BYTES, gt=0)
+
+
+#: Hostnames that always resolve to local/cloud-metadata targets.
+WEBFETCH_BLOCKED_HOSTS = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+    }
+)
+
+#: IP literal blocked as a cloud-metadata endpoint.
+WEBFETCH_BLOCKED_IP = "169.254.169.254"
+
+
+def _host_is_blocked(host: str) -> bool:
+    """Return True when *host* is a localhost/metadata name."""
+    normalized = (host or "").strip().lower().rstrip(".")
+    if not normalized:
+        return True
+    if normalized in WEBFETCH_BLOCKED_HOSTS:
+        return True
+    if normalized == WEBFETCH_BLOCKED_IP:
+        return True
+    if normalized.endswith(".localhost"):
+        return True
+    return False
+
+
+def _ip_is_blocked(address: ipaddress._BaseAddress) -> bool:
+    """Return True for private/loopback/link-local/reserved IPs."""
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+    )
+
+
+def is_blocked_url(url: str) -> bool:
+    """Return True when *url* targets a blocked SSRF host.
+
+    Checks the hostname blocklist, IP-literal classification, and a
+    best-effort DNS lookup (``socket.gethostbyname``): a resolvable
+    private IP blocks, an unresolvable name does not fail closed.
+    """
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return True
+    if _host_is_blocked(host):
+        return True
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return _ip_is_blocked(literal)
+    try:
+        resolved = socket.gethostbyname(host)
+    except (OSError, ValueError):
+        return False
+    if resolved == WEBFETCH_BLOCKED_IP:
+        return True
+    try:
+        return _ip_is_blocked(ipaddress.ip_address(resolved))
+    except ValueError:
+        return False
 
 
 class WebfetchTool(Tool):
@@ -306,6 +450,11 @@ class WebfetchTool(Tool):
                 f"Only https:// URLs are allowed: {args.url}",
                 tool=self.name,
             )
+        if is_blocked_url(url):
+            raise ToolError(
+                f"Blocked private/internal URL: {url}",
+                tool=self.name,
+            )
         import httpx
 
         try:
@@ -313,6 +462,12 @@ class WebfetchTool(Tool):
                 timeout=WEBFETCH_TIMEOUT, follow_redirects=True
             ) as client:
                 async with client.stream("GET", url) as response:
+                    if str(response.url.scheme or "").lower() != "https":
+                        raise ToolError(
+                            f"Redirect downgraded to insecure scheme: "
+                            f"{response.url}",
+                            tool=self.name,
+                        )
                     response.raise_for_status()
                     chunks: list[bytes] = []
                     buffered = 0

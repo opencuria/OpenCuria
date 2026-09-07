@@ -9,7 +9,14 @@ import structlog
 from django.utils import timezone
 
 from . import models as perm_models
-from .evaluator import ALLOW, ASK, DENY, Decision, PermissionEvaluator
+from .evaluator import (
+    ALLOW,
+    ASK,
+    DEFAULT_GLOBAL_RULES,
+    DENY,
+    Decision,
+    PermissionEvaluator,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -167,7 +174,9 @@ class PermissionService:
         requests: type[PermissionRequestRepository] | None = None,
         allowlist: type[AllowlistRepository] | None = None,
     ) -> None:
-        self.evaluator = evaluator or PermissionEvaluator()
+        self.evaluator = evaluator or PermissionEvaluator(
+            global_rules=dict(DEFAULT_GLOBAL_RULES)
+        )
         self.requests = requests or PermissionRequestRepository
         self.allowlist = allowlist or AllowlistRepository
 

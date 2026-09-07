@@ -13,18 +13,26 @@ Permission design (OpenCode-like defaults):
   allowlist without prompting: ``git status/log/diff/branch``, ``ls``,
   ``cat``, ``head``, ``tail``, ``pwd``, ``echo``. Everything else
   (``rm``, ``sudo``, build commands, …) goes through the ask gate.
-- ``general`` (subagent): ``{"*": "allow"}`` — delegated subtasks may
-  use every tool (M5 wires up child sessions).
+- ``general`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
+  — delegated subtasks may use every tool (M5 wires up child sessions)
+  but never prompt the user directly.
 - ``explore`` (subagent, read-only): ``edit``/``write`` are ``deny``.
   ``bash`` is ``allow`` (OpenCode-like, so research commands such as
   ``find``/``rg`` do not block on a hidden child ask) with a
   last-match deny list for destructive commands (``rm``, ``sudo``,
   ``mv``, …). Pure research tools (``read``, ``glob``, ``grep``,
-  ``list``, ``webfetch``) stay allowed.
+  ``list``, ``webfetch``) stay allowed; ``question`` is ``deny``.
 - ``title`` / ``compaction`` (hidden): ``{"*": "deny"}`` so the loop
   offers no tools at all and answers text-only. ``title`` uses the
   ``"small"`` sentinel resolved to ``ProviderConfig.small_model`` at
   runtime; ``compaction`` uses the session model (see ``runner``).
+- ``computeruse`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
+  (same rationale as ``general``; ``ask_user`` still pauses via its
+  own desktop flow, not the ``question`` tool).
+- Global (``permissions.evaluator.DEFAULT_GLOBAL_RULES``): ``read``
+  stays ``allow`` except ``*.env`` / ``*.env.*`` which ``ask``
+  (OpenCode parity); ``*.env.example`` stays ``allow``. Combined with
+  deny > ask > allow precedence so agent ``* allow`` cannot override.
 """
 
 from __future__ import annotations
@@ -73,6 +81,10 @@ EXPLORE_BASH_RULES: dict[str, str] = {
     "chown *": "deny",
     "dd *": "deny",
 }
+
+#: Subagent/hidden agents never prompt the user directly: pending
+#: question gates of child sessions surface on the parent composer.
+QUESTION_DENY: dict[str, str] = {"question": "deny"}
 
 
 @dataclass(frozen=True)
@@ -153,7 +165,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "and key facts. Keep tool use focused and avoid unrelated "
             "changes."
         ),
-        permissions={"*": "allow"},
+        permissions={"*": "allow", **QUESTION_DENY},
         color="cyan",
     ),
     "explore": AgentDefinition(
@@ -175,6 +187,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "write": "deny",
             "process": "deny",
             "bash": dict(EXPLORE_BASH_RULES),
+            **QUESTION_DENY,
         },
         color="green",
     ),
@@ -186,7 +199,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "Generate a short title (at most 8 words) for the conversation. "
             "Reply with the title only, no tools, no extra text."
         ),
-        permissions={"*": "deny"},
+        permissions={"*": "deny", **QUESTION_DENY},
         model_override=SMALL_MODEL,
         color="gray",
     ),
@@ -208,7 +221,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "summary in the exact format requested by the user prompt. "
             "Respond in the same language as the conversation."
         ),
-        permissions={"*": "deny"},
+        permissions={"*": "deny", **QUESTION_DENY},
         color="magenta",
     ),
     "computeruse": AgentDefinition(
@@ -256,7 +269,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "- Keep the final response short and say what was actually "
             "completed."
         ),
-        permissions={"*": "allow"},
+        permissions={"*": "allow", **QUESTION_DENY},
         color="purple",
     ),
 }

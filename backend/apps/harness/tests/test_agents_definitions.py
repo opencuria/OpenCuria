@@ -30,7 +30,10 @@ def test_all_agents_defined() -> None:
     assert get_agent("explore").mode == "subagent"
     assert get_agent("computeruse").mode == "subagent"
     assert get_agent("computeruse").steps is None
-    assert get_agent("computeruse").permissions == {"*": "allow"}
+    assert get_agent("computeruse").permissions == {
+        "*": "allow",
+        "question": "deny",
+    }
     assert get_agent("title").mode == "hidden"
     assert get_agent("compaction").mode == "hidden"
 
@@ -79,10 +82,62 @@ def test_hidden_agents_deny_tools() -> None:
     """Hidden agents deny tools; only title uses the small model."""
     for name in ("title", "compaction"):
         agent = get_agent(name)
-        assert agent.permissions == {"*": "deny"}
+        assert agent.permissions == {"*": "deny", "question": "deny"}
         assert agent.steps is None
     assert get_agent("title").model_override == "small"
     assert get_agent("compaction").model_override is None
+
+
+def test_subagent_question_denied_but_build_allowed() -> None:
+    """Subagents deny question; build still allows via * (happy path)."""
+    from apps.harness.permissions.evaluator import PermissionEvaluator
+
+    for name in ("general", "explore", "computeruse"):
+        evaluator = PermissionEvaluator(
+            agent_rules=dict(get_agent(name).permissions)
+        )
+        assert evaluator.evaluate("question", "") == "deny"
+    build_eval = PermissionEvaluator(
+        agent_rules=dict(get_agent("build").permissions)
+    )
+    assert build_eval.evaluate("question", "") == "allow"
+
+
+def test_global_read_env_asks() -> None:
+    """Global defaults ask for .env reads (OpenCode parity)."""
+    from apps.harness.permissions.evaluator import (
+        DEFAULT_GLOBAL_RULES,
+        PermissionEvaluator,
+    )
+
+    evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
+    assert evaluator.evaluate("read", "/workspace/.env") == "ask"
+    assert evaluator.evaluate("read", "/workspace/a.env") == "ask"
+    assert evaluator.evaluate("read", "/workspace/.env.example") == "allow"
+    assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
+
+
+def test_global_read_env_survives_build_wildcard() -> None:
+    """Base ask beats agent * allow (deny > ask > allow precedence)."""
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.runner import HarnessRunner
+    from apps.harness.tests.conftest import FakeAccessor
+    from apps.harness.tools import default_tool_registry
+
+    from .test_runner_loop import FakeProvider
+
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=default_tool_registry(),
+        accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
+    )
+    agent = get_agent("build")
+    assert (
+        runner._decide(agent, "read", "/workspace/.env", "build") == "ask"
+    )
+    assert (
+        runner._decide(agent, "read", "/workspace/a.py", "build") == "allow"
+    )
 
 
 def test_unknown_agent_raises() -> None:

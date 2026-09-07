@@ -58,7 +58,12 @@ from .computeruse_loop import (
 )
 from .images import hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
-from .permissions.evaluator import ASK, DENY, PermissionEvaluator
+from .permissions.evaluator import (
+    ASK,
+    DEFAULT_GLOBAL_RULES,
+    DENY,
+    PermissionEvaluator,
+)
 from .prompts.composer import compose_system_prompt
 from .provider_retry import (
     RETRY_MAX_RETRIES,
@@ -81,12 +86,41 @@ log = structlog.get_logger(__name__)
 #: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
 DEFAULT_MAX_DEPTH = 1
 
+#: Default step budget when neither RunOptions.max_steps nor the agent
+#: definition sets one. DoS leash for unbounded loops; override per run
+#: via ``RunOptions.max_steps``.
+DEFAULT_MAX_STEPS = 100
+
+#: Max fingerprints kept for the doom-loop guard. The guard only reads
+#: the last 3 entries, so trimming is behavior-preserving.
+RECENT_CALLS_MAXLEN = 10
+
+#: Notice appended when the provider stops a step via content filter.
+#: Tool calls (if any) are skipped in that case.
+CONTENT_FILTER_NOTICE = (
+    "\n\n[Notice: the response was stopped by a content filter; "
+    "tool calls were skipped.]"
+)
+
+#: Notice appended when a length stop survives the bounded retry.
+LENGTH_TRUNCATION_NOTICE = (
+    "\n\n[Notice: the response was truncated due to length limits.]"
+)
+
+#: Shell/background tools whose commands are scanned for absolute
+#: paths outside /workspace (``external_directory`` permission gate).
+EXTERNAL_PATH_TOOLS = frozenset({"bash", "process_start"})
+
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
 DOOM_LOOP_REPEATS = 3
 
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 PermissionCallback = Callable[..., Awaitable[str]]
 QuestionCallback = Callable[..., Awaitable[list[Any]]]
+
+
+#: Max raw-argument characters appended to tool-error messages.
+TOOL_ERROR_ARGS_SNIPPET = 500
 
 
 @dataclass
@@ -109,6 +143,12 @@ class RunOptions:
     run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
+    # Per-run cache of once-approved (tool, action) pairs, reset at
+    # the start of every run() call. ``always`` continues to flow
+    # through the allowlist/service; this set only suppresses repeat
+    # ``once`` callbacks for identical calls in one run (never shared
+    # across runs, even when RunOptions is reused).
+    once_approved: set[tuple[str, str]] = field(default_factory=set)
     context_length: int = 0
     max_output_tokens: int = 0
     auto_compact: bool = True
@@ -153,6 +193,8 @@ def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
     key = (tool_name or "").strip().lower()
     if key == "bash":
         return str(args.get("command", ""))
+    if key == "process_start":
+        return str(args.get("command", ""))
     if key in ("read", "edit", "write", "list"):
         return str(args.get("path", ""))
     if key in ("glob", "grep"):
@@ -164,6 +206,16 @@ def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
     if key == "task":
         return str(args.get("description", ""))
     return ""
+
+
+def _detect_external_directory(tool_name: str, args: dict[str, Any]) -> bool:
+    """Return True when a shell command touches paths outside /workspace."""
+    key = (tool_name or "").strip().lower()
+    if key not in EXTERNAL_PATH_TOOLS:
+        return False
+    from .tools.shell import detect_external_directory
+
+    return detect_external_directory(str(args.get("command", "") or ""))
 
 
 def _combine_decisions(*decisions: str) -> str:
@@ -186,6 +238,14 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _with_args(message: str, call: _PendingToolCall) -> str:
+    """Append the raw tool arguments (truncated) to an error message."""
+    raw = (call.raw_arguments or "").strip()
+    if not raw:
+        return message
+    return f"{message} (args: {raw[:TOOL_ERROR_ARGS_SNIPPET]})"
 
 
 def _is_last_step(step: int, max_steps: int | None) -> bool:
@@ -246,7 +306,11 @@ class HarnessRunner:
         """
         self.provider = provider
         self.tools = tools
-        self.evaluator = evaluator or PermissionEvaluator()
+        if evaluator is None:
+            evaluator = PermissionEvaluator(
+                global_rules=dict(DEFAULT_GLOBAL_RULES)
+            )
+        self.evaluator = evaluator
         self.accessor = accessor
         self.chat_options = chat_options or ChatOptions()
         self._emit = emit or self._noop_emit
@@ -269,6 +333,10 @@ class HarnessRunner:
         self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
     ) -> list[ToolSchema]:
         """Return tool schemas excluding permission-denied tools.
+
+        The run *mode* is forwarded to both evaluators so
+        ``mode_rules`` slices apply here as well as in :meth:`_decide`
+        (Phase 3 wiring decision; ``mode_rules=None`` is a no-op).
 
         Depth filtering (M5): ``task`` is withheld when
         ``depth >= max_depth`` and ``todowrite`` is withheld from any
@@ -308,19 +376,36 @@ class HarnessRunner:
         mode: str,
         *,
         doom_loop: bool = False,
+        external_directory: bool = False,
     ) -> str:
         """Combine base and agent permission layers (deny wins).
 
-        The permission *key* (not the tool name) is evaluated: ``write``
-        and ``list`` share keys with ``edit``/``read`` (see tools), so
-        key-level rules apply to them as well.
+        The run *mode* is forwarded to both evaluators so per-mode
+        ``mode_rules`` (when configured) participate in the merged
+        decision (Phase 3 wiring decision). The permission *key* (not
+        the tool name) is evaluated: ``write`` and ``list`` share keys
+        with ``edit``/``read`` (see tools), so key-level rules apply
+        to them as well. ``external_directory`` routes through the
+        reserved ``ask``-by-default key so shell commands escaping
+        /workspace always hit the ask gate.
         """
         key = self._permission_key(tool_name)
         agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
         if doom_loop:
             return _combine_decisions(
-                self.evaluator.evaluate(key, action, mode=mode, doom_loop=True),
+                self.evaluator.evaluate(
+                    key, action, mode=mode, doom_loop=True
+                ),
                 agent_eval.evaluate(key, action, mode=mode, doom_loop=True),
+            )
+        if external_directory:
+            return _combine_decisions(
+                self.evaluator.evaluate(
+                    key, action, mode=mode, external_directory=True
+                ),
+                agent_eval.evaluate(
+                    key, action, mode=mode, external_directory=True
+                ),
             )
         return _combine_decisions(
             self.evaluator.evaluate(key, action, mode=mode),
@@ -347,11 +432,18 @@ class HarnessRunner:
     ) -> bool:
         """Resolve an ``ask`` gate via ``on_permission`` (True = approved).
 
-        Auto-denies when no callback is configured (unless
-        ``auto_approve``). An optional positive ``permission_timeout``
-        still auto-denies; otherwise the loop waits until resolve or abort.
+        Once-approved ``(tool, action)`` pairs cached on
+        ``opts.once_approved`` return True without a callback. A fresh
+        ``once``/``allow``/``yes`` response is cached; ``always`` flows
+        through the allowlist/service untouched. Auto-denies when no
+        callback is configured (unless ``auto_approve``). An optional
+        positive ``permission_timeout`` still auto-denies; otherwise
+        the loop waits until resolve or abort.
         """
         key = "doom_loop" if doom_loop else "permission"
+        if (tool_name, action) in opts.once_approved:
+            log.info("permission_once_cached", tool=tool_name, action=action)
+            return True
         if opts.auto_approve:
             log.info("permission_auto_approved", tool=tool_name, action=action)
             return True
@@ -382,7 +474,10 @@ class HarnessRunner:
             log.warning("permission_timeout_auto_deny", tool=tool_name)
             return False
         normalized = str(response or "").strip().lower()
-        return normalized in ("once", "always", "allow", "approved", "yes")
+        approved = normalized in ("once", "always", "allow", "approved", "yes")
+        if approved and normalized != "always":
+            opts.once_approved.add((tool_name, action))
+        return approved
 
     def _tool_error_outcome(
         self, call: _PendingToolCall, content: str
@@ -443,7 +538,15 @@ class HarnessRunner:
             return self._tool_error_outcome(
                 call, "todowrite is not available to subagents."
             )
-        decision = self._decide(agent, call.name, action, mode, doom_loop=doom_loop)
+        external = _detect_external_directory(call.name, call.arguments)
+        decision = self._decide(
+            agent,
+            call.name,
+            action,
+            mode,
+            doom_loop=doom_loop,
+            external_directory=external,
+        )
         log.debug(
             "permission_decision",
             tool=call.name,
@@ -455,7 +558,7 @@ class HarnessRunner:
         approved = True
         if decision == DENY:
             approved = False
-        elif decision == ASK or doom_loop:
+        elif decision == ASK or doom_loop or external:
             approved = await self._resolve_ask(
                 tool_name=call.name,
                 action=action,
@@ -468,6 +571,8 @@ class HarnessRunner:
         if not approved:
             if doom_loop:
                 reason = "doom-loop guard denied"
+            elif external:
+                reason = "external directory access denied"
             else:
                 reason = "denied by permissions"
             await self._send(
@@ -496,27 +601,29 @@ class HarnessRunner:
         except asyncio.CancelledError:
             raise
         except KeyError as exc:
+            error = _with_args(f"Unknown tool '{call.name}': {exc}", call)
             await self._send(
                 {
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
                     "tool": call.name,
-                    "error": str(exc),
+                    "error": error,
                 }
             )
-            return self._tool_error_outcome(call, f"Unknown tool '{call.name}'")
+            return self._tool_error_outcome(call, error)
         except Exception as exc:
+            error = _with_args(f"Tool '{call.name}' failed: {exc}", call)
             await self._send(
                 {
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
                     "tool": call.name,
-                    "error": str(exc),
+                    "error": error,
                 }
             )
-            return self._tool_error_outcome(call, f"Tool '{call.name}' failed: {exc}")
+            return self._tool_error_outcome(call, error)
         await self._send(
             {
                 "type": "tool_completed",
@@ -576,6 +683,7 @@ class HarnessRunner:
         for call in calls:
             fingerprint = f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
             recent_calls.append(fingerprint)
+            recent_calls[:] = recent_calls[-RECENT_CALLS_MAXLEN:]
             doom_flags.append(
                 len(recent_calls) >= DOOM_LOOP_REPEATS
                 and len(set(recent_calls[-DOOM_LOOP_REPEATS:])) == 1
@@ -659,6 +767,9 @@ class HarnessRunner:
             asyncio.CancelledError: On abort (after emitting ``aborted``).
         """
         options = opts or RunOptions()
+        # Per-run once-approval cache: never shared across runs, even
+        # when the caller reuses the same RunOptions object.
+        options.once_approved = set()
         if mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         if not prompt or not prompt.strip():
@@ -667,8 +778,9 @@ class HarnessRunner:
         effective_model = model
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
-        max_steps = options.max_steps or agent.steps
+        max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
+        depth = max(0, options.depth)
         depth = max(0, options.depth)
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
@@ -801,6 +913,7 @@ class HarnessRunner:
                 calls,
                 usage,
                 messages,
+                finish_reason,
             ) = await self._provider_step_with_overflow_retry(
                 model=model,
                 messages=messages,
@@ -828,6 +941,63 @@ class HarnessRunner:
                     "cost": usage.cost,
                 }
             )
+            if finish_reason == "length":
+                (
+                    text,
+                    calls,
+                    retry_usage,
+                    messages,
+                    finish_reason,
+                ) = await self._length_retry_once(
+                    model=model,
+                    messages=messages,
+                    schemas=schemas,
+                    step=step,
+                    agent=agent,
+                    mode=mode,
+                    opts=opts,
+                    text=text,
+                    calls=calls,
+                    usage=usage,
+                    is_last_step=is_last,
+                )
+                if retry_usage is not None:
+                    usage = retry_usage
+                    last_step_prompt = usage.prompt_tokens
+                    last_step_completion = usage.completion_tokens
+                    last_step_total = usage.total_tokens
+                    total_usage = total_usage.merge(usage)
+                    total_cost = total_usage.cost
+                    await self._send(
+                        {
+                            "type": "step_finish",
+                            "step": step,
+                            "tokens": {
+                                "prompt_tokens": usage.prompt_tokens,
+                                "completion_tokens": usage.completion_tokens,
+                                "total_tokens": usage.total_tokens,
+                            },
+                            "cost": usage.cost,
+                        }
+                    )
+            if finish_reason == "content_filter":
+                messages.append(LLMMessage(role="assistant", content=text))
+                return RunResult(
+                    output=f"{text}{CONTENT_FILTER_NOTICE}",
+                    steps=step,
+                    usage=total_usage,
+                    cost=total_cost,
+                    finish_reason="content_filter",
+                )
+            if finish_reason == "length":
+                messages.append(LLMMessage(role="assistant", content=text))
+                return RunResult(
+                    output=f"{text}{LENGTH_TRUNCATION_NOTICE}",
+                    steps=step,
+                    usage=total_usage,
+                    cost=total_cost,
+                    finish_reason="length",
+                )
             if is_last:
                 if calls:
                     await self._reject_last_step_tools(calls, step)
@@ -1001,7 +1171,7 @@ class HarnessRunner:
                         cu_state.build_provider_messages(), schemas, is_last
                     )
                 )
-                text, calls, usage = await self._provider_step(
+                text, calls, usage, _finish = await self._provider_step(
                     model=model,
                     messages=request_messages,
                     schemas=request_schemas,
@@ -1163,20 +1333,20 @@ class HarnessRunner:
         mode: str,
         opts: RunOptions,
         is_last_step: bool = False,
-    ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage]]:
+    ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage], str]:
         """Run one provider step, compacting and retrying once on overflow errors."""
         request_messages, request_schemas, request_opts = self._last_step_request(
             messages, schemas, is_last_step
         )
         try:
-            text, calls, usage = await self._provider_step_with_transient_retry(
+            text, calls, usage, finish = await self._provider_step_with_transient_retry(
                 model=model,
                 messages=request_messages,
                 schemas=request_schemas,
                 step=step,
                 chat_options=request_opts,
             )
-            return text, calls, usage, messages
+            return text, calls, usage, messages, finish
         except Exception as exc:
             if not is_context_overflow_error(exc):
                 raise
@@ -1196,18 +1366,67 @@ class HarnessRunner:
                 compacted, schemas, is_last_step
             )
             try:
-                text, calls, usage = await self._provider_step_with_transient_retry(
-                    model=model,
-                    messages=retry_messages,
-                    schemas=retry_schemas,
-                    step=step,
-                    chat_options=retry_opts,
+                text, calls, usage, finish = (
+                    await self._provider_step_with_transient_retry(
+                        model=model,
+                        messages=retry_messages,
+                        schemas=retry_schemas,
+                        step=step,
+                        chat_options=retry_opts,
+                    )
                 )
             except Exception as retry_exc:
                 if is_context_overflow_error(retry_exc):
                     raise RuntimeError(CONTEXT_OVERFLOW_COMPACTION_ERROR) from retry_exc
                 raise
-            return text, calls, usage, compacted
+            return text, calls, usage, compacted, finish
+
+    async def _length_retry_once(
+        self,
+        *,
+        model: str,
+        messages: list[LLMMessage],
+        schemas: list[ToolSchema],
+        step: int,
+        agent: AgentDefinition,
+        mode: str,
+        opts: RunOptions,
+        text: str,
+        calls: list[_PendingToolCall],
+        usage: Usage,
+        is_last_step: bool = False,
+    ) -> tuple[str, list[_PendingToolCall], Usage | None, list[LLMMessage], str]:
+        """Retry one length-stopped step after compaction (bounded to 1).
+
+        Returns the retried ``(text, calls, usage, messages, finish)``;
+        ``usage`` is None when compaction had nothing to summarize and the
+        original length stop stands.
+        """
+        compacted = await self._maybe_compact_history(
+            messages=messages,
+            agent=agent,
+            model=model,
+            mode=mode,
+            opts=opts,
+            limits=ModelLimits(
+                context_length=opts.context_length,
+                max_output_tokens=opts.max_output_tokens,
+            ),
+        )
+        if compacted is messages:
+            return text, calls, None, messages, "length"
+        request_messages, request_schemas, request_opts = self._last_step_request(
+            compacted, schemas, is_last_step
+        )
+        retried = await self._provider_step_with_transient_retry(
+            model=model,
+            messages=request_messages,
+            schemas=request_schemas,
+            step=step,
+            chat_options=request_opts,
+        )
+        retried_text, retried_calls, retried_usage, retried_finish = retried
+        return retried_text, retried_calls, retried_usage, compacted, retried_finish
 
     async def _provider_step_with_transient_retry(
         self,
@@ -1217,7 +1436,7 @@ class HarnessRunner:
         schemas: list[ToolSchema],
         step: int,
         chat_options: ChatOptions | None = None,
-    ) -> tuple[str, list[_PendingToolCall], Usage]:
+    ) -> tuple[str, list[_PendingToolCall], Usage, str]:
         """Run one provider step, retrying transient timeouts and 5xx errors."""
         attempt = 0
         while True:
@@ -1245,7 +1464,19 @@ class HarnessRunner:
                     delay_seconds=delay,
                     error=str(exc),
                 )
+                await self._send(
+                    {
+                        "type": "retry_scheduled",
+                        "step": step,
+                        "attempt": attempt,
+                        "delay_seconds": delay,
+                        "error": str(exc),
+                    }
+                )
                 await asyncio.sleep(delay)
+                await self._send(
+                    {"type": "retry_attempt", "step": step, "attempt": attempt}
+                )
 
     async def _provider_step(
         self,
@@ -1255,16 +1486,19 @@ class HarnessRunner:
         schemas: list[ToolSchema],
         step: int,
         chat_options: ChatOptions | None = None,
-    ) -> tuple[str, list[_PendingToolCall], Usage]:
+    ) -> tuple[str, list[_PendingToolCall], Usage, str]:
         """Stream one provider step and accumulate text/tool calls/usage."""
         fragments: dict[int, dict[str, Any]] = {}
         text_parts: list[str] = []
         usage = Usage()
+        finish_reason = ""
         async for delta in self.provider.chat_stream(
             model, messages, schemas, chat_options or self.chat_options
         ):
             if delta.usage is not None:
                 usage = usage.merge(delta.usage)
+            if delta.finish_reason:
+                finish_reason = str(delta.finish_reason)
             if delta.text:
                 text_parts.append(delta.text)
                 await self._send(
@@ -1311,7 +1545,7 @@ class HarnessRunner:
                     raw_arguments=raw,
                 )
             )
-        return "".join(text_parts), calls, usage
+        return "".join(text_parts), calls, usage, finish_reason
 
     def _tool_title(self, tool_name: str, args: dict[str, Any]) -> str:
         """Best-effort human title for a tool invocation."""
