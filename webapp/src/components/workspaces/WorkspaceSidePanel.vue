@@ -3,10 +3,11 @@
  * WorkspaceSidePanel — collapsible, horizontally resizable panel docked to
  * the right of the workspace chat.
  *
- * Hosts the Git (placeholder), Desktop (live preview), Terminal and Files
- * tabs. The panel is a full-height column: its tab bar spans the full panel
- * width at the top (same bg-card surface as the content), so the chat
- * header buttons always sit left of the panel. Closing happens via the
+ * Hosts the Git (mock data, frontend-only for now), Desktop (live
+ * preview), Terminal and Files tabs. The panel is a full-height column:
+ * its tab bar spans the full panel width at the top (same bg-card surface
+ * as the content), so the chat header buttons always sit left of the
+ * panel. Closing happens via the
  * side-panel toggle in the chat header; below the lg breakpoint (where the
  * panel overlays the chat full-width and covers that toggle) the tab bar
  * shows its own close button. Tab contents are lazily mounted and kept
@@ -23,6 +24,7 @@ import { GitBranch, Monitor, TerminalSquare, FolderTree, PanelRightClose } from 
 import WorkspaceTerminal from './WorkspaceTerminal.vue'
 import SidePanelDesktop from './SidePanelDesktop.vue'
 import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
+import GitPanel from '@/components/git/GitPanel.vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -157,19 +159,11 @@ onBeforeUnmount(() => {
 
     <!-- Tab contents (lazy mounted, kept alive) -->
     <div class="min-h-0 flex-1">
-      <div
+      <GitPanel
+        v-if="mountedTabs.has('git')"
         v-show="sidePanel.activeTab === 'git'"
-        class="flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
-        data-testid="side-panel-git"
-      >
-        <GitBranch :size="32" class="text-muted-foreground" />
-        <div>
-          <p class="text-sm font-medium text-foreground">Git integration</p>
-          <p class="mt-1 text-xs text-muted-foreground">
-            Coming soon — review changes, branches and commits right here.
-          </p>
-        </div>
-      </div>
+        :workspace-id="props.workspaceId"
+      />
       <SidePanelDesktop
         v-if="mountedTabs.has('desktop')"
         v-show="sidePanel.activeTab === 'desktop'"

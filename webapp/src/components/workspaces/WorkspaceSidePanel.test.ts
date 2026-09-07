@@ -15,6 +15,7 @@ const tabStubs = {
   WorkspaceTerminal: { template: '<div data-testid="stub-terminal" />', props: ['workspaceId'] },
   SidePanelDesktop: { template: '<div data-testid="stub-desktop" />', props: ['workspaceId'] },
   FileExplorerPanel: { template: '<div data-testid="stub-files" />', props: ['workspaceId'] },
+  GitPanel: { template: '<div data-testid="side-panel-git" />', props: ['workspaceId'] },
 }
 
 function stubWideLayout(): void {

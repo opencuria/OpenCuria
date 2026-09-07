@@ -549,6 +549,9 @@ credentials or other sensitive content visible on screen may appear in the mp4.
 - New UI primitives are added via `npx shadcn-vue@latest add <component>`.
 - Organization Settings and all future views must follow this rule for a
   consistent design system (reka-maia preset, Noto Sans, Lucide icons).
+- The Git side-panel tab (`webapp/src/components/git/`) is frontend-only:
+  all data comes from mock repos (`webapp/src/mock/git.ts`) via
+  `webapp/src/stores/git.ts` until a backend git API is wired up.
 
 ### 6.10 Mandatory Test Strategy (strict)
 

@@ -22,6 +22,8 @@ import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
+import GitDiffViewer from '@/components/git/GitDiffViewer.vue'
+import { useGitStore } from '@/stores/git'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { useSidePanelStore } from '@/stores/sidePanel'
@@ -37,6 +39,7 @@ const sidePanelStore = useSidePanelStore()
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
 const fileExplorerStore = useFileExplorerStore()
+const gitStore = useGitStore()
 const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
@@ -380,8 +383,12 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
 
             <!-- Harness chat area -->
             <div v-else class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+              <GitDiffViewer
+                v-if="gitStore.viewingDiffChange"
+                :workspace-id="workspaceId"
+              />
               <FileViewer
-                v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
+                v-else-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
                 :workspace-id="workspaceId"
               />
               <div
