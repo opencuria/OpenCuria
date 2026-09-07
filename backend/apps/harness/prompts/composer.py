@@ -196,8 +196,8 @@ async def compose_system_prompt(
     ]
     if mode == "plan":
         env_lines.append(
-            "Plan mode: investigate freely (read tools, bash, background "
-            "processes); ask before edits."
+            "Plan mode: investigate read-only; "
+            "ask before edits/mutating commands."
         )
     sections.append("\n".join(env_lines))
 
