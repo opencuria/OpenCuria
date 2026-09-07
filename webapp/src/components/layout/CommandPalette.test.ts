@@ -2,7 +2,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
-import SearchModal from './SearchModal.vue'
+import CommandPalette from './CommandPalette.vue'
+import { WorkspaceStatus } from '@/types'
 
 const routerPush = vi.fn()
 
@@ -36,6 +37,29 @@ const conversationStore = {
   markAsRead: vi.fn(),
 }
 
+const workspaceStore = {
+  workspaces: [
+    {
+      id: 'ws-1',
+      name: 'Alpha workspace',
+      status: WorkspaceStatus.RUNNING,
+      runner_online: true,
+      last_activity_at: new Date().toISOString(),
+      has_active_session: false,
+      active_operation: null,
+    },
+    {
+      id: 'ws-2',
+      name: 'Beta workspace',
+      status: WorkspaceStatus.RUNNING,
+      runner_online: true,
+      last_activity_at: new Date().toISOString(),
+      has_active_session: false,
+      active_operation: null,
+    },
+  ],
+}
+
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: routerPush }),
 }))
@@ -44,9 +68,13 @@ vi.mock('@/stores/harnessConversations', () => ({
   useHarnessConversationStore: () => conversationStore,
 }))
 
-function mountModal(props = { open: true }) {
+vi.mock('@/stores/workspaces', () => ({
+  useWorkspaceStore: () => workspaceStore,
+}))
+
+function mountPalette(props = { open: true }) {
   setActivePinia(createPinia())
-  return mount(SearchModal, {
+  return mount(CommandPalette, {
     props,
     global: {
       stubs: {
@@ -60,32 +88,46 @@ function mountModal(props = { open: true }) {
   })
 }
 
-describe('SearchModal', () => {
+describe('CommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
-  it('lists conversations with workspace names', () => {
-    const wrapper = mountModal()
+  it('lists actions, recent chats, and workspaces without a query', () => {
+    const wrapper = mountPalette()
 
+    expect(wrapper.text()).toContain('Neuer Chat')
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha workspace')
+    expect(wrapper.text()).toContain('Workspaces verwalten')
   })
 
-  it('filters by title and workspace', async () => {
-    const wrapper = mountModal()
-    const input = wrapper.find('[data-testid="chat-search-input"]')
+  it('filters chats, workspaces, and actions by query', async () => {
+    const wrapper = mountPalette()
+    const input = wrapper.find('[data-testid="command-palette-input"]')
 
     await input.setValue('beta')
 
     expect(wrapper.text()).toContain('Second chat')
+    expect(wrapper.text()).toContain('Beta workspace')
     expect(wrapper.text()).not.toContain('First chat')
+    expect(wrapper.text()).not.toContain('Neuer Chat')
   })
 
-  it('navigates on Enter like a sidebar row click', async () => {
-    const wrapper = mountModal()
-    const input = wrapper.find('[data-testid="chat-search-input"]')
+  it('runs Neuer Chat on Enter when the query is empty', async () => {
+    const wrapper = mountPalette()
+    const input = wrapper.find('[data-testid="command-palette-input"]')
 
+    await input.trigger('keydown', { key: 'Enter' })
+
+    expect(routerPush).toHaveBeenCalledWith('/')
+  })
+
+  it('opens a matching chat on Enter', async () => {
+    const wrapper = mountPalette()
+    const input = wrapper.find('[data-testid="command-palette-input"]')
+
+    await input.setValue('first')
     await input.trigger('keydown', { key: 'Enter' })
 
     expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
@@ -96,12 +138,12 @@ describe('SearchModal', () => {
   })
 
   it('moves selection with ArrowDown/ArrowUp', async () => {
-    const wrapper = mountModal()
-    const input = wrapper.find('[data-testid="chat-search-input"]')
+    const wrapper = mountPalette()
+    const input = wrapper.find('[data-testid="command-palette-input"]')
 
     await input.trigger('keydown', { key: 'ArrowDown' })
 
     const selected = wrapper.find('[aria-selected="true"]')
-    expect(selected.text()).toContain('Second chat')
+    expect(selected.text()).toContain('Workspaces verwalten')
   })
 })

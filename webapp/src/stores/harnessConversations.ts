@@ -9,6 +9,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import type { HarnessConversation, HarnessSessionStatus } from '@/types/harness'
+import { extractActiveConversations } from '@/lib/conversationGroups'
 import { listHarnessConversations, markHarnessSessionRead } from '@/services/harness.api'
 import { WorkspaceStatus } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspaces'
@@ -48,6 +49,8 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     }
     return [...ids]
   })
+
+  const activeConversations = computed(() => extractActiveConversations(conversations.value))
 
   async function fetchConversations(): Promise<void> {
     loading.value = true
@@ -110,6 +113,7 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     searchQuery,
     filteredConversations,
     uniqueWorkspaceIds,
+    activeConversations,
     fetchConversations,
     markAsRead,
     updateSessionStatus,

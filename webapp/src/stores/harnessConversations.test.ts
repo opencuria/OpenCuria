@@ -58,6 +58,16 @@ describe('harnessConversations store unread', () => {
     expect(store.conversations[0]?.status).toBe('busy')
   })
 
+  it('exposes busy and unread conversations as activeConversations', () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [
+      makeConversation({ session_id: 'idle', status: 'idle', unread: false }),
+      makeConversation({ session_id: 'busy', status: 'busy', unread: false }),
+      makeConversation({ session_id: 'unread', status: 'idle', unread: true }),
+    ]
+    expect(store.activeConversations.map((row) => row.session_id)).toEqual(['busy', 'unread'])
+  })
+
   it('persists mark-read via the API', async () => {
     const store = useHarnessConversationStore()
     store.conversations = [makeConversation({ status: 'idle', unread: true })]

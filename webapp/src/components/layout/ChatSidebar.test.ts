@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatSidebar from './ChatSidebar.vue'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
+import type { HarnessConversation } from '@/types/harness'
 
 const authStore = {
   organizations: [{ id: 'org-1', name: 'Acme', role: 'admin' }],
@@ -24,12 +25,18 @@ const workspaceStore = {
       name: 'Alpha',
       status: WorkspaceStatus.RUNNING,
       runner_online: true,
+      last_activity_at: new Date().toISOString(),
+      has_active_session: false,
+      active_operation: null,
     },
     {
       id: 'ws-2',
       name: 'Beta',
       status: WorkspaceStatus.STOPPED,
       runner_online: false,
+      last_activity_at: new Date().toISOString(),
+      has_active_session: false,
+      active_operation: null,
     },
   ],
   fetchWorkspaces: vi.fn(),
@@ -39,21 +46,21 @@ const workspaceStore = {
   handleWorkspaceError: vi.fn(),
 }
 
+const defaultConversation: HarnessConversation = {
+  session_id: 's-1',
+  workspace_id: 'ws-1',
+  workspace_name: 'Alpha',
+  title: 'First chat',
+  status: 'idle',
+  mode: 'build',
+  agent_name: 'build',
+  model: '',
+  unread: true,
+  updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+}
+
 const conversationStore = {
-  conversations: [
-    {
-      session_id: 's-1',
-      workspace_id: 'ws-1',
-      workspace_name: 'Alpha',
-      title: 'First chat',
-      status: 'idle',
-      mode: 'build',
-      agent_name: 'build',
-      model: '',
-      unread: true,
-      updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
-    },
-  ],
+  conversations: [defaultConversation] as HarnessConversation[],
   uniqueWorkspaceIds: ['ws-1'],
   fetchConversations: vi.fn(),
   markAsRead: vi.fn(),
@@ -62,7 +69,6 @@ const conversationStore = {
 }
 
 const harnessStore = {
-  childSessionsByParent: {},
   viewingSessionId: null,
   renameSession: vi.fn(),
   removeSession: vi.fn(),
@@ -126,35 +132,61 @@ const SidebarTestWrapper = defineComponent({
   template: '<SidebarProvider><ChatSidebar /></SidebarProvider>',
 })
 
+const sidebarStubs = {
+  OpenCuriaLogo: true,
+  CommandPalette: true,
+  Tooltip: { template: '<div><slot /></div>' },
+  TooltipContent: true,
+  TooltipTrigger: { template: '<div><slot /></div>' },
+  TooltipProvider: { template: '<div><slot /></div>' },
+  DropdownMenu: { template: '<div><slot /></div>' },
+  DropdownMenuTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+  DropdownMenuSeparator: true,
+}
+
 function mountSidebar() {
   setActivePinia(createPinia())
   return mount(SidebarTestWrapper, {
-    global: {
-      stubs: {
-        OpenCuriaLogo: true,
-        SearchModal: true,
-        Tooltip: { template: '<div><slot /></div>' },
-        TooltipContent: true,
-        TooltipTrigger: { template: '<div><slot /></div>' },
-        TooltipProvider: { template: '<div><slot /></div>' },
-        // Render dropdown/collapsible content inline (reka teleports it otherwise)
-        DropdownMenu: { template: '<div><slot /></div>' },
-        DropdownMenuTrigger: { template: '<div><slot /></div>' },
-        DropdownMenuContent: { template: '<div><slot /></div>' },
-        DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
-        DropdownMenuSeparator: true,
-        Collapsible: { template: '<div><slot /></div>' },
-        CollapsibleTrigger: { template: '<button><slot /></button>' },
-        CollapsibleContent: { template: '<div><slot /></div>' },
-      },
-    },
+    global: { stubs: sidebarStubs },
   })
+}
+
+function makeConversation(overrides: Partial<HarnessConversation> = {}): HarnessConversation {
+  return {
+    ...defaultConversation,
+    unread: false,
+    ...overrides,
+  }
 }
 
 describe('ChatSidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    conversationStore.conversations = [makeConversation({ unread: true })]
+    conversationStore.uniqueWorkspaceIds = ['ws-1']
+    workspaceStore.workspaces = [
+      {
+        id: 'ws-1',
+        name: 'Alpha',
+        status: WorkspaceStatus.RUNNING,
+        runner_online: true,
+        last_activity_at: new Date().toISOString(),
+        has_active_session: false,
+        active_operation: null,
+      },
+      {
+        id: 'ws-2',
+        name: 'Beta',
+        status: WorkspaceStatus.STOPPED,
+        runner_online: false,
+        last_activity_at: new Date().toISOString(),
+        has_active_session: false,
+        active_operation: null,
+      },
+    ]
   })
 
   it('renders the active organization name', () => {
@@ -163,17 +195,15 @@ describe('ChatSidebar', () => {
     expect(wrapper.text()).toContain('Acme')
   })
 
-  it('renders workspace groups with chats and empty state', () => {
+  it('shows unread chats in the active section and hides empty stopped workspaces', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Alpha')
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('First chat')
-    expect(wrapper.text()).toContain('Keine Chats — Enter zum Starten')
-  })
-
-  it('shows an unread dot for unread conversations', () => {
-    const wrapper = mountSidebar()
-
+    expect(wrapper.text()).toContain('Alpha')
+    expect(wrapper.text()).toContain('Alle Workspaces (2)')
+    expect(wrapper.text()).not.toContain('Beta')
+    expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
   })
 
@@ -195,6 +225,34 @@ describe('ChatSidebar', () => {
       path: '/workspaces/ws-1',
       query: { session: 's-1' },
     })
+  })
+
+  it('caps the time list at 15 rows and expands the rest', async () => {
+    conversationStore.conversations = Array.from({ length: 20 }, (_, index) =>
+      makeConversation({
+        session_id: `s-${index}`,
+        title: `Chat ${index}`,
+        unread: false,
+        updated_at: new Date(Date.now() - index * 60 * 1000).toISOString(),
+      }),
+    )
+
+    const wrapper = mountSidebar()
+
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(15)
+    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('5 weitere Chats')
+
+    await wrapper.get('[data-testid="show-more-chats"]').trigger('click')
+
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(20)
+  })
+
+  it('shows an empty chat prompt when there are no conversations', () => {
+    conversationStore.conversations = []
+    const wrapper = mountSidebar()
+
+    expect(wrapper.text()).toContain('Noch keine Chats — starte mit Neuer Chat')
   })
 
   it('emits opencuria:open-settings from the user menu', async () => {
