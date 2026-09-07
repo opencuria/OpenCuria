@@ -28,6 +28,7 @@ from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.computeruse import (
     LeftClickTool,
     OpenUrlTool,
+    PressKeyTool,
     ViewRegionTool,
     ViewScreenTool,
     pixel_coordinates,
@@ -168,6 +169,21 @@ async def test_left_click_without_coordinates_skips_move(fake_accessor) -> None:
     actions = [call[0] for call in fake_accessor.desktop_calls]
     assert "move" not in actions
     assert "click" in actions
+
+
+async def test_press_key_forwards_key_and_modifiers(fake_accessor) -> None:
+    """press_key sends a desktop key action with the given combo."""
+    ctx = _ctx(fake_accessor)
+    await PressKeyTool().execute(
+        {"key": "enter", "modifiers": ["control"]},
+        ctx,
+    )
+    key_calls = [
+        call for call in fake_accessor.desktop_calls if call[0] == "key"
+    ]
+    assert key_calls == [
+        ("key", {"key": "enter", "modifiers": ["control"]}, None),
+    ]
 
 
 async def test_open_url_rejects_non_http_schemes(fake_accessor) -> None:
