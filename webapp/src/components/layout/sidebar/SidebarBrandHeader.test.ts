@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import SidebarBrandHeader from './SidebarBrandHeader.vue'
-import { SidebarProvider } from '@/components/ui/sidebar'
+import { Sidebar, SidebarProvider } from '@/components/ui/sidebar'
 
 const authStore = {
   organizations: [{ id: 'org-1', name: 'Acme', role: 'admin' }],
@@ -24,13 +24,24 @@ vi.mock('vue-router', () => ({
 }))
 
 const HeaderWrapper = defineComponent({
-  components: { SidebarProvider, SidebarBrandHeader },
-  template: '<SidebarProvider><SidebarBrandHeader /></SidebarProvider>',
+  props: {
+    defaultOpen: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  components: { Sidebar, SidebarProvider, SidebarBrandHeader },
+  template: `
+    <SidebarProvider :default-open="defaultOpen">
+      <Sidebar><SidebarBrandHeader /></Sidebar>
+    </SidebarProvider>
+  `,
 })
 
-function mountHeader() {
+function mountHeader(defaultOpen = true) {
   setActivePinia(createPinia())
   return mount(HeaderWrapper, {
+    props: { defaultOpen },
     global: {
       stubs: {
         Tooltip: { template: '<div><slot /></div>' },
@@ -60,6 +71,23 @@ describe('SidebarBrandHeader', () => {
 
     expect(logo.classes()).toContain('size-8!')
     expect(logo.attributes('viewBox')).toBe('13 13 38 38')
+  })
+
+  it('renders OpenCuria instead of the active organization name', () => {
+    const wrapper = mountHeader()
+
+    expect(wrapper.text()).toContain('OpenCuria')
+    expect(wrapper.text()).not.toContain('Acme')
+  })
+
+  it('expands the sidebar when the logo is clicked while collapsed', async () => {
+    const wrapper = mountHeader(false)
+
+    expect(wrapper.get('[data-slot="sidebar"]').attributes('data-state')).toBe('collapsed')
+
+    await wrapper.get('svg[aria-label="OpenCuria"]').trigger('click')
+
+    expect(wrapper.get('[data-slot="sidebar"]').attributes('data-state')).toBe('expanded')
   })
 
   it('keeps the org-switcher chevron at the default icon size', () => {

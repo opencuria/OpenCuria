@@ -190,10 +190,11 @@ describe('ChatSidebar', () => {
     ]
   })
 
-  it('renders the active organization name', () => {
+  it('renders the OpenCuria brand name', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Acme')
+    expect(wrapper.text()).toContain('OpenCuria')
+    expect(wrapper.text()).not.toContain('Acme')
   })
 
   it('shows unread chats in the active section and hides empty stopped workspaces', () => {

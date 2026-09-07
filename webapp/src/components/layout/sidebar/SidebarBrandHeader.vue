@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * Logo + organization switcher. A single org renders as a home link;
- * multiple orgs open a dropdown.
+ * Logo + organization switcher. Expanded sidebars show the OpenCuria brand;
+ * multiple organizations can be switched from the dropdown.
  */
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -15,7 +15,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
+import {
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  useSidebar,
+} from '@/components/ui/sidebar'
 import { useAuthStore } from '@/stores/auth'
 
 const emit = defineEmits<{
@@ -24,22 +29,23 @@ const emit = defineEmits<{
 }>()
 
 const authStore = useAuthStore()
-
-const orgName = computed(
-  () => authStore.activeOrganization?.name ?? 'OpenCuria',
-)
-
+const { isMobile, state, setOpen } = useSidebar()
 const showSwitcher = computed(() => authStore.organizations.length > 1)
+const isCollapsed = computed(() => !isMobile.value && state.value === 'collapsed')
+
+function expandSidebar(): void {
+  if (isCollapsed.value) setOpen(true)
+}
 </script>
 
 <template>
   <SidebarMenu>
     <SidebarMenuItem>
-      <DropdownMenu v-if="showSwitcher">
+      <DropdownMenu v-if="showSwitcher && !isCollapsed">
         <DropdownMenuTrigger as-child>
           <SidebarMenuButton size="lg" tooltip="Organisation wechseln">
-            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" />
-            <span class="truncate font-semibold">{{ orgName }}</span>
+            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" @click="expandSidebar" />
+            <span class="truncate font-semibold">OpenCuria</span>
             <ChevronsUpDown class="ml-auto size-4 shrink-0" />
           </SidebarMenuButton>
         </DropdownMenuTrigger>
@@ -67,10 +73,20 @@ const showSwitcher = computed(() => authStore.organizations.length > 1)
         </DropdownMenuContent>
       </DropdownMenu>
 
+      <SidebarMenuButton
+        v-else-if="isCollapsed"
+        size="lg"
+        tooltip="OpenCuria"
+        @click="expandSidebar"
+      >
+        <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" @click="expandSidebar" />
+        <span class="truncate font-semibold">OpenCuria</span>
+      </SidebarMenuButton>
+
       <SidebarMenuButton v-else size="lg" as-child tooltip="OpenCuria">
         <RouterLink to="/" @click="emit('home')">
           <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" />
-          <span class="truncate font-semibold">{{ orgName }}</span>
+          <span class="truncate font-semibold">OpenCuria</span>
         </RouterLink>
       </SidebarMenuButton>
     </SidebarMenuItem>
