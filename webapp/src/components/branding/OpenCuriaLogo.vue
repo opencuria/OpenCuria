@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed, useAttrs } from 'vue'
+import { cn } from '@/lib/utils'
+
 defineOptions({ inheritAttrs: false })
 
 withDefaults(
@@ -11,15 +14,24 @@ withDefaults(
     alt: 'OpenCuria logo',
   },
 )
+
+const attrs = useAttrs()
+
+const svgAttrs = computed(() => {
+  const { class: _className, ...rest } = attrs
+  return rest
+})
+
+const iconClass = computed(() => cn('block size-8', attrs.class))
+const wordmarkClass = computed(() => cn('block h-10 w-auto', attrs.class))
 </script>
 
 <template>
   <svg
     v-if="iconOnly"
-    v-bind="$attrs"
-    viewBox="0 0 64 64"
-    class="block"
-    :class="'w-8 h-8'"
+    v-bind="svgAttrs"
+    viewBox="13 13 38 38"
+    :class="iconClass"
     style="color: var(--color-foreground)"
     role="img"
     :aria-label="alt"
@@ -41,10 +53,9 @@ withDefaults(
 
   <svg
     v-else
-    v-bind="$attrs"
+    v-bind="svgAttrs"
     viewBox="0 0 244 64"
-    class="block"
-    :class="'h-8 w-auto'"
+    :class="wordmarkClass"
     style="color: var(--color-foreground)"
     role="img"
     :aria-label="alt"

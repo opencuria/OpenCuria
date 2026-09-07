@@ -198,7 +198,7 @@ onMounted(async () => {
   <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
     <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
       <div class="mb-4 flex justify-center">
-        <OpenCuriaLogo icon-only alt="OpenCuria" class="size-12" />
+        <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
       </div>
 
       <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">

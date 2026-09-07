@@ -38,7 +38,7 @@ const showSwitcher = computed(() => authStore.organizations.length > 1)
       <DropdownMenu v-if="showSwitcher">
         <DropdownMenuTrigger as-child>
           <SidebarMenuButton size="lg" tooltip="Organisation wechseln">
-            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8" />
+            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" />
             <span class="truncate font-semibold">{{ orgName }}</span>
             <ChevronsUpDown class="ml-auto size-4 shrink-0" />
           </SidebarMenuButton>
@@ -69,7 +69,7 @@ const showSwitcher = computed(() => authStore.organizations.length > 1)
 
       <SidebarMenuButton v-else size="lg" as-child tooltip="OpenCuria">
         <RouterLink to="/" @click="emit('home')">
-          <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8" />
+          <OpenCuriaLogo icon-only alt="OpenCuria" class="size-8!" />
           <span class="truncate font-semibold">{{ orgName }}</span>
         </RouterLink>
       </SidebarMenuButton>

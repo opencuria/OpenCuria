@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
     <Card class="w-full max-w-md">
       <CardContent class="pt-6">
         <div class="flex items-center gap-3 mb-6 justify-center">
-          <OpenCuriaLogo class="h-10 w-auto" alt="OpenCuria" />
+          <OpenCuriaLogo class="h-12 w-auto" alt="OpenCuria" />
         </div>
 
         <CardHeader class="px-0 pb-4 text-center">

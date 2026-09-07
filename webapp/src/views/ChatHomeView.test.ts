@@ -152,6 +152,7 @@ describe('ChatHomeView', () => {
     expect(wrapper.find('[data-testid="workspace-picker-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(true)
     expect(wrapper.findAll('[data-testid="chat-home-suggestion"]')).toHaveLength(4)
+    expect(wrapper.get('svg[aria-label="OpenCuria"]').classes()).toContain('size-16')
   })
 
   it('prefers the last selected workspace from localStorage', async () => {
