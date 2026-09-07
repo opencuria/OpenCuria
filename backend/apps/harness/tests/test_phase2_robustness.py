@@ -413,7 +413,7 @@ async def test_composer_environment_has_platform_and_plan_reminder() -> None:
     plan = await compose_system_prompt(agent=get_agent("plan"), mode="plan")
     assert "Platform:" in plan.system
     assert "Workspace root:" in plan.system
-    assert "Plan mode: investigate freely" in plan.system
+    assert "Plan mode: investigate read-only" in plan.system
     assert "ask before edits" in plan.system
     build = await compose_system_prompt(agent=get_agent("build"), mode="build")
     assert "Platform:" in build.system

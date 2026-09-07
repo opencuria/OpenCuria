@@ -1,15 +1,15 @@
 /**
- * Shared helpers for the global Settings-Sheet (Schritt 5).
+ * Shared helpers for the global Settings sheet.
  *
  * Kept in a lightweight module (no component imports) so that
  * OrgSettingsView can map legacy `?tab=` deep-links onto sheet tabs
- * without pulling the whole sheet (5 Views) into its bundle.
+ * without pulling the whole sheet into its bundle.
  */
 
-/** Window-Event, das das Settings-Sheet öffnet. Detail: `{ tab?: string }`. */
+/** Window event that opens the Settings sheet. Detail: `{ tab?: string }`. */
 export const OPEN_SETTINGS_EVENT = 'opencuria:open-settings'
 
-/** Query-Param auf `/`, der das Sheet per Deep-Link öffnet (`/?settings=<tab>`). */
+/** Query param on `/` that opens the sheet via deep-link (`/?settings=<tab>`). */
 export const SETTINGS_QUERY_PARAM = 'settings'
 
 export type SettingsTabId =
@@ -20,12 +20,13 @@ export type SettingsTabId =
   | 'api-keys'
   | 'images'
   | 'runners'
-  | 'organization'
+  | 'credential-services'
+  | 'image-definitions'
 
 /**
- * Mappt alte OrgSettings-Query-Tabs (`workspace-policies`, `provider`,
- * `image-definitions`, `credential-services`) und freie Eingaben
- * (Event-Detail, `?settings=`) auf Sheet-Tabs. Unbekannt → `general`.
+ * Maps old OrgSettings query tabs (`workspace-policies`, `provider`,
+ * `image-definitions`, `credential-services`) and free-form input
+ * (event detail, `?settings=`) onto sheet tabs. Unknown → `general`.
  */
 export function resolveSettingsTab(tab: unknown): SettingsTabId {
   switch (tab) {
@@ -43,16 +44,17 @@ export function resolveSettingsTab(tab: unknown): SettingsTabId {
     case 'api_keys':
       return 'api-keys'
     case 'images':
-    case 'image-definitions':
     case 'captured-images':
       return 'images'
     case 'runners':
       return 'runners'
+    case 'credential-services':
     case 'organization':
     case 'organisation':
-    case 'credential-services':
     case 'members':
-      return 'organization'
+      return 'credential-services'
+    case 'image-definitions':
+      return 'image-definitions'
     default:
       return 'general'
   }

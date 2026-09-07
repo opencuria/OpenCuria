@@ -1,9 +1,5 @@
 <!--
-  CredentialServicesTab — Extrahierter "Credential Services"-Kern aus OrgSettingsView (Schritt 5).
-
-  Enthält die Service-Liste inkl. Create-Dialog und Aktivierungs-Toggle.
-  Wird vom Settings-Sheet (Tab "Organization") und weiterhin von
-  OrgSettingsView wiederverwendet.
+  CredentialServicesTab — catalog of credential services and per-org activation.
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
@@ -11,7 +7,12 @@ import { get, post } from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import SettingsSection from './SettingsSection.vue'
+import SettingsRow from './SettingsRow.vue'
 import {
   Select,
   SelectContent,
@@ -23,14 +24,11 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Plus, Key, Check, X } from '@lucide/vue'
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { Plus, Key, X } from '@lucide/vue'
 
 interface CredentialServiceWithActivation {
   id: string
@@ -54,10 +52,6 @@ interface CredentialServiceCreateIn {
   label?: string
 }
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
 const authStore = useAuthStore()
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
 
@@ -66,7 +60,6 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const toggleLoading = ref<string | null>(null)
 
-// Create credential service dialog
 const showCreateServiceModal = ref(false)
 const createServiceLoading = ref(false)
 const serviceName = ref('')
@@ -108,9 +101,12 @@ const isCreateServiceValid = computed(() => {
   return true
 })
 
-// ---------------------------------------------------------------------------
-// Load data
-// ---------------------------------------------------------------------------
+function typeLabel(type: string): string {
+  if (type === 'ssh_key') return 'SSH Key'
+  if (type === 'file') return 'File'
+  if (type === 'env') return 'ENV'
+  return type
+}
 
 async function loadData(): Promise<void> {
   loading.value = true
@@ -136,10 +132,6 @@ onMounted(() => {
 watch(activeOrganizationId, () => {
   void loadData()
 })
-
-// ---------------------------------------------------------------------------
-// Credential service activation toggle
-// ---------------------------------------------------------------------------
 
 async function toggleCredentialServiceActivation(
   svc: CredentialServiceWithActivation,
@@ -224,93 +216,88 @@ async function createCredentialService(): Promise<void> {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="space-y-6">
+    <div
+      v-if="error"
+      class="flex items-center justify-between rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+    >
+      <span>{{ error }}</span>
+      <Button size="icon-sm" variant="ghost" @click="error = null">
+        <X />
+      </Button>
+    </div>
+
     <div v-if="loading" class="flex justify-center py-12">
       <LoadingSpinner :size="24" />
     </div>
 
-    <div
-      v-else-if="error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error flex items-center justify-between"
+    <SettingsSection
+      v-else
+      description="Control which credential services are available to members of this organization."
     >
-      <span>{{ error }}</span>
-      <Button size="icon-sm" variant="ghost" @click="error = null">
-        <X :size="14" />
-      </Button>
-    </div>
-
-    <template v-else>
-      <div class="flex items-start justify-between gap-3">
-        <p class="text-sm text-muted-foreground">
-          Control which credential services are available to your organization members.
-        </p>
+      <template #actions>
         <Button size="sm" @click="openCreateCredentialService">
-          <Plus :size="14" />
+          <Plus />
           New Service
         </Button>
-      </div>
-
-      <div class="space-y-2">
-        <div
-          v-for="svc in credentialServices"
-          :key="svc.id"
-          class="flex items-center gap-3 px-4 py-3 rounded-md border border-border bg-card"
-        >
-          <!-- Icon -->
-          <div
-            class="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
-            :class="svc.is_active ? 'bg-success/10' : 'bg-muted/10'"
-          >
-            <Key :size="14" :class="svc.is_active ? 'text-success' : 'text-muted-foreground'" />
-          </div>
-
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="font-medium text-sm text-foreground">{{ svc.name }}</span>
-              <span
-                class="text-xs text-muted-foreground font-mono px-1.5 py-0.5 rounded bg-muted/10"
-              >
-                {{ svc.credential_type }}
-              </span>
-            </div>
-            <p v-if="svc.description" class="text-xs text-muted-foreground truncate mt-0.5">
-              {{ svc.description }}
-            </p>
-            <p v-if="svc.env_var_name" class="text-xs text-muted-foreground font-mono mt-0.5">
-              {{ svc.env_var_name }}
-            </p>
-            <p v-if="svc.target_path" class="text-xs text-muted-foreground font-mono mt-0.5">
-              {{ svc.target_path }}
-            </p>
-          </div>
-
-          <!-- Activation toggle -->
-          <button
-            type="button"
-            class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border font-medium transition-colors shrink-0"
-            :class="
-              svc.is_active
-                ? 'border-success/30 bg-success/10 text-success hover:bg-success/20'
-                : 'border-border bg-muted/10 text-muted-foreground hover:bg-muted/20'
-            "
-            :disabled="toggleLoading === svc.id"
-            @click="toggleCredentialServiceActivation(svc)"
-          >
-            <LoadingSpinner v-if="toggleLoading === svc.id" :size="10" />
-            <Check v-else-if="svc.is_active" :size="11" />
-            <X v-else :size="11" />
-            {{ svc.is_active ? 'Active' : 'Inactive' }}
-          </button>
-        </div>
-      </div>
+      </template>
 
       <div
         v-if="credentialServices.length === 0"
-        class="text-center py-12 text-muted-foreground text-sm"
+        class="overflow-hidden rounded-lg border border-border bg-card"
       >
-        No credential services found.
+        <EmptyState
+          :icon="Key"
+          title="No credential services"
+          description="Define a service so members can store matching credentials for workspaces."
+        />
       </div>
-    </template>
+
+      <div
+        v-else
+        class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+      >
+        <SettingsRow
+          v-for="svc in credentialServices"
+          :key="svc.id"
+          :icon-class="svc.is_active ? 'bg-success/10 text-success' : undefined"
+        >
+          <template #icon>
+            <Key :size="16" />
+          </template>
+          <div class="min-w-0 space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium text-foreground">{{ svc.name }}</span>
+              <span class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                {{ typeLabel(svc.credential_type) }}
+              </span>
+            </div>
+            <p v-if="svc.description" class="text-sm text-muted-foreground">
+              {{ svc.description }}
+            </p>
+            <p v-if="svc.env_var_name" class="font-mono text-xs text-muted-foreground">
+              {{ svc.env_var_name }}
+            </p>
+            <p v-if="svc.target_path" class="font-mono text-xs text-muted-foreground break-all">
+              {{ svc.target_path }}
+            </p>
+          </div>
+          <template #actions>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-muted-foreground">
+                {{ svc.is_active ? 'Active' : 'Inactive' }}
+              </span>
+              <Switch
+                :model-value="svc.is_active"
+                :disabled="toggleLoading === svc.id"
+                :aria-label="svc.is_active ? 'Deactivate service' : 'Activate service'"
+                @update:model-value="toggleCredentialServiceActivation(svc)"
+              />
+            </div>
+          </template>
+        </SettingsRow>
+      </div>
+    </SettingsSection>
 
     <Dialog
       :open="showCreateServiceModal"
@@ -325,27 +312,26 @@ async function createCredentialService(): Promise<void> {
         </DialogHeader>
 
         <form class="space-y-4" @submit.prevent="createCredentialService">
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-            <Input v-model="serviceName" placeholder="GitHub Enterprise" />
+          <div class="space-y-2">
+            <Label for="service-name">Name</Label>
+            <Input id="service-name" v-model="serviceName" placeholder="GitHub Enterprise" />
           </div>
 
           <div class="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">Slug</label>
+            <div class="space-y-2">
+              <Label for="service-slug">Slug</Label>
               <Input
+                id="service-slug"
                 v-model="serviceSlug"
                 placeholder="github-enterprise"
                 @update:model-value="serviceSlugTouched = true"
               />
-              <p class="text-xs text-muted-foreground mt-1">
-                Used as stable identifier. Auto-generated from name.
+              <p class="text-xs text-muted-foreground">
+                Used as a stable identifier. Auto-generated from the name.
               </p>
             </div>
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">
-                Credential Type
-              </label>
+            <div class="space-y-2">
+              <Label>Credential Type</Label>
               <Select v-model="serviceCredentialType">
                 <SelectTrigger>
                   <SelectValue placeholder="Select credential type" />
@@ -363,42 +349,41 @@ async function createCredentialService(): Promise<void> {
             </div>
           </div>
 
-          <div v-if="serviceCredentialType === 'env'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">
-              Environment Variable Name
-            </label>
-            <Input v-model="serviceEnvVarName" placeholder="GITHUB_TOKEN" />
-            <p class="text-xs text-muted-foreground mt-1">
+          <div v-if="serviceCredentialType === 'env'" class="space-y-2">
+            <Label for="service-env">Environment Variable Name</Label>
+            <Input id="service-env" v-model="serviceEnvVarName" placeholder="GITHUB_TOKEN" />
+            <p class="text-xs text-muted-foreground">
               Must be uppercase snake case, e.g. <code>OPENAI_API_KEY</code>.
             </p>
           </div>
 
-          <div v-else-if="serviceCredentialType === 'file'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Target Path</label>
-            <Input v-model="serviceTargetPath" placeholder="~/.codex/auth.json" />
-            <p class="text-xs text-muted-foreground mt-1">
+          <div v-else-if="serviceCredentialType === 'file'" class="space-y-2">
+            <Label for="service-path">Target Path</Label>
+            <Input id="service-path" v-model="serviceTargetPath" placeholder="~/.codex/auth.json" />
+            <p class="text-xs text-muted-foreground">
               Supports absolute paths, <code>~/...</code>, <code>${HOME}/...</code>, and relative
               paths resolved against HOME.
             </p>
           </div>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Label</label>
-            <Input v-model="serviceLabel" placeholder="Personal Access Token" />
-            <p class="text-xs text-muted-foreground mt-1">
+          <div class="space-y-2">
+            <Label for="service-label">Label</Label>
+            <Input id="service-label" v-model="serviceLabel" placeholder="Personal Access Token" />
+            <p class="text-xs text-muted-foreground">
               Optional helper label shown in credential forms.
             </p>
           </div>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
+          <div class="space-y-2">
+            <Label for="service-description">Description</Label>
             <Input
+              id="service-description"
               v-model="serviceDescription"
               placeholder="Used for repository access and API integrations."
             />
           </div>
 
-          <div class="flex justify-end gap-2 pt-2">
+          <DialogFooter>
             <Button
               variant="outline"
               type="button"
@@ -409,10 +394,10 @@ async function createCredentialService(): Promise<void> {
             </Button>
             <Button type="submit" :disabled="!isCreateServiceValid || createServiceLoading">
               <LoadingSpinner v-if="createServiceLoading" :size="12" />
-              <Plus v-else :size="12" />
+              <Plus v-else />
               Create Service
             </Button>
-          </div>
+          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

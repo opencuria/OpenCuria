@@ -2,7 +2,11 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import {
   Dialog,
   DialogContent,
@@ -12,15 +16,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import SettingsSection from '@/components/settings/SettingsSection.vue'
+import SettingsRow from '@/components/settings/SettingsRow.vue'
 import {
   Plus,
   Pencil,
   Trash2,
-  ChevronsDownUp,
-  ChevronsUpDown,
+  ChevronDown,
   Loader2,
   Copy,
   RotateCcw,
+  Layers,
 } from '@lucide/vue'
 import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
@@ -344,12 +351,32 @@ function handleAction(
   void run()
 }
 
-async function toggleExpand(definitionId: string): Promise<void> {
-  expanded.value = expanded.value === definitionId ? null : definitionId
-  if (expanded.value === definitionId) {
-    await loadBuilds(definitionId)
+async function onExpandChange(definitionId: string, open: boolean): Promise<void> {
+  if (!open) {
+    if (expanded.value === definitionId) expanded.value = null
+    ensureRefresh()
+    return
   }
+  expanded.value = definitionId
+  await loadBuilds(definitionId)
   ensureRefresh()
+}
+
+function formatRuntimeType(runtime: string): string {
+  if (runtime === 'qemu') return 'QEMU'
+  if (!runtime) return runtime
+  return runtime.charAt(0).toUpperCase() + runtime.slice(1)
+}
+
+function definitionKindLabel(definition: ImageDefinition): string {
+  return definition.is_standard ? 'Standard' : 'Custom'
+}
+
+function definitionStatusLabel(status: string): string {
+  if (status === 'deactivated') return 'Deactivated'
+  if (status === 'pending_deletion' || status === 'deleting') return 'Removing'
+  if (status === 'delete_failed') return 'Remove failed'
+  return status
 }
 
 onMounted(() => {
@@ -362,62 +389,89 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex justify-between items-start gap-4">
-      <p class="text-sm text-muted-foreground">
-        An image definition is a recipe. Build it on a runner to make it available for new
-        workspaces. Rebuilding or removing an image does not delete existing workspaces.
-      </p>
-      <Button size="sm" class="shrink-0" @click="openCreate">
-        <Plus :size="14" />
-        New Image Definition
-      </Button>
-    </div>
-
-    <div v-if="loading" class="flex justify-center py-10"><LoadingSpinner :size="24" /></div>
-
+  <div class="space-y-6">
     <div
       v-if="error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
     >
       {{ error }}
     </div>
 
-    <div v-if="!loading" class="space-y-2">
-      <Card v-for="definition in imageDefinitions" :key="definition.id">
-        <CardContent>
-          <div class="flex items-center gap-3">
-            <button
-              type="button"
-              class="text-muted-foreground hover:text-foreground"
-              @click="toggleExpand(definition.id)"
-            >
-              <ChevronsUpDown v-if="expanded !== definition.id" :size="14" />
-              <ChevronsDownUp v-else :size="14" />
-            </button>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-medium text-foreground">{{ definition.name }}</span>
-                <Badge variant="default">{{ definition.runtime_type }}</Badge>
-                <Badge variant="secondary">
-                  {{ definition.is_standard ? 'standard' : 'custom' }}
-                </Badge>
+    <SettingsSection
+      description="An image definition is a recipe. Build it on a runner to make it available for new workspaces. Rebuilding or removing an image does not delete existing workspaces."
+    >
+      <template #actions>
+        <Button size="sm" @click="openCreate">
+          <Plus />
+          New Image Definition
+        </Button>
+      </template>
+
+      <div v-if="loading" class="flex justify-center py-12">
+        <LoadingSpinner :size="24" />
+      </div>
+
+      <div
+        v-else-if="imageDefinitions.length === 0"
+        class="overflow-hidden rounded-lg border border-border bg-card"
+      >
+        <EmptyState
+          :icon="Layers"
+          title="No image definitions"
+          description="Create a recipe, then build it on a runner to use it for new workspaces."
+        />
+      </div>
+
+      <div
+        v-else
+        class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+      >
+        <Collapsible
+          v-for="definition in imageDefinitions"
+          :key="definition.id"
+          :open="expanded === definition.id"
+          @update:open="(open) => onExpandChange(definition.id, open)"
+        >
+          <SettingsRow bare-icon>
+            <template #icon>
+              <CollapsibleTrigger as-child>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  data-testid="image-definition-expand"
+                  :aria-label="
+                    expanded === definition.id ? 'Collapse runner builds' : 'Expand runner builds'
+                  "
+                >
+                  <ChevronDown
+                    class="transition-transform"
+                    :class="expanded === definition.id ? 'rotate-180' : undefined"
+                  />
+                </Button>
+              </CollapsibleTrigger>
+            </template>
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-medium text-foreground">{{ definition.name }}</span>
+                <Badge variant="default">{{ formatRuntimeType(definition.runtime_type) }}</Badge>
+                <Badge variant="secondary">{{ definitionKindLabel(definition) }}</Badge>
                 <Badge v-if="definition.status === 'deactivated'" variant="outline">
-                  deactivated
+                  {{ definitionStatusLabel(definition.status) }}
                 </Badge>
-                <Badge v-else-if="definition.status === 'pending_deletion'" variant="destructive">
-                  <Loader2 :size="10" class="inline animate-spin mr-1" />
-                  removing
-                </Badge>
-                <Badge v-else-if="definition.status === 'deleting'" variant="destructive">
-                  <Loader2 :size="10" class="inline animate-spin mr-1" />
-                  removing
+                <Badge
+                  v-else-if="
+                    definition.status === 'pending_deletion' || definition.status === 'deleting'
+                  "
+                  variant="destructive"
+                >
+                  <Loader2 :size="10" class="mr-1 inline animate-spin" />
+                  {{ definitionStatusLabel(definition.status) }}
                 </Badge>
                 <Badge v-else-if="definition.status === 'delete_failed'" variant="destructive">
-                  remove failed
+                  {{ definitionStatusLabel(definition.status) }}
                 </Badge>
               </div>
-              <p class="text-xs text-muted-foreground truncate">
+              <p class="text-sm text-muted-foreground">
                 {{ definition.description || 'No description' }}
               </p>
               <p class="text-xs text-muted-foreground">
@@ -426,179 +480,184 @@ onUnmounted(() => {
               </p>
               <p
                 v-if="definition.status === 'delete_failed' && definition.delete_last_error"
-                class="text-xs text-destructive mt-1"
+                class="text-xs text-destructive"
               >
                 {{ definition.delete_last_error }}
               </p>
             </div>
-            <template v-if="getDefinitionActions(definition).canDuplicate">
-              <Button variant="ghost" size="icon-sm" @click="duplicateDefinition(definition)">
-                <Copy :size="14" />
+            <template #actions>
+              <Button
+                v-if="getDefinitionActions(definition).canDuplicate"
+                variant="ghost"
+                size="icon-sm"
+                @click="duplicateDefinition(definition)"
+              >
+                <Copy />
+              </Button>
+              <Button
+                v-if="getDefinitionActions(definition).canEdit"
+                variant="ghost"
+                size="icon-sm"
+                @click="openEdit(definition)"
+              >
+                <Pencil />
+              </Button>
+              <Button
+                v-if="getDefinitionActions(definition).canDelete"
+                variant="ghost"
+                size="icon-sm"
+                class="text-destructive hover:text-destructive"
+                @click="requestDeleteDefinition(definition)"
+              >
+                <Trash2 />
+              </Button>
+              <Button
+                v-if="getDefinitionActions(definition).canRestore"
+                size="sm"
+                variant="outline"
+                :disabled="actionLoading === `${definition.id}:restore`"
+                @click="restoreDefinition(definition.id)"
+              >
+                Restore
+              </Button>
+              <Button
+                v-if="getDefinitionActions(definition).canRetryDelete"
+                size="sm"
+                variant="destructive"
+                @click="requestDeleteDefinition(definition)"
+              >
+                <RotateCcw />
+                Retry delete
               </Button>
             </template>
-            <Button
-              v-if="getDefinitionActions(definition).canEdit"
-              variant="ghost"
-              size="icon-sm"
-              @click="openEdit(definition)"
-            >
-              <Pencil :size="14" />
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canDelete"
-              variant="ghost"
-              size="icon-sm"
-              class="text-destructive"
-              @click="requestDeleteDefinition(definition)"
-            >
-              <Trash2 :size="14" />
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canRestore"
-              size="sm"
-              variant="outline"
-              :disabled="actionLoading === `${definition.id}:restore`"
-              @click="restoreDefinition(definition.id)"
-            >
-              Restore
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canRetryDelete"
-              size="sm"
-              variant="destructive"
-              @click="requestDeleteDefinition(definition)"
-            >
-              <RotateCcw :size="12" />
-              Retry delete
-            </Button>
-          </div>
+          </SettingsRow>
 
-          <div v-if="expanded === definition.id" class="mt-4 border-t border-border pt-3">
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-left text-muted-foreground">
-                    <th class="py-1 pr-3">Runner</th>
-                    <th class="py-1 pr-3">Status</th>
-                    <th class="py-1">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="runner in compatibleRunners(definition)"
-                    :key="runner.id"
-                    class="border-t border-border/40"
-                  >
-                    <td class="py-2 pr-3">
-                      <div class="flex items-center gap-2">
-                        <span>{{ runner.name || runner.id.slice(0, 8) }}</span>
-                        <Badge v-if="!isRunnerOnline(runner)" variant="outline">offline</Badge>
-                      </div>
-                    </td>
-                    <td class="py-2 pr-3">
-                      <Badge
-                        :variant="
-                          ['pending_deletion', 'deleting', 'delete_failed', 'failed'].includes(
-                            getBuild(definition.id, runner.id)?.status || '',
-                          )
-                            ? 'destructive'
-                            : 'secondary'
-                        "
-                      >
-                        <Loader2
-                          v-if="
-                            ['pending', 'building', 'pending_deletion', 'deleting'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          :size="10"
-                          class="inline animate-spin mr-1"
-                        />
-                        {{
-                          getRunnerBuildStatusLabel(
-                            getBuild(definition.id, runner.id)?.status,
-                            isRunnerOnline(runner),
-                          )
-                        }}
-                      </Badge>
-                    </td>
-                    <td class="py-2">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <Button
-                          v-if="
-                            ['pending', 'building'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          size="sm"
-                          variant="outline"
-                          disabled
-                        >
-                          <Loader2 :size="12" class="animate-spin" />
-                          {{
-                            getBuild(definition.id, runner.id)?.status === 'pending' &&
-                            !isRunnerOnline(runner)
-                              ? 'Waiting for runner'
-                              : 'Building…'
-                          }}
-                        </Button>
-                        <Button
-                          v-else-if="
-                            ['pending_deletion', 'deleting'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          size="sm"
-                          variant="outline"
-                          disabled
-                        >
-                          <Loader2 :size="12" class="animate-spin" />
-                          Removing…
-                        </Button>
-                        <Button
-                          v-for="action in getRunnerBuildActions(
-                            getBuild(definition.id, runner.id)?.status,
-                            { definitionLocked: isDefinitionLocked(definition.status) },
-                          )"
-                          :key="action.id"
-                          size="sm"
+          <CollapsibleContent>
+            <div class="border-t border-border px-4 pb-4 pt-3">
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-xs text-muted-foreground">
+                      <th class="py-1.5 pr-3 font-medium">Runner</th>
+                      <th class="py-1.5 pr-3 font-medium">Status</th>
+                      <th class="py-1.5 font-medium">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-border">
+                    <tr v-for="runner in compatibleRunners(definition)" :key="runner.id">
+                      <td class="py-2 pr-3">
+                        <div class="flex items-center gap-2">
+                          <span>{{ runner.name || runner.id.slice(0, 8) }}</span>
+                          <Badge v-if="!isRunnerOnline(runner)" variant="outline">Offline</Badge>
+                        </div>
+                      </td>
+                      <td class="py-2 pr-3">
+                        <Badge
                           :variant="
-                            action.kind === 'destructive'
-                              ? 'ghost'
-                              : action.kind === 'ghost'
-                                ? 'ghost'
-                                : 'outline'
+                            ['pending_deletion', 'deleting', 'delete_failed', 'failed'].includes(
+                              getBuild(definition.id, runner.id)?.status || '',
+                            )
+                              ? 'destructive'
+                              : 'secondary'
                           "
-                          :class="action.kind === 'destructive' ? 'text-destructive' : ''"
-                          :disabled="Boolean(actionLoading?.startsWith(`${definition.id}:${runner.id}:`))"
-                          @click="handleAction(definition, runner, action)"
                         >
-                          {{ action.label }}
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                          <Loader2
+                            v-if="
+                              ['pending', 'building', 'pending_deletion', 'deleting'].includes(
+                                getBuild(definition.id, runner.id)?.status || '',
+                              )
+                            "
+                            :size="10"
+                            class="mr-1 inline animate-spin"
+                          />
+                          {{
+                            getRunnerBuildStatusLabel(
+                              getBuild(definition.id, runner.id)?.status,
+                              isRunnerOnline(runner),
+                            )
+                          }}
+                        </Badge>
+                      </td>
+                      <td class="py-2">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <Button
+                            v-if="
+                              ['pending', 'building'].includes(
+                                getBuild(definition.id, runner.id)?.status || '',
+                              )
+                            "
+                            size="sm"
+                            variant="outline"
+                            disabled
+                          >
+                            <Loader2 :size="12" class="animate-spin" />
+                            {{
+                              getBuild(definition.id, runner.id)?.status === 'pending' &&
+                              !isRunnerOnline(runner)
+                                ? 'Waiting for runner'
+                                : 'Building…'
+                            }}
+                          </Button>
+                          <Button
+                            v-else-if="
+                              ['pending_deletion', 'deleting'].includes(
+                                getBuild(definition.id, runner.id)?.status || '',
+                              )
+                            "
+                            size="sm"
+                            variant="outline"
+                            disabled
+                          >
+                            <Loader2 :size="12" class="animate-spin" />
+                            Removing…
+                          </Button>
+                          <Button
+                            v-for="action in getRunnerBuildActions(
+                              getBuild(definition.id, runner.id)?.status,
+                              { definitionLocked: isDefinitionLocked(definition.status) },
+                            )"
+                            :key="action.id"
+                            size="sm"
+                            :variant="
+                              action.kind === 'destructive'
+                                ? 'ghost'
+                                : action.kind === 'ghost'
+                                  ? 'ghost'
+                                  : 'outline'
+                            "
+                            :class="action.kind === 'destructive' ? 'text-destructive' : ''"
+                            :disabled="
+                              Boolean(actionLoading?.startsWith(`${definition.id}:${runner.id}:`))
+                            "
+                            @click="handleAction(definition, runner, action)"
+                          >
+                            {{ action.label }}
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p
+                v-if="compatibleRunners(definition).length === 0"
+                class="mt-3 text-xs text-muted-foreground"
+              >
+                No runners in this organization currently support the
+                {{ formatRuntimeType(definition.runtime_type) }} runtime.
+              </p>
+              <p
+                v-else-if="!isDefinitionLocked(definition.status)"
+                class="mt-3 text-xs text-muted-foreground"
+              >
+                Deactivate only hides this image from new workspaces on that runner. Existing
+                workspaces keep running.
+              </p>
             </div>
-            <p v-if="compatibleRunners(definition).length === 0" class="mt-3 text-xs text-muted-foreground">
-              No runners in this organization currently support the {{ definition.runtime_type }} runtime.
-            </p>
-            <p
-              v-else-if="!isDefinitionLocked(definition.status)"
-              class="mt-3 text-xs text-muted-foreground"
-            >
-              Deactivate only hides this image from new workspaces on that runner. Existing
-              workspaces keep running.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div v-if="imageDefinitions.length === 0" class="py-10 text-center text-sm text-muted-foreground">
-        No image definitions found.
+          </CollapsibleContent>
+        </Collapsible>
       </div>
-    </div>
+    </SettingsSection>
 
     <ImageDefinitionModal
       :open="modalOpen"
@@ -632,7 +691,9 @@ onUnmounted(() => {
           <DialogTitle>Build log</DialogTitle>
           <DialogDescription>Latest output from the runner image build.</DialogDescription>
         </DialogHeader>
-        <pre class="max-h-80 overflow-auto rounded-[var(--radius-md)] bg-muted p-3 text-xs whitespace-pre-wrap">{{ logText }}</pre>
+        <pre class="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs">{{
+          logText
+        }}</pre>
         <DialogFooter>
           <Button variant="outline" type="button" @click="logText = null">Close</Button>
         </DialogFooter>

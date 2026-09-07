@@ -183,7 +183,8 @@ describe('SettingsSheet', () => {
       'api-keys',
       'images',
       'runners',
-      'organization',
+      'credential-services',
+      'image-definitions',
     ]) {
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     }
@@ -201,7 +202,7 @@ describe('SettingsSheet', () => {
     const wrapper = mountSheet()
     await flushPromises()
 
-    // Default: Allgemein (Workspace-Policy)
+    // Default: General (workspace policy)
     expect(wrapper.text()).toContain('Automatic Workspace Stop')
 
     await wrapper.find('[data-testid="settings-nav-provider"]').trigger('click')
@@ -211,14 +212,14 @@ describe('SettingsSheet', () => {
 
   it('opens via opencuria:open-settings event with the given tab', async () => {
     const wrapper = mountSheet()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
 
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
     await flushPromises()
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
-      'Provider & Modelle',
+      'Provider & Models',
     )
     expect(wrapper.text()).toContain('OpenRouter Provider')
   })
@@ -231,14 +232,21 @@ describe('SettingsSheet', () => {
     )
     await flushPromises()
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
 
     window.dispatchEvent(
       new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'credential-services' } }),
     )
     await flushPromises()
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Organization')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Credential Services')
+
+    window.dispatchEvent(
+      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'image-definitions' } }),
+    )
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Image Definitions')
   })
 
   it('falls back to general for unknown tabs and hides runners for non-admins', async () => {
@@ -248,12 +256,12 @@ describe('SettingsSheet', () => {
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners' } }))
     await flushPromises()
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
 
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'nope' } }))
     await flushPromises()
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
     authMock.isAdmin = true
   })
 

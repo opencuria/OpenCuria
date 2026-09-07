@@ -1,18 +1,15 @@
 <!--
-  SettingsSheet — Großes Settings-Modal mit Seiten-Nav (Schritt 5).
+  SettingsSheet — large settings modal with side navigation.
 
-  Layout-Pattern angelehnt an OpenWebUI (chat/SettingsModal.svelte +
-  common/Modal.svelte, size=full): links Nav (w-60 border-r), rechts Content.
-  Inhalte sind OpenCuria-eigene Panels (keine OpenWebUI-Tabs).
+  Layout: left nav (w-60 border-r), right content. Contents are
+  OpenCuria-owned panels.
 
-  Öffnen:  (a) global via Window-Event `opencuria:open-settings`
+  Open:  (a) global via Window event `opencuria:open-settings`
              (CustomEvent, detail `{ tab?: string }`),
-           (b) kontrolliert via v-model:open (defineModel).
-  Tab-Auswahl: `resolveSettingsTab()` — mappt auch alte OrgSettings-Tabs
-  (`workspace-policies`, `provider`, `image-definitions`,
-  `credential-services`) und Legacy-Tabs (`preferences`, `theme` …).
-  Runners-Tab ist nur für Admins sichtbar (authStore.isAdmin).
-  Focus-Trap/Esc/Backdrop kommen vom Dialog (reka-ui) gratis.
+           (b) controlled via v-model:open (defineModel).
+  Tab selection: `resolveSettingsTab()` — also maps old OrgSettings tabs.
+  Runners tab is admin-only (authStore.isAdmin).
+  Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, watch } from 'vue'
@@ -23,9 +20,10 @@ import {
   Camera,
   Key,
   KeyRound,
+  Layers,
   Server,
   Settings2,
-  Users,
+  Shield,
 } from '@lucide/vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -61,14 +59,15 @@ interface SettingsNavItem {
 }
 
 const navItems: SettingsNavItem[] = [
-  { id: 'general', label: 'Allgemein', icon: Settings2 },
-  { id: 'provider', label: 'Provider & Modelle', icon: Bot },
+  { id: 'general', label: 'General', icon: Settings2 },
+  { id: 'provider', label: 'Provider & Models', icon: Bot },
   { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'images', label: 'Captured Images', icon: Camera },
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
-  { id: 'organization', label: 'Organization', icon: Users },
+  { id: 'credential-services', label: 'Credential Services', icon: Shield },
+  { id: 'image-definitions', label: 'Image Definitions', icon: Layers },
 ]
 
 const visibleNavItems = computed(() =>
@@ -76,12 +75,12 @@ const visibleNavItems = computed(() =>
 )
 
 const activeLabel = computed(
-  () => visibleNavItems.value.find((item) => item.id === activeTab.value)?.label ?? 'Einstellungen',
+  () => visibleNavItems.value.find((item) => item.id === activeTab.value)?.label ?? 'Settings',
 )
 
 function openSheet(tab?: unknown): void {
   const next = resolveSettingsTab(tab)
-  // Runners nur für Admins — sonst auf Allgemein zurückfallen.
+  // Runners is admin-only — fall back to General.
   activeTab.value = next === 'runners' && !isAdmin.value ? 'general' : next
   open.value = true
 }
@@ -103,8 +102,7 @@ onUnmounted(() => {
   window.removeEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
 })
 
-// Falls ein Admin den Runners-Tab offen hat und die Rolle verliert (Org-Wechsel),
-// zurück auf Allgemein wechseln.
+// If an admin has Runners open and loses the role (org switch), fall back.
 watch(isAdmin, (admin) => {
   if (!admin && activeTab.value === 'runners') {
     activeTab.value = 'general'
@@ -114,33 +112,31 @@ watch(isAdmin, (admin) => {
 
 <template>
   <Dialog v-model:open="open">
-    <!-- Breite mit Tailwind-v4-Important-Modifier (trailing `!`): tailwind-merge
-      löst die Dialog-Basis (`sm:max-w-md`, `w-full`) zwar korrekt ab
-      (verifiziert via twMerge + gemountetem Dialog), das `!` sichert die
-      80rem-Breite zusätzlich gegen die Stylesheet-Reihenfolge ab, falls die
-      Klasse je ohne Merge konkateniert wird (`sm:max-w-md` läge im
-      generierten CSS hinter `sm:max-w-[80rem]` und würde sonst gewinnen). -->
+    <!-- Width uses the Tailwind v4 important modifier (trailing `!`):
+      tailwind-merge already replaces Dialog's `sm:max-w-md` / `w-full`,
+      and `!` additionally guards stylesheet order if the class is ever
+      concatenated without merge. -->
     <DialogContent
       aria-describedby="settings-sheet-description"
       class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
       data-testid="settings-sheet"
       @open-auto-focus.prevent
     >
-      <DialogTitle class="sr-only">Einstellungen</DialogTitle>
+      <DialogTitle class="sr-only">Settings</DialogTitle>
       <DialogDescription id="settings-sheet-description" class="sr-only">
-        Organisations-, Provider- und Harness-Einstellungen.
+        Organization, provider, and harness settings.
       </DialogDescription>
 
-      <!-- Seiten-Nav: mobil horizontal, ab md vertikal -->
+      <!-- Side nav: horizontal on mobile, vertical from md -->
       <nav
-        aria-label="Einstellungen"
+        aria-label="Settings"
         class="shrink-0 border-b border-border md:w-60 md:border-b-0 md:border-r"
       >
-        <!-- Mobil: horizontale Chips -->
+        <!-- Mobile: horizontal chips -->
         <div
           class="flex gap-1.5 overflow-x-auto p-2 md:hidden"
           role="tablist"
-          aria-label="Einstellungen-Tabs"
+          aria-label="Settings tabs"
         >
           <button
             v-for="item in visibleNavItems"
@@ -164,13 +160,13 @@ watch(isAdmin, (admin) => {
           </button>
         </div>
 
-        <!-- Desktop: vertikale Liste -->
+        <!-- Desktop: vertical list -->
         <ScrollArea class="hidden h-full md:block">
-          <div class="flex flex-col gap-0.5 p-2" role="tablist" aria-label="Einstellungen-Tabs">
+          <div class="flex flex-col gap-0.5 p-2" role="tablist" aria-label="Settings tabs">
             <div class="flex items-center gap-2 px-2.5 pb-2 pt-1.5">
               <Building2 :size="16" class="text-muted-foreground" aria-hidden="true" />
               <span class="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                Einstellungen
+                Settings
               </span>
             </div>
             <button
@@ -213,16 +209,8 @@ watch(isAdmin, (admin) => {
             <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
             <CapturedImagesPanel v-else-if="activeTab === 'images'" />
             <RunnersPanel v-else-if="activeTab === 'runners' && isAdmin" />
-            <div v-else-if="activeTab === 'organization'" class="space-y-8">
-              <section aria-label="Credential Services">
-                <h3 class="mb-3 text-sm font-semibold text-foreground">Credential Services</h3>
-                <CredentialServicesTab />
-              </section>
-              <section aria-label="Image Definitions">
-                <h3 class="mb-3 text-sm font-semibold text-foreground">Image Definitions</h3>
-                <ImageDefinitionsTab />
-              </section>
-            </div>
+            <CredentialServicesTab v-else-if="activeTab === 'credential-services'" />
+            <ImageDefinitionsTab v-else-if="activeTab === 'image-definitions'" />
           </div>
         </ScrollArea>
       </div>

@@ -11,6 +11,8 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
@@ -98,7 +100,7 @@ function handleClose(): void {
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
     <DialogTrigger as-child>
-      <Button @click="open = true">Add Credential</Button>
+      <Button size="sm" @click="open = true">Add Credential</Button>
     </DialogTrigger>
 
     <DialogContent>
@@ -180,16 +182,11 @@ function handleClose(): void {
           </p>
         </div>
 
-        <div v-if="authStore.isAdmin" class="flex items-center gap-2">
-          <input
-            id="create-org-credential"
-            v-model="isOrgCredential"
-            type="checkbox"
-            class="rounded border-border"
-          />
-          <label for="create-org-credential" class="text-sm text-foreground cursor-pointer">
+        <div v-if="authStore.isAdmin" class="flex items-center justify-between gap-3">
+          <Label for="create-org-credential" class="cursor-pointer font-normal">
             Share with entire organization
-          </label>
+          </Label>
+          <Switch id="create-org-credential" v-model="isOrgCredential" />
         </div>
 
         <div class="flex justify-end gap-2 pt-2">

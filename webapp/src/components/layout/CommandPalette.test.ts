@@ -18,6 +18,8 @@ const baseConversations = [
       agent_name: 'build',
       model: '',
       unread: false,
+      needs_attention: false,
+      attention_kind: '',
       updated_at: new Date().toISOString(),
     },
     {
@@ -30,6 +32,8 @@ const baseConversations = [
       agent_name: 'plan',
       model: '',
       unread: false,
+      needs_attention: false,
+      attention_kind: '',
       updated_at: new Date().toISOString(),
     },
   ]

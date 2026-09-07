@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Runner } from '@/types'
 import RunnerCard from './RunnerCard.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import { Server } from '@lucide/vue'
 
 defineProps<{
@@ -9,20 +10,18 @@ defineProps<{
 </script>
 
 <template>
-  <div v-if="runners.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+  <div
+    v-if="runners.length"
+    class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+  >
     <RunnerCard v-for="runner in runners" :key="runner.id" :runner="runner" />
   </div>
 
-  <div
-    v-else
-    class="flex flex-col items-center justify-center py-12 px-6 text-center"
-  >
-    <div class="mb-4 text-muted-foreground">
-      <Server :size="40" />
-    </div>
-    <h3 class="text-lg font-medium text-foreground mb-1">No runners registered</h3>
-    <p class="text-sm text-muted-foreground max-w-sm">
-      Register a runner to start provisioning workspaces for your AI coding agents.
-    </p>
+  <div v-else class="overflow-hidden rounded-lg border border-border bg-card">
+    <EmptyState
+      :icon="Server"
+      title="No runners registered"
+      description="Register a runner to start provisioning workspaces for your AI coding agents."
+    />
   </div>
 </template>

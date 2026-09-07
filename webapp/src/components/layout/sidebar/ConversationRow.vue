@@ -179,26 +179,32 @@ function tooltipDate(): string {
       />
     </div>
 
-    <Tooltip :delay-duration="500">
-      <TooltipTrigger as-child>
-        <span
-          class="min-w-0 flex-1 truncate text-[13px] text-foreground"
-          :class="needsAttention || props.conversation.unread ? 'font-semibold' : 'font-medium'"
-        >
-          {{ title }}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="right" class="space-y-0.5 text-left">
-        <div class="font-medium">{{ title }}</div>
-        <div>{{ props.conversation.workspace_name }}</div>
-        <div v-if="needsAttention" class="text-amber-200">{{ attentionLabel }}</div>
-        <div class="text-background/70">{{ tooltipDate() }}</div>
-      </TooltipContent>
-    </Tooltip>
+    <div class="min-w-0 flex-1">
+      <Tooltip :delay-duration="500">
+        <TooltipTrigger as-child>
+          <span
+            class="block truncate text-[13px] text-foreground"
+            :class="needsAttention || props.conversation.unread ? 'font-semibold' : 'font-medium'"
+          >
+            {{ title }}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="right" class="space-y-0.5 text-left">
+          <div class="font-medium">{{ title }}</div>
+          <div>{{ props.conversation.workspace_name }}</div>
+          <div v-if="needsAttention" class="text-amber-200">{{ attentionLabel }}</div>
+          <div class="text-background/70">{{ tooltipDate() }}</div>
+        </TooltipContent>
+      </Tooltip>
+    </div>
 
-    <div class="relative flex h-6 w-20 shrink-0 items-center justify-end">
+    <div
+      class="relative flex h-6 min-w-6 shrink-0 items-center justify-end"
+      data-testid="conversation-row-meta"
+    >
       <span
-        class="max-w-full truncate text-right text-[11px] text-muted-foreground group-hover/row:invisible group-focus-within/row:invisible"
+        class="text-right text-[11px] text-muted-foreground group-hover/row:invisible group-focus-within/row:invisible"
+        :class="props.showWorkspace ? 'max-w-16 truncate' : ''"
       >
         {{
           props.showWorkspace

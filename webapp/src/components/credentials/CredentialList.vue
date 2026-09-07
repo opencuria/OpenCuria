@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Credential } from '@/types'
 import CredentialCard from './CredentialCard.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import { KeyRound } from '@lucide/vue'
 
 defineProps<{
@@ -15,7 +16,10 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div v-if="credentials.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+  <div
+    v-if="credentials.length"
+    class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+  >
     <CredentialCard
       v-for="cred in credentials"
       :key="cred.id"
@@ -26,16 +30,11 @@ const emit = defineEmits<{
     />
   </div>
 
-  <div
-    v-else
-    class="flex flex-col items-center justify-center py-12 px-6 text-center"
-  >
-    <div class="mb-4 text-muted-foreground">
-      <KeyRound :size="40" />
-    </div>
-    <h3 class="text-lg font-medium text-foreground mb-1">No credentials</h3>
-    <p class="text-sm text-muted-foreground max-w-sm">
-      Add credentials so they can be injected into workspaces as environment variables or SSH keys.
-    </p>
+  <div v-else class="overflow-hidden rounded-lg border border-border bg-card">
+    <EmptyState
+      :icon="KeyRound"
+      title="No credentials"
+      description="Add credentials so they can be injected into workspaces as environment variables or SSH keys."
+    />
   </div>
 </template>

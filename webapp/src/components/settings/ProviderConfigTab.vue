@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import SettingsSection from './SettingsSection.vue'
 import {
   deleteProviderConfig,
   getProviderConfig,
@@ -110,32 +111,24 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <p class="text-sm text-muted-foreground">
-      Configure the OpenRouter API key and default models used by the agent harness across
-      all workspaces in this organization.
-    </p>
-
+  <div class="space-y-6">
     <div v-if="loading" class="flex justify-center py-12">
       <LoadingSpinner :size="24" />
     </div>
 
     <div
       v-else-if="error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
     >
       {{ error }}
     </div>
 
-    <div v-else class="rounded-lg border border-border bg-card p-5 space-y-5">
-      <div>
-        <h3 class="text-base font-semibold text-foreground">OpenRouter Provider</h3>
-        <p class="mt-1 text-sm text-muted-foreground">
-          The API key is encrypted at rest. Only a masked hint is shown after saving.
-        </p>
-      </div>
-
-      <div class="grid gap-4 max-w-xl">
+    <SettingsSection
+      v-else
+      title="OpenRouter Provider"
+      description="Configure the API key and default models used by the agent harness across all workspaces. The key is encrypted at rest; only a masked hint is shown after saving."
+    >
+      <div class="grid max-w-xl gap-4">
         <div class="space-y-2">
           <Label for="provider-api-key">API Key</Label>
           <Input
@@ -191,22 +184,24 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="flex flex-wrap items-center gap-2">
-        <Button size="sm" :disabled="saving" @click="handleSave">
-          <LoadingSpinner v-if="saving" :size="12" />
-          <span v-else>Save Provider Config</span>
-        </Button>
+      <div class="flex flex-wrap items-center justify-between gap-2">
         <Button
           v-if="config"
           size="sm"
-          variant="outline"
+          variant="ghost"
+          class="text-destructive hover:text-destructive"
           :disabled="deleting"
           @click="handleDelete"
         >
           <LoadingSpinner v-if="deleting" :size="12" />
           <span v-else>Delete Config</span>
         </Button>
+        <span v-else />
+        <Button size="sm" :disabled="saving" @click="handleSave">
+          <LoadingSpinner v-if="saving" :size="12" />
+          <span v-else>Save Provider Config</span>
+        </Button>
       </div>
-    </div>
+    </SettingsSection>
   </div>
 </template>

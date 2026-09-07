@@ -108,7 +108,7 @@ function handleClose(): void {
     @update:open="(v) => (v ? (open = true) : handleClose())"
   >
     <DialogTrigger as-child>
-      <Button @click="open = true">Capture Image</Button>
+      <Button size="sm" @click="open = true">Capture Image</Button>
     </DialogTrigger>
 
     <DialogContent>

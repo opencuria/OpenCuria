@@ -1,9 +1,5 @@
 <!--
-  RunnersPanel — Extrahierter Runners-Kern aus RunnersView (Schritt 5).
-
-  Enthält Liste + Create-Dialog ohne Page-Header. Pollt alle 10s (wie die View).
-  Wird vom Settings-Sheet (Tab "Runners", nur Admin) und weiterhin von
-  RunnersView wiederverwendet.
+  RunnersPanel — runner list plus create dialog. Polls every 10s. Admin-only tab.
 -->
 <script setup lang="ts">
 import { onMounted } from 'vue'
@@ -12,6 +8,7 @@ import { usePolling } from '@/composables/usePolling'
 import RunnerList from '@/components/runners/RunnerList.vue'
 import CreateRunnerDialog from '@/components/runners/CreateRunnerDialog.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import SettingsSection from './SettingsSection.vue'
 
 const runnerStore = useRunnerStore()
 
@@ -23,31 +20,27 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-start justify-between gap-3">
-      <p class="text-sm text-muted-foreground">Manage runner instances that execute AI coding agents.</p>
-      <div class="shrink-0">
+  <div class="space-y-6">
+    <SettingsSection description="Manage runner instances that execute AI coding agents.">
+      <template #actions>
         <CreateRunnerDialog />
+      </template>
+
+      <div
+        v-if="runnerStore.loading && !runnerStore.runners.length"
+        class="flex justify-center py-12"
+      >
+        <LoadingSpinner :size="24" />
       </div>
-    </div>
 
-    <!-- Loading state -->
-    <div
-      v-if="runnerStore.loading && !runnerStore.runners.length"
-      class="flex justify-center py-12"
-    >
-      <LoadingSpinner :size="24" />
-    </div>
+      <div
+        v-else-if="runnerStore.error"
+        class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      >
+        {{ runnerStore.error }}
+      </div>
 
-    <!-- Error state -->
-    <div
-      v-else-if="runnerStore.error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
-    >
-      {{ runnerStore.error }}
-    </div>
-
-    <!-- Runner list -->
-    <RunnerList v-else :runners="runnerStore.runners" />
+      <RunnerList v-else :runners="runnerStore.runners" />
+    </SettingsSection>
   </div>
 </template>

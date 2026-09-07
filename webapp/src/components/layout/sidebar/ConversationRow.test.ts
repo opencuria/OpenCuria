@@ -80,7 +80,7 @@ describe('ConversationRow', () => {
     })
 
     expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="Chat First chat öffnen — Question waiting"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="Chat First chat öffnen — Question waiting"]')).toBeTruthy()
   })
 
   it('emits mark-unread from the row menu when the chat is read', async () => {
@@ -151,5 +151,27 @@ describe('ConversationRow', () => {
     const wrapper = mountRow({}, { showWorkspace: true })
 
     expect(wrapper.get('[data-testid="conversation-row"]').text()).toContain('Alpha')
+  })
+
+  it('sizes the trailing meta to its content so titles can use leftover space', () => {
+    const wrapper = mountRow({ title: 'Bitte um eine Frage auf Wunsch' })
+    const meta = wrapper.get('[data-testid="conversation-row-meta"]')
+
+    expect(meta.classes()).toContain('min-w-6')
+    expect(meta.classes()).not.toContain('w-20')
+    expect(wrapper.get('[data-testid="conversation-row"]').text()).toContain(
+      'Bitte um eine Frage auf Wunsch',
+    )
+  })
+
+  it('truncates long workspace names in the trailing meta', () => {
+    const wrapper = mountRow(
+      { workspace_name: 'A very long workspace name' },
+      { showWorkspace: true },
+    )
+    const metaLabel = wrapper.get('[data-testid="conversation-row-meta"] span')
+
+    expect(metaLabel.classes()).toContain('truncate')
+    expect(metaLabel.classes()).toContain('max-w-16')
   })
 })

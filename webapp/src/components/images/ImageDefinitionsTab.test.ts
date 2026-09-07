@@ -119,7 +119,7 @@ describe('ImageDefinitionsTab', () => {
     const wrapper = mount(ImageDefinitionsTab)
     await flushPromises()
 
-    await wrapper.get('button.text-muted-foreground').trigger('click')
+    await wrapper.get('[data-testid="image-definition-expand"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('Build')

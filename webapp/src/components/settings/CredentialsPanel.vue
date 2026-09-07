@@ -1,9 +1,6 @@
 <!--
-  CredentialsPanel — Extrahierter Credentials-Kern aus CredentialsView (Schritt 5).
-
-  Enthält Liste + Create/Edit/Delete/Public-Key-Dialoge ohne Page-Header.
-  Pollt alle 10s (wie die View). Wird vom Settings-Sheet (Tab "Credentials")
-  und weiterhin von CredentialsView wiederverwendet.
+  CredentialsPanel — credential list plus create/edit/delete/public-key dialogs.
+  Polls every 10s.
 -->
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
@@ -15,6 +12,7 @@ import EditCredentialDialog from '@/components/credentials/EditCredentialDialog.
 import DeleteCredentialDialog from '@/components/credentials/DeleteCredentialDialog.vue'
 import PublicKeyDialog from '@/components/credentials/PublicKeyDialog.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import SettingsSection from './SettingsSection.vue'
 import type { Credential } from '@/types'
 
 const credentialStore = useCredentialStore()
@@ -55,46 +53,39 @@ function onPublicKeyClose(): void {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-start justify-between gap-3">
-      <p class="text-sm text-muted-foreground">
-        Manage credentials injected into workspaces. Personal credentials are yours across all
-        organizations; organization credentials are shared with all members.
-      </p>
-      <div class="shrink-0">
+  <div class="space-y-6">
+    <SettingsSection
+      description="Manage credentials injected into workspaces. Personal credentials are yours across all organizations; organization credentials are shared with all members."
+    >
+      <template #actions>
         <CreateCredentialDialog />
+      </template>
+
+      <div
+        v-if="credentialStore.loading && !credentialStore.credentials.length"
+        class="flex justify-center py-12"
+      >
+        <LoadingSpinner :size="24" />
       </div>
-    </div>
 
-    <div
-      v-if="credentialStore.loading && !credentialStore.credentials.length"
-      class="flex justify-center py-12"
-    >
-      <LoadingSpinner :size="24" />
-    </div>
+      <div
+        v-else-if="credentialStore.error"
+        class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      >
+        {{ credentialStore.error }}
+      </div>
 
-    <div
-      v-else-if="credentialStore.error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
-    >
-      {{ credentialStore.error }}
-    </div>
+      <CredentialList
+        v-else
+        :credentials="credentialStore.credentials"
+        @edit="onEdit"
+        @delete="onDelete"
+        @view-public-key="onViewPublicKey"
+      />
+    </SettingsSection>
 
-    <CredentialList
-      v-else
-      :credentials="credentialStore.credentials"
-      @edit="onEdit"
-      @delete="onDelete"
-      @view-public-key="onViewPublicKey"
-    />
-
-    <!-- Edit dialog -->
     <EditCredentialDialog :credential="editingCredential" @close="onEditClose" />
-
-    <!-- Delete confirmation dialog -->
     <DeleteCredentialDialog :credential="deletingCredential" @close="onDeleteClose" />
-
-    <!-- Public key dialog -->
     <PublicKeyDialog :credential="viewingPublicKeyCredential" @close="onPublicKeyClose" />
   </div>
 </template>
