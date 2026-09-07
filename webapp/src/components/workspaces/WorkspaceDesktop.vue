@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, toRef } from 'vue'
 import type { CSSProperties } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
-import { onEvent } from '@/services/socket'
 import { getConfig } from '@/services/config'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { X, Monitor, RefreshCw, Minus, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { useDesktopSession } from '@/composables/useDesktopSession'
 import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
 import {
   DEFAULT_SIDEBAR_WIDTH,
@@ -25,11 +25,19 @@ const props = defineProps<{
 const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const notifications = useNotificationStore()
-const error = ref<string | null>(null)
+const {
+  error,
+  takeControlBusy,
+  startDesktop,
+  stopDesktop,
+  stopDesktopIfActive,
+  handleReconnect,
+  takeControl,
+  setupSocketListeners,
+  cleanupSocketListeners,
+} = useDesktopSession(toRef(props, 'workspaceId'))
 const clipboardBusy = ref(false)
-const takeControlBusy = ref(false)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
-const cleanupFns: (() => void)[] = []
 const viewportHostRef = ref<HTMLElement | null>(null)
 const viewportWidth = ref(0)
 const viewportHeight = ref(0)
@@ -130,82 +138,12 @@ const desktopIframeSrc = computed(() => {
   return buildDesktopIframeSrc(base, desktopStore.proxyUrl, token)
 })
 
-async function startDesktop(): Promise<void> {
-  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId) {
-    desktopStore.reset()
-  }
-  if (desktopStore.isConnecting || desktopStore.isConnected) return
-  error.value = null
-  desktopStore.setConnecting(props.workspaceId)
-
-  try {
-    const status = await workspacesApi.getDesktopStatus(props.workspaceId)
-    desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
-    await workspacesApi.startDesktop(props.workspaceId)
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
-      try {
-        const status = await workspacesApi.getDesktopStatus(props.workspaceId)
-        desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
-        if (status.active && status.proxy_url) {
-          desktopStore.setConnected(props.workspaceId, status.proxy_url)
-          return
-        }
-      } catch { /* fall through */ }
-    }
-    error.value = msg
-    desktopStore.setDisconnected()
-  }
-}
-
-async function stopDesktop(): Promise<boolean> {
-  try {
-    await workspacesApi.stopDesktop(props.workspaceId)
-    desktopStore.setDisconnected()
-    return true
-  } catch {
-    error.value = 'Failed to stop desktop session'
-    return false
-  }
-}
-
-async function stopDesktopIfActive(targetWorkspaceId: string): Promise<void> {
-  if (desktopStore.workspaceId !== targetWorkspaceId) return
-  if (!desktopStore.isConnected && !desktopStore.isConnecting) return
-  try {
-    await workspacesApi.stopDesktop(targetWorkspaceId)
-  } catch {
-    // Ignore stop errors during teardown.
-  }
-  desktopStore.setDisconnected()
-}
-
 async function handleClose(): Promise<void> {
   if (await stopDesktop()) desktopStore.close()
 }
 
 function handleMinimize(): void {
   desktopStore.minimize()
-}
-
-function handleReconnect(): void {
-  desktopStore.setDisconnected()
-  startDesktop()
-}
-
-async function takeControl(): Promise<void> {
-  if (takeControlBusy.value) return
-  takeControlBusy.value = true
-  desktopStore.setComputerUseActive(false)
-  try {
-    await workspacesApi.takeDesktopControl(props.workspaceId)
-  } catch (err: unknown) {
-    desktopStore.setComputerUseActive(true)
-    error.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    takeControlBusy.value = false
-  }
 }
 
 async function copyFromVmClipboard(): Promise<boolean> {
@@ -381,47 +319,10 @@ onMounted(() => {
     desktopStore.reset()
   }
 
-  cleanupFns.push(
-    onEvent('desktop:started', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      desktopStore.setConnected(props.workspaceId, data.proxy_url)
-      if (data.computer_use_active) desktopStore.setComputerUseActive(true)
-    }),
-    onEvent('desktop:stopped', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      desktopStore.setDisconnected()
-      desktopStore.setComputerUseActive(false)
-    }),
-    onEvent('desktop:viewer_released', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      desktopStore.setDisconnected()
-      desktopStore.setComputerUseActive(Boolean(data.computer_use_active))
-    }),
-    onEvent('harness.subtask_started', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      if ((data.agent || '').toLowerCase() !== 'computeruse') return
-      desktopStore.markComputerUseStarted(
-        data.child_session_id || data.subtask_id,
-      )
-    }),
-    onEvent('harness.subtask_finished', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      if ((data.agent || '').toLowerCase() !== 'computeruse') return
-      desktopStore.markComputerUseFinished(
-        data.child_session_id || data.subtask_id,
-      )
-    }),
-    onEvent('workspace:error', (data) => {
-      if (data.workspace_id !== props.workspaceId) return
-      if (desktopStore.isConnecting) {
-        error.value = data.error
-        desktopStore.setDisconnected()
-      }
-    }),
-  )
+  setupSocketListeners()
 
   if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting) {
-    startDesktop()
+    void startDesktop()
   }
   observeViewportHost()
   smQuery.addEventListener('change', onWideLayoutChange)
@@ -438,8 +339,7 @@ onBeforeUnmount(() => {
   if (!keepRunningInBackground) {
     void stopDesktopIfActive(props.workspaceId)
   }
-  cleanupFns.forEach((fn) => fn())
-  cleanupFns.length = 0
+  cleanupSocketListeners()
   resizeObserver?.disconnect()
   resizeObserver = null
   iframeKeydownCleanup?.()
@@ -453,7 +353,7 @@ watch(
   () => desktopStore.isOpen,
   (open) => {
     if (open && !desktopStore.isConnected && !desktopStore.isConnecting) {
-      startDesktop()
+      void startDesktop()
     }
   },
 )

@@ -18,13 +18,13 @@ import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
-import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
+import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
-import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
+import { useSidePanelStore } from '@/stores/sidePanel'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,21 +32,15 @@ const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const desktopStore = useDesktopStore()
 const processesStore = useProcessesStore()
+const sidePanelStore = useSidePanelStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
 const fileExplorerStore = useFileExplorerStore()
 const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
-const terminalHeight = ref(300)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
-
-const lgQuery = window.matchMedia('(min-width: 1024px)')
-const isDesktop = ref(lgQuery.matches)
-const onBreakpointChange = (e: MediaQueryListEvent) => {
-  isDesktop.value = e.matches
-}
 
 const canPrompt = computed(
   () =>
@@ -86,32 +80,6 @@ const activeChatTitle = computed(
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
-}
-
-function handleToggleTerminal(): void {
-  if (!canPrompt.value) return
-  if (!terminalStore.isOpen) {
-    terminalStore.open()
-    return
-  }
-  if (terminalStore.isMinimized) {
-    terminalStore.restore()
-    return
-  }
-  terminalStore.minimize()
-}
-
-function handleToggleDesktop(): void {
-  if (!canPrompt.value) return
-  if (!desktopStore.isOpen) {
-    desktopStore.open()
-    return
-  }
-  if (desktopStore.isMinimized) {
-    desktopStore.restore()
-    return
-  }
-  desktopStore.minimize()
 }
 
 function handleDeleteWorkspace(): void {
@@ -314,20 +282,12 @@ const {
 } = usePolling(() => processesStore.fetchProcesses(workspaceId.value), 10000)
 
 onMounted(() => {
-  lgQuery.addEventListener('change', onBreakpointChange)
   start()
   startProcessesPolling()
   setupSocketListeners()
 })
 
-watch(isDesktop, (desktop) => {
-  if (!desktop) {
-    fileExplorerStore.close()
-  }
-})
-
 onUnmounted(() => {
-  lgQuery.removeEventListener('change', onBreakpointChange)
   stop()
   stopProcessesPolling()
   cleanupSocket()
@@ -373,31 +333,6 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
   await workspaceStore.renameWorkspace(workspace.value.id, trimmed)
   renamingWorkspace.value = false
 }
-
-// --- Terminal resize drag ---
-
-const isDragging = ref(false)
-
-function onDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isDragging.value = true
-  const startY = e.clientY
-  const startHeight = terminalHeight.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startY - ev.clientY
-    terminalHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
-  }
-
-  const onUp = () => {
-    isDragging.value = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
 </script>
 
 <template>
@@ -409,11 +344,7 @@ function onDragStart(e: MouseEvent): void {
       :transition-label="workspaceTransitionLabel"
       :auto-stop-label="navbarStatusLabel"
       :runner-offline="isRunnerOfflineState"
-      :file-explorer-open="fileExplorerStore.isOpen"
-      :terminal-open="terminalStore.isOpen"
-      :terminal-minimized="terminalStore.isMinimized"
-      :desktop-open="desktopStore.isOpen"
-      :desktop-minimized="desktopStore.isMinimized"
+      :side-panel-open="sidePanelStore.isOpen"
       :processes-active="isProcessesPanelVisible"
       :running-process-count="runningProcessCount"
       :can-prompt="canPrompt"
@@ -421,9 +352,7 @@ function onDragStart(e: MouseEvent): void {
       @start-workspace="handleStartWorkspace"
       @stop-workspace="handleStopWorkspace"
       @save-workspace-name="handleSaveWorkspaceName"
-      @toggle-files="fileExplorerStore.toggle()"
-      @toggle-terminal="handleToggleTerminal"
-      @toggle-desktop="handleToggleDesktop"
+      @toggle-side-panel="sidePanelStore.toggle()"
       @toggle-processes="toggleProcessesPanel"
       @capture-image="imageArtifactDialogOpen = true"
       @delete-workspace="handleDeleteWorkspace"
@@ -434,7 +363,7 @@ function onDragStart(e: MouseEvent): void {
       <LoadingSpinner :size="24" />
     </div>
 
-    <!-- Chat area + terminal -->
+    <!-- Chat area + side panel -->
     <template v-else-if="workspace">
       <div class="flex flex-col flex-1 min-h-0">
         <!-- Chat content area -->
@@ -462,30 +391,15 @@ function onDragStart(e: MouseEvent): void {
               ></div>
             </div>
 
-            <!-- File explorer panel (right side) -->
-            <FileExplorerPanel
-              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
+            <!-- Side panel (Git / Desktop / Terminal / Files) -->
+            <WorkspaceSidePanel
+              v-if="canPrompt && sidePanelStore.hasOpened"
+              v-show="sidePanelStore.isOpen"
+              :key="workspaceId"
               :workspace-id="workspaceId"
             />
           </template>
         </div>
-
-        <!-- Terminal panel (bottom) -->
-        <template v-if="terminalStore.isOpen && canPrompt">
-          <!-- Drag handle -->
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onDragStart"
-          ></div>
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="shrink-0 relative"
-            :style="{ height: terminalHeight + 'px' }"
-          >
-            <WorkspaceTerminal :workspace-id="workspaceId" />
-          </div>
-        </template>
 
         <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
           <HarnessChatPanel

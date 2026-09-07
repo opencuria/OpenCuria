@@ -1,10 +1,16 @@
 <script setup lang="ts">
+/**
+ * FileExplorerPanel — file tree content for the side panel Files tab.
+ *
+ * Panel chrome (resize handle, close button) lives in WorkspaceSidePanel;
+ * this component only renders the tree, upload zone and context menu.
+ */
 import { ref, watch, onMounted } from 'vue'
 import type { FileNode } from '@/types'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { RefreshCw, ChevronRight } from '@lucide/vue'
+import { RefreshCw } from '@lucide/vue'
 import FileTree from './FileTree.vue'
 import FileContextMenu from './FileContextMenu.vue'
 import FileUploadZone from './FileUploadZone.vue'
@@ -22,11 +28,6 @@ const contextMenu = ref<{
   node: FileNode
 } | null>(null)
 
-// Drag resize state
-const isDragging = ref(false)
-
-const panelWidth = ref(store.panelWidth)
-
 // Load root on first open
 onMounted(() => {
   if (store.tree.length === 0) {
@@ -39,7 +40,6 @@ watch(
   () => props.workspaceId,
   () => {
     store.reset()
-    store.open()
     store.fetchDirectory(props.workspaceId, '/workspace')
   },
 )
@@ -63,78 +63,40 @@ function handleDownload(path: string): void {
 function handleRefresh(): void {
   store.refreshAll(props.workspaceId)
 }
-
-function onDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isDragging.value = true
-  const startX = e.clientX
-  const startWidth = panelWidth.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startX - ev.clientX
-    panelWidth.value = Math.max(200, Math.min(startWidth + delta, 600))
-  }
-
-  const onUp = () => {
-    isDragging.value = false
-    store.panelWidth = panelWidth.value
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
 </script>
 
 <template>
-  <div
-    class="flex h-full border-l border-border bg-card shrink-0 relative transition-all duration-200"
-    :style="{ width: `${panelWidth}px` }"
-  >
-    <!-- Drag handle (left edge) -->
-    <div
-      class="w-1 hover:bg-primary cursor-col-resize shrink-0 transition-colors"
-      @mousedown="onDragStart"
-    />
-
-    <!-- Close toggle -->
-    <Button
-      variant="secondary"
-      size="icon-sm"
-      class="absolute -left-3 top-3 z-10 w-6 h-6 rounded-full bg-card border border-border hover:bg-muted transition-colors flex items-center justify-center"
-      title="Close files"
-      @click="store.close()"
-    >
-      <ChevronRight :size="14" />
-    </Button>
-
-    <div class="flex flex-col flex-1 min-w-0">
-      <!-- Header -->
-      <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-        <span class="text-sm font-medium text-foreground">Files</span>
-        <Button variant="ghost" size="icon-sm" title="Refresh" @click="handleRefresh">
-          <RefreshCw :size="14" />
-        </Button>
-      </div>
-
-      <!-- File tree with drag & drop upload -->
-      <FileUploadZone
-        :workspace-id="workspaceId"
-        target-path="/workspace"
-        class="flex-1 min-h-0"
-        @uploaded="handleRefresh"
+  <div class="flex h-full flex-col bg-card" data-testid="file-explorer-panel">
+    <!-- Header -->
+    <div class="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+      <span class="text-xs font-medium text-foreground">Files</span>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        class="h-6 w-6"
+        title="Refresh"
+        @click="handleRefresh"
       >
-        <ScrollArea class="h-full">
-          <FileTree
-            :nodes="store.tree"
-            :workspace-id="workspaceId"
-            @select="handleSelect"
-            @contextmenu="handleContextMenu"
-          />
-        </ScrollArea>
-      </FileUploadZone>
+        <RefreshCw :size="12" />
+      </Button>
     </div>
+
+    <!-- File tree with drag & drop upload -->
+    <FileUploadZone
+      :workspace-id="workspaceId"
+      target-path="/workspace"
+      class="min-h-0 flex-1"
+      @uploaded="handleRefresh"
+    >
+      <ScrollArea class="h-full">
+        <FileTree
+          :nodes="store.tree"
+          :workspace-id="workspaceId"
+          @select="handleSelect"
+          @contextmenu="handleContextMenu"
+        />
+      </ScrollArea>
+    </FileUploadZone>
 
     <!-- Context menu -->
     <FileContextMenu

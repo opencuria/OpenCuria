@@ -4,9 +4,10 @@
  *
  * Kein Balken: transparent, ohne Border. Links steht der Chat-Name groß,
  * darunter Workspace-Name (per Klick/Pencil inline editierbar) plus Status.
- * Rechts: kompakte Panel-Toggles inkl. Background processes, dann `…`-Menü
- * mit Start/Stop, Capture und Delete. Die Chatliste lebt ausschließlich in
- * der globalen Sidebar; Chat-Rename/Delete passiert dort.
+ * Rechts: New chat, Background processes, `…`-Menü mit Start/Stop, Capture
+ * und Delete, dann der Side-Panel-Toggle (Git/Desktop/Terminal/Files).
+ * Die Chatliste lebt ausschließlich in der globalen Sidebar; Chat-Rename/
+ * Delete passiert dort.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
@@ -26,14 +27,12 @@ import {
   Check,
   Container,
   Ellipsis,
-  FolderTree,
   Loader2,
-  Monitor,
+  PanelRight,
   Pencil,
   Play,
   Plus,
   Square,
-  TerminalSquare,
   Trash2,
   X,
 } from '@lucide/vue'
@@ -44,11 +43,7 @@ const props = defineProps<{
   transitionLabel: string | null
   autoStopLabel: string | null
   runnerOffline: boolean
-  fileExplorerOpen: boolean
-  terminalOpen: boolean
-  terminalMinimized: boolean
-  desktopOpen: boolean
-  desktopMinimized: boolean
+  sidePanelOpen: boolean
   processesActive: boolean
   runningProcessCount: number
   canPrompt: boolean
@@ -59,9 +54,7 @@ const emit = defineEmits<{
   'start-workspace': []
   'stop-workspace': []
   'save-workspace-name': [name: string]
-  'toggle-files': []
-  'toggle-terminal': []
-  'toggle-desktop': []
+  'toggle-side-panel': []
   'toggle-processes': []
   'capture-image': []
   'delete-workspace': []
@@ -234,47 +227,6 @@ watch(
       <Button
         variant="ghost"
         size="icon-sm"
-        :title="fileExplorerOpen ? 'Hide files' : 'Open file explorer'"
-        data-testid="workspace-chat-header-toggle-files"
-        @click="emit('toggle-files')"
-      >
-        <FolderTree :size="16" :class="fileExplorerOpen ? 'text-primary' : ''" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        :title="!terminalOpen ? 'Open terminal' : terminalMinimized ? 'Restore terminal' : 'Minimize terminal'"
-        data-testid="workspace-chat-header-toggle-terminal"
-        @click="emit('toggle-terminal')"
-      >
-        <span class="relative inline-flex">
-          <TerminalSquare :size="16" :class="terminalOpen ? 'text-primary' : ''" />
-          <span
-            v-if="terminalOpen && terminalMinimized"
-            class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-            title="Terminal minimized"
-          />
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        :title="!desktopOpen ? 'Open desktop' : desktopMinimized ? 'Restore desktop' : 'Minimize desktop'"
-        data-testid="workspace-chat-header-toggle-desktop"
-        @click="emit('toggle-desktop')"
-      >
-        <span class="relative inline-flex">
-          <Monitor :size="16" :class="desktopOpen ? 'text-primary' : ''" />
-          <span
-            v-if="desktopOpen && desktopMinimized"
-            class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-            title="Desktop minimized"
-          />
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
         title="Background processes"
         data-testid="workspace-chat-header-toggle-processes"
         @click="emit('toggle-processes')"
@@ -341,6 +293,16 @@ watch(
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        :title="sidePanelOpen ? 'Close side panel' : 'Open side panel'"
+        data-testid="workspace-chat-header-toggle-side-panel"
+        @click="emit('toggle-side-panel')"
+      >
+        <PanelRight :size="16" :class="sidePanelOpen ? 'text-primary' : ''" />
+      </Button>
     </div>
   </header>
 </template>

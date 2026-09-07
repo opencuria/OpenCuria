@@ -41,11 +41,7 @@ function baseProps(overrides: Record<string, unknown> = {}) {
     transitionLabel: null,
     autoStopLabel: null,
     runnerOffline: false,
-    fileExplorerOpen: false,
-    terminalOpen: false,
-    terminalMinimized: false,
-    desktopOpen: false,
-    desktopMinimized: false,
+    sidePanelOpen: false,
     processesActive: false,
     runningProcessCount: 0,
     canPrompt: true,
@@ -124,23 +120,34 @@ describe('WorkspaceChatHeader', () => {
     expect(stop.attributes('disabled')).toBeDefined()
     expect(wrapper.emitted('stop-workspace')).toBeUndefined()
   })
-  it('emits panel toggles and new chat', async () => {
+  it('emits side panel toggle, processes toggle and new chat', async () => {
     const wrapper = mountHeader()
     await wrapper.find('[data-testid="workspace-chat-header-new-chat"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-files"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-terminal"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').trigger('click')
+    await wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').trigger('click')
     await wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').trigger('click')
     expect(wrapper.emitted('new-chat')).toEqual([[]])
-    expect(wrapper.emitted('toggle-files')).toEqual([[]])
-    expect(wrapper.emitted('toggle-terminal')).toEqual([[]])
-    expect(wrapper.emitted('toggle-desktop')).toEqual([[]])
+    expect(wrapper.emitted('toggle-side-panel')).toEqual([[]])
     expect(wrapper.emitted('toggle-processes')).toEqual([[]])
+  })
+
+  it('places the side panel toggle right of the overflow menu', () => {
+    const wrapper = mountHeader()
+    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').element
+      .parentElement
+    const children = Array.from(actions?.children ?? [])
+    const moreIndex = children.findIndex(
+      (el) => el.querySelector('[data-testid="workspace-chat-header-more"]') !== null,
+    )
+    const sidePanelIndex = children.findIndex(
+      (el) => el.getAttribute('data-testid') === 'workspace-chat-header-toggle-side-panel',
+    )
+    expect(moreIndex).toBeGreaterThanOrEqual(0)
+    expect(sidePanelIndex).toBe(moreIndex + 1)
   })
 
   it('places background processes immediately left of the overflow menu', () => {
     const wrapper = mountHeader({ runningProcessCount: 2 })
-    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').element
+    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').element
       .parentElement
     const children = Array.from(actions?.children ?? [])
     const processesIndex = children.findIndex(

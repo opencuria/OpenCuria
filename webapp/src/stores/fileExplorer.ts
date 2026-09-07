@@ -13,6 +13,7 @@ import {
   sendFilesDownload,
 } from '@/services/socket'
 import { useNotificationStore } from '@/stores/notifications'
+import { useSidePanelStore } from '@/stores/sidePanel'
 
 let requestCounter = 0
 
@@ -23,8 +24,6 @@ function nextRequestId(): string {
 export const useFileExplorerStore = defineStore('fileExplorer', () => {
   // -- state ----------------------------------------------------------------
 
-  const isOpen = ref(false)
-  const panelWidth = ref(300)
   const tree = ref<FileNode[]>([])
   const expandedPaths = ref<Set<string>>(new Set())
   const selectedPath = ref<string | null>(null)
@@ -51,18 +50,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   const isViewingFile = computed(() => viewingFile.value !== null)
 
   // -- actions --------------------------------------------------------------
-
-  function open(): void {
-    isOpen.value = true
-  }
-
-  function close(): void {
-    isOpen.value = false
-  }
-
-  function toggle(): void {
-    isOpen.value = !isOpen.value
-  }
 
   function setTree(path: string, entries: FileEntryRaw[]): void {
     const nodes: FileNode[] = entries.map((e) => ({
@@ -139,9 +126,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
 
     if (revealInExplorer) {
-      open()
-    } else {
-      close()
+      useSidePanelStore().open('files')
     }
 
     const segments = path.split('/').filter(Boolean)
@@ -286,7 +271,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   }
 
   function reset(): void {
-    isOpen.value = false
     tree.value = []
     expandedPaths.value = new Set()
     selectedPath.value = null
@@ -483,8 +467,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   return {
     // state
-    isOpen,
-    panelWidth,
     tree,
     expandedPaths,
     selectedPath,
@@ -494,9 +476,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     // getters
     isViewingFile,
     // actions
-    open,
-    close,
-    toggle,
     setTree,
     toggleExpand,
     selectFile,
