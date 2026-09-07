@@ -43,18 +43,22 @@ def test_build_allows_everything() -> None:
     assert get_agent("build").permissions == {"*": "allow"}
 
 
-def test_plan_edit_asks_and_bash_allows_read_only() -> None:
-    """Plan asks for edits; read-only bash is allowed, mutating asks."""
+def test_plan_edit_asks_and_bash_process_allowed() -> None:
+    """Plan asks for edits; bash and background processes are fully allowed."""
     from apps.harness.permissions.evaluator import PermissionEvaluator
 
-    evaluator = PermissionEvaluator(agent_rules=dict(get_agent("plan").permissions))
+    agent = get_agent("plan")
+    assert agent.permissions == {"*": "allow", "edit": "ask", "write": "ask"}
+    evaluator = PermissionEvaluator(agent_rules=dict(agent.permissions))
     assert evaluator.evaluate("edit", "/workspace/a.py") == "ask"
     assert evaluator.evaluate("write", "/workspace/a.py") == "ask"
     assert evaluator.evaluate("bash", "git status") == "allow"
     assert evaluator.evaluate("bash", "git log --oneline") == "allow"
     assert evaluator.evaluate("bash", "ls -la") == "allow"
     assert evaluator.evaluate("bash", "cat README.md") == "allow"
-    assert evaluator.evaluate("bash", "rm -rf /tmp/x") == "ask"
+    assert evaluator.evaluate("bash", "rm -rf /tmp/x") == "allow"
+    assert evaluator.evaluate("bash", "sudo reboot") == "allow"
+    assert evaluator.evaluate("process", "sleep 60") == "allow"
     assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
 
 

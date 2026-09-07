@@ -9,10 +9,10 @@ Permission design (OpenCode-like defaults):
 - ``build`` (primary): ``{"*": "allow"}`` — full read/write/run access.
 - ``plan`` (primary): edits ask for approval (``ask``, deliberately not
   ``deny`` so a planner can still apply a one-off fix after the user
-  approves it). ``bash`` asks by default but allows a read-only
-  allowlist without prompting: ``git status/log/diff/branch``, ``ls``,
-  ``cat``, ``head``, ``tail``, ``pwd``, ``echo``. Everything else
-  (``rm``, ``sudo``, build commands, …) goes through the ask gate.
+  approves it). ``bash`` and background processes (``process``) are
+  fully allowed, exactly like ``build`` — the planner may run any
+  command, server, or test suite while scoping; only file edits go
+  through the ask gate.
 - ``general`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
   — delegated subtasks may use every tool (M5 wires up child sessions)
   but never prompt the user directly.
@@ -46,27 +46,6 @@ AgentMode = Literal["primary", "subagent", "hidden"]
 SMALL_MODEL = "small"
 
 VALID_MODES: tuple[str, ...] = ("primary", "subagent", "hidden")
-
-#: Read-only shell commands allowed by ``plan`` without prompting.
-#: Matched with fnmatch against the full command line (``*`` matches
-#: any suffix, including the empty string, so ``"ls*"`` allows ``ls``).
-READ_ONLY_BASH_RULES: dict[str, str] = {
-    "git status*": "allow",
-    "git log*": "allow",
-    "git diff*": "allow",
-    "git branch*": "allow",
-    "ls*": "allow",
-    "cat *": "allow",
-    "head *": "allow",
-    "tail *": "allow",
-    "pwd": "allow",
-    "echo *": "allow",
-}
-
-#: ``plan`` bash rules: read-only commands allowed, rest asks.
-#: NOTE: catch-all first — granular matching is last-match-wins, so
-#: specific allows must come after ``"*"`` to take effect.
-PLAN_BASH_RULES: dict[str, str] = {"*": "ask", **READ_ONLY_BASH_RULES}
 
 #: ``explore`` bash rules: research commands allowed, destructive
 #: denied. Order matters (last-match-wins): catch-all first, denies last.
@@ -133,22 +112,21 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         mode="primary",
         description=(
             "Primary planning agent: investigates and proposes plans; "
-            "edits and mutating shell commands need approval."
+            "edits need approval, shell and background processes are free."
         ),
         system_prompt=(
             "You are opencuria plan, a staff engineer scoping a task. "
-            "Investigate the codebase with read-only tools (read, glob, "
-            "grep, list, and harmless shell commands such as git "
-            "status/log/diff, ls, cat). Do NOT edit files or run mutating "
-            "commands without explicit user approval. End with a concise "
-            "step-by-step plan and wait for confirmation."
+            "Investigate the codebase with read tools (read, glob, grep, "
+            "list), shell commands (bash), and background processes — "
+            "running commands, servers, and test suites is allowed and "
+            "encouraged while scoping. Do NOT edit files without explicit "
+            "user approval. End with a concise step-by-step plan and wait "
+            "for confirmation."
         ),
         permissions={
             "*": "allow",
             "edit": "ask",
             "write": "ask",
-            "process": "ask",
-            "bash": dict(PLAN_BASH_RULES),
         },
         color="amber",
     ),

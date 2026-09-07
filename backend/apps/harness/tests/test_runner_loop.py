@@ -587,7 +587,14 @@ async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
 
     provider = FakeProvider(
         [
-            _tool_step("bash", {"command": "find /workspace"}),
+            _tool_step(
+                "edit",
+                {
+                    "path": "/workspace/a.py",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            ),
             _text_step("ok"),
         ]
     )
@@ -599,7 +606,7 @@ async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
     pending = [item for item in captured if item[0] == "permission_ask_pending"]
     assert decisions
     assert decisions[0][1]["decision"] == "ask"
-    assert decisions[0][1]["tool"] == "bash"
+    assert decisions[0][1]["tool"] == "edit"
     assert decisions[0][1]["session_id"] == "plan-1"
     assert pending
     assert pending[0][1]["session_id"] == "plan-1"
@@ -769,19 +776,38 @@ async def test_prompt_workspace_image_hydrated_for_provider() -> None:
     assert any(part.get("type") == "image_url" for part in last_user.content)
 
 
-async def test_plan_mode_read_only_bash_auto_flows() -> None:
-    """Plan agent allows read-only bash without a permission callback."""
+async def test_plan_mode_bash_and_process_auto_flow() -> None:
+    """Plan agent runs any bash/process without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
     provider = FakeProvider(
         [
-            _tool_step("bash", {"command": "git status"}, call_id="c1"),
+            _multi_tool_step(
+                [
+                    ("bash", {"command": "rm -rf /workspace/build"}, "c1"),
+                    (
+                        "process_start",
+                        {"command": "python -m http.server 8000"},
+                        "c2",
+                    ),
+                ]
+            ),
             _text_step("plan ready"),
         ]
     )
     events: list[dict[str, Any]] = []
-    runner, opts = _runner(provider, events)
+    runner, opts = _runner(provider, events, on_permission=on_permission)
     result = await runner.run("scope it", "plan", "m", "plan", opts)
     assert result.output == "plan ready"
+    assert called == []
     assert not any(event["type"] == "permission_required" for event in events)
+    assert (
+        sum(1 for event in events if event["type"] == "tool_completed") == 2
+    )
 
 
 async def test_agent_runner_alias() -> None:
