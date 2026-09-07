@@ -2396,19 +2396,85 @@ class RunnerService:
         status: str,
         exit_code: int | None = None,
         pid: int | None = None,
+        log_path: str | None = None,
+        run_count: int | None = None,
     ) -> None:
         """Forward a background-process status change to the frontend."""
+        payload: dict = {
+            "workspace_id": workspace_id,
+            "process_id": process_id,
+            "status": status,
+            "exit_code": exit_code,
+            "pid": pid,
+        }
+        if log_path is not None:
+            payload["log_path"] = log_path
+        if run_count is not None:
+            payload["run_count"] = run_count
         self._forward_to_frontend(
             "process:status_changed",
+            payload,
+            workspace_id,
+        )
+
+    def _push_process_removed(
+        self,
+        *,
+        workspace_id: str,
+        process_id: str,
+    ) -> None:
+        """Forward a background-process removal to the frontend."""
+        self._forward_to_frontend(
+            "process:removed",
             {
                 "workspace_id": workspace_id,
                 "process_id": process_id,
-                "status": status,
-                "exit_code": exit_code,
-                "pid": pid,
             },
             workspace_id,
         )
+
+    @staticmethod
+    def _clean_process_name(name: str | None) -> str:
+        """Validate a process name (identity per workspace, case-sensitive).
+
+        Strips surrounding whitespace; empty names and names longer than
+        255 characters raise ``ValueError``.
+        """
+        cleaned = (name or "").strip()
+        if not cleaned:
+            raise ValueError("name must not be empty")
+        if len(cleaned) > 255:
+            raise ValueError("name must be at most 255 characters")
+        return cleaned
+
+    @staticmethod
+    def _process_log_paths(
+        process_id: uuid.UUID,
+        run_count: int,
+    ) -> tuple[str, str]:
+        """Return the absolute (log_path, exit_path) for a process run.
+
+        The first run keeps the legacy ``<id>.log`` layout (backward
+        compat); later runs get ``<id>_r<run>.log`` so earlier logs are
+        never overwritten or deleted.
+        """
+        base = f"/workspace/.opencuria/processes/{process_id}"
+        if (run_count or 0) > 1:
+            return (f"{base}_r{run_count}.log", f"{base}_r{run_count}.exit")
+        return (f"{base}.log", f"{base}.exit")
+
+    async def _resolve_process(
+        self,
+        workspace_id: uuid.UUID,
+        id_or_name: uuid.UUID | str,
+    ) -> "WorkspaceProcess":
+        """Resolve a process by id or exact name, scoped to a workspace."""
+        resolved = await sync_to_async(self.processes.resolve_for_workspace)(
+            workspace_id, id_or_name
+        )
+        if resolved is None:
+            raise WorkspaceNotFoundError(str(id_or_name))
+        return resolved
 
     async def start_process(
         self,
@@ -2417,27 +2483,34 @@ class RunnerService:
         *,
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
-        name: str = "",
+        name: str,
         user=None,
         session_id: uuid.UUID | str | None = None,
     ) -> "WorkspaceProcess":
-        """Start a detached background process in a workspace.
+        """Start a detached background process in a workspace (upsert by name).
 
-        The backend assigns the process_id, persists a running record,
-        then asks the runner to spawn the OS process. Log content stays
-        decentralised as a file inside the workspace.
+        The process ``name`` is the identity within its workspace: a new
+        name creates a fresh row, an existing name reuses the same row
+        (stable id) with ``run_count + 1`` and a new log file — earlier
+        logs are kept. The stored command/workdir config is overwritten
+        on a name restart. A still-running row is stopped first (same
+        SIGTERM->SIGKILL logic as :meth:`stop_process`); if that stop
+        fails the new run is aborted and the DB is left unchanged.
+        There is no auto-restart — every run is explicit (same name).
 
         Raises:
             WorkspaceNotFoundError: Unknown workspace.
             WorkspaceStateError: Workspace not running / pending deletion.
             RunnerOfflineError: Owning runner is offline.
             ConflictError: Runner reported an error or timed out.
+            ValueError: Empty command or name.
         """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
         runner = self._ensure_process_dispatchable(workspace)
 
+        cleaned_name = self._clean_process_name(name)
         cleaned_command = (command or "").strip()
         if not cleaned_command:
             raise ValueError("command must not be empty")
@@ -2448,17 +2521,78 @@ class RunnerService:
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"Invalid session_id: {session_id}") from exc
 
-        process_id = generate_uuid()
-        process = await sync_to_async(self.processes.create)(
-            process_id=process_id,
-            workspace=workspace,
-            command=cleaned_command,
-            workdir=safe_workdir,
-            name=name or "",
-            created_by=user,
-            session_id=session_id,
+        existing = await sync_to_async(self.processes.get_by_name)(
+            workspace_id, cleaned_name
         )
+        if existing is not None and existing.status == ProcessStatus.RUNNING:
+            await self._stop_running_process(workspace, existing)
 
+        process_id: uuid.UUID
+        run_count: int
+        if existing is not None:
+            process_id = existing.id
+            run_count = (existing.run_count or 1) + 1
+            if existing.run_count is None or existing.run_count <= 0:
+                run_count = 2
+            await sync_to_async(self.processes.update_for_restart)(
+                process_id,
+                command=cleaned_command,
+                workdir=safe_workdir,
+                log_path="",
+                run_count=run_count,
+                created_by=user,
+                session_id=session_id,
+            )
+        else:
+            process_id = generate_uuid()
+            run_count = 1
+            try:
+                await sync_to_async(self.processes.create)(
+                    process_id=process_id,
+                    workspace=workspace,
+                    command=cleaned_command,
+                    workdir=safe_workdir,
+                    name=cleaned_name,
+                    created_by=user,
+                    session_id=session_id,
+                    run_count=run_count,
+                )
+            except Exception as exc:
+                from django.db import IntegrityError
+
+                if not isinstance(exc, IntegrityError):
+                    raise
+                # Race: a concurrent start won the (workspace, name) unique
+                # slot — retry once as a restart of the winner.
+                winner = await sync_to_async(self.processes.get_by_name)(
+                    workspace_id, cleaned_name
+                )
+                if winner is None:
+                    raise
+                existing = winner
+                process_id = winner.id
+                if winner.status == ProcessStatus.RUNNING:
+                    await self._stop_running_process(workspace, winner)
+                    winner = await sync_to_async(self.processes.get_by_id)(
+                        winner.id
+                    ) or winner
+                    existing = winner
+                run_count = (winner.run_count or 1) + 1
+                if winner.run_count is None or winner.run_count <= 0:
+                    run_count = 2
+                await sync_to_async(self.processes.update_for_restart)(
+                    process_id,
+                    command=cleaned_command,
+                    workdir=safe_workdir,
+                    log_path="",
+                    run_count=run_count,
+                    created_by=user,
+                    session_id=session_id,
+                )
+
+        log_path_abs, exit_path_abs = self._process_log_paths(
+            process_id, run_count
+        )
         request_id = uuid.uuid4().hex
         try:
             result = await self._await_process_result(
@@ -2471,7 +2605,10 @@ class RunnerService:
                     "command": cleaned_command,
                     "workdir": safe_workdir,
                     "env": dict(env or {}),
-                    "name": name or "",
+                    "name": cleaned_name,
+                    "log_path": log_path_abs,
+                    "exit_path": exit_path_abs,
+                    "run_count": run_count,
                 },
                 runner=runner,
                 timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
@@ -2486,6 +2623,7 @@ class RunnerService:
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
+                run_count=run_count,
             )
             raise
 
@@ -2500,11 +2638,12 @@ class RunnerService:
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
+                run_count=run_count,
             )
             raise ConflictError(f"Runner failed to start process: {error}")
 
         pid = result.get("pid")
-        log_path = str(result.get("log_path") or "")
+        log_path = str(result.get("log_path") or "") or log_path_abs
         await sync_to_async(self.processes.update_status)(
             process_id,
             status=ProcessStatus.RUNNING,
@@ -2512,20 +2651,267 @@ class RunnerService:
             log_path=log_path or None,
         )
         refreshed = await sync_to_async(self.processes.get_by_id)(process_id)
-        process = refreshed or process
+        if refreshed is None:
+            raise ConflictError(
+                f"Process record {process_id} vanished after start"
+            )
+        self._push_process_status(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+            status=ProcessStatus.RUNNING,
+            pid=refreshed.pid,
+            log_path=log_path,
+            run_count=run_count,
+        )
+        logger.info(
+            "Started background process %s in workspace %s (pid=%s, run=%s)",
+            process_id,
+            workspace_id,
+            refreshed.pid,
+            run_count,
+        )
+        return refreshed
+
+    async def _stop_running_process(
+        self,
+        workspace: "Workspace",
+        stored: "WorkspaceProcess",
+    ) -> "WorkspaceProcess":
+        """Stop a RUNNING record via the runner (SIGTERM, then SIGKILL).
+
+        Shared by :meth:`stop_process`, :meth:`start_process` (restart via
+        the same name), :meth:`restart_process` and :meth:`delete_process`.
+        A runner-side "not found" is treated as already gone (EXITED);
+        other errors propagate and the DB is left to the caller.
+        """
+        workspace_id = workspace.id
+        process_id = stored.id
+        request_id = uuid.uuid4().hex
+        result = await self._await_process_result(
+            request_id=request_id,
+            event="harness:process_stop",
+            payload={
+                "request_id": request_id,
+                "workspace_id": str(workspace_id),
+                "process_id": str(process_id),
+            },
+            runner=workspace.runner,
+            timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
+        )
+
+        error = result.get("error")
+        if error:
+            if "not found" in str(error).lower():
+                await sync_to_async(self.processes.mark_finished)(
+                    process_id,
+                    status=ProcessStatus.EXITED,
+                    exit_code=None,
+                )
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=str(process_id),
+                    status=ProcessStatus.EXITED,
+                    pid=stored.pid,
+                    run_count=stored.run_count,
+                )
+                refreshed = await sync_to_async(
+                    self.processes.get_for_workspace
+                )(process_id, workspace_id)
+                return refreshed or stored
+            raise ConflictError(f"Runner failed to stop process: {error}")
+
+        live_exit = result.get("exit_code")
+        exit_code = int(live_exit) if live_exit is not None else None
+        status = (
+            ProcessStatus.EXITED
+            if str(result.get("status") or "") == "exited"
+            else ProcessStatus.KILLED
+        )
+        await sync_to_async(self.processes.mark_finished)(
+            process_id,
+            status=status,
+            exit_code=exit_code,
+        )
+        self._push_process_status(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+            status=status,
+            exit_code=exit_code,
+            pid=stored.pid,
+            run_count=stored.run_count,
+        )
+        logger.info(
+            "Stopped background process %s in workspace %s (status=%s)",
+            process_id,
+            workspace_id,
+            status,
+        )
+        refreshed = await sync_to_async(self.processes.get_for_workspace)(
+            process_id, workspace_id
+        )
+        return refreshed or stored
+
+    async def restart_process(
+        self,
+        workspace_id: uuid.UUID,
+        id_or_name: uuid.UUID | str,
+        *,
+        user=None,
+        session_id: uuid.UUID | str | None = None,
+    ) -> "WorkspaceProcess":
+        """Restart a named process on the same row (stable id, new log).
+
+        Reuses the stored command/workdir (no overwrite, unlike
+        :meth:`start_process` with the same name). A still-running row is
+        stopped first; old logs are kept (new ``_r<run>`` log path).
+        """
+        stored = await self._resolve_process(workspace_id, id_or_name)
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        self._ensure_process_dispatchable(workspace)
+        if session_id is not None and not isinstance(session_id, uuid.UUID):
+            try:
+                session_id = uuid.UUID(str(session_id))
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid session_id: {session_id}") from exc
+
+        current = stored
+        if current.status == ProcessStatus.RUNNING:
+            current = await self._stop_running_process(workspace, current)
+            current = (
+                await sync_to_async(self.processes.get_by_id)(current.id)
+                or current
+            )
+
+        run_count = (current.run_count or 1) + 1
+        if current.run_count is None or current.run_count <= 0:
+            run_count = 2
+        process_id = current.id
+        command = current.command
+        workdir = current.workdir
+        runner = workspace.runner
+        log_path_abs, exit_path_abs = self._process_log_paths(
+            process_id, run_count
+        )
+        await sync_to_async(self.processes.update_for_restart)(
+            process_id,
+            command=command,
+            workdir=workdir,
+            log_path="",
+            run_count=run_count,
+            created_by=user,
+            session_id=session_id,
+        )
+
+        request_id = uuid.uuid4().hex
+        try:
+            result = await self._await_process_result(
+                request_id=request_id,
+                event="harness:process_start",
+                payload={
+                    "request_id": request_id,
+                    "workspace_id": str(workspace_id),
+                    "process_id": str(process_id),
+                    "command": command,
+                    "workdir": workdir,
+                    "env": {},
+                    "name": current.name,
+                    "log_path": log_path_abs,
+                    "exit_path": exit_path_abs,
+                    "run_count": run_count,
+                },
+                runner=runner,
+                timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
+            )
+        except (ConflictError, RunnerOfflineError, RuntimeError):
+            await sync_to_async(self.processes.mark_finished)(
+                process_id,
+                status=ProcessStatus.FAILED,
+                exit_code=None,
+            )
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process_id),
+                status=ProcessStatus.FAILED,
+                run_count=run_count,
+            )
+            raise
+
+        error = result.get("error")
+        if error:
+            await sync_to_async(self.processes.mark_finished)(
+                process_id,
+                status=ProcessStatus.FAILED,
+                exit_code=None,
+            )
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process_id),
+                status=ProcessStatus.FAILED,
+                run_count=run_count,
+            )
+            raise ConflictError(f"Runner failed to start process: {error}")
+
+        pid = result.get("pid")
+        log_path = str(result.get("log_path") or "") or log_path_abs
+        await sync_to_async(self.processes.update_status)(
+            process_id,
+            status=ProcessStatus.RUNNING,
+            pid=int(pid) if pid is not None else None,
+            log_path=log_path or None,
+        )
+        refreshed = await sync_to_async(self.processes.get_by_id)(process_id)
+        process = refreshed or current
         self._push_process_status(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
             status=ProcessStatus.RUNNING,
             pid=process.pid,
+            log_path=log_path,
+            run_count=run_count,
         )
         logger.info(
-            "Started background process %s in workspace %s (pid=%s)",
+            "Restarted background process %s in workspace %s (pid=%s, run=%s)",
             process_id,
             workspace_id,
             process.pid,
+            run_count,
         )
         return process
+
+    async def delete_process(
+        self,
+        workspace_id: uuid.UUID,
+        id_or_name: uuid.UUID | str,
+    ) -> uuid.UUID:
+        """Delete a process row by id or name (stops it first if running).
+
+        Returns the deleted process id. Pushes ``process:removed``.
+        """
+        stored = await self._resolve_process(workspace_id, id_or_name)
+        if stored.status == ProcessStatus.RUNNING:
+            workspace = await sync_to_async(self.workspaces.get_by_id)(
+                workspace_id
+            )
+            if workspace is None:
+                raise WorkspaceNotFoundError(str(workspace_id))
+            self._ensure_process_dispatchable(workspace)
+            await self._stop_running_process(workspace, stored)
+        process_id = stored.id
+        await sync_to_async(self.processes.delete_for_workspace)(
+            process_id, workspace_id
+        )
+        self._push_process_removed(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+        )
+        logger.info(
+            "Deleted background process %s in workspace %s",
+            process_id,
+            workspace_id,
+        )
+        return process_id
 
     async def list_processes(
         self, workspace_id: uuid.UUID
@@ -2571,14 +2957,15 @@ class RunnerService:
         return await sync_to_async(list)(queryset)
 
     async def get_process(
-        self, workspace_id: uuid.UUID, process_id: uuid.UUID
+        self, workspace_id: uuid.UUID, id_or_name: uuid.UUID | str
     ) -> "WorkspaceProcess":
-        """Return one process scoped to a workspace, live-merged when online."""
-        process = await sync_to_async(self.processes.get_for_workspace)(
-            process_id, workspace_id
-        )
-        if process is None:
-            raise WorkspaceNotFoundError(str(process_id))
+        """Return one process scoped to a workspace, live-merged when online.
+
+        ``id_or_name`` accepts a process UUID or the exact process name
+        (resolved via :meth:`_resolve_process`).
+        """
+        process = await self._resolve_process(workspace_id, id_or_name)
+        process_id = process.id
 
         if (
             process.status == ProcessStatus.RUNNING
@@ -2635,89 +3022,23 @@ class RunnerService:
     async def stop_process(
         self,
         workspace_id: uuid.UUID,
-        process_id: uuid.UUID,
+        id_or_name: uuid.UUID | str,
     ) -> "WorkspaceProcess":
         """Stop a tracked background process (SIGTERM, then SIGKILL after grace).
 
         Already-finished records are returned unchanged (idempotent).
+        ``id_or_name`` accepts a process UUID or the exact process name
+        (resolved via :meth:`_resolve_process`).
         """
-        stored = await sync_to_async(self.processes.get_for_workspace)(
-            process_id, workspace_id
-        )
-        if stored is None:
-            raise WorkspaceNotFoundError(str(process_id))
+        stored = await self._resolve_process(workspace_id, id_or_name)
         if stored.status != ProcessStatus.RUNNING:
             return stored
 
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-        runner = self._ensure_process_dispatchable(workspace)
-
-        request_id = uuid.uuid4().hex
-        result = await self._await_process_result(
-            request_id=request_id,
-            event="harness:process_stop",
-            payload={
-                "request_id": request_id,
-                "workspace_id": str(workspace_id),
-                "process_id": str(process_id),
-            },
-            runner=runner,
-            timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
-        )
-
-        error = result.get("error")
-        if error:
-            if "not found" in str(error).lower():
-                # Runner lost track of the process (e.g. after a restart) —
-                # it is effectively gone.
-                await sync_to_async(self.processes.mark_finished)(
-                    process_id,
-                    status=ProcessStatus.EXITED,
-                    exit_code=None,
-                )
-                self._push_process_status(
-                    workspace_id=str(workspace_id),
-                    process_id=str(process_id),
-                    status=ProcessStatus.EXITED,
-                    pid=stored.pid,
-                )
-                refreshed = await sync_to_async(
-                    self.processes.get_for_workspace
-                )(process_id, workspace_id)
-                return refreshed or stored
-            raise ConflictError(f"Runner failed to stop process: {error}")
-
-        live_exit = result.get("exit_code")
-        exit_code = int(live_exit) if live_exit is not None else None
-        status = (
-            ProcessStatus.EXITED
-            if str(result.get("status") or "") == "exited"
-            else ProcessStatus.KILLED
-        )
-        await sync_to_async(self.processes.mark_finished)(
-            process_id,
-            status=status,
-            exit_code=exit_code,
-        )
-        self._push_process_status(
-            workspace_id=str(workspace_id),
-            process_id=str(process_id),
-            status=status,
-            exit_code=exit_code,
-            pid=stored.pid,
-        )
-        logger.info(
-            "Stopped background process %s in workspace %s (status=%s)",
-            process_id,
-            workspace_id,
-            status,
-        )
-        refreshed = await sync_to_async(self.processes.get_for_workspace)(
-            process_id, workspace_id
-        )
-        return refreshed or stored
+        self._ensure_process_dispatchable(workspace)
+        return await self._stop_running_process(workspace, stored)
 
     def reconcile_workspace_processes(
         self,

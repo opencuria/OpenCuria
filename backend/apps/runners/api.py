@@ -1056,6 +1056,7 @@ def _process_to_out(process) -> ProcessOut:
         log_path=process.log_path or "",
         status=process.status,
         exit_code=process.exit_code,
+        run_count=int(getattr(process, "run_count", 0) or 0),
         started_at=process.started_at,
         ended_at=process.ended_at,
         updated_at=process.updated_at,
@@ -1088,18 +1089,23 @@ async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
 @workspace_router.post(
     "/{workspace_id}/processes/",
     response={
+        200: ProcessOut,
         201: ProcessOut,
         400: ErrorOut,
         403: ErrorOut,
         404: ErrorOut,
         409: ErrorOut,
     },
-    summary="Start a background process",
+    summary="Start or restart (upsert by name)",
 )
 async def start_process(
     request: HttpRequest, workspace_id: uuid.UUID, payload: ProcessStartIn
 ):
-    """Start a detached background process in a workspace."""
+    """Start a detached background process in a workspace (upsert by name).
+
+    A new ``name`` creates a fresh row (201); an existing ``name``
+    restarts the same row with ``run_count + 1`` (200, stable id).
+    """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
     ):
@@ -1115,10 +1121,11 @@ async def start_process(
             payload.command,
             workdir=payload.workdir,
             env=dict(payload.env or {}),
-            name=payload.name or "",
+            name=payload.name,
             user=request.user,
         )
-        return 201, _process_to_out(process)
+        status = 201 if int(getattr(process, "run_count", 1) or 1) <= 1 else 200
+        return status, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
@@ -1133,9 +1140,12 @@ async def start_process(
     summary="Get a background process",
 )
 async def get_process(
-    request: HttpRequest, workspace_id: uuid.UUID, process_id: uuid.UUID
+    request: HttpRequest, workspace_id: uuid.UUID, process_id: str
 ):
-    """Return one background process scoped to a workspace."""
+    """Return one background process scoped to a workspace.
+
+    ``process_id`` accepts a process UUID or the exact process name.
+    """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
     ):
@@ -1160,9 +1170,12 @@ async def get_process(
 async def stop_process(
     request: HttpRequest,
     workspace_id: uuid.UUID,
-    process_id: uuid.UUID,
+    process_id: str,
 ):
-    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
+    """Stop a background process (SIGTERM, then SIGKILL after grace).
+
+    ``process_id`` accepts a process UUID or the exact process name.
+    """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
     ):
@@ -1178,6 +1191,83 @@ async def stop_process(
             process_id,
         )
         return 200, _process_to_out(process)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/processes/{process_id}/restart/",
+    response={
+        200: ProcessOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
+    summary="Restart (same row, new log)",
+)
+async def restart_process(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    process_id: str,
+):
+    """Restart a background process on the same row (stable id, new log).
+
+    Reuses the stored command/workdir; ``process_id`` accepts a process
+    UUID or the exact process name. No request body required.
+    """
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        process = await service.restart_process(
+            workspace_id,
+            process_id,
+            user=request.user,
+        )
+        return 200, _process_to_out(process)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.delete(
+    "/{workspace_id}/processes/{process_id}/",
+    response={204: None, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Delete a background process",
+)
+async def delete_process(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    process_id: str,
+):
+    """Delete a background process row (stops it first if running).
+
+    ``process_id`` accepts a process UUID or the exact process name.
+    """
+    if not check_api_key_permission(
+        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
+    ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        await service.delete_process(workspace_id, process_id)
+        return 204, None
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

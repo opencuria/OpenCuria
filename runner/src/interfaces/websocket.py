@@ -1321,18 +1321,23 @@ class WebSocketInterface(Interface):
                     workdir=data.get("workdir", "/workspace"),
                     env=data.get("env"),
                     name=str(data.get("name", "") or ""),
+                    log_path=data.get("log_path"),
+                    exit_path=data.get("exit_path"),
                 )
+                payload = {
+                    "workspace_id": str(workspace_id),
+                    "request_id": request_id,
+                    "process_id": result["process_id"],
+                    "pid": result["pid"],
+                    "log_path": result["log_path"],
+                    "exit_path": result["exit_path"],
+                    "status": "running",
+                }
+                if data.get("run_count") is not None:
+                    payload["run_count"] = data.get("run_count")
                 await _harness_result(
                     "harness:process_start_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "process_id": result["process_id"],
-                        "pid": result["pid"],
-                        "log_path": result["log_path"],
-                        "exit_path": result["exit_path"],
-                        "status": "running",
-                    },
+                    payload,
                 )
             except Exception as exc:
                 await _harness_result(

@@ -1680,6 +1680,14 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
+    async def process_restart(self, process_id):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def process_delete(self, process_id):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
 
 #: Backwards-friendly alias (brief allows ``AgentRunner``).
 AgentRunner = HarnessRunner

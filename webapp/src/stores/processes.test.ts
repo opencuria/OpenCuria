@@ -21,6 +21,9 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     ...actual,
     listProcesses: vi.fn(),
     stopProcess: vi.fn(),
+    startProcess: vi.fn(),
+    restartProcess: vi.fn(),
+    deleteProcess: vi.fn(),
   }
 })
 
@@ -35,6 +38,7 @@ function makeProcess(overrides: Partial<WorkspaceProcess> = {}): WorkspaceProces
     log_path: overrides.log_path ?? '.opencuria/processes/process-1.log',
     status: overrides.status ?? ProcessStatus.RUNNING,
     exit_code: overrides.exit_code ?? null,
+    run_count: overrides.run_count ?? 1,
     started_at: overrides.started_at ?? '2026-09-06T10:00:00.000Z',
     ended_at: overrides.ended_at ?? null,
     updated_at: overrides.updated_at ?? '2026-09-06T10:00:00.000Z',
@@ -145,6 +149,161 @@ describe('processes store', () => {
 
     expect(workspacesApi.listProcesses).toHaveBeenCalledWith('workspace-1')
     expect(store.processesFor('workspace-1')).toEqual(fresh)
+  })
+
+  it('merges log_path/run_count from status_changed events', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess()]
+    vi.mocked(workspacesApi.listProcesses).mockResolvedValue([])
+
+    await store.handleStatusChanged({
+      workspace_id: 'workspace-1',
+      process_id: 'process-1',
+      status: ProcessStatus.RUNNING,
+      exit_code: null,
+      pid: 4242,
+      log_path: '.opencuria/processes/process-1-run2.log',
+      run_count: 2,
+    })
+
+    const updated = store.processesFor('workspace-1')[0]
+    expect(updated?.log_path).toBe('.opencuria/processes/process-1-run2.log')
+    expect(updated?.run_count).toBe(2)
+  })
+
+  it('starts a new process and notifies "Process started"', async () => {
+    const store = useProcessesStore()
+    const created = makeProcess({ run_count: 1 })
+    vi.mocked(workspacesApi.startProcess).mockResolvedValue(created)
+
+    const result = await store.startProcess('workspace-1', {
+      command: 'npm run dev',
+      name: 'dev-server',
+    })
+
+    expect(result).toEqual({ ok: true, process: created })
+    expect(workspacesApi.startProcess).toHaveBeenCalledWith('workspace-1', {
+      command: 'npm run dev',
+      name: 'dev-server',
+    })
+    expect(store.processesFor('workspace-1')[0]).toEqual(created)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Process started',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
+  })
+
+  it('notifies "Process restarted" when start returns run_count > 1', async () => {
+    const store = useProcessesStore()
+    const restarted = makeProcess({ run_count: 2 })
+    vi.mocked(workspacesApi.startProcess).mockResolvedValue(restarted)
+
+    const result = await store.startProcess('workspace-1', {
+      command: 'npm run dev',
+      name: 'dev-server',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Process restarted',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
+  })
+
+  it('notifies on start failure', async () => {
+    const store = useProcessesStore()
+    vi.mocked(workspacesApi.startProcess).mockRejectedValue(new Error('boom'))
+
+    const result = await store.startProcess('workspace-1', {
+      command: 'npm run dev',
+      name: 'dev-server',
+    })
+
+    expect(result).toEqual({ ok: false })
+    expect(toast.error).toHaveBeenCalledWith(
+      'Start failed',
+      expect.objectContaining({ description: 'boom' }),
+    )
+  })
+
+  it('restarts a process and upserts the returned record', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.EXITED })]
+    const restarted = makeProcess({ status: ProcessStatus.RUNNING, run_count: 2 })
+    vi.mocked(workspacesApi.restartProcess).mockResolvedValue(restarted)
+
+    const ok = await store.restartProcess('workspace-1', 'process-1')
+
+    expect(ok).toBe(true)
+    expect(workspacesApi.restartProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+    expect(store.processesFor('workspace-1')[0]?.status).toBe(ProcessStatus.RUNNING)
+    expect(store.processesFor('workspace-1')[0]?.run_count).toBe(2)
+    expect(store.isRestarting('process-1')).toBe(false)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Process restarted',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
+  })
+
+  it('notifies on restart failure', async () => {
+    const store = useProcessesStore()
+    vi.mocked(workspacesApi.restartProcess).mockRejectedValue(new Error('boom'))
+
+    const ok = await store.restartProcess('workspace-1', 'process-1')
+
+    expect(ok).toBe(false)
+    expect(toast.error).toHaveBeenCalledWith(
+      'Restart failed',
+      expect.objectContaining({ description: 'boom' }),
+    )
+    expect(store.isRestarting('process-1')).toBe(false)
+  })
+
+  it('deletes a process and removes it from the list', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess(),
+      makeProcess({ id: 'process-2', name: 'other' }),
+    ]
+    vi.mocked(workspacesApi.deleteProcess).mockResolvedValue(undefined)
+
+    const ok = await store.deleteProcess('workspace-1', 'process-1')
+
+    expect(ok).toBe(true)
+    expect(workspacesApi.deleteProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+    expect(store.processesFor('workspace-1').map((p) => p.id)).toEqual(['process-2'])
+    expect(store.isDeleting('process-1')).toBe(false)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Process deleted',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
+  })
+
+  it('notifies on delete failure without removing the entry', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess()]
+    vi.mocked(workspacesApi.deleteProcess).mockRejectedValue(new Error('boom'))
+
+    const ok = await store.deleteProcess('workspace-1', 'process-1')
+
+    expect(ok).toBe(false)
+    expect(store.processesFor('workspace-1')).toHaveLength(1)
+    expect(toast.error).toHaveBeenCalledWith(
+      'Delete failed',
+      expect.objectContaining({ description: 'boom' }),
+    )
+  })
+
+  it('removes the entry on process:removed events', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess(),
+      makeProcess({ id: 'process-2', name: 'other' }),
+    ]
+
+    store.handleRemoved({ workspace_id: 'workspace-1', process_id: 'process-1' })
+
+    expect(store.processesFor('workspace-1').map((p) => p.id)).toEqual(['process-2'])
   })
 
   it('ignores events for workspaces without loaded state', async () => {

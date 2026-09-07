@@ -83,6 +83,6 @@ class ImageBuildJobAdmin(admin.ModelAdmin):
 
 @admin.register(WorkspaceProcess)
 class WorkspaceProcessAdmin(admin.ModelAdmin):
-    list_display = ["id", "workspace", "name", "status", "pid", "exit_code", "started_at"]
+    list_display = ["id", "workspace", "name", "run_count", "status", "pid", "exit_code", "started_at"]
     list_filter = ["status"]
-    readonly_fields = ["id", "started_at", "ended_at", "updated_at"]
+    readonly_fields = ["id", "run_count", "started_at", "ended_at", "updated_at"]

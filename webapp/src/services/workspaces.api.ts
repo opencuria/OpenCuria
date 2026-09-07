@@ -135,6 +135,37 @@ export function stopProcess(
   )
 }
 
+/** Start a new process, or restart the existing one with the same name. `processId` params below accept UUID or name. */
+export interface ProcessStartIn {
+  command: string
+  name: string
+  workdir?: string
+  env?: Record<string, string>
+}
+
+export function startProcess(
+  workspaceId: string,
+  data: ProcessStartIn,
+): Promise<WorkspaceProcess> {
+  return post<WorkspaceProcess>(`/workspaces/${workspaceId}/processes/`, data)
+}
+
+export function restartProcess(
+  workspaceId: string,
+  processId: string,
+): Promise<WorkspaceProcess> {
+  return post<WorkspaceProcess>(
+    `/workspaces/${workspaceId}/processes/${processId}/restart/`,
+  )
+}
+
+export function deleteProcess(
+  workspaceId: string,
+  processId: string,
+): Promise<void> {
+  return del<void>(`/workspaces/${workspaceId}/processes/${processId}/`)
+}
+
 // --- Workspace image artifact API ---
 
 export function listWorkspaceImageArtifacts(workspaceId: string): Promise<ImageArtifact[]> {

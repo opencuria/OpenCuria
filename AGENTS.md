@@ -678,8 +678,8 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
 | Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
 | Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
-| Backend -> Runner | `harness:process_start` | `{request_id, workspace_id, process_id, command, workdir, env, name}` |
-| Runner -> Backend | `harness:process_start_result` | `{request_id, workspace_id, process_id, pid, log_path, status}` |
+| Backend -> Runner | `harness:process_start` | `{request_id, workspace_id, process_id, command, workdir, env, name, log_path, exit_path, run_count}` (restart reuses this event with `run_count+1` and a new `_r<run>` log path; no separate `harness:process_restart`/`harness:process_delete` socket events — restart/delete are REST-only: `POST .../processes/{id}/restart`, `DELETE .../processes/{id}`) |
+| Runner -> Backend | `harness:process_start_result` | `{request_id, workspace_id, process_id, pid, log_path, exit_path, status, run_count?}` |
 | Backend -> Runner | `harness:process_list` | `{request_id, workspace_id}` |
 | Runner -> Backend | `harness:process_list_result` | `{request_id, workspace_id, processes}` |
 | Backend -> Runner | `harness:process_get` | `{request_id, workspace_id, process_id}` |
@@ -729,7 +729,8 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Backend -> Frontend | `desktop:started` | `{workspace_id, task_id, proxy_url, computer_use_active?}` |
 | Backend -> Frontend | `desktop:stopped` | `{workspace_id, task_id}` |
 | Backend -> Frontend | `desktop:viewer_released` | `{workspace_id, task_id, computer_use_active}` |
-| Backend -> Frontend | `process:status_changed` | `{workspace_id, process_id, status, exit_code, pid}` |
+| Backend -> Frontend | `process:status_changed` | `{workspace_id, process_id, status, exit_code, pid, log_path?, run_count?}` |
+| Backend -> Frontend | `process:removed` | `{workspace_id, process_id}` (nach `DELETE .../processes/{id}`) |
 
 Authentication: `Authorization: Bearer <RUNNER_API_TOKEN>` header on connect.
 Frontend Socket.IO authentication: JWT token passed in `auth: { token }` on connect (validated server-side).

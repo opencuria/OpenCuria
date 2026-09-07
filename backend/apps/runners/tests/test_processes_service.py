@@ -121,7 +121,7 @@ class TestStartProcess:
         service._emit_to_runner.side_effect = _emit
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
 
         failed = WorkspaceProcess.objects.exclude(
             status=ProcessStatus.RUNNING
@@ -162,7 +162,7 @@ class TestStartProcess:
         service._PROCESS_RPC_TIMEOUT_SECONDS = 1
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
 
     @pytest.mark.asyncio
     async def test_start_runner_offline(self, service, offline_runner, user):
@@ -176,7 +176,7 @@ class TestStartProcess:
             created_by=user,
         )
         with pytest.raises(RunnerOfflineError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
 
     @pytest.mark.asyncio
     async def test_start_requires_running_workspace(
@@ -184,13 +184,13 @@ class TestStartProcess:
     ):
         """Non-running workspaces cannot start processes."""
         with pytest.raises(WorkspaceStateError):
-            await service.start_process(stopped_workspace.id, "sleep 60", user=user)
+            await service.start_process(stopped_workspace.id, "sleep 60", name="sleeper", user=user)
 
     @pytest.mark.asyncio
     async def test_start_unknown_workspace(self, service, user):
         """Unknown workspace IDs raise WorkspaceNotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.start_process(uuid.uuid4(), "sleep 60", user=user)
+            await service.start_process(uuid.uuid4(), "sleep 60", name="sleeper", user=user)
 
 
 @pytest.mark.django_db(transaction=True)

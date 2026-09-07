@@ -51,6 +51,8 @@ async def test_default_registry_has_standard_tools_plus_webfetch() -> None:
         "process_list",
         "process_get",
         "process_stop",
+        "process_restart",
+        "process_delete",
     ]
 
 

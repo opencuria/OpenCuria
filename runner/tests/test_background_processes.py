@@ -242,6 +242,99 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.remove_workspace(ws_id)
         self.assertNotIn(ws_id, service._background_processes)
 
+    async def test_explicit_run_paths_used(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, runtime, ws_id = _service_with_workspace()
+        started = await service.start_background_process(
+            ws_id,
+            "proc-r",
+            "sleep 60",
+            log_path=f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.log",
+            exit_path=f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.exit",
+        )
+        self.assertEqual(
+            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.log"
+        )
+        self.assertEqual(
+            started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.exit"
+        )
+        entry = service._background_processes[ws_id]["proc-r"]
+        self.assertEqual(entry.log_path, started["log_path"])
+        self.assertIn("proc-r_r2.log", runtime.last_start_shell)
+
+    async def test_legacy_paths_without_explicit(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, _runtime, ws_id = _service_with_workspace()
+        started = await service.start_background_process(
+            ws_id, "proc-leg", "sleep 60"
+        )
+        self.assertEqual(
+            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-leg.log"
+        )
+        self.assertEqual(
+            started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-leg.exit"
+        )
+
+    async def test_restart_replaces_entry_and_stops_old_pid(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, runtime, ws_id = _service_with_workspace()
+        await service.start_background_process(ws_id, "proc-re", "sleep 60")
+        old_pid = service._background_processes[ws_id]["proc-re"].pid
+        self.assertTrue(runtime.alive.get(old_pid))
+        await service.start_background_process(
+            ws_id,
+            "proc-re",
+            "sleep 60",
+            log_path=f"{BACKGROUND_PROCESS_DIR}/proc-re_r2.log",
+            exit_path=f"{BACKGROUND_PROCESS_DIR}/proc-re_r2.exit",
+        )
+        self.assertEqual(len(service._background_processes[ws_id]), 1)
+        entry = service._background_processes[ws_id]["proc-re"]
+        self.assertEqual(
+            entry.log_path, f"{BACKGROUND_PROCESS_DIR}/proc-re_r2.log"
+        )
+        self.assertNotEqual(entry.pid, old_pid)
+        self.assertFalse(runtime.alive.get(old_pid))
+
+    async def test_invalid_log_path_falls_back_to_legacy(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, _runtime, ws_id = _service_with_workspace()
+        started = await service.start_background_process(
+            ws_id,
+            "proc-inv",
+            "sleep 60",
+            log_path="/etc/x.log",
+            exit_path="/etc/x.exit",
+        )
+        self.assertEqual(
+            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-inv.log"
+        )
+        self.assertEqual(
+            started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-inv.exit"
+        )
+
+    async def test_invalid_traversal_log_path_falls_back(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, _runtime, ws_id = _service_with_workspace()
+        started = await service.start_background_process(
+            ws_id,
+            "proc-trav",
+            "sleep 60",
+            log_path=f"{BACKGROUND_PROCESS_DIR}/../evil.log",
+            exit_path=f"{BACKGROUND_PROCESS_DIR}/../evil.exit",
+        )
+        self.assertEqual(
+            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-trav.log"
+        )
+        self.assertEqual(
+            started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-trav.exit"
+        )
+
 
 class BackgroundWebsocketTests(unittest.IsolatedAsyncioTestCase):
     def _interface(self, service) -> WebSocketInterface:
@@ -298,6 +391,38 @@ class BackgroundWebsocketTests(unittest.IsolatedAsyncioTestCase):
         event, payload = interface._sio.emit.await_args.args
         self.assertEqual(event, "harness:process_stop_result")
         self.assertTrue(payload["stopped"])
+
+    async def test_process_start_passthrough_run_paths_and_count(self) -> None:
+        from src.service import BACKGROUND_PROCESS_DIR
+
+        service, _runtime, ws_id = _service_with_workspace()
+        interface = self._interface(service)
+        handlers = interface._sio.handlers["/"]
+        await handlers["harness:process_start"](
+            {
+                "workspace_id": str(ws_id),
+                "request_id": "r-run",
+                "process_id": "proc-ws2",
+                "command": "sleep 30",
+                "workdir": "/workspace",
+                "env": {},
+                "name": "demo",
+                "log_path": f"{BACKGROUND_PROCESS_DIR}/proc-ws2_r2.log",
+                "exit_path": f"{BACKGROUND_PROCESS_DIR}/proc-ws2_r2.exit",
+                "run_count": 2,
+            }
+        )
+        event, payload = interface._sio.emit.await_args.args
+        self.assertEqual(event, "harness:process_start_result")
+        self.assertEqual(
+            payload["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-ws2_r2.log"
+        )
+        self.assertEqual(
+            payload["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-ws2_r2.exit"
+        )
+        self.assertEqual(payload["run_count"], 2)
+        entry = service._background_processes[ws_id]["proc-ws2"]
+        self.assertEqual(entry.log_path, payload["log_path"])
 
     async def test_process_start_error_has_error_field(self) -> None:
         service, _runtime, ws_id = _service_with_workspace()

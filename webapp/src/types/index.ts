@@ -590,6 +590,7 @@ export interface WorkspaceProcess {
   log_path: string
   status: ProcessStatus | string
   exit_code: number | null
+  run_count: number
   started_at: string
   ended_at: string | null
   updated_at: string
@@ -601,4 +602,11 @@ export interface ProcessStatusChangedEvent {
   status: string
   exit_code: number | null
   pid: number | null
+  log_path?: string
+  run_count?: number
+}
+
+export interface ProcessRemovedEvent {
+  workspace_id: string
+  process_id: string
 }

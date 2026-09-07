@@ -81,10 +81,41 @@ def _process_dict(process: WorkspaceProcess) -> dict:
         "log_path": process.log_path,
         "status": process.status,
         "exit_code": process.exit_code,
+        "run_count": process.run_count,
         "started_at": process.started_at,
         "ended_at": process.ended_at,
         "updated_at": process.updated_at,
     }
+
+
+def _make_process_record(*, workspace, name="sleeper", run_count=1, status=None):
+    """Build an unsaved WorkspaceProcess record for mocked service returns."""
+    from django.utils import timezone as _tz
+
+    now = _tz.now()
+    return WorkspaceProcess(
+        id=uuid.uuid4(),
+        workspace_id=workspace.id,
+        name=name,
+        command="sleep 60",
+        workdir="/workspace",
+        pid=4242,
+        log_path=".opencuria/processes/abc.log",
+        status=status or ProcessStatus.RUNNING,
+        exit_code=None,
+        run_count=run_count,
+        started_at=now,
+        ended_at=None,
+        updated_at=now,
+    )
+
+
+def _full_permissions() -> list[str]:
+    return [
+        APIKeyPermission.WORKSPACES_PROCESSES_READ.value,
+        APIKeyPermission.WORKSPACES_PROCESSES_RUN.value,
+        APIKeyPermission.WORKSPACES_READ.value,
+    ]
 
 
 @pytest.mark.django_db
@@ -110,7 +141,7 @@ def test_processes_require_run_permission_for_start(client: Client):
     )
     response = client.post(
         f"/api/v1/workspaces/{workspace.id}/processes/",
-        data=json.dumps({"command": "sleep 60"}),
+        data=json.dumps({"command": "sleep 60", "name": "sleeper"}),
         content_type="application/json",
         **_auth_headers(token, str(org.id)),
     )
@@ -188,6 +219,8 @@ def test_processes_unknown_process_returns_404(client: Client, monkeypatch):
             start_process=AsyncMock(),
             get_process=_get_process,
             stop_process=AsyncMock(),
+            restart_process=AsyncMock(),
+            delete_process=AsyncMock(),
         ),
     )
     response = client.get(
@@ -225,6 +258,7 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
         log_path=".opencuria/processes/abc.log",
         status=ProcessStatus.RUNNING,
         exit_code=None,
+        run_count=1,
         started_at=now,
         ended_at=None,
         updated_at=now,
@@ -239,6 +273,7 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
         log_path=".opencuria/processes/abc.log",
         status=ProcessStatus.KILLED,
         exit_code=None,
+        run_count=1,
         started_at=now,
         ended_at=now,
         updated_at=now,
@@ -269,6 +304,8 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
             start_process=AsyncMock(return_value=process),
             get_process=AsyncMock(return_value=process),
             stop_process=AsyncMock(return_value=stopped),
+            restart_process=AsyncMock(return_value=process),
+            delete_process=AsyncMock(return_value=process.id),
         ),
     )
 
@@ -350,6 +387,302 @@ def test_processes_runner_offline_returns_409(client: Client, monkeypatch):
             start_process=_start,
             get_process=AsyncMock(),
             stop_process=AsyncMock(),
+            restart_process=AsyncMock(),
+            delete_process=AsyncMock(),
+        ),
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/",
+        data=json.dumps({"command": "sleep 60", "name": "sleeper"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 409
+
+
+@pytest.mark.django_db
+def test_processes_start_same_name_upsert_returns_200(client: Client, monkeypatch):
+    """Starting with an existing name restarts the same row (200, run_count 2)."""
+    import apps.runners.api as runners_api
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    first = _make_process_record(workspace=workspace, run_count=1)
+    second = _make_process_record(workspace=workspace, run_count=2)
+    object.__setattr__(second, "id", first.id)
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[second]),
+            start_process=AsyncMock(return_value=second),
+            get_process=AsyncMock(return_value=second),
+            stop_process=AsyncMock(return_value=second),
+            restart_process=AsyncMock(return_value=second),
+            delete_process=AsyncMock(return_value=second.id),
+        ),
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/",
+        data=json.dumps({"command": "sleep 60", "name": "sleeper"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(first.id)
+    assert body["run_count"] == 2
+
+
+@pytest.mark.django_db
+def test_processes_restart_endpoint_returns_200(client: Client, monkeypatch):
+    """POST restart returns the restarted row (stable id, bumped run_count)."""
+    import apps.runners.api as runners_api
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    restarted = _make_process_record(workspace=workspace, run_count=3)
+
+    async def _restart(workspace_id, id_or_name, **kwargs):
+        assert str(id_or_name) in (str(restarted.id), restarted.name)
+        return restarted
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[restarted]),
+            start_process=AsyncMock(return_value=restarted),
+            get_process=AsyncMock(return_value=restarted),
+            stop_process=AsyncMock(return_value=restarted),
+            restart_process=_restart,
+            delete_process=AsyncMock(return_value=restarted.id),
+        ),
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/{restarted.id}/restart/",
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 200
+    assert response.json()["id"] == str(restarted.id)
+    assert response.json()["run_count"] == 3
+
+
+@pytest.mark.django_db
+def test_processes_restart_unknown_returns_404(client: Client, monkeypatch):
+    """Restart of an unknown process returns 404."""
+    import apps.runners.api as runners_api
+    from common.exceptions import NotFoundError
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    async def _restart(workspace_id, id_or_name, **kwargs):
+        raise NotFoundError("WorkspaceProcess", str(id_or_name))
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[]),
+            start_process=AsyncMock(),
+            get_process=AsyncMock(),
+            stop_process=AsyncMock(),
+            restart_process=_restart,
+            delete_process=AsyncMock(),
+        ),
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/{uuid.uuid4()}/restart/",
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_processes_delete_returns_204_then_get_404(client: Client, monkeypatch):
+    """DELETE removes the row (204); a later GET is 404."""
+    import apps.runners.api as runners_api
+    from common.exceptions import NotFoundError
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    record = _make_process_record(workspace=workspace, run_count=1)
+
+    async def _delete(workspace_id, id_or_name):
+        return record.id
+
+    async def _missing(workspace_id, id_or_name):
+        raise NotFoundError("WorkspaceProcess", str(id_or_name))
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    service = SimpleNamespace(
+        list_processes=AsyncMock(return_value=[record]),
+        start_process=AsyncMock(return_value=record),
+        get_process=AsyncMock(return_value=record),
+        stop_process=AsyncMock(return_value=record),
+        restart_process=AsyncMock(return_value=record),
+        delete_process=_delete,
+    )
+    monkeypatch.setattr(runners_api, "_get_service", lambda: service)
+
+    deleted = client.delete(
+        f"/api/v1/workspaces/{workspace.id}/processes/{record.id}/",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert deleted.status_code == 204
+
+    service.get_process = _missing
+    detail = client.get(
+        f"/api/v1/workspaces/{workspace.id}/processes/{record.id}/",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert detail.status_code == 404
+
+
+@pytest.mark.django_db
+def test_processes_delete_unknown_returns_404(client: Client, monkeypatch):
+    """DELETE of an unknown process returns 404."""
+    import apps.runners.api as runners_api
+    from common.exceptions import NotFoundError
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    async def _delete(workspace_id, id_or_name):
+        raise NotFoundError("WorkspaceProcess", str(id_or_name))
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[]),
+            start_process=AsyncMock(),
+            get_process=AsyncMock(),
+            stop_process=AsyncMock(),
+            restart_process=AsyncMock(),
+            delete_process=_delete,
+        ),
+    )
+    response = client.delete(
+        f"/api/v1/workspaces/{workspace.id}/processes/{uuid.uuid4()}/",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_processes_get_and_stop_by_name(client: Client, monkeypatch):
+    """Detail/stop resolve an exact process name, not just the UUID."""
+    import apps.runners.api as runners_api
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    record = _make_process_record(workspace=workspace, name="sleeper", run_count=2)
+    seen: list[tuple] = []
+
+    async def _get(workspace_id, id_or_name):
+        seen.append(("get", str(id_or_name)))
+        assert str(id_or_name) == "sleeper"
+        return record
+
+    async def _stop(workspace_id, id_or_name):
+        seen.append(("stop", str(id_or_name)))
+        assert str(id_or_name) == "sleeper"
+        return record
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[record]),
+            start_process=AsyncMock(return_value=record),
+            get_process=_get,
+            stop_process=_stop,
+            restart_process=AsyncMock(return_value=record),
+            delete_process=AsyncMock(return_value=record.id),
+        ),
+    )
+    detail = client.get(
+        f"/api/v1/workspaces/{workspace.id}/processes/sleeper/",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert detail.status_code == 200
+    assert detail.json()["id"] == str(record.id)
+
+    stopped = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/sleeper/stop/",
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert stopped.status_code == 200
+    assert [kind for kind, _ in seen] == ["get", "stop"]
+
+
+@pytest.mark.django_db
+def test_processes_start_without_name_returns_400(client: Client, monkeypatch):
+    """Start without a name is a 400 (ValueError), not a 422 schema error."""
+    import apps.runners.api as runners_api
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    async def _start(workspace_id, command, **kwargs):
+        raise ValueError("name must not be empty")
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[]),
+            start_process=_start,
+            get_process=AsyncMock(),
+            stop_process=AsyncMock(),
+            restart_process=AsyncMock(),
+            delete_process=AsyncMock(),
+        ),
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/",
+        data=json.dumps({"command": "sleep 60", "name": ""}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_processes_start_missing_name_field_is_422(client: Client, monkeypatch):
+    """A missing name field fails schema validation (422) — name is required."""
+    import apps.runners.api as runners_api
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+
+    monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    monkeypatch.setattr(
+        runners_api,
+        "_get_service",
+        lambda: SimpleNamespace(
+            list_processes=AsyncMock(return_value=[]),
+            start_process=AsyncMock(),
+            get_process=AsyncMock(),
+            stop_process=AsyncMock(),
+            restart_process=AsyncMock(),
+            delete_process=AsyncMock(),
         ),
     )
     response = client.post(
@@ -358,4 +691,4 @@ def test_processes_runner_offline_returns_409(client: Client, monkeypatch):
         content_type="application/json",
         **_auth_headers(token, str(org.id)),
     )
-    assert response.status_code == 409
+    assert response.status_code == 422

@@ -310,6 +310,35 @@ class WorkspaceService:
     # -- background processes --------------------------------------------------
 
     @staticmethod
+    def _sanitize_background_file_path(value: str | None, suffix: str) -> str | None:
+        """Validate a backend-assigned background log/exit path.
+
+        Returns the path when it lives directly under
+        ``BACKGROUND_PROCESS_DIR`` (prefix ``DIR + "/"``), contains no
+        ``..`` segments, its basename matches
+        ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` and ends with *suffix*
+        (``.log`` / ``.exit``).  Returns ``None`` for anything else so
+        callers fall back to the legacy ``{DIR}/{process_id}`` schema.
+        """
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        prefix = BACKGROUND_PROCESS_DIR.rstrip("/") + "/"
+        if not cleaned.startswith(prefix):
+            return None
+        remainder = cleaned[len(prefix):]
+        if not remainder or "/" in remainder or ".." in remainder:
+            return None
+        basename = remainder
+        if not basename.endswith(suffix):
+            return None
+        if not _BACKGROUND_PROCESS_ID_RE.match(basename):
+            return None
+        return cleaned
+
+    @staticmethod
     def _sanitize_process_id(process_id: str) -> str:
         """Validate a backend-assigned background process id."""
         cleaned = (process_id or "").strip()
@@ -413,6 +442,8 @@ class WorkspaceService:
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
+        log_path: str | None = None,
+        exit_path: str | None = None,
     ) -> dict[str, Any]:
         """Start a detached background process inside a workspace.
 
@@ -423,6 +454,11 @@ class WorkspaceService:
             workdir: Working directory, must be under ``/workspace``.
             env: Optional per-process environment overrides.
             name: Optional human-readable process name.
+            log_path: Optional backend-assigned log path. Used only when it
+                passes :meth:`_sanitize_background_file_path` validation;
+                otherwise the legacy ``{DIR}/{process_id}.log`` schema applies.
+            exit_path: Optional backend-assigned exit path (same rule,
+                ``.exit`` suffix).
 
         Returns:
             Dict with ``process_id``, ``pid``, ``log_path``, ``exit_path``.
@@ -441,10 +477,53 @@ class WorkspaceService:
             if not _BACKGROUND_ENV_KEY_RE.match(str(key)):
                 raise ValueError(f"Invalid env key: {key!r}")
 
-        log_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log"
-        exit_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit"
+        legacy_log_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log"
+        legacy_exit_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit"
+        resolved_log_path = (
+            self._sanitize_background_file_path(log_path, ".log")
+            or legacy_log_path
+        )
+        resolved_exit_path = (
+            self._sanitize_background_file_path(exit_path, ".exit")
+            or legacy_exit_path
+        )
+        # Restart safety: if the same process_id still tracks a living PID,
+        # best-effort stop it (TERM -> grace -> KILL) before starting the
+        # new run. The tracking entry itself is replaced below after start.
+        old_entry = self._background_processes.get(workspace_id, {}).get(
+            cleaned_process_id
+        )
+        if old_entry is not None:
+            try:
+                if await self._probe_background_pid(
+                    runtime, info.instance_id, old_entry.pid
+                ):
+                    await self._kill_background_pid(
+                        runtime, info.instance_id, old_entry.pid, "TERM"
+                    )
+                    elapsed = 0.0
+                    while elapsed <= _BACKGROUND_STOP_GRACE_S:
+                        if not await self._probe_background_pid(
+                            runtime, info.instance_id, old_entry.pid
+                        ):
+                            break
+                        await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
+                        elapsed += _BACKGROUND_STOP_POLL_S
+                    if await self._probe_background_pid(
+                        runtime, info.instance_id, old_entry.pid
+                    ):
+                        await self._kill_background_pid(
+                            runtime, info.instance_id, old_entry.pid, "KILL"
+                        )
+            except Exception:
+                logger.exception(
+                    "background_process_restart_stop_failed",
+                    workspace_id=str(workspace_id),
+                    process_id=cleaned_process_id,
+                    old_pid=old_entry.pid,
+                )
         start_shell = self._build_background_start_shell(
-            command.strip(), log_path, exit_path, extra_env
+            command.strip(), resolved_log_path, resolved_exit_path, extra_env
         )
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
@@ -466,8 +545,8 @@ class WorkspaceService:
             pid=pid,
             command=command.strip(),
             workdir=safe_workdir,
-            log_path=log_path,
-            exit_path=exit_path,
+            log_path=resolved_log_path,
+            exit_path=resolved_exit_path,
             name=name or "",
         )
         async with self._background_lock:
@@ -483,8 +562,8 @@ class WorkspaceService:
         return {
             "process_id": cleaned_process_id,
             "pid": pid,
-            "log_path": log_path,
-            "exit_path": exit_path,
+            "log_path": resolved_log_path,
+            "exit_path": resolved_exit_path,
         }
 
     async def _background_status_locked(
