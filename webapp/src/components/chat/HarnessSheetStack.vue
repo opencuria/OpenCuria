@@ -28,13 +28,13 @@ const emit = defineEmits<{
   'dismiss-notice': [messageId: string]
 }>()
 
-const todoOpen = ref(true)
+const todoOpen = ref(false)
 
 watch(
   () => props.sheets,
   (sheets) => {
     if (sheets.some((sheet) => sheet.kind === 'todos')) return
-    todoOpen.value = true
+    todoOpen.value = false
   },
 )
 

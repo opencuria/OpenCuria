@@ -14,7 +14,10 @@ const dropdownStubs = {
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
   DropdownMenuItem: {
-    template: '<button type="button" @click="$emit(\'select\'); $emit(\'click\')"><slot /></button>',
+    inheritAttrs: false,
+    template:
+      '<button type="button" v-bind="$attrs" :disabled="disabled" @click="$emit(\'select\'); $emit(\'click\')"><slot /></button>',
+    props: ['disabled'],
   },
   DropdownMenuSeparator: { template: '<hr />' },
 }
@@ -58,15 +61,23 @@ function mountHeader(props: Record<string, unknown> = {}) {
 }
 
 describe('WorkspaceChatHeader', () => {
-  it('renders the workspace name and the active chat as a subtle subline', () => {
+  it('renders the chat name large and the workspace name as a subtle subline', () => {
     const wrapper = mountHeader()
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe(
+      'First chat',
+    )
     expect(wrapper.find('[data-testid="workspace-chat-header-name"]').text()).toBe(
       'Alpha workspace',
     )
     expect(wrapper.find('[data-testid="workspace-chat-header-status"]').text()).toContain(
-      'First chat',
+      'Alpha workspace',
     )
     expect(wrapper.find('[data-testid="workspace-chat-header"]').classes()).not.toContain('border-b')
+  })
+
+  it('falls back to New chat when no session title is set', () => {
+    const wrapper = mountHeader({ activeChatTitle: null })
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe('New chat')
   })
 
   it('renames the workspace inline', async () => {
@@ -86,15 +97,16 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.findAllComponents({ name: 'Badge' })).toHaveLength(0)
   })
 
-  it('shows a stop button for a running workspace and emits stop-workspace', async () => {
+  it('shows a stop action in the overflow menu for a running workspace', async () => {
     const wrapper = mountHeader()
     const stop = wrapper.find('[data-testid="workspace-chat-header-stop"]')
     expect(stop.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-chat-header-more"]').exists()).toBe(true)
     await stop.trigger('click')
     expect(wrapper.emitted('stop-workspace')).toEqual([[]])
   })
 
-  it('shows a start button for a stopped workspace and emits start-workspace', async () => {
+  it('shows a start action in the overflow menu for a stopped workspace', async () => {
     const stopped = makeWorkspace()
     stopped.status = WorkspaceStatus.STOPPED
     const wrapper = mountHeader({ workspace: stopped })
@@ -118,25 +130,45 @@ describe('WorkspaceChatHeader', () => {
     await wrapper.find('[data-testid="workspace-chat-header-toggle-files"]').trigger('click')
     await wrapper.find('[data-testid="workspace-chat-header-toggle-terminal"]').trigger('click')
     await wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').trigger('click')
+    await wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').trigger('click')
     expect(wrapper.emitted('new-chat')).toEqual([[]])
     expect(wrapper.emitted('toggle-files')).toEqual([[]])
     expect(wrapper.emitted('toggle-terminal')).toEqual([[]])
     expect(wrapper.emitted('toggle-desktop')).toEqual([[]])
+    expect(wrapper.emitted('toggle-processes')).toEqual([[]])
+  })
+
+  it('places background processes immediately left of the overflow menu', () => {
+    const wrapper = mountHeader({ runningProcessCount: 2 })
+    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').element
+      .parentElement
+    const children = Array.from(actions?.children ?? [])
+    const processesIndex = children.findIndex(
+      (el) => el.getAttribute('data-testid') === 'workspace-chat-header-toggle-processes',
+    )
+    const moreIndex = children.findIndex(
+      (el) => el.querySelector('[data-testid="workspace-chat-header-more"]') !== null,
+    )
+    expect(processesIndex).toBeGreaterThanOrEqual(0)
+    expect(moreIndex).toBe(processesIndex + 1)
+    expect(wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').text()).toContain(
+      '2',
+    )
   })
 
   it('routes overflow actions through emits', async () => {
-    const wrapper = mountHeader({ runningProcessCount: 2 })
+    const wrapper = mountHeader()
     const buttons = wrapper.findAll('button')
     const byText = (label: string) =>
       buttons.find((button) => button.text().includes(label))!
 
-    await byText('Background processes').trigger('click')
+    expect(byText('Background processes')).toBeUndefined()
+    await byText('Stop workspace').trigger('click')
     await byText('Capture image').trigger('click')
     await byText('Delete workspace').trigger('click')
 
-    expect(wrapper.emitted('toggle-processes')).toEqual([[]])
+    expect(wrapper.emitted('stop-workspace')).toEqual([[]])
     expect(wrapper.emitted('capture-image')).toEqual([[]])
     expect(wrapper.emitted('delete-workspace')).toEqual([[]])
-    expect(wrapper.text()).toContain('2')
   })
 })

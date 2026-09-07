@@ -2,13 +2,11 @@
 /**
  * WorkspaceChatHeader — minimaler Chat-Header (OpenWebUI-Navbar angelehnt).
  *
- * Kein Balken: transparent, ohne Border. Links steht der Workspace-Name
- * (dort per Klick/Pencil inline editierbar) mit Status + aktivem Chat als
- * dezenter Subline. Rechts: kompakte Panel-Toggles + `…`-Menü.
- * Die Chatliste lebt ausschließlich in der globalen Sidebar (gruppiert nach
- * Workspace); Chat-Rename/Delete passiert dort.
- * Start/Stop des Workspace hängen als Power-Button rechts (gleiche Logik wie
- * WorkspaceActions).
+ * Kein Balken: transparent, ohne Border. Links steht der Chat-Name groß,
+ * darunter Workspace-Name (per Klick/Pencil inline editierbar) plus Status.
+ * Rechts: kompakte Panel-Toggles inkl. Background processes, dann `…`-Menü
+ * mit Start/Stop, Capture und Delete. Die Chatliste lebt ausschließlich in
+ * der globalen Sidebar; Chat-Rename/Delete passiert dort.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
@@ -126,6 +124,7 @@ function saveWorkspaceRename(): void {
 }
 
 function handlePowerClick(): void {
+  if (powerDisabled.value) return
   if (showStopButton.value) {
     emit('stop-workspace')
     return
@@ -149,13 +148,22 @@ watch(
   >
     <SidebarTrigger class="shrink-0 text-muted-foreground" />
 
-    <!-- Left: workspace name (editable here) + subtle status/chat subline -->
+    <!-- Left: chat name (large) + workspace name/status (small, editable) -->
     <div class="flex min-w-0 flex-1 flex-col justify-center">
-      <div class="flex min-w-0 items-center gap-1">
+      <div
+        class="min-w-0 truncate py-0.5 text-left text-[15px] font-normal text-foreground"
+        data-testid="workspace-chat-header-chat-title"
+      >
+        {{ activeChatTitle || 'New chat' }}
+      </div>
+      <div
+        class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+        data-testid="workspace-chat-header-status"
+      >
         <template v-if="editingWorkspace">
           <Input
             v-model="workspaceNameInput"
-            class="h-7 min-w-0 flex-1 text-sm"
+            class="h-6 min-w-0 flex-1 text-xs"
             maxlength="255"
             placeholder="Workspace name"
             data-testid="workspace-chat-header-name-input"
@@ -165,7 +173,7 @@ watch(
           <Button
             variant="ghost"
             size="icon-sm"
-            class="h-7 w-7 shrink-0"
+            class="h-6 w-6 shrink-0"
             title="Save workspace name"
             data-testid="workspace-chat-header-name-save"
             @click="saveWorkspaceRename"
@@ -175,7 +183,7 @@ watch(
           <Button
             variant="ghost"
             size="icon-sm"
-            class="h-7 w-7 shrink-0"
+            class="h-6 w-6 shrink-0"
             title="Cancel"
             data-testid="workspace-chat-header-name-cancel"
             @click="cancelWorkspaceRename"
@@ -184,9 +192,13 @@ watch(
           </Button>
         </template>
         <template v-else>
+          <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
+          <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
+          <span class="shrink-0 truncate">{{ statusText }}</span>
+          <span class="shrink-0">·</span>
           <button
             type="button"
-            class="min-w-0 flex-1 truncate py-0.5 text-left text-[15px] font-normal text-foreground transition-colors hover:text-foreground/80"
+            class="min-w-0 truncate text-left transition-colors hover:text-foreground"
             :class="transitionLabel ? 'cursor-default' : 'cursor-pointer'"
             title="Rename workspace"
             data-testid="workspace-chat-header-name"
@@ -197,7 +209,7 @@ watch(
           <button
             v-if="!transitionLabel"
             type="button"
-            class="hidden shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 sm:block [div:hover>&]:opacity-100"
+            class="hidden shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 sm:block [div:hover>&]:opacity-100"
             title="Rename workspace"
             data-testid="workspace-chat-header-rename"
             @click="startWorkspaceRename"
@@ -206,34 +218,10 @@ watch(
           </button>
         </template>
       </div>
-      <div
-        class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
-        data-testid="workspace-chat-header-status"
-      >
-        <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
-        <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
-        <span class="shrink-0 truncate">{{ statusText }}</span>
-        <span v-if="activeChatTitle" class="min-w-0 truncate" data-testid="workspace-chat-header-chat-title">
-          · {{ activeChatTitle }}
-        </span>
-      </div>
     </div>
 
-    <!-- Right: power + compact toggles + overflow menu -->
+    <!-- Right: compact toggles + processes + overflow menu -->
     <div class="flex shrink-0 items-center gap-0.5">
-      <Button
-        v-if="showStopButton || showStartButton"
-        variant="ghost"
-        size="icon-sm"
-        :title="powerTitle"
-        :disabled="powerDisabled"
-        :data-testid="showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'"
-        @click="handlePowerClick"
-      >
-        <Loader2 v-if="isTransitioning" :size="16" class="animate-spin" />
-        <Square v-else-if="showStopButton" :size="16" />
-        <Play v-else :size="16" />
-      </Button>
       <Button
         variant="ghost"
         size="icon-sm"
@@ -284,6 +272,28 @@ watch(
           />
         </span>
       </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        title="Background processes"
+        data-testid="workspace-chat-header-toggle-processes"
+        @click="emit('toggle-processes')"
+      >
+        <span class="relative inline-flex">
+          <Container :size="16" :class="processesActive ? 'text-primary' : ''" />
+          <span
+            v-if="runningProcessCount > 0"
+            class="absolute -bottom-1 -right-1 flex h-3 min-w-3 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] leading-none text-secondary-foreground"
+          >
+            {{ runningProcessCount }}
+          </span>
+          <span
+            v-else-if="processesActive"
+            class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
+            title="Background processes open"
+          />
+        </span>
+      </Button>
 
       <DropdownMenu>
         <DropdownMenuTrigger as-child>
@@ -298,21 +308,19 @@ watch(
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" class="w-56">
           <DropdownMenuItem
-            class="relative text-xs"
-            data-testid="workspace-chat-header-toggle-processes"
-            @select="emit('toggle-processes')"
+            v-if="showStopButton || showStartButton"
+            class="text-xs"
+            :disabled="powerDisabled"
+            :title="powerTitle"
+            :data-testid="showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'"
+            @select="handlePowerClick"
           >
-            <Container :size="14" :class="processesActive ? 'text-primary' : ''" />
-            Background processes
-            <span
-              v-if="runningProcessCount > 0"
-              class="ml-auto rounded-full bg-secondary px-1.5 text-[10px] text-secondary-foreground"
-            >
-              {{ runningProcessCount }}
-            </span>
-            <Check v-else-if="processesActive" :size="14" class="ml-auto text-primary" />
+            <Loader2 v-if="isTransitioning" :size="14" class="animate-spin" />
+            <Square v-else-if="showStopButton" :size="14" />
+            <Play v-else :size="14" />
+            {{ showStopButton ? 'Stop workspace' : 'Start workspace' }}
           </DropdownMenuItem>
-          <DropdownMenuSeparator />
+          <DropdownMenuSeparator v-if="showStopButton || showStartButton" />
           <DropdownMenuItem
             class="text-xs"
             data-testid="workspace-chat-header-capture-image"
