@@ -694,7 +694,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_PERMISSION,
             {
-                **self._gate_ids(session),
+                **(await self._gate_ids(session)),
                 "request_id": str(request_id),
                 "decision": result.decision,
                 "remember": result.remember,
@@ -740,7 +740,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
             {
-                **self._gate_ids(session),
+                **(await self._gate_ids(session)),
                 "request_id": str(question_id),
                 "status": status,
             },
@@ -1243,7 +1243,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_PERMISSION,
             {
-                **self._gate_ids(session),
+                **(await self._gate_ids(session)),
                 "request_id": str(request.id),
                 "tool": tool,
                 "pattern": action,
@@ -1279,7 +1279,7 @@ class HarnessService:
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
             {
-                **self._gate_ids(session),
+                **(await self._gate_ids(session)),
                 "request_id": str(request.id),
                 "questions": questions,
                 "call_id": call_id,
@@ -1702,7 +1702,7 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_PERMISSION,
                 {
-                    **self._gate_ids(session),
+                    **(await self._gate_ids(session)),
                     "request_id": str(request.id),
                     "decision": "reject",
                     "remember": "once",
@@ -1721,7 +1721,7 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_QUESTION,
                 {
-                    **self._gate_ids(session),
+                    **(await self._gate_ids(session)),
                     "request_id": str(request.id),
                     "status": "rejected",
                 },
@@ -1754,7 +1754,7 @@ class HarnessService:
             await self._emit_frontend(
                 FRONTEND_EVENT_PERMISSION,
                 {
-                    **self._gate_ids(session),
+                    **(await self._gate_ids(session)),
                     "request_id": sid,
                     "decision": decision,
                     "remember": remember,
@@ -1762,12 +1762,13 @@ class HarnessService:
                 str(session.workspace_id),
             )
 
-    def _gate_ids(self, session: HarnessSession) -> dict[str, str]:
+    async def _gate_ids(self, session: HarnessSession) -> dict[str, str]:
         """Workspace, session, and root session ids for gate events."""
+        root_id = await sync_to_async(self.sessions.get_root_id)(session)
         return {
             "workspace_id": str(session.workspace_id),
             "session_id": str(session.id),
-            "root_session_id": str(self.sessions.get_root_id(session)),
+            "root_session_id": str(root_id),
         }
 
     def _session_status_payload(

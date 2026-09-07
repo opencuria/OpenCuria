@@ -296,6 +296,128 @@ async def test_abort_rejects_pending_permission_and_question(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_resolve_permission_child_session_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Child-session permission resolve must wrap get_root_id for Daphne."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="ls",
+        title="$ ls",
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        outcome = await service.resolve_permission(
+            session=child,
+            request_id=permission.id,
+            response="once",
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_permission called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert outcome["decision"] == "allow"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("root_session_id") == str(parent.id)
+        and event.get("session_id") == str(child.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_question_child_session_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Child-session question resolve must wrap get_root_id for Daphne."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Color?"}],
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        outcome = await service.resolve_question(
+            session=child,
+            question_id=question.id,
+            answers=["blue"],
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_question called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert outcome["status"] == "answered"
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("root_session_id") == str(parent.id)
+        and event.get("session_id") == str(child.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_run_child_session_pending_gates_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Aborting a child with pending gates must wrap get_root_id for Daphne."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Continue?"}],
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        aborted = await service.abort_run(child.id)
+    except SynchronousOnlyOperation:
+        pytest.fail("abort_run called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert aborted.status == "idle"
+    stored_permission = await sync_to_async(PermissionRequest.objects.get)(
+        id=permission.id
+    )
+    stored_question = await sync_to_async(QuestionRequest.objects.get)(id=question.id)
+    assert stored_permission.status == "rejected"
+    assert stored_question.status == "rejected"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("root_session_id") == str(parent.id)
+        for event in events
+    )
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("root_session_id") == str(parent.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_start_run_settles_open_text_and_reasoning_parts(
     harness_workspace,
 ) -> None:
@@ -1324,6 +1446,19 @@ async def _db_create_session(harness_workspace):  # type: ignore[no-untyped-def]
     )
 
 
+async def _db_create_child_session(harness_workspace, parent: HarnessSession):
+    """Create a subagent child session from async test context."""
+    return await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="child",
+        agent_name="general",
+        mode="build",
+        model="fake-model",
+        parent_id=parent.id,
+    )
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_start_run_uses_accessor_factory_for_list_tool(
     harness_workspace,
@@ -1489,7 +1624,7 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
 
 @pytest.mark.django_db(transaction=True)
 async def test_always_allow_resolves_sibling_pending_asks(
-    harness_workspace,
+    harness_workspace, monkeypatch
 ) -> None:
     """Always-allow auto-approves remaining pending asks for the same tool."""
     emitted: list[dict[str, Any]] = []
@@ -1498,7 +1633,8 @@ async def test_always_allow_resolves_sibling_pending_asks(
         emitted.append({"event": event, **data})
 
     service = HarnessService(emit=_emit)
-    session = await _db_create_session(harness_workspace)
+    parent = await _db_create_session(harness_workspace)
+    session = await _db_create_child_session(harness_workspace, parent)
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant"
     )
@@ -1533,11 +1669,17 @@ async def test_always_allow_resolves_sibling_pending_asks(
             break
         await asyncio.sleep(0.02)
     assert len(request_ids) >= 2
-    await service.resolve_permission(
-        session=session,
-        request_id=uuid.UUID(request_ids[0]),
-        response="always",
-    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        await service.resolve_permission(
+            session=session,
+            request_id=uuid.UUID(request_ids[0]),
+            response="always",
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_permission called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
     decisions = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
     assert set(decisions) == {"once"}
     resolved_events = [
@@ -1547,6 +1689,7 @@ async def test_always_allow_resolves_sibling_pending_asks(
     ]
     assert len(resolved_events) == 2
     assert {item["request_id"] for item in resolved_events} == set(request_ids[:2])
+    assert all(item.get("root_session_id") == str(parent.id) for item in resolved_events)
 
 
 @pytest.mark.django_db(transaction=True)
