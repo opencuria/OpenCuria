@@ -5,8 +5,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
-import { useDesktopStore } from '@/stores/desktop'
-import { useTerminalStore } from '@/stores/terminal'
 import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
@@ -17,8 +15,6 @@ import {
 } from '@/lib/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
-import { Button } from '@/components/ui/button'
-import { FolderTree, Monitor, TerminalSquare } from '@lucide/vue'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
@@ -26,7 +22,6 @@ import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
 const props = defineProps<{
   workspaceId: string
   canPrompt?: boolean
-  showWorkspaceToolbar?: boolean
   processesOpen?: boolean
 }>()
 
@@ -41,8 +36,6 @@ const route = useRoute()
 const router = useRouter()
 const fileExplorer = useFileExplorerStore()
 const skillStore = useSkillStore()
-const terminalStore = useTerminalStore()
-const desktopStore = useDesktopStore()
 
 const sending = ref(false)
 const resolving = ref(false)
@@ -451,44 +444,6 @@ function handleOpenSubtask(childSessionId: string): void {
     void harness.fetchSessions(props.workspaceId)
   }
 }
-
-function handleTerminalButtonClick(): void {
-  if (!props.canPrompt) return
-  if (!terminalStore.isOpen) {
-    terminalStore.open()
-    return
-  }
-  if (terminalStore.isMinimized) {
-    terminalStore.restore()
-    return
-  }
-  terminalStore.minimize()
-}
-
-function handleDesktopButtonClick(): void {
-  if (!props.canPrompt) return
-  if (!desktopStore.isOpen) {
-    desktopStore.open()
-    return
-  }
-  if (desktopStore.isMinimized) {
-    desktopStore.restore()
-    return
-  }
-  desktopStore.minimize()
-}
-
-const terminalButtonTitle = computed(() => {
-  if (!terminalStore.isOpen) return 'Open terminal'
-  if (terminalStore.isMinimized) return 'Restore terminal'
-  return 'Minimize terminal'
-})
-
-const desktopButtonTitle = computed(() => {
-  if (!desktopStore.isOpen) return 'Open desktop'
-  if (desktopStore.isMinimized) return 'Restore desktop'
-  return 'Minimize desktop'
-})
 </script>
 
 <template>
@@ -503,7 +458,7 @@ const desktopButtonTitle = computed(() => {
     />
     <div
       v-if="!isSubagentSession"
-      class="relative z-10 flex min-w-0 shrink-0 items-end gap-0 overflow-x-hidden"
+      class="relative z-10 flex min-w-0 shrink-0 overflow-x-hidden"
     >
       <div class="flex min-w-0 flex-1 flex-col">
         <HarnessSheetStack
@@ -551,52 +506,6 @@ const desktopButtonTitle = computed(() => {
           @mention-select="handleMentionSelect"
         />
       </div>
-      <template v-if="showWorkspaceToolbar">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="mb-2 shrink-0"
-          :disabled="!canPrompt"
-          :title="fileExplorer.isOpen ? 'Hide files' : 'Open file explorer'"
-          @click="fileExplorer.toggle()"
-        >
-          <FolderTree :size="16" :class="fileExplorer.isOpen ? 'text-primary' : ''" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="mb-2 mr-2 shrink-0"
-          :disabled="!canPrompt"
-          :title="terminalButtonTitle"
-          @click="handleTerminalButtonClick"
-        >
-          <span class="relative inline-flex">
-            <TerminalSquare :size="16" :class="terminalStore.isOpen ? 'text-primary' : ''" />
-            <span
-              v-if="terminalStore.isOpen && terminalStore.isMinimized"
-              class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-              title="Terminal minimized"
-            />
-          </span>
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="mb-2 mr-2 shrink-0"
-          :disabled="!canPrompt"
-          :title="desktopButtonTitle"
-          @click="handleDesktopButtonClick"
-        >
-          <span class="relative inline-flex">
-            <Monitor :size="16" :class="desktopStore.isOpen ? 'text-primary' : ''" />
-            <span
-              v-if="desktopStore.isOpen && desktopStore.isMinimized"
-              class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-              title="Desktop minimized"
-            />
-          </span>
-        </Button>
-      </template>
     </div>
   </div>
 </template>

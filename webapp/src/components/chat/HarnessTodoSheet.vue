@@ -11,7 +11,7 @@ const props = defineProps<{
   peek?: boolean
 }>()
 
-const open = defineModel<boolean>('open', { default: true })
+const open = defineModel<boolean>('open', { default: false })
 
 const sorted = computed(() => [...props.todos].sort((a, b) => a.order - b.order))
 

@@ -36,6 +36,7 @@ vi.mock('@/components/chat/HarnessContextSheet.vue', () => ({
 
 vi.mock('@/components/chat/HarnessTodoSheet.vue', () => ({
   default: {
+    name: 'HarnessTodoSheet',
     props: ['todos', 'open'],
     template: '<div data-testid="todo-stub">{{ todos.length }}</div>',
   },
@@ -213,6 +214,17 @@ describe('HarnessSheetStack', () => {
     const notice = wrapper.findComponent({ name: 'HarnessNoticeSheet' })
     notice.vm.$emit('dismiss', 'msg-1')
     expect(wrapper.emitted('dismiss-notice')).toEqual([['msg-1']])
+  })
+
+  it('renders the todos sheet collapsed by default', () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: { sheets: [{ kind: 'todos', todos: [makeTodo('t1')] }] },
+    })
+
+    expect(wrapper.find('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'todos',
+    )
+    expect(wrapper.getComponent({ name: 'HarnessTodoSheet' }).props('open')).toBe(false)
   })
 
   it('renders the processes sheet on top of todos and forwards close', async () => {

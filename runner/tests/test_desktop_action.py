@@ -265,6 +265,146 @@ async def test_screenshot_crop_rejects_invalid_bounds(service: WorkspaceService)
         )
 
 
+def _last_shell_command(service: WorkspaceService) -> str:
+    """Return the last desktop shell command executed by *service*."""
+    call = service._runtime.exec_command_wait.await_args_list[-1]
+    return call.args[1][2]
+
+
+@pytest.mark.asyncio
+async def test_key_enter_uses_xdotool_return(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    result = await service.desktop_action(
+        service._workspace_id, "key", {"key": "enter", "modifiers": []}
+    )
+
+    assert result == {"ok": True}
+    command = _last_shell_command(service)
+    assert command == "xdotool key --clearmodifiers Return"
+    assert "xdotool key -- " not in command
+
+
+@pytest.mark.asyncio
+async def test_key_enter_is_case_insensitive(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    await service.desktop_action(
+        service._workspace_id, "key", {"key": "ENTER", "modifiers": []}
+    )
+
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers Return"
+
+
+@pytest.mark.asyncio
+async def test_key_tab_and_escape_use_x11_keysyms(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, ""),
+        (0, "alive"),
+        (0, ""),
+    ]
+
+    await service.desktop_action(
+        service._workspace_id, "key", {"key": "tab", "modifiers": []}
+    )
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers Tab"
+
+    await service.desktop_action(
+        service._workspace_id, "key", {"key": "escape", "modifiers": []}
+    )
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers Escape"
+
+
+@pytest.mark.asyncio
+async def test_key_control_c_uses_ctrl_modifier(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    await service.desktop_action(
+        service._workspace_id,
+        "key",
+        {"key": "c", "modifiers": ["control"]},
+    )
+
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers ctrl+c"
+
+
+@pytest.mark.asyncio
+async def test_key_command_maps_to_super(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    await service.desktop_action(
+        service._workspace_id,
+        "key",
+        {"key": "a", "modifiers": ["command"]},
+    )
+
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers super+a"
+
+
+@pytest.mark.asyncio
+async def test_key_combo_in_key_field_is_split(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    await service.desktop_action(
+        service._workspace_id,
+        "key",
+        {"key": "ctrl+enter", "modifiers": []},
+    )
+
+    assert _last_shell_command(service) == "xdotool key --clearmodifiers ctrl+Return"
+
+
+@pytest.mark.asyncio
+async def test_key_unknown_name_with_exit_zero_raises(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, "No such key name 'foo'. Ignoring it."),
+    ]
+
+    with pytest.raises(RuntimeError, match="Failed to send key"):
+        await service.desktop_action(
+            service._workspace_id, "key", {"key": "foo", "modifiers": []}
+        )
+
+
+@pytest.mark.asyncio
+async def test_type_omits_end_of_options_dash(service: WorkspaceService) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    result = await service.desktop_action(
+        service._workspace_id, "type", {"text": "hello"}
+    )
+
+    assert result == {"ok": True}
+    command = _last_shell_command(service)
+    assert command == "xdotool type --delay 0 --clearmodifiers hello"
+    assert "xdotool type --delay 0 -- " not in command
+
+
+@pytest.mark.asyncio
+async def test_type_leading_dash_uses_file_stdin(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "")]
+
+    await service.desktop_action(
+        service._workspace_id, "type", {"text": "-n flag"}
+    )
+
+    command = _last_shell_command(service)
+    assert command == (
+        "printf '%s' '-n flag' | "
+        "xdotool type --delay 0 --clearmodifiers --file -"
+    )
+
+
 @pytest.mark.asyncio
 async def test_unknown_action_raises(service: WorkspaceService) -> None:
     service._runtime.exec_command_wait.return_value = (0, "alive")

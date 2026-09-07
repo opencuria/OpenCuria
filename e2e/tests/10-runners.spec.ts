@@ -8,11 +8,12 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('10 — Runners', () => {
   test('should display runners page with at least one runner', async ({ authedPage: page }) => {
-    await page.goto(`${BASE_URL}/runners`);
+    await page.goto(`${BASE_URL}/?settings=runners`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    // Should show runners heading
-    await expect(page.getByRole('heading', { name: /runner/i }).first()).toBeVisible();
+    // Sheet opens on the Runners tab (title "Runners")
+    await expect(page.getByTestId('settings-sheet-title')).toContainText(/runners/i);
 
     // At least one runner should be shown
     const runners = await api.get('/runners/');
@@ -26,7 +27,8 @@ test.describe('10 — Runners', () => {
   });
 
   test('should show runner details and status', async ({ authedPage: page }) => {
-    await page.goto(`${BASE_URL}/runners`);
+    await page.goto(`${BASE_URL}/?settings=runners`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     // Should show status badges (online/offline) — wait for data to load

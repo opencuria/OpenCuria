@@ -163,7 +163,8 @@ function handleClose(): void {
 
 async function navigateToCredentials(): Promise<void> {
   handleClose()
-  await router.push({ name: 'credentials' })
+  // Settings-Routen sind Redirects aufs Sheet (Schritt 6): Deep-Link nutzen.
+  await router.push({ path: '/', query: { settings: 'credentials' } })
 }
 
 </script>

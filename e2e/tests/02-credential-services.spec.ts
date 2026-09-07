@@ -8,18 +8,19 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
 test.describe('02 — Credential Services', () => {
   test('should create an env-type credential service', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    // Click Credential Services tab
-    await page.getByRole('button', { name: 'Credential Services' }).click();
+    // Sheet opens on the Organization tab (Credential Services section)
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
 
     // Click New Service
     await page.getByRole('button', { name: /new service/i }).click();
-    await page.waitForSelector('[role="dialog"]');
+    await page.getByRole('dialog').last().waitFor();
 
-    const dialog = page.locator('[role="dialog"]');
+    const dialog = page.getByRole('dialog').last();
     const name = `${testState.prefix}-test-svc`;
 
     // Dialog fields by label (from accessibility tree):
@@ -59,19 +60,21 @@ test.describe('02 — Credential Services', () => {
     testState.credentialServiceSlug = created.slug;
 
     // Reload and verify service appears in list
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
-    await page.getByRole('button', { name: 'Credential Services' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
     await expect(page.getByText(name)).toBeVisible({ timeout: 10_000 });
     console.log(`Created credential service: ${testState.credentialServiceId} (${testState.credentialServiceSlug})`);
   });
 
   test('should show credential service in the list', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Credential Services' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
 
     // Verify our service is visible
@@ -85,10 +88,11 @@ test.describe('02 — Credential Services', () => {
   });
 
   test('should toggle credential service activation', async ({ authedPage: page, testState }) => {
-    await page.goto(`${BASE_URL}/org-settings`);
+    await page.goto(`${BASE_URL}/?settings=organization`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
-    await page.getByRole('button', { name: 'Credential Services' }).click();
+    await page.getByTestId('settings-nav-organization').first().click();
     await page.waitForTimeout(500);
 
     // Find our service and toggle it
