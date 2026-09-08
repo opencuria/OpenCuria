@@ -2,10 +2,10 @@
 import { useTheme } from '@/composables/useTheme'
 import { Toaster } from '@/components/ui/sonner'
 
-useTheme()
+const { isDark } = useTheme()
 </script>
 
 <template>
   <RouterView />
-  <Toaster rich-colors close-button />
+  <Toaster :theme="isDark ? 'dark' : 'light'" close-button />
 </template>
