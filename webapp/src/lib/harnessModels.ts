@@ -43,6 +43,17 @@ export function formatEffort(effort: string): string {
   return EFFORT_LABELS[key] ?? effort
 }
 
+/** Compact context size label (128000 → "128k"); empty when unknown. */
+export function formatContextLength(contextLength: number): string {
+  if (!Number.isFinite(contextLength) || contextLength <= 0) return ''
+  if (contextLength >= 1_000_000) {
+    const millions = contextLength / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}m`
+  }
+  if (contextLength >= 1_000) return `${Math.round(contextLength / 1_000)}k`
+  return String(contextLength)
+}
+
 /**
  * Keep the current effort when the model still supports it; otherwise fall
  * back to the model's default (or first) effort.

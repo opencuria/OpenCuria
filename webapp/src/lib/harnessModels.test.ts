@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  formatContextLength,
   formatEffort,
   formatHarnessModelEffort,
   providerDisplayName,
@@ -39,6 +40,16 @@ describe('harnessModels', () => {
     expect(formatEffort('high')).toBe('High')
     expect(formatEffort('xhigh')).toBe('Extra High')
     expect(formatEffort('mystery')).toBe('mystery')
+  })
+
+  it('formats context lengths compactly', () => {
+    expect(formatContextLength(128_000)).toBe('128k')
+    expect(formatContextLength(200_000)).toBe('200k')
+    expect(formatContextLength(1_000_000)).toBe('1m')
+    expect(formatContextLength(1_500_000)).toBe('1.5m')
+    expect(formatContextLength(500)).toBe('500')
+    expect(formatContextLength(0)).toBe('')
+    expect(formatContextLength(-1)).toBe('')
   })
 
   it('snaps unsupported effort to the model default', () => {

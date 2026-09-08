@@ -13,7 +13,12 @@ import {
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
-import { providerDisplayName, type ProviderModel } from '@/lib/harnessModels'
+import {
+  formatContextLength,
+  formatEffort,
+  providerDisplayName,
+  type ProviderModel,
+} from '@/lib/harnessModels'
 
 const props = withDefaults(
   defineProps<{
@@ -45,6 +50,24 @@ const triggerLabel = computed(() => {
   return props.placeholder
 })
 
+/** Models grouped by provider, preserving catalog order. */
+const groupedModels = computed(() => {
+  const groups = new Map<string, ProviderModel[]>()
+  for (const item of props.models) {
+    const key = item.provider ?? ''
+    const list = groups.get(key)
+    if (list) list.push(item)
+    else groups.set(key, [item])
+  }
+  return [...groups.entries()].map(([provider, items]) => ({ provider, items }))
+})
+
+function effortHint(item: ProviderModel): string {
+  if (item.default_effort) return formatEffort(item.default_effort)
+  if (item.reasoning_efforts.length > 0) return formatEffort(item.reasoning_efforts[0] ?? '')
+  return ''
+}
+
 function selectModel(id: string): void {
   emit('update:modelValue', id)
   open.value = false
@@ -68,8 +91,13 @@ function clearModel(): void {
         class="w-full justify-between font-normal"
         :data-testid="inputId ? `${inputId}-trigger` : undefined"
       >
-        <span :class="cn('truncate', !modelValue.trim() && 'text-muted-foreground')">
-          {{ triggerLabel }}
+        <span class="min-w-0 flex-1 truncate text-left">
+          <span :class="cn(!modelValue.trim() && 'text-muted-foreground')">
+            {{ triggerLabel }}
+          </span>
+          <span v-if="selected" class="ml-1.5 text-muted-foreground">
+            {{ providerDisplayName(selected.provider) }}
+          </span>
         </span>
         <ChevronsUpDown class="size-4 shrink-0 opacity-50" />
       </Button>
@@ -83,22 +111,32 @@ function clearModel(): void {
             <CommandItem value="__clear__" @select="clearModel">
               <span class="text-muted-foreground">Clear selection</span>
             </CommandItem>
+          </CommandGroup>
+          <CommandGroup
+            v-for="group in groupedModels"
+            :key="group.provider || 'other'"
+            :heading="providerDisplayName(group.provider) || 'Other'"
+          >
             <CommandItem
-              v-for="item in models"
+              v-for="item in group.items"
               :key="item.id"
               :value="`${item.name} ${item.id} ${providerDisplayName(item.provider)}`"
+              :data-testid="`model-option-${item.id}`"
               @select="selectModel(item.id)"
             >
               <span class="min-w-0 flex-1 truncate">{{ item.name }}</span>
-              <span class="ml-2 shrink-0 text-xs text-muted-foreground">
-                {{ providerDisplayName(item.provider) }}
+              <span
+                v-if="formatContextLength(item.context_length)"
+                class="ml-2 shrink-0 font-mono text-xs text-muted-foreground"
+              >
+                {{ formatContextLength(item.context_length) }}
+              </span>
+              <span v-if="effortHint(item)" class="ml-2 shrink-0 text-xs text-muted-foreground">
+                {{ effortHint(item) }}
               </span>
               <Check
                 :class="
-                  cn(
-                    'ml-2 size-4 shrink-0',
-                    modelValue === item.id ? 'opacity-100' : 'opacity-0',
-                  )
+                  cn('ml-2 size-4 shrink-0', modelValue === item.id ? 'opacity-100' : 'opacity-0')
                 "
               />
             </CommandItem>
