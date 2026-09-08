@@ -1,22 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, toRef } from 'vue'
+/**
+ * WorkspaceDesktop — the desktop modal.
+ *
+ * A large aspect-ratio-matched dialog (same pattern as the settings
+ * sheet) that hosts the persistent DesktopSurface iframe. Closing the
+ * modal only closes the view — the session keeps running and the live
+ * stream stays visible in the side panel. There is no chat sidebar here
+ * anymore.
+ */
+import { computed, toRef } from 'vue'
 import type { CSSProperties } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
-import { useNotificationStore } from '@/stores/notifications'
-import * as workspacesApi from '@/services/workspaces.api'
-import { getConfig } from '@/services/config'
-import { Button } from '@/components/ui/button'
-import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { X, Monitor, RefreshCw, Minus, Copy, ClipboardPaste, MousePointerClick } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useDesktopSession } from '@/composables/useDesktopSession'
-import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
+import { desktopModalWidthCss, workspaceDesktopSize } from '@/lib/desktopGeometry'
+import { modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import {
-  DEFAULT_SIDEBAR_WIDTH,
-  clampSidebarWidth,
-  loadSidebarWidth,
-  saveSidebarWidth,
-} from '@/lib/desktopSidebar'
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { Monitor, RefreshCw, Square, Copy, ClipboardPaste, X } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -24,81 +32,15 @@ const props = defineProps<{
 
 const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
-const notifications = useNotificationStore()
 const {
   error,
-  takeControlBusy,
+  clipboardBusy,
   startDesktop,
   stopDesktop,
-  stopDesktopIfActive,
   handleReconnect,
-  takeControl,
-  setupSocketListeners,
-  cleanupSocketListeners,
+  copyFromVmClipboard,
+  pasteToVmClipboard,
 } = useDesktopSession(toRef(props, 'workspaceId'))
-const clipboardBusy = ref(false)
-const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
-const viewportHostRef = ref<HTMLElement | null>(null)
-const viewportWidth = ref(0)
-const viewportHeight = ref(0)
-let resizeObserver: ResizeObserver | null = null
-let iframeKeydownCleanup: (() => void) | null = null
-let isDispatchingSyntheticPasteShortcut = false
-
-const sidebarWidth = ref(loadSidebarWidth())
-const isResizing = ref(false)
-const smQuery = window.matchMedia('(min-width: 640px)')
-const isWideLayout = ref(smQuery.matches)
-
-function onWideLayoutChange(event: MediaQueryListEvent): void {
-  isWideLayout.value = event.matches
-}
-
-function applySidebarWidth(width: number): void {
-  sidebarWidth.value = clampSidebarWidth(width, window.innerWidth)
-}
-
-function persistSidebarWidth(): void {
-  saveSidebarWidth(sidebarWidth.value)
-}
-
-function onWindowResize(): void {
-  applySidebarWidth(sidebarWidth.value)
-}
-
-function onResizePointerDown(event: PointerEvent): void {
-  if (!isWideLayout.value) return
-  event.preventDefault()
-  isResizing.value = true
-  const handle = event.currentTarget as HTMLElement
-  handle.setPointerCapture?.(event.pointerId)
-  applySidebarWidth(window.innerWidth - event.clientX)
-}
-
-function onResizePointerMove(event: PointerEvent): void {
-  if (!isResizing.value) return
-  applySidebarWidth(window.innerWidth - event.clientX)
-}
-
-function onResizePointerUp(event: PointerEvent): void {
-  if (!isResizing.value) return
-  isResizing.value = false
-  const handle = event.currentTarget as HTMLElement
-  if (handle.hasPointerCapture?.(event.pointerId)) {
-    handle.releasePointerCapture(event.pointerId)
-  }
-  persistSidebarWidth()
-}
-
-function onResizeDoubleClick(): void {
-  applySidebarWidth(DEFAULT_SIDEBAR_WIDTH)
-  persistSidebarWidth()
-}
-
-const sidebarStyle = computed<CSSProperties>(() => {
-  if (!isWideLayout.value) return {}
-  return { width: `${sidebarWidth.value}px` }
-})
 
 const desktopSize = computed(() => {
   const workspace =
@@ -109,286 +51,114 @@ const desktopSize = computed(() => {
   return workspaceDesktopSize(workspace)
 })
 
-const viewportScale = computed(() => {
-  if (viewportWidth.value <= 0 || viewportHeight.value <= 0) return 1
-  const fitScale = Math.min(
-    viewportWidth.value / Math.max(desktopSize.value.width, 1),
-    viewportHeight.value / Math.max(desktopSize.value.height, 1),
-  )
-  return Math.max(Math.min(fitScale, 1), 0.1)
-})
-
-const scaledFrameStyle = computed<CSSProperties>(() => ({
-  width: `${desktopSize.value.width}px`,
-  height: `${desktopSize.value.height}px`,
-  transform: `scale(${viewportScale.value})`,
-  transformOrigin: 'center center',
+// Largest width that keeps the dialog (header + aspect-ratio viewport)
+// inside the viewport with a minimal margin.
+const contentStyle = computed<CSSProperties>(() => ({
+  width: desktopModalWidthCss(desktopSize.value.width, desktopSize.value.height),
 }))
 
-const scaledIframeStyle = computed<CSSProperties>(() => ({
-  width: `${desktopSize.value.width}px`,
-  height: `${desktopSize.value.height}px`,
-}))
-
-const desktopIframeSrc = computed(() => {
-  if (!desktopStore.proxyUrl) return ''
-  const token = localStorage.getItem('kern_access_token') || ''
-  const config = getConfig()
-  const base = config.wsBaseUrl || ''
-  return buildDesktopIframeSrc(base, desktopStore.proxyUrl, token)
-})
-
-async function handleClose(): Promise<void> {
-  if (await stopDesktop()) desktopStore.close()
+function handleUpdateOpen(open: boolean): void {
+  if (!open) desktopStore.close()
 }
 
-function handleMinimize(): void {
-  desktopStore.minimize()
+function setModalHost(el: Element | ComponentPublicInstance | null): void {
+  modalDesktopHost.value = el instanceof HTMLElement ? el : null
 }
-
-async function copyFromVmClipboard(): Promise<boolean> {
-  if (!desktopStore.isConnected || clipboardBusy.value) return false
-  clipboardBusy.value = true
-  try {
-    const { text } = await workspacesApi.readDesktopClipboard(props.workspaceId)
-    await navigator.clipboard.writeText(text || '')
-    notifications.success('Copied from VM', 'VM clipboard copied to local clipboard.')
-    return true
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    notifications.error('Copy failed', msg)
-    return false
-  } finally {
-    clipboardBusy.value = false
-  }
-}
-
-async function pasteToVmClipboard(): Promise<boolean> {
-  if (!desktopStore.isConnected || clipboardBusy.value) return false
-  clipboardBusy.value = true
-  try {
-    const text = await navigator.clipboard.readText()
-    await workspacesApi.writeDesktopClipboard(props.workspaceId, text || '')
-    notifications.success('Pasted to VM', 'Local clipboard sent to VM clipboard.')
-    return true
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    notifications.error('Paste failed', msg)
-    return false
-  } finally {
-    clipboardBusy.value = false
-  }
-}
-
-function shouldHandleClipboardShortcut(event: KeyboardEvent): boolean {
-  if (!desktopStore.isOpen || desktopStore.isMinimized || !desktopStore.isConnected) return false
-  const target = event.target as HTMLElement | null
-  if (target?.closest('input, textarea, [contenteditable="true"]')) return false
-  return true
-}
-
-function parseClipboardShortcut(event: KeyboardEvent): 'copy' | 'paste' | null {
-  const key = event.key.toLowerCase()
-  const modifierPressed = event.metaKey || event.ctrlKey
-  if (!modifierPressed || event.altKey || event.shiftKey) return null
-  if (key === 'c') return 'copy'
-  if (key === 'v') return 'paste'
-  return null
-}
-
-function suppressClipboardEvent(event: KeyboardEvent): void {
-  event.preventDefault()
-  event.stopPropagation()
-  event.stopImmediatePropagation()
-}
-
-function dispatchPasteShortcutToVm(event: KeyboardEvent): void {
-  const iframe = desktopIframeRef.value
-  const doc = iframe?.contentDocument
-  if (!iframe || !doc) return
-
-  const activeTarget = (doc.activeElement as HTMLElement | null) ?? doc.body ?? doc.documentElement
-  if (!activeTarget) return
-
-  const modifierKey = event.metaKey ? 'Meta' : 'Control'
-  const shortcutEventInit: KeyboardEventInit = {
-    key: 'v',
-    code: 'KeyV',
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    ctrlKey: modifierKey === 'Control',
-    metaKey: modifierKey === 'Meta',
-  }
-
-    isDispatchingSyntheticPasteShortcut = true
-  try {
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keydown', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-    activeTarget.dispatchEvent(new KeyboardEvent('keydown', shortcutEventInit))
-    activeTarget.dispatchEvent(new KeyboardEvent('keyup', shortcutEventInit))
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keyup', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-  } finally {
-    isDispatchingSyntheticPasteShortcut = false
-  }
-}
-
-async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
-  if (isDispatchingSyntheticPasteShortcut) return
-  if (!shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-
-  if (shortcut === 'copy') {
-    window.setTimeout(() => {
-      void copyFromVmClipboard()
-    }, 120)
-    return
-  }
-
-  suppressClipboardEvent(event)
-  const synced = await pasteToVmClipboard()
-  if (!synced) return
-  dispatchPasteShortcutToVm(event)
-}
-
-function handleDesktopIframeKeyup(event: KeyboardEvent): void {
-  if (isDispatchingSyntheticPasteShortcut) return
-  if (!shouldHandleClipboardShortcut(event)) return
-  if (parseClipboardShortcut(event) !== 'paste') return
-  suppressClipboardEvent(event)
-}
-
-function bindDesktopIframeKeydownListener(): void {
-  iframeKeydownCleanup?.()
-  iframeKeydownCleanup = null
-
-  const doc = desktopIframeRef.value?.contentDocument
-  const win = desktopIframeRef.value?.contentWindow
-  if (!doc || !win) return
-  const keydownListener = (event: KeyboardEvent) => {
-    void handleDesktopIframeKeydown(event)
-  }
-  const keyupListener = (event: KeyboardEvent) => {
-    handleDesktopIframeKeyup(event)
-  }
-  win.addEventListener('keydown', keydownListener, true)
-  win.addEventListener('keyup', keyupListener, true)
-  doc.addEventListener('keydown', keydownListener, true)
-  doc.addEventListener('keyup', keyupListener, true)
-  iframeKeydownCleanup = () => {
-    win.removeEventListener('keydown', keydownListener, true)
-    win.removeEventListener('keyup', keyupListener, true)
-    doc.removeEventListener('keydown', keydownListener, true)
-    doc.removeEventListener('keyup', keyupListener, true)
-  }
-}
-
-function onGlobalKeydown(event: KeyboardEvent): void {
-  if (!shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-
-  if (shortcut === 'copy') {
-    event.preventDefault()
-    void copyFromVmClipboard()
-  } else if (shortcut === 'paste') {
-    event.preventDefault()
-    void pasteToVmClipboard()
-  }
-}
-
-function observeViewportHost(): void {
-  if (!viewportHostRef.value) return
-  const refreshBounds = () => {
-    if (!viewportHostRef.value) return
-    const rect = viewportHostRef.value.getBoundingClientRect()
-    viewportWidth.value = rect.width
-    viewportHeight.value = rect.height
-  }
-  refreshBounds()
-  resizeObserver = new ResizeObserver(refreshBounds)
-  resizeObserver.observe(viewportHostRef.value)
-}
-
-onMounted(() => {
-  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId) {
-    desktopStore.reset()
-  }
-
-  setupSocketListeners()
-
-  if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting) {
-    void startDesktop()
-  }
-  observeViewportHost()
-  smQuery.addEventListener('change', onWideLayoutChange)
-  window.addEventListener('resize', onWindowResize)
-  window.addEventListener('keydown', onGlobalKeydown)
-})
-
-onBeforeUnmount(() => {
-  const keepRunningInBackground = (
-    desktopStore.isOpen
-    && desktopStore.isMinimized
-    && desktopStore.workspaceId === props.workspaceId
-  )
-  if (!keepRunningInBackground) {
-    void stopDesktopIfActive(props.workspaceId)
-  }
-  cleanupSocketListeners()
-  resizeObserver?.disconnect()
-  resizeObserver = null
-  iframeKeydownCleanup?.()
-  iframeKeydownCleanup = null
-  smQuery.removeEventListener('change', onWideLayoutChange)
-  window.removeEventListener('resize', onWindowResize)
-  window.removeEventListener('keydown', onGlobalKeydown)
-})
-
-watch(
-  () => desktopStore.isOpen,
-  (open) => {
-    if (open && !desktopStore.isConnected && !desktopStore.isConnecting) {
-      void startDesktop()
-    }
-  },
-)
-
-watch(
-  () => props.workspaceId,
-  async (workspaceId, previousWorkspaceId) => {
-    if (workspaceId !== previousWorkspaceId) {
-      if (previousWorkspaceId) await stopDesktopIfActive(previousWorkspaceId)
-      error.value = null
-      desktopStore.reset()
-    }
-  },
-)
-
-watch(
-  () => desktopIframeRef.value,
-  () => {
-    bindDesktopIframeKeydownListener()
-  },
-)
 </script>
 
 <template>
-  <div
-    v-show="!desktopStore.isMinimized"
-    class="fixed inset-0 z-(--z-desktop) bg-card"
-    :class="{ 'select-none': isResizing }"
-  >
-    <div class="flex h-full flex-col bg-card sm:flex-row">
+  <Dialog :open="desktopStore.isOpen" @update:open="handleUpdateOpen">
+    <!-- Width comes from the inline style (desktop aspect ratio); the
+      important modifier only drops Dialog's default sm:max-w-md cap. -->
+    <DialogContent
+      :show-close-button="false"
+      aria-describedby="workspace-desktop-description"
+      class="gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none!"
+      :style="contentStyle"
+      data-testid="workspace-desktop-modal"
+      @open-auto-focus.prevent
+    >
+      <DialogTitle class="sr-only">Desktop</DialogTitle>
+      <DialogDescription id="workspace-desktop-description" class="sr-only">
+        Interactive remote desktop session.
+      </DialogDescription>
+
+      <!-- Header -->
+      <div class="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+        <div class="flex items-center gap-2">
+          <Monitor :size="14" class="shrink-0 text-muted-foreground" />
+          <span class="text-xs font-medium text-foreground">Desktop</span>
+          <span
+            v-if="desktopStore.isConnected"
+            class="inline-block h-1.5 w-1.5 rounded-full bg-success"
+            title="Connected"
+          />
+          <span
+            v-else-if="desktopStore.isConnecting"
+            class="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warning"
+            title="Connecting…"
+          />
+        </div>
+        <div class="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="h-6 w-6 opacity-50 hover:opacity-100"
+            :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
+            title="Copy VM clipboard to local clipboard"
+            @click="copyFromVmClipboard"
+          >
+            <Copy :size="11" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="h-6 w-6 opacity-50 hover:opacity-100"
+            :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
+            title="Paste local clipboard into VM clipboard"
+            @click="pasteToVmClipboard"
+          >
+            <ClipboardPaste :size="11" />
+          </Button>
+          <Button
+            v-if="desktopStore.isConnected"
+            variant="ghost"
+            size="icon-sm"
+            class="h-6 w-6"
+            title="Reconnect desktop"
+            @click="handleReconnect"
+          >
+            <RefreshCw :size="12" />
+          </Button>
+          <Button
+            v-if="desktopStore.isConnected || desktopStore.isConnecting"
+            variant="ghost"
+            size="icon-sm"
+            class="h-6 w-6"
+            title="Stop desktop session"
+            data-testid="desktop-modal-stop"
+            @click="stopDesktop"
+          >
+            <Square :size="12" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="h-6 w-6"
+            title="Close desktop"
+            data-testid="desktop-modal-close"
+            @click="desktopStore.close()"
+          >
+            <X :size="12" />
+          </Button>
+        </div>
+      </div>
+
+      <!-- Viewport, aspect-ratio matched to the desktop resolution -->
       <div
-        ref="viewportHostRef"
+        class="relative w-full bg-black"
+        :style="{ aspectRatio: `${desktopSize.width} / ${desktopSize.height}` }"
         data-testid="desktop-viewport"
-        class="order-2 min-h-0 flex-1 sm:order-1 relative"
-        :class="{ 'pointer-events-none': isResizing }"
       >
         <div
           v-if="desktopStore.isConnecting"
@@ -409,149 +179,25 @@ watch(
         </div>
 
         <div
-          v-else-if="!desktopStore.isConnected && !desktopStore.isConnecting"
+          v-else-if="!desktopStore.isConnected"
           class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
         >
           <Monitor :size="32" class="text-muted-foreground" />
           <p class="text-sm text-muted-foreground">Desktop session not active</p>
-          <Button size="sm" @click="startDesktop">
+          <Button size="sm" data-testid="desktop-modal-start" @click="startDesktop">
             <Monitor :size="14" class="mr-1" />
             Start Desktop
           </Button>
         </div>
 
+        <!-- Host for the persistent DesktopSurface iframe -->
         <div
-          v-else-if="desktopStore.isConnected && desktopStore.proxyUrl"
+          v-else
+          :ref="setModalHost"
           class="absolute inset-0"
-        >
-          <div
-            class="flex h-full w-full items-center justify-center overflow-hidden p-2 sm:p-3"
-          >
-            <div
-              class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
-              :style="scaledFrameStyle"
-            >
-              <iframe
-                ref="desktopIframeRef"
-                :src="desktopIframeSrc"
-                class="block border-0"
-                :style="scaledIframeStyle"
-                sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-                allow="clipboard-read; clipboard-write"
-                @load="bindDesktopIframeKeydownListener"
-              />
-            </div>
-          </div>
-          <div
-            v-if="desktopStore.computerUseActive"
-            class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
-            tabindex="0"
-            @keydown.prevent
-          >
-            <MousePointerClick :size="28" class="text-white" />
-            <p class="max-w-md text-sm text-white">
-              Computer-use is controlling this desktop. Watching is read-only.
-              Taking control aborts the computer-use agent.
-            </p>
-            <Button
-              size="sm"
-              :disabled="takeControlBusy"
-              @click="takeControl"
-            >
-              Take control
-            </Button>
-          </div>
-        </div>
+          data-testid="desktop-modal-host"
+        />
       </div>
-
-      <div
-        data-testid="desktop-resize-handle"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
-        title="Drag to resize sidebar"
-        class="relative hidden w-1 shrink-0 cursor-col-resize touch-none bg-border hover:bg-primary sm:order-2 sm:block"
-        :class="{ 'bg-primary': isResizing }"
-        @pointerdown="onResizePointerDown"
-        @pointermove="onResizePointerMove"
-        @pointerup="onResizePointerUp"
-        @pointercancel="onResizePointerUp"
-        @dblclick="onResizeDoubleClick"
-      />
-
-      <div
-        data-testid="desktop-sidebar"
-        class="order-1 flex min-h-0 shrink-0 flex-col gap-2 border-b border-border bg-card px-3 py-1.5 sm:order-3 sm:border-b-0 sm:border-l sm:py-2"
-        :style="sidebarStyle"
-      >
-        <div class="flex items-center justify-between gap-2">
-          <div class="flex items-center gap-2">
-            <Monitor :size="14" class="shrink-0 text-muted-foreground" />
-            <span class="text-xs font-medium text-foreground">Desktop</span>
-            <span
-              v-if="desktopStore.isConnected"
-              class="inline-block h-1.5 w-1.5 rounded-full bg-success"
-              title="Connected"
-            />
-            <span
-              v-else-if="desktopStore.isConnecting"
-              class="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warning"
-              title="Connecting…"
-            />
-          </div>
-          <div class="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
-              title="Copy VM clipboard to local clipboard"
-              @click="copyFromVmClipboard"
-            >
-              <Copy :size="11" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="h-6 w-6 opacity-50 hover:opacity-100"
-              :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
-              title="Paste local clipboard into VM clipboard"
-              @click="pasteToVmClipboard"
-            >
-              <ClipboardPaste :size="11" />
-            </Button>
-            <Button
-              v-if="desktopStore.isConnected"
-              variant="ghost"
-              size="icon-sm"
-              title="Reconnect desktop"
-              @click="handleReconnect"
-            >
-              <RefreshCw :size="12" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              title="Minimize desktop panel"
-              @click="handleMinimize"
-            >
-              <Minus :size="12" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              title="Close desktop panel"
-              @click="handleClose"
-            >
-              <X :size="12" />
-            </Button>
-          </div>
-        </div>
-
-        <div class="hidden min-h-0 flex-1 overflow-hidden pt-2 lg:flex">
-          <slot name="sidebar-content" />
-        </div>
-      </div>
-    </div>
-  </div>
+    </DialogContent>
+  </Dialog>
 </template>

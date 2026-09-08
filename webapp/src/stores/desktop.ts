@@ -1,8 +1,9 @@
 /**
- * Desktop session store — manages the KasmVNC desktop panel state.
+ * Desktop session store — manages the KasmVNC desktop session state.
  *
- * Tracks whether the desktop viewer is open, whether a session is
- * active, and stores the proxy URL for the KasmVNC iframe.
+ * `isOpen` controls the desktop modal. The session itself (proxy URL,
+ * connection state) is independent of the modal: closing the modal keeps
+ * the session running so the side-panel live view stays alive.
  */
 
 import { defineStore } from 'pinia'
@@ -10,7 +11,6 @@ import { computed, ref } from 'vue'
 
 export const useDesktopStore = defineStore('desktop', () => {
   const isOpen = ref(false)
-  const isMinimized = ref(false)
   const isConnecting = ref(false)
   const isConnected = ref(false)
   const computerUseRuns = ref<Set<string>>(new Set())
@@ -18,28 +18,12 @@ export const useDesktopStore = defineStore('desktop', () => {
   const proxyUrl = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
 
-  function toggle(): void {
-    isOpen.value = !isOpen.value
-  }
-
   function open(): void {
     isOpen.value = true
-    isMinimized.value = false
   }
 
   function close(): void {
     isOpen.value = false
-    isMinimized.value = false
-  }
-
-  function minimize(): void {
-    if (!isOpen.value) return
-    isMinimized.value = true
-  }
-
-  function restore(): void {
-    isOpen.value = true
-    isMinimized.value = false
   }
 
   function setConnecting(wsId: string): void {
@@ -79,7 +63,6 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   function reset(): void {
     isOpen.value = false
-    isMinimized.value = false
     isConnected.value = false
     isConnecting.value = false
     computerUseRuns.value = new Set()
@@ -89,17 +72,13 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   return {
     isOpen,
-    isMinimized,
     isConnecting,
     isConnected,
     computerUseActive,
     proxyUrl,
     workspaceId,
-    toggle,
     open,
     close,
-    minimize,
-    restore,
     setConnecting,
     setConnected,
     setComputerUseActive,

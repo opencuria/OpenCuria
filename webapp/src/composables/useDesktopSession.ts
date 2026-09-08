@@ -1,20 +1,24 @@
 /**
  * useDesktopSession — shared KasmVNC desktop session logic.
  *
- * Owns start/stop/reconnect, the computer-use take-control flow and the
- * Socket.IO listeners that keep the desktop store in sync. Used by both
- * the fullscreen desktop overlay and the embedded side-panel live view.
+ * Owns start/stop/reconnect, the computer-use take-control flow, VM
+ * clipboard sync and the Socket.IO listeners that keep the desktop store
+ * in sync. Socket listeners are set up once by DesktopSurface; the side
+ * panel and the desktop modal only use the actions.
  */
 
 import { ref, type Ref } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
+import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
 import { onEvent } from '@/services/socket'
 
 export function useDesktopSession(workspaceId: Ref<string>) {
   const desktopStore = useDesktopStore()
+  const notifications = useNotificationStore()
   const error = ref<string | null>(null)
   const takeControlBusy = ref(false)
+  const clipboardBusy = ref(false)
   const cleanupFns: (() => void)[] = []
 
   async function startDesktop(): Promise<void> {
@@ -89,6 +93,40 @@ export function useDesktopSession(workspaceId: Ref<string>) {
     }
   }
 
+  async function copyFromVmClipboard(): Promise<boolean> {
+    if (!desktopStore.isConnected || clipboardBusy.value) return false
+    clipboardBusy.value = true
+    try {
+      const { text } = await workspacesApi.readDesktopClipboard(workspaceId.value)
+      await navigator.clipboard.writeText(text || '')
+      notifications.success('Copied from VM', 'VM clipboard copied to local clipboard.')
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      notifications.error('Copy failed', msg)
+      return false
+    } finally {
+      clipboardBusy.value = false
+    }
+  }
+
+  async function pasteToVmClipboard(): Promise<boolean> {
+    if (!desktopStore.isConnected || clipboardBusy.value) return false
+    clipboardBusy.value = true
+    try {
+      const text = await navigator.clipboard.readText()
+      await workspacesApi.writeDesktopClipboard(workspaceId.value, text || '')
+      notifications.success('Pasted to VM', 'Local clipboard sent to VM clipboard.')
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      notifications.error('Paste failed', msg)
+      return false
+    } finally {
+      clipboardBusy.value = false
+    }
+  }
+
   function setupSocketListeners(): void {
     cleanupFns.push(
       onEvent('desktop:started', (data) => {
@@ -134,11 +172,14 @@ export function useDesktopSession(workspaceId: Ref<string>) {
   return {
     error,
     takeControlBusy,
+    clipboardBusy,
     startDesktop,
     stopDesktop,
     stopDesktopIfActive,
     handleReconnect,
     takeControl,
+    copyFromVmClipboard,
+    pasteToVmClipboard,
     setupSocketListeners,
     cleanupSocketListeners,
   }

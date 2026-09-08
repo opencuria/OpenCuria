@@ -60,7 +60,6 @@ describe('HarnessDesktopMini', () => {
 
     await wrapper.get('[data-testid="harness-desktop-mini"]').trigger('click')
     expect(store.isOpen).toBe(true)
-    expect(store.isMinimized).toBe(false)
   })
 
   it('hides the preview while the full desktop is open', async () => {

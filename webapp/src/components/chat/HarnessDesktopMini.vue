@@ -28,9 +28,7 @@ const desktopSize = computed(() => {
   return workspaceDesktopSize(workspace)
 })
 
-const fullDesktopOpen = computed(
-  () => desktopStore.isOpen && !desktopStore.isMinimized,
-)
+const fullDesktopOpen = computed(() => desktopStore.isOpen)
 
 const iframeSrc = computed(() => {
   if (!proxyUrl.value) return ''

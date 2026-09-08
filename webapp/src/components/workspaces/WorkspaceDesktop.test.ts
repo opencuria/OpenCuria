@@ -1,12 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { nextTick } from 'vue'
 
 import WorkspaceDesktop from './WorkspaceDesktop.vue'
 import { useDesktopStore } from '@/stores/desktop'
+import { modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import * as workspacesApi from '@/services/workspaces.api'
-import { DEFAULT_SIDEBAR_WIDTH, SIDEBAR_WIDTH_STORAGE_KEY } from '@/lib/desktopSidebar'
 
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
@@ -25,39 +24,18 @@ vi.mock('@/services/socket', () => ({
   onEvent: vi.fn(() => () => {}),
 }))
 
-const getDesktopStatus = vi.mocked(workspacesApi.getDesktopStatus)
-const startDesktop = vi.mocked(workspacesApi.startDesktop)
 const stopDesktop = vi.mocked(workspacesApi.stopDesktop)
-const takeDesktopControl = vi.mocked(workspacesApi.takeDesktopControl)
 
 const uiStubs = {
   Button: {
     template: '<button v-bind="$attrs" :title="title"><slot /></button>',
     props: ['title'],
   },
-  Select: { template: '<div><slot /></div>' },
-  SelectTrigger: { template: '<div />' },
-  SelectValue: { template: '<div />' },
-  SelectContent: { template: '<div />' },
-  SelectItem: { template: '<div />' },
   LoadingSpinner: { template: '<div />' },
-}
-
-function stubWideLayout(): void {
-  Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true })
-  vi.stubGlobal('matchMedia', (query: string) => ({
-    matches: query.includes('min-width: 640px'),
-    media: query,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
-    onchange: null,
-  }))
-  HTMLElement.prototype.setPointerCapture = vi.fn()
-  HTMLElement.prototype.releasePointerCapture = vi.fn()
-  HTMLElement.prototype.hasPointerCapture = vi.fn(() => true)
+  Dialog: { template: '<div><slot /></div>', props: ['open'] },
+  DialogContent: { template: '<div><slot /></div>' },
+  DialogTitle: { template: '<span><slot /></span>' },
+  DialogDescription: { template: '<span><slot /></span>' },
 }
 
 function mountDesktop() {
@@ -67,160 +45,80 @@ function mountDesktop() {
   })
 }
 
-async function dispatchPointer(
-  element: Element,
-  type: string,
-  init: PointerEventInit = {},
-): Promise<void> {
-  element.dispatchEvent(new PointerEvent(type, { bubbles: true, ...init }))
-  await nextTick()
-}
-
-describe('WorkspaceDesktop leases', () => {
+describe('WorkspaceDesktop modal', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     localStorage.clear()
-    stubWideLayout()
-    class ResizeObserverStub {
-      observe(): void {}
-      disconnect(): void {}
-      unobserve(): void {}
-    }
-    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
-    getDesktopStatus.mockResolvedValue({
-      active: true,
-      proxy_url: '/ws/desktop/ws-1/',
-      viewer_held: false,
-      computer_use_active: true,
-    })
-    startDesktop.mockResolvedValue({ task_id: 'task-1' })
+    modalDesktopHost.value = null
     stopDesktop.mockResolvedValue({ task_id: 'task-2' })
-    takeDesktopControl.mockResolvedValue({ aborted_session_ids: ['cu-1'] })
   })
 
-  it('always posts start to acquire the viewer lease', async () => {
+  it('sizes the viewport to the desktop aspect ratio', () => {
     const store = useDesktopStore()
     store.open()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    const wrapper = mountDesktop()
+
+    const viewport = wrapper.get('[data-testid="desktop-viewport"]')
+    expect(viewport.attributes('style')).toContain('aspect-ratio: 1920 / 1080')
+    // The width formula itself is covered in desktopGeometry.test.ts;
+    // jsdom drops the min()/calc() declaration, so only check the cap
+    // override here.
+    const modal = wrapper.get('[data-testid="workspace-desktop-modal"]')
+    expect(modal.attributes('class')).toContain('sm:max-w-none!')
+  })
+
+  it('registers the modal host for the persistent surface while connected', () => {
+    const store = useDesktopStore()
+    store.open()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
     mountDesktop()
-    await flushPromises()
 
-    expect(getDesktopStatus).toHaveBeenCalledWith('ws-1')
-    expect(startDesktop).toHaveBeenCalledWith('ws-1')
-    expect(store.computerUseActive).toBe(true)
+    expect(modalDesktopHost.value).toBeInstanceOf(HTMLElement)
   })
 
-  it('shows a take-control overlay while computer-use is active', async () => {
+  it('closes the modal without stopping the session', async () => {
     const store = useDesktopStore()
     store.open()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
 
     const wrapper = mountDesktop()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Computer-use is controlling this desktop')
-    const takeControl = wrapper.findAll('button').find((button) => {
-      return button.text() === 'Take control'
-    })
-    expect(takeControl).toBeTruthy()
-    await takeControl?.trigger('click')
+    await wrapper.get('[data-testid="desktop-modal-close"]').trigger('click')
     await flushPromises()
-    expect(takeDesktopControl).toHaveBeenCalledWith('ws-1')
-    expect(store.computerUseActive).toBe(false)
+
+    expect(store.isOpen).toBe(false)
+    expect(stopDesktop).not.toHaveBeenCalled()
+    expect(store.isConnected).toBe(true)
   })
 
-  it('releases the viewer lease on close without treating it as process death', async () => {
+  it('stops the session via the stop button', async () => {
     const store = useDesktopStore()
     store.open()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
 
     const wrapper = mountDesktop()
     await flushPromises()
 
-    const close = wrapper.findAll('button').find((button) => {
-      return button.attributes('title') === 'Close desktop panel'
-    })
-    await close?.trigger('click')
+    await wrapper.get('[data-testid="desktop-modal-stop"]').trigger('click')
     await flushPromises()
 
     expect(stopDesktop).toHaveBeenCalledWith('ws-1')
-    expect(store.isOpen).toBe(false)
     expect(store.isConnected).toBe(false)
   })
 
-  it('does not expose live screen-size or rotate controls', async () => {
+  it('shows the not-active state with a start button when disconnected', () => {
     const store = useDesktopStore()
     store.open()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
 
     const wrapper = mountDesktop()
-    await flushPromises()
 
-    expect(wrapper.text()).not.toContain('Screen size')
-    expect(wrapper.text()).not.toContain('Rotate')
-    expect(wrapper.get('iframe').attributes('src')).toContain('resize=scale')
-  })
-
-  it('renders the sidebar at the default width', async () => {
-    const store = useDesktopStore()
-    store.open()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-
-    const wrapper = mountDesktop()
-    await flushPromises()
-
-    expect(wrapper.get('[data-testid="desktop-sidebar"]').attributes('style')).toContain(
-      `width: ${DEFAULT_SIDEBAR_WIDTH}px`,
-    )
-  })
-
-  it('resizes the sidebar via the drag handle and persists the width', async () => {
-    const store = useDesktopStore()
-    store.open()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-
-    const wrapper = mountDesktop()
-    await flushPromises()
-
-    const handle = wrapper.get('[data-testid="desktop-resize-handle"]')
-    await dispatchPointer(handle.element, 'pointerdown', { clientX: 960, pointerId: 1 })
-    expect(wrapper.get('[data-testid="desktop-viewport"]').classes()).toContain(
-      'pointer-events-none',
-    )
-
-    await dispatchPointer(handle.element, 'pointermove', { clientX: 840, pointerId: 1 })
-    expect(wrapper.get('[data-testid="desktop-sidebar"]').attributes('style')).toContain(
-      'width: 440px',
-    )
-
-    await dispatchPointer(handle.element, 'pointerup', { pointerId: 1 })
-    expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('440')
-    expect(wrapper.get('[data-testid="desktop-viewport"]').classes()).not.toContain(
-      'pointer-events-none',
-    )
-  })
-
-  it('resets the sidebar width on double-click', async () => {
-    const store = useDesktopStore()
-    store.open()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-
-    const wrapper = mountDesktop()
-    await flushPromises()
-
-    const handle = wrapper.get('[data-testid="desktop-resize-handle"]')
-    await dispatchPointer(handle.element, 'pointerdown', { clientX: 840, pointerId: 1 })
-    await dispatchPointer(handle.element, 'pointerup', { pointerId: 1 })
-    expect(wrapper.get('[data-testid="desktop-sidebar"]').attributes('style')).toContain(
-      'width: 440px',
-    )
-
-    await handle.trigger('dblclick')
-    expect(wrapper.get('[data-testid="desktop-sidebar"]').attributes('style')).toContain(
-      `width: ${DEFAULT_SIDEBAR_WIDTH}px`,
-    )
-    expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe(String(DEFAULT_SIDEBAR_WIDTH))
+    expect(wrapper.text()).toContain('Desktop session not active')
+    expect(wrapper.find('[data-testid="desktop-modal-start"]').exists()).toBe(true)
+    expect(modalDesktopHost.value).toBeNull()
   })
 })

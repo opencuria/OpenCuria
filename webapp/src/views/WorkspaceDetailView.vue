@@ -19,6 +19,7 @@ import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
+import DesktopSurface from '@/components/workspaces/DesktopSurface.vue'
 import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import FileViewer from '@/components/files/FileViewer.vue'
@@ -102,10 +103,6 @@ function handleStopWorkspace(): void {
   void workspaceStore.stopWorkspace(workspace.value.id)
 }
 
-const isDesktopPanelVisible = computed(
-  () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
-)
-
 const runningProcessCount = computed(() =>
   processesStore.runningCountFor(workspaceId.value),
 )
@@ -120,15 +117,7 @@ function toggleProcessesPanel(): void {
   }
 }
 
-const chatPanelTarget = computed<HTMLElement | null>(() => {
-  if (isDesktopPanelVisible.value) {
-    return desktopChatPanelHost.value
-  }
-  return mainChatPanelHost.value
-})
-
 const mainChatPanelHost = ref<HTMLElement | null>(null)
-const desktopChatPanelHost = ref<HTMLElement | null>(null)
 
 // Socket.IO event cleanup functions
 const cleanupFns: (() => void)[] = []
@@ -311,6 +300,11 @@ onUnmounted(() => {
   workspaceStore.activeWorkspace = null
 })
 
+// Close the desktop modal when the workspace is no longer usable
+watch(canPrompt, (ok) => {
+  if (!ok) desktopStore.close()
+})
+
 // React to route changes (if user navigates between workspaces)
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
@@ -380,17 +374,8 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
 
           <!-- Chat content area -->
           <div class="flex flex-1 min-h-0 flex-col">
-            <WorkspaceDesktop
-              v-if="isDesktopPanelVisible"
-              :workspace-id="workspaceId"
-            >
-              <template #sidebar-content>
-                <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
-              </template>
-            </WorkspaceDesktop>
-
             <!-- Harness chat area -->
-            <div v-else class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <GitDiffViewer
                 v-if="gitStore.viewingDiffChange || gitStore.viewingCommitDiff"
                 :workspace-id="workspaceId"
@@ -407,7 +392,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
             </div>
           </div>
 
-          <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
+          <Teleport v-if="mainChatPanelHost" :to="mainChatPanelHost">
             <HarnessChatPanel
               :workspace-id="workspaceId"
               :can-prompt="canPrompt"
@@ -420,12 +405,16 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
 
         <!-- Side panel (Git / Desktop / Terminal / Files), full-height column -->
         <WorkspaceSidePanel
-          v-if="canPrompt && sidePanelStore.hasOpened && !isDesktopPanelVisible"
+          v-if="canPrompt && sidePanelStore.hasOpened"
           v-show="sidePanelStore.isOpen"
           :key="workspaceId"
           :workspace-id="workspaceId"
         />
       </div>
+
+      <!-- Persistent desktop surface (single iframe) + desktop modal -->
+      <DesktopSurface v-if="canPrompt" :workspace-id="workspaceId" />
+      <WorkspaceDesktop :workspace-id="workspaceId" />
     </template>
 
     <!-- Error -->
