@@ -42,6 +42,24 @@ class _MockStream:
         return self._events.pop(0)
 
 
+class _AioEventStreamLike:
+    """Mirrors aiobotocore AioEventStream's broken async-iterator protocol.
+
+    ``__anext__`` is an async generator (uses ``yield``). ``async for`` works
+    because it calls ``__aiter__``; ``anext(stream)`` does not.
+    """
+
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = list(events)
+
+    def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+        return self.__anext__()
+
+    async def __anext__(self) -> dict[str, Any]:  # type: ignore[misc]
+        for event in self._events:
+            yield event
+
+
 class _MockBedrockClient:
     """Minimal bedrock-runtime client stub."""
 
@@ -51,10 +69,12 @@ class _MockBedrockClient:
         *,
         error: Exception | None = None,
         capture: dict[str, Any] | None = None,
+        stream_cls: type[_MockStream] | type[_AioEventStreamLike] = _MockStream,
     ) -> None:
         self._events = events
         self._error = error
         self._capture = capture
+        self._stream_cls = stream_cls
         self.meta = MagicMock()
         self.meta.events = MagicMock()
 
@@ -63,7 +83,7 @@ class _MockBedrockClient:
             self._capture["body"] = kwargs
         if self._error is not None:
             raise self._error
-        return {"stream": _MockStream(self._events)}
+        return {"stream": self._stream_cls(self._events)}
 
 
 class _MockClientContext:
@@ -88,10 +108,12 @@ class _MockSession:
         *,
         error: Exception | None = None,
         capture: dict[str, Any] | None = None,
+        stream_cls: type[_MockStream] | type[_AioEventStreamLike] = _MockStream,
     ) -> None:
         self._events = events or []
         self._error = error
         self._capture = capture or {}
+        self._stream_cls = stream_cls
         self.client_kwargs: list[dict[str, Any]] = []
         self.last_client: _MockBedrockClient | None = None
 
@@ -101,6 +123,7 @@ class _MockSession:
             self._events,
             error=self._error,
             capture=self._capture,
+            stream_cls=self._stream_cls,
         )
         self.last_client = client
         return _MockClientContext(client)
@@ -242,6 +265,20 @@ def test_build_converse_body_thinking_budget_mapping() -> None:
     assert thinking == {"type": "enabled", "budget_tokens": 16384}
     assert body["inferenceConfig"]["maxTokens"] == 16385
     assert "temperature" not in body["inferenceConfig"]
+
+
+async def test_chat_stream_aioeventstream_protocol_with_chunk_timeout() -> None:
+    """aiobotocore-shaped streams parse under the default wait_for path."""
+    events = [
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Hi"}}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    adapter, _ = _adapter(
+        session=_MockSession(events, stream_cls=_AioEventStreamLike)
+    )
+    deltas = await _collect(adapter)
+    assert deltas[0].text == "Hi"
+    assert deltas[-1].finish_reason == "stop"
 
 
 async def test_chat_stream_text_reasoning_tool_usage_finish() -> None:

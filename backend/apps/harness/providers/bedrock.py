@@ -534,14 +534,21 @@ class BedrockAdapter(ProviderAdapter):
         active_tools: dict[int, _ToolCallState] = {}
         pending_finish: str | None = None
         pending_usage: Usage | None = None
+        # aiobotocore AioEventStream is an async iterable whose __anext__
+        # is an async generator (yield). anext(stream) therefore returns
+        # that generator, which cannot be awaited. aiter() is what
+        # ``async for`` uses and yields a real async iterator.
+        iterator = aiter(stream)
 
         while True:
             timeout = effective_timeout(chunk_timeout, deadline)
             try:
                 if timeout is None:
-                    event = await anext(stream)
+                    event = await anext(iterator)
                 else:
-                    event = await asyncio.wait_for(anext(stream), timeout=timeout)
+                    event = await asyncio.wait_for(
+                        anext(iterator), timeout=timeout
+                    )
             except StopAsyncIteration:
                 if pending_finish is not None or pending_usage is not None:
                     yield Delta(
