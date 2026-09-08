@@ -238,6 +238,21 @@ def _combine_decisions(*decisions: str) -> str:
     return "allow"
 
 
+def _slot_sort_key(key: Any) -> tuple[int, int, str]:
+    """Return a comparison-safe sort key for mixed stream-key types.
+
+    Numeric stream keys (Chat/Bedrock ``index``) sort numerically first;
+    string keys (Responses ``item_id``, synthetic ``call-{step}-{n}`` and
+    ``{index}#{n}`` split keys) sort lexicographically after them, so
+    ``sorted()`` never raises ``TypeError`` on mixed ``int``/``str`` keys.
+    """
+    if isinstance(key, bool):
+        return (0, int(key), "")
+    if isinstance(key, int):
+        return (0, key, "")
+    return (1, 0, str(key))
+
+
 def _parse_arguments(raw: Any) -> dict[str, Any]:
     """Parse raw tool arguments (JSON string or dict) into a dict."""
     if isinstance(raw, dict):
@@ -1509,8 +1524,24 @@ class HarnessRunner:
         step: int,
         chat_options: ChatOptions | None = None,
     ) -> tuple[str, list[_PendingToolCall], Usage, str]:
-        """Stream one provider step and accumulate text/tool calls/usage."""
-        fragments: dict[int, dict[str, Any]] = {}
+        """Stream one provider step and accumulate text/tool calls/usage.
+
+        Tool fragments are grouped by stream key (OpenCode ``finishAll``
+        equivalent: every slot with a name is finalized at step end).
+        A usable ``index`` (neither missing, ``None`` nor ``""``) is the
+        stream key verbatim — numeric Chat/Bedrock indexes stay numeric,
+        Responses ``item_id`` strings stay strings (never cast to int).
+        Fragments without a usable index are grouped by their call ``id``
+        so arguments of two different call IDs are never concatenated
+        into one string. Slots sort via :func:`_slot_sort_key`, which
+        keeps mixed ``int``/``str`` keys comparable (ints numerically
+        first, strings lexicographically after).
+        """
+        fragments: dict[Any, dict[str, Any]] = {}
+        id_to_key: dict[str, Any] = {}
+        split_to_key: dict[tuple[str, str], Any] = {}
+        next_slot = 0
+        current_key: Any = None
         text_parts: list[str] = []
         usage = Usage()
         finish_reason = ""
@@ -1543,29 +1574,126 @@ class HarnessRunner:
                     }
                 )
             for fragment in delta.tool_calls or ():
-                index = int(fragment.get("index", 0) or 0)
-                slot = fragments.setdefault(
-                    index, {"id": "", "name": "", "arguments": ""}
+                if not isinstance(fragment, dict):
+                    continue
+                # Usable stream key: an explicit ``index`` (numeric Chat /
+                # Bedrock index or Responses ``item_id`` string) used
+                # verbatim — never cast to int. Missing key, ``None`` and
+                # ``""`` all mean "no stream key" (Bedrock emits no index).
+                raw_index = fragment.get("index")
+                has_usable_index = raw_index is not None and (
+                    not isinstance(raw_index, str) or raw_index != ""
                 )
-                if fragment.get("id"):
-                    slot["id"] = fragment["id"]
-                if fragment.get("name"):
-                    slot["name"] = fragment["name"]
+                fragment_id = fragment.get("id") or ""
+                fragment_name = fragment.get("name") or ""
+                if not has_usable_index:
+                    if fragment_id:
+                        # Group by call id: same id continues its slot, a
+                        # new id opens a new slot — never concatenate
+                        # arguments of two different call IDs.
+                        existing = id_to_key.get(fragment_id)
+                        if existing is not None and existing in fragments:
+                            key = existing
+                        else:
+                            key = f"call-{step}-{next_slot}"
+                            next_slot += 1
+                            id_to_key[fragment_id] = key
+                    elif (
+                        fragment_name
+                        and current_key is not None
+                        and current_key in fragments
+                        and str(fragments[current_key].get("id", "") or "")
+                    ):
+                        # After a fully-identified slot, an id-less fragment
+                        # cannot be a continuation — open a fresh slot.
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                    elif (
+                        fragment_name
+                        and current_key is not None
+                        and current_key in fragments
+                        and str(fragments[current_key].get("name", "") or "")
+                        and str(fragments[current_key].get("name", "") or "")
+                        != fragment_name
+                    ):
+                        # Id-less fragment starting a *different* tool name:
+                        # new slot instead of gluing two tools into slot 0.
+                        # (Same-name/args-only fragments continue the slot
+                        # so fragmented arguments stay concatenated.)
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                    elif current_key is not None and current_key in fragments:
+                        # Fragmented-arguments continuation of the active
+                        # id-less slot.
+                        key = current_key
+                    else:
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                else:
+                    key = raw_index
+                    if fragment_id:
+                        known = id_to_key.get(fragment_id)
+                        if known is not None and known in fragments and known != key:
+                            # Same call id already accumulating under a
+                            # different key: keep one slot per call id.
+                            key = known
+                        else:
+                            # Same stream index reused for a new call id
+                            # (provider restarted the slot): never concat
+                            # arguments of two different call IDs — split
+                            # into a side slot.
+                            slot_for_key = fragments.get(key)
+                            slot_id = (
+                                str(slot_for_key.get("id", "") or "")
+                                if slot_for_key
+                                else ""
+                            )
+                            if (
+                                slot_for_key is not None
+                                and slot_id
+                                and slot_id != fragment_id
+                            ):
+                                split_pair = (str(raw_index), fragment_id)
+                                split_key = split_to_key.get(split_pair)
+                                if split_key is None or split_key not in fragments:
+                                    split_key = f"{raw_index}#{next_slot}"
+                                    next_slot += 1
+                                    split_to_key[split_pair] = split_key
+                                    id_to_key[fragment_id] = split_key
+                                key = split_key
+                            else:
+                                id_to_key[fragment_id] = key
+                slot = fragments.setdefault(
+                    key, {"id": "", "name": "", "arguments": ""}
+                )
+                if fragment_id and not slot.get("id"):
+                    slot["id"] = fragment_id
+                if fragment_name and not slot.get("name"):
+                    slot["name"] = fragment_name
                 args = fragment.get("arguments", "")
                 if isinstance(args, dict):
                     args = json.dumps(args)
                 if args:
                     slot["arguments"] += str(args)
+                current_key = key
         calls: list[_PendingToolCall] = []
-        for index in sorted(fragments):
-            slot = fragments[index]
+        for key in sorted(fragments, key=_slot_sort_key):
+            slot = fragments[key]
             name = str(slot.get("name", "") or "")
             if not name:
                 continue
             raw = str(slot.get("arguments", "") or "")
+            slot_id = str(slot.get("id", "") or "")
+            if slot_id:
+                call_id = slot_id
+            elif isinstance(key, str):
+                # Index-less slots already carry a synthetic key.
+                call_id = key
+            else:
+                call_id = f"call-{step}-{key}"
             calls.append(
                 _PendingToolCall(
-                    call_id=str(slot.get("id", "") or f"call-{step}-{index}"),
+                    call_id=call_id,
                     name=name,
                     arguments=_parse_arguments(raw),
                     raw_arguments=raw,

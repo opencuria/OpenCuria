@@ -1116,3 +1116,104 @@ async def test_auth_error_is_not_retried(monkeypatch) -> None:
     with pytest.raises(ProviderAuthError):
         await runner.run("go", "build", "m", "build", opts)
     assert provider.attempts == 1
+
+
+async def _provider_calls(
+    step_deltas: list[Delta], *, step: int = 0
+) -> list[Any]:
+    """Run one ``_provider_step`` with canned deltas and return its calls."""
+    provider = FakeProvider([step_deltas])
+    runner, _ = _runner(provider, [])
+    _, calls, _, _ = await runner._provider_step(
+        model="m", messages=[], schemas=[], step=step
+    )
+    return calls
+
+
+async def test_provider_step_parallel_tools_without_index_split_by_id() -> None:
+    """Two index-less fragments with different ids stay separate."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {"id": "a1", "name": "read", "arguments": '{"path":"a"}'},
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {"id": "b2", "name": "read", "arguments": '{"path":"b"}'},
+                )
+            ),
+        ]
+    )
+    assert [(call.call_id, call.arguments) for call in calls] == [
+        ("a1", {"path": "a"}),
+        ("b2", {"path": "b"}),
+    ]
+
+
+async def test_provider_step_same_index_different_ids_split() -> None:
+    """A reused stream index never glues two call IDs into one string."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "a1",
+                        "name": "read",
+                        "arguments": '{"path":"',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "b2",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+        ]
+    )
+    assert len(calls) == 2
+    assert calls[0].call_id == "a1"
+    assert calls[0].raw_arguments == '{"path":"'
+    assert calls[1].call_id == "b2"
+    assert calls[1].arguments == {"path": "b"}
+
+
+async def test_provider_step_fragmented_args_same_key_concatenated() -> None:
+    """Fragments sharing one stream key concatenate into a single call."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "a1",
+                        "name": "read",
+                        "arguments": '{"path":"a',
+                    },
+                )
+            ),
+            Delta(tool_calls=({"index": 0, "arguments": '.txt"}'},)),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-y",
+                        "id": "b2",
+                        "name": "read",
+                        "arguments": '{"path":"y"}',
+                    },
+                )
+            ),
+        ]
+    )
+    assert len(calls) == 2
+    assert calls[0].call_id == "a1"
+    assert calls[0].arguments == {"path": "a.txt"}
+    assert calls[1].call_id == "b2"
+    assert calls[1].arguments == {"path": "y"}

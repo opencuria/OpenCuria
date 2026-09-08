@@ -215,3 +215,43 @@ def test_error_fields_default_backward_compatible() -> None:
     assert limited.response_headers == {}
     assert limited.response_body == ""
     assert limited.is_retryable is None
+
+
+def test_overflow_never_retried_despite_should_retry_hint() -> None:
+    """Overflow with x-should-retry:true still fails fast (parity)."""
+    overflow_hint = ProviderResponseError(
+        "busy",
+        status_code=503,
+        response_headers={"x-should-retry": "true"},
+        response_body="too many tokens",
+    )
+    assert not is_retryable_provider_error(overflow_hint)
+    overflow_limit = ProviderRateLimitError(
+        "slow",
+        status_code=429,
+        response_headers={"x-should-retry": "true"},
+        response_body="prompt is too long",
+    )
+    assert not is_retryable_provider_error(overflow_limit)
+
+
+def test_bedrock_stream_retryable_flags_pass_through() -> None:
+    """Bedrock throttling retries; validation overflow does not."""
+    from apps.harness.providers.bedrock import BedrockAdapter
+
+    adapter = BedrockAdapter(
+        {"access_key_id": "AKIA", "secret_access_key": "secret"},
+    )
+    throttling = adapter._stream_error_from_event(
+        {"throttlingException": {"message": "Slow down"}}
+    )
+    assert throttling is not None
+    assert getattr(throttling, "is_retryable") is True
+    assert is_retryable_provider_error(throttling)
+    overflow = adapter._stream_error_from_event(
+        {"validationException": {"message": "model_context_window_exceeded"}}
+    )
+    assert overflow is not None
+    assert getattr(overflow, "is_retryable") is False
+    assert not is_retryable_provider_error(overflow)
+
