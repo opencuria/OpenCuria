@@ -168,6 +168,8 @@ def test_resolve_bedrock_model_id_apac_prefixes() -> None:
     assert resolve_bedrock_model_id(claude, "ap-south-1") == f"apac.{claude}"
     sonnet_au = "anthropic.claude-sonnet-4-5"
     assert resolve_bedrock_model_id(sonnet_au, "ap-southeast-2") == f"au.{sonnet_au}"
+    opus_au = "anthropic.claude-opus-4-6-v1"
+    assert resolve_bedrock_model_id(opus_au, "ap-southeast-2") == f"au.{opus_au}"
 
 
 def test_resolve_bedrock_model_id_deepseek_v32_no_prefix() -> None:

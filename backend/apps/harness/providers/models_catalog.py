@@ -356,6 +356,15 @@ def chatgpt_models() -> list[ProviderModel]:
 
 _BEDROCK_MODEL_SPECS: tuple[dict[str, Any], ...] = (
     {
+        "id": "anthropic.claude-opus-4-6-v1",
+        "name": "Claude Opus 4.6",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 1_000_000,
+        "max_output_tokens": 128_000,
+    },
+    {
         "id": "anthropic.claude-sonnet-4-5",
         "name": "Claude Sonnet 4.5",
         "reasoning_efforts": ("low", "medium", "high", "xhigh"),

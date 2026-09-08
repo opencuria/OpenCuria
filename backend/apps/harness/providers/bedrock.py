@@ -79,7 +79,11 @@ _EU_PREFIX_MODELS = ("claude", "nova-lite", "nova-micro", "llama3", "pixtral")
 _APAC_PREFIX_MODELS = ("claude", "nova-lite", "nova-micro", "nova-pro")
 
 #: Australia-only Claude models.
-_AU_CLAUDE_MODELS = ("anthropic.claude-sonnet-4-5", "anthropic.claude-haiku")
+_AU_CLAUDE_MODELS = (
+    "anthropic.claude-opus-4-6",
+    "anthropic.claude-sonnet-4-5",
+    "anthropic.claude-haiku",
+)
 
 _CONTEXT_OVERFLOW_PATTERNS = (
     r"prompt is too long",

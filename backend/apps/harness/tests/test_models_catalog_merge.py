@@ -57,6 +57,16 @@ def test_bedrock_models_region_prefixing() -> None:
     assert sonnet.id == f"amazon-bedrock/{expected}"
     assert sonnet.provider == "amazon-bedrock"
     assert sonnet.supports_tools is True
+    opus = next(model for model in models if "claude-opus-4-6" in model.id)
+    opus_expected = resolve_bedrock_model_id(
+        "anthropic.claude-opus-4-6-v1",
+        "us-east-1",
+    )
+    assert opus.id == f"amazon-bedrock/{opus_expected}"
+    assert opus.name == "Claude Opus 4.6"
+    assert opus.context_length == 1_000_000
+    assert opus.max_output_tokens == 128_000
+    assert "xhigh" in opus.reasoning_efforts
 
 
 @pytest.mark.django_db
