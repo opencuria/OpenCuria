@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import SettingsSheet from './SettingsSheet.vue'
 import { OPEN_SETTINGS_EVENT } from './settingsTabs'
 import * as harnessApi from '@/services/harness.api'
+import * as providerCatalog from '@/lib/providerCatalog'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -14,6 +15,7 @@ vi.mock('@/services/harness.api', async () => {
     getProviderConfig: vi.fn(),
     saveProviderConfig: vi.fn(),
     deleteProviderConfig: vi.fn(),
+    listProviderConnections: vi.fn(),
   }
 })
 
@@ -130,6 +132,7 @@ vi.mock('@/lib/runtimeSupport', () => ({
 }))
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
+const listProviderConnectionsMock = vi.mocked(harnessApi.listProviderConnections)
 
 function mountSheet() {
   setActivePinia(createPinia())
@@ -163,6 +166,7 @@ describe('SettingsSheet', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     authMock.isAdmin = true
+    vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
@@ -171,6 +175,11 @@ describe('SettingsSheet', () => {
       has_api_key: true,
       api_key_hint: '••••cdef',
     })
+    listProviderConnectionsMock.mockResolvedValue([
+      { provider: 'openrouter', connected: true, api_key_hint: '••••cdef' },
+      { provider: 'chatgpt', connected: false },
+      { provider: 'amazon-bedrock', connected: false },
+    ])
   })
 
   it('renders all nav items for admins', () => {
@@ -207,7 +216,7 @@ describe('SettingsSheet', () => {
 
     await wrapper.find('[data-testid="settings-nav-provider"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('OpenRouter Provider')
+    expect(wrapper.text()).toContain('Providers')
   })
 
   it('opens via opencuria:open-settings event with the given tab', async () => {
@@ -221,7 +230,7 @@ describe('SettingsSheet', () => {
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
       'Provider & Models',
     )
-    expect(wrapper.text()).toContain('OpenRouter Provider')
+    expect(wrapper.text()).toContain('Providers')
   })
 
   it('maps legacy org-settings tabs onto sheet tabs', async () => {

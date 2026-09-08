@@ -69,6 +69,7 @@ class APIKeyPermission(str, enum.Enum):
     HARNESS_READ = "harness:read"
     HARNESS_RUN = "harness:run"
     HARNESS_PERMISSIONS = "harness:permissions"
+    HARNESS_PROVIDERS = "harness:providers"
 
     # MCP
     MCP_ACCESS = "mcp:access"

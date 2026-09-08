@@ -6,8 +6,9 @@ import type { ProviderModel } from '@/lib/harnessModels'
 
 const models: ProviderModel[] = [
   {
-    id: 'acme/think',
+    id: 'openrouter/think',
     name: 'Think',
+    provider: 'openrouter',
     reasoning_efforts: ['low', 'high'],
     default_effort: 'high',
     supports_tools: true,
@@ -15,8 +16,9 @@ const models: ProviderModel[] = [
     max_output_tokens: 8_192,
   },
   {
-    id: 'acme/plain',
+    id: 'chatgpt/plain',
     name: 'Plain',
+    provider: 'chatgpt',
     reasoning_efforts: [],
     default_effort: '',
     supports_tools: true,
@@ -34,12 +36,16 @@ const stubs = {
   DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
   DropdownMenuSeparator: { template: '<hr />' },
+  TooltipProvider: { template: '<div><slot /></div>' },
+  Tooltip: { template: '<div><slot /></div>' },
+  TooltipTrigger: { template: '<div><slot /></div>' },
+  TooltipContent: { template: '<div><slot /></div>' },
 }
 
 describe('HarnessModelPicker', () => {
   it('lists Auto plus catalog models and hides Fast', () => {
     const wrapper = mount(HarnessModelPicker, {
-      props: { model: 'acme/think', effort: 'high', models },
+      props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
     expect(wrapper.text()).toContain('Auto')
@@ -49,9 +55,22 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(true)
   })
 
+  it('shows provider labels and tooltip content', () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: 'openrouter/think', effort: 'high', models },
+      global: { stubs },
+    })
+    expect(wrapper.find('[data-testid="composer-model-provider-openrouter/think"]').text()).toBe(
+      'OpenRouter',
+    )
+    expect(wrapper.find('[data-testid="composer-model-provider-chatgpt/plain"]').text()).toBe(
+      'ChatGPT',
+    )
+  })
+
   it('shows model name and effort on the compact trigger', () => {
     const wrapper = mount(HarnessModelPicker, {
-      props: { model: 'acme/think', effort: 'high', models },
+      props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
     const trigger = wrapper.find('[data-testid="composer-model-trigger"]')
@@ -61,7 +80,7 @@ describe('HarnessModelPicker', () => {
 
   it('hides the effort submenu when the model has no reasoning', () => {
     const wrapper = mount(HarnessModelPicker, {
-      props: { model: 'acme/plain', effort: '', models },
+      props: { model: 'chatgpt/plain', effort: '', models },
       global: { stubs },
     })
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(false)
@@ -69,12 +88,12 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('High')
   })
 
-  it('filters the catalog by the search query', async () => {
+  it('filters the catalog by model name and provider label', async () => {
     const wrapper = mount(HarnessModelPicker, {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
-    await wrapper.find('[data-testid="composer-model-search"]').setValue('plain')
+    await wrapper.find('[data-testid="composer-model-search"]').setValue('chatgpt')
     expect(wrapper.text()).toContain('Plain')
     expect(wrapper.text()).not.toContain('Think')
   })

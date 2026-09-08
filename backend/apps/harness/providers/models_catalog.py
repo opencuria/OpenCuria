@@ -1,20 +1,27 @@
 """
-OpenRouter model catalog fetch, normalize, and in-memory cache.
+Multi-provider model catalog fetch, normalize, merge, and in-memory cache.
 
-The browser never talks to OpenRouter directly. The backend proxies
-``GET {base_url}/models`` with the org API key and returns a UI-ready list.
+The browser never talks to provider APIs directly. The backend proxies
+OpenRouter ``GET {base_url}/models`` with the org API key and merges static
+ChatGPT and Amazon Bedrock catalogs for connected providers.
 """
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 import structlog
 
+from common.utils import decrypt_value
+
+from ..repositories import ProviderConnectionRepository
 from .base import ProviderAuthError, ProviderResponseError, ProviderTimeoutError
+from .bedrock import DEFAULT_REGION, resolve_bedrock_model_id
 from .openrouter import DEFAULT_BASE_URL
 
 log = structlog.get_logger(__name__)
@@ -59,6 +66,7 @@ class ProviderModel:
     supports_tools: bool
     context_length: int = 0
     max_output_tokens: int = 0
+    provider: str = "openrouter"
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable mapping."""
@@ -70,6 +78,7 @@ class ProviderModel:
             "supports_tools": self.supports_tools,
             "context_length": self.context_length,
             "max_output_tokens": self.max_output_tokens,
+            "provider": self.provider,
         }
 
 
@@ -108,6 +117,11 @@ _catalog_cache = ModelsCatalogCache()
 def clear_models_cache(key: str | None = None) -> None:
     """Invalidate the process-local catalog cache (tests and config saves)."""
     _catalog_cache.invalidate(key)
+
+
+def get_cached_org_catalog(organization_id: uuid.UUID) -> list[ProviderModel] | None:
+    """Return a warm merged catalog for *organization_id* when cached."""
+    return _catalog_cache.get(str(organization_id))
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -191,6 +205,17 @@ def normalize_openrouter_model(raw: Any) -> ProviderModel | None:
         supports_tools=supports_tools,
         context_length=context_length,
         max_output_tokens=max_output_tokens,
+        provider="openrouter",
+    )
+
+
+def _namespace_openrouter_model(model: ProviderModel) -> ProviderModel:
+    """Prefix OpenRouter ids with ``openrouter/`` for multi-provider catalogs."""
+    bare_id = model.id.removeprefix("openrouter/")
+    return replace(
+        model,
+        id=f"openrouter/{bare_id}",
+        provider="openrouter",
     )
 
 
@@ -273,6 +298,221 @@ def fetch_openrouter_models(
     return normalize_openrouter_catalog(payload)
 
 
+_CHATGPT_MODEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "gpt-5.5",
+        "name": "GPT-5.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "context_length": 400_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-5.4",
+        "name": "GPT-5.4",
+        "reasoning_efforts": ("low", "medium", "high"),
+        "default_effort": "medium",
+        "context_length": 400_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-5.4-mini",
+        "name": "GPT-5.4 Mini",
+        "reasoning_efforts": ("low", "medium", "high"),
+        "default_effort": "medium",
+        "context_length": 400_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-5.3-codex-spark",
+        "name": "GPT-5.3 Codex Spark",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "context_length": 400_000,
+        "max_output_tokens": 128_000,
+    },
+)
+
+
+def chatgpt_models() -> list[ProviderModel]:
+    """Return the static ChatGPT OAuth allowlist catalog."""
+    models: list[ProviderModel] = []
+    for spec in _CHATGPT_MODEL_SPECS:
+        model_id = str(spec["id"])
+        models.append(
+            ProviderModel(
+                id=f"chatgpt/{model_id}",
+                name=str(spec["name"]),
+                reasoning_efforts=tuple(spec["reasoning_efforts"]),
+                default_effort=str(spec["default_effort"]),
+                supports_tools=True,
+                context_length=int(spec["context_length"]),
+                max_output_tokens=int(spec["max_output_tokens"]),
+                provider="chatgpt",
+            )
+        )
+    return models
+
+
+_BEDROCK_MODEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "anthropic.claude-sonnet-4-5",
+        "name": "Claude Sonnet 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "anthropic.claude-opus-4-5",
+        "name": "Claude Opus 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "anthropic.claude-haiku-4-5",
+        "name": "Claude Haiku 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "amazon.nova-pro-v1:0",
+        "name": "Amazon Nova Pro",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 300_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "amazon.nova-lite-v1:0",
+        "name": "Amazon Nova Lite",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 300_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "amazon.nova-micro-v1:0",
+        "name": "Amazon Nova Micro",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": False,
+        "context_length": 128_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "meta.llama3-3-70b-instruct-v1:0",
+        "name": "Meta Llama 3.3 70B Instruct",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 128_000,
+        "max_output_tokens": 2_048,
+    },
+    {
+        "id": "meta.llama3-2-90b-instruct-v1:0",
+        "name": "Meta Llama 3.2 90B Instruct",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 128_000,
+        "max_output_tokens": 2_048,
+    },
+    {
+        "id": "deepseek.r1-v1:0",
+        "name": "DeepSeek R1",
+        "reasoning_efforts": ("low", "medium", "high"),
+        "default_effort": "medium",
+        "supports_tools": False,
+        "context_length": 128_000,
+        "max_output_tokens": 32_768,
+    },
+)
+
+
+def bedrock_models(region: str) -> list[ProviderModel]:
+    """Return the curated Amazon Bedrock catalog for *region*."""
+    resolved_region = region or DEFAULT_REGION
+    models: list[ProviderModel] = []
+    for spec in _BEDROCK_MODEL_SPECS:
+        bare_id = str(spec["id"])
+        resolved_id = resolve_bedrock_model_id(bare_id, resolved_region)
+        models.append(
+            ProviderModel(
+                id=f"amazon-bedrock/{resolved_id}",
+                name=str(spec["name"]),
+                reasoning_efforts=tuple(spec["reasoning_efforts"]),
+                default_effort=str(spec["default_effort"]),
+                supports_tools=bool(spec["supports_tools"]),
+                context_length=int(spec["context_length"]),
+                max_output_tokens=int(spec["max_output_tokens"]),
+                provider="amazon-bedrock",
+            )
+        )
+    return models
+
+
+def _fetch_openrouter_catalog_for_connection(
+    connection: Any,
+    *,
+    client: httpx.Client | None = None,
+) -> list[ProviderModel]:
+    credentials = json.loads(decrypt_value(connection.credentials_encrypted))
+    api_key = str(credentials.get("api_key", "") or "")
+    if not api_key.strip():
+        return []
+    base_url = str((connection.config or {}).get("base_url") or DEFAULT_BASE_URL)
+    models = fetch_openrouter_models(api_key=api_key, base_url=base_url, client=client)
+    return [_namespace_openrouter_model(model) for model in models]
+
+
+def list_merged_provider_models(
+    *,
+    organization_id: uuid.UUID,
+    connection_repository: type[ProviderConnectionRepository] | None = None,
+    client: httpx.Client | None = None,
+    force_refresh: bool = False,
+) -> list[ProviderModel]:
+    """Return the merged catalog across all connected providers for an org."""
+    cache_key = str(organization_id)
+    if not force_refresh:
+        cached = _catalog_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    repository = connection_repository or ProviderConnectionRepository
+    connections = repository.list_by_org(organization_id)
+    merged: list[ProviderModel] = []
+    for connection in connections:
+        if connection.provider == "openrouter":
+            merged.extend(
+                _fetch_openrouter_catalog_for_connection(connection, client=client)
+            )
+        elif connection.provider == "chatgpt":
+            merged.extend(chatgpt_models())
+        elif connection.provider == "amazon-bedrock":
+            region = str((connection.config or {}).get("region") or DEFAULT_REGION)
+            merged.extend(bedrock_models(region))
+
+    _catalog_cache.set(cache_key, merged)
+    log.info(
+        "provider_models_merged",
+        organization_id=cache_key,
+        count=len(merged),
+        providers=[connection.provider for connection in connections],
+    )
+    return merged
+
+
 def list_cached_provider_models(
     *,
     cache_key: str,
@@ -286,7 +526,12 @@ def list_cached_provider_models(
         cached = _catalog_cache.get(cache_key)
         if cached is not None:
             return cached
-    models = fetch_openrouter_models(api_key=api_key, base_url=base_url, client=client)
+    models = [
+        _namespace_openrouter_model(model)
+        for model in fetch_openrouter_models(
+            api_key=api_key, base_url=base_url, client=client
+        )
+    ]
     _catalog_cache.set(cache_key, models)
     log.info("provider_models_fetched", cache_key=cache_key, count=len(models))
     return models

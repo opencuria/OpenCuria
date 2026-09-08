@@ -1,3 +1,6 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap');
+
 @import '@fontsource-variable/noto-sans';
 @import 'tailwindcss';
 @import 'tw-animate-css';
@@ -277,5 +280,14 @@
     color: var(--muted-foreground);
     -webkit-background-clip: unset;
     background-clip: unset;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
   }
 }

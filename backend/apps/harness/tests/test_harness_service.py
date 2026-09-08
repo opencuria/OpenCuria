@@ -760,9 +760,10 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
 
     captured: list[RunOptions] = []
 
-    def _runner_factory(*, provider, tools, accessor, emit):  # type: ignore[no-untyped-def]
+    def _runner_factory(*, provider, model_resolver, tools, accessor, emit):  # type: ignore[no-untyped-def]
         runner = HarnessRunner(
             provider=provider,
+            model_resolver=model_resolver,
             tools=tools,
             accessor=accessor,
             emit=emit,

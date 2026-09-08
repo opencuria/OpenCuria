@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from django.db import IntegrityError
 
@@ -13,8 +15,8 @@ from common.utils import decrypt_value
 
 
 @pytest.mark.django_db
-def test_encrypt_decrypt_roundtrip(organization) -> None:
-    """API key survives save/load without plaintext in the DB row."""
+def test_save_config_routes_openrouter_credentials(organization) -> None:
+    """OpenRouter API keys are stored on ProviderConnection, not ProviderConfig."""
     service = ProviderConfigService()
     config = service.save_config(
         organization_id=organization.id,
@@ -22,13 +24,13 @@ def test_encrypt_decrypt_roundtrip(organization) -> None:
         default_model="model-a",
         small_model="model-b",
     )
-    assert config.api_key_encrypted != "sk-secret-123"
-    assert "sk-secret-123" not in config.api_key_encrypted
+    connection = service.get_connection(organization.id, "openrouter")
+    assert connection is not None
+    assert connection.credentials_encrypted != "sk-secret-123"
+    stored = json.loads(decrypt_value(connection.credentials_encrypted))
+    assert stored["api_key"] == "sk-secret-123"
     assert service.get_decrypted_api_key(organization.id) == "sk-secret-123"
-
-    raw = ProviderConfig.objects.get(id=config.id)
-    assert raw.api_key_encrypted != "sk-secret-123"
-    assert decrypt_value(raw.api_key_encrypted) == "sk-secret-123"
+    assert not hasattr(config, "api_key_encrypted")
 
 
 @pytest.mark.django_db
@@ -36,14 +38,12 @@ def test_org_unique_constraint(organization) -> None:
     """A second config for the same org violates the OneToOne mapping."""
     ProviderConfig.objects.create(
         organization=organization,
-        api_key_encrypted="enc",
-        base_url="https://openrouter.ai/api/v1",
+        default_model="m1",
     )
     with pytest.raises(IntegrityError):
         ProviderConfig.objects.create(
             organization=organization,
-            api_key_encrypted="enc2",
-            base_url="https://openrouter.ai/api/v1",
+            default_model="m2",
         )
 
 
@@ -51,19 +51,31 @@ def test_org_unique_constraint(organization) -> None:
 def test_save_config_upserts(organization) -> None:
     """Saving twice updates instead of duplicating."""
     service = ProviderConfigService()
-    first = service.save_config(organization_id=organization.id, api_key="key-1")
-    second = service.save_config(organization_id=organization.id, api_key="key-2")
+    first = service.save_config(
+        organization_id=organization.id,
+        api_key="key-1",
+        default_model="m1",
+    )
+    second = service.save_config(
+        organization_id=organization.id,
+        api_key="key-2",
+        default_model="m2",
+    )
     assert first.id == second.id
     assert service.get_decrypted_api_key(organization.id) == "key-2"
     assert ProviderConfig.objects.filter(organization_id=organization.id).count() == 1
 
 
 @pytest.mark.django_db
-def test_save_config_empty_key_on_create_raises(organization) -> None:
-    """Creating a config without an api_key is rejected."""
+def test_save_config_create_without_api_key(organization) -> None:
+    """Default models can be saved before any provider connection exists."""
     service = ProviderConfigService()
-    with pytest.raises(ValueError, match="api_key must not be empty"):
-        service.save_config(organization_id=organization.id, api_key="")
+    config = service.save_config(
+        organization_id=organization.id,
+        default_model="model-a",
+    )
+    assert config.default_model == "model-a"
+    assert service.get_connection(organization.id, "openrouter") is None
 
 
 @pytest.mark.django_db
@@ -75,7 +87,7 @@ def test_get_missing_config_raises(organization) -> None:
 
 
 @pytest.mark.django_db
-def test_build_adapter_uses_stored_config(organization) -> None:
+def test_build_adapter_uses_stored_connection(organization) -> None:
     """build_adapter decrypts the key and honors the stored base URL."""
     service = ProviderConfigService()
     service.save_config(
@@ -88,9 +100,5 @@ def test_build_adapter_uses_stored_config(organization) -> None:
     assert isinstance(adapter, OpenRouterAdapter)
     assert adapter._base_url == "https://example.com/v1"
 
-    from_config = service.adapter_from_config(service.get_config(organization.id))
-    assert isinstance(from_config, OpenRouterAdapter)
-    assert from_config._base_url == "https://example.com/v1"
-
-    with pytest.raises(KeyError):
+    with pytest.raises(NotFoundError):
         service.build_adapter(organization.id, provider_name="nope")

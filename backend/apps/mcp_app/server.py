@@ -33,6 +33,12 @@ Tools and their required permissions
 - list_provider_models → harness:read
 - save_provider_config → harness:run
 - delete_provider_config → harness:run
+- list_provider_connections → harness:providers
+- save_provider_connection → harness:providers
+- delete_provider_connection → harness:providers
+- chatgpt_oauth_start → harness:providers
+- chatgpt_oauth_status → harness:providers
+- chatgpt_oauth_cancel → harness:providers
 - list_harness_sessions → harness:read
 - create_harness_session → harness:run
 - send_harness_message → harness:run
@@ -372,7 +378,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_provider_models",
-        description="List models available from the org OpenRouter provider.",
+        description="List models from all connected org providers (merged catalog).",
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -392,6 +398,74 @@ _TOOLS: list[Tool] = [
     Tool(
         name="delete_provider_config",
         description="Delete the org-wide harness provider config.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="list_provider_connections",
+        description=(
+            "List connection status for all org providers "
+            "(openrouter, chatgpt, amazon-bedrock)."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="save_provider_connection",
+        description=(
+            "Upsert credentials for openrouter or amazon-bedrock. "
+            "ChatGPT uses chatgpt_oauth_start instead."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id: openrouter or amazon-bedrock.",
+                },
+                "api_key": {"type": "string"},
+                "base_url": {"type": "string"},
+                "auth_method": {
+                    "type": "string",
+                    "description": "Bedrock only: access_keys or bearer.",
+                },
+                "region": {"type": "string"},
+                "access_key_id": {"type": "string"},
+                "secret_access_key": {"type": "string"},
+                "session_token": {"type": "string"},
+                "bearer_token": {"type": "string"},
+            },
+            "required": ["provider"],
+        },
+    ),
+    Tool(
+        name="delete_provider_connection",
+        description="Delete one org provider connection.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider id to disconnect.",
+                }
+            },
+            "required": ["provider"],
+        },
+    ),
+    Tool(
+        name="chatgpt_oauth_start",
+        description="Start the ChatGPT device OAuth flow for the org.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="chatgpt_oauth_status",
+        description=(
+            "Poll once for ChatGPT OAuth completion. Returns status: "
+            "pending, connected, expired, denied, or no_flow."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="chatgpt_oauth_cancel",
+        description="Cancel a pending ChatGPT OAuth flow for the org.",
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -674,6 +748,12 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_provider_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
+    "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
+    "save_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "delete_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "chatgpt_oauth_start": APIKeyPermission.HARNESS_PROVIDERS,
+    "chatgpt_oauth_status": APIKeyPermission.HARNESS_PROVIDERS,
+    "chatgpt_oauth_cancel": APIKeyPermission.HARNESS_PROVIDERS,
     "list_harness_sessions": APIKeyPermission.HARNESS_READ,
     "create_harness_session": APIKeyPermission.HARNESS_RUN,
     "send_harness_message": APIKeyPermission.HARNESS_RUN,
@@ -1720,6 +1800,225 @@ def _call_delete_provider_config(api_key, org_id, args: dict) -> list[TextConten
     return _text({"deleted": True})
 
 
+def _call_list_provider_connections(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _list_org_provider_connections
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    connections = _list_org_provider_connections(org_id)
+    return _text([row.model_dump(mode="json") for row in connections])
+
+
+def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import (
+        BedrockConnectionIn,
+        OpenRouterConnectionIn,
+        ProviderConnectionUpsertIn,
+        _parse_provider_param,
+        _upsert_bedrock_connection,
+        _upsert_openrouter_connection,
+    )
+    from apps.harness.enums import ProviderType
+    from apps.organizations.services import OrganizationService
+
+    provider = args.get("provider")
+    if not provider:
+        return _error("provider is required")
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+
+    try:
+        provider_id = _parse_provider_param(str(provider))
+    except ValueError as exc:
+        return _error(str(exc))
+
+    if provider_id == ProviderType.CHATGPT:
+        return _error("ChatGPT uses OAuth connect; use chatgpt_oauth_start")
+
+    payload = ProviderConnectionUpsertIn(
+        **{key: value for key, value in args.items() if key != "provider"}
+    )
+
+    try:
+        if provider_id == ProviderType.OPENROUTER:
+            body = OpenRouterConnectionIn(
+                api_key=payload.api_key,
+                base_url=payload.base_url,
+            )
+            connection = _upsert_openrouter_connection(org_id, body)
+        else:
+            body = BedrockConnectionIn(
+                auth_method=payload.auth_method,
+                region=payload.region,
+                access_key_id=payload.access_key_id,
+                secret_access_key=payload.secret_access_key,
+                session_token=payload.session_token,
+                bearer_token=payload.bearer_token,
+            )
+            connection = _upsert_bedrock_connection(org_id, body)
+    except (ValueError, KeyError, TypeError) as exc:
+        return _error(str(exc))
+
+    return _text(connection.model_dump(mode="json"))
+
+
+def _call_delete_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _delete_org_provider_connection, _parse_provider_param
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    provider = args.get("provider")
+    if not provider:
+        return _error("provider is required")
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+
+    try:
+        provider_id = _parse_provider_param(str(provider))
+        _delete_org_provider_connection(org_id, provider_id)
+    except ValueError as exc:
+        return _error(str(exc))
+    except NotFoundError as exc:
+        return _error(exc.message)
+
+    return _text({"deleted": True, "provider": provider_id})
+
+
+async def _call_chatgpt_oauth_start(api_key, org_id, args: dict) -> list[TextContent]:
+    import time
+
+    from asgiref.sync import sync_to_async
+
+    from apps.harness.api import (
+        CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
+        _PendingChatGPTOAuth,
+        _chatgpt_oauth_lock,
+        _chatgpt_oauth_pending,
+    )
+    from apps.harness.providers.base import ProviderError
+    from apps.harness.providers.chatgpt_oauth import start_device_flow
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
+
+    try:
+        flow = await start_device_flow()
+        async with _chatgpt_oauth_lock:
+            _chatgpt_oauth_pending[org_id] = _PendingChatGPTOAuth(
+                device_auth_id=flow.device_auth_id,
+                user_code=flow.user_code,
+                interval=flow.interval,
+                created_at=time.monotonic(),
+            )
+        return _text(
+            {
+                "user_code": flow.user_code,
+                "verification_url": flow.verification_url,
+                "interval": flow.interval,
+                "expires_in": CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
+            }
+        )
+    except ProviderError as exc:
+        return _error(str(exc))
+
+
+async def _call_chatgpt_oauth_status(api_key, org_id, args: dict) -> list[TextContent]:
+    import time
+
+    from asgiref.sync import sync_to_async
+
+    from apps.harness.api import (
+        CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
+        _chatgpt_oauth_lock,
+        _chatgpt_oauth_pending,
+    )
+    from apps.harness.enums import ProviderType
+    from apps.harness.providers.base import ProviderError
+    from apps.harness.providers.chatgpt_oauth import poll_device_flow_once
+    from apps.harness.services import ProviderConfigService
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
+
+    try:
+        async with _chatgpt_oauth_lock:
+            pending = _chatgpt_oauth_pending.get(org_id)
+        if pending is None:
+            return _text(
+                {
+                    "status": "no_flow",
+                    "detail": "No pending ChatGPT OAuth flow for this organization",
+                }
+            )
+        if (
+            time.monotonic() - pending.created_at
+            > CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS
+        ):
+            async with _chatgpt_oauth_lock:
+                _chatgpt_oauth_pending.pop(org_id, None)
+            return _text({"status": "expired"})
+
+        result = await poll_device_flow_once(
+            pending.device_auth_id,
+            pending.user_code,
+        )
+        if result.status == "pending":
+            return _text({"status": "pending"})
+        if result.status == "expired":
+            async with _chatgpt_oauth_lock:
+                _chatgpt_oauth_pending.pop(org_id, None)
+            return _text({"status": "expired"})
+        if result.status == "denied":
+            async with _chatgpt_oauth_lock:
+                _chatgpt_oauth_pending.pop(org_id, None)
+            return _text({"status": "denied"})
+        if result.tokens is None:
+            return _error("OAuth completed without tokens")
+
+        credentials = {
+            "access": result.tokens.access,
+            "refresh": result.tokens.refresh,
+            "expires": result.tokens.expires,
+            "account_id": result.tokens.account_id or "",
+            "residency": result.tokens.residency or "",
+        }
+        service = ProviderConfigService()
+        await sync_to_async(service.save_connection)(
+            organization_id=org_id,
+            provider=ProviderType.CHATGPT,
+            credentials=credentials,
+            config={},
+        )
+        async with _chatgpt_oauth_lock:
+            _chatgpt_oauth_pending.pop(org_id, None)
+        return _text(
+            {
+                "status": "connected",
+                "account_id": result.tokens.account_id or "",
+            }
+        )
+    except ProviderError as exc:
+        return _error(str(exc))
+
+
+async def _call_chatgpt_oauth_cancel(api_key, org_id, args: dict) -> list[TextContent]:
+    from asgiref.sync import sync_to_async
+
+    from apps.harness.api import _chatgpt_oauth_lock, _chatgpt_oauth_pending
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
+    async with _chatgpt_oauth_lock:
+        _chatgpt_oauth_pending.pop(org_id, None)
+    return _text({"cancelled": True})
+
+
 def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent]:
     import uuid as _uuid
 
@@ -2495,6 +2794,12 @@ _TOOL_HANDLERS = {
     "list_provider_models": _call_list_provider_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
+    "list_provider_connections": _call_list_provider_connections,
+    "save_provider_connection": _call_save_provider_connection,
+    "delete_provider_connection": _call_delete_provider_connection,
+    "chatgpt_oauth_start": _call_chatgpt_oauth_start,
+    "chatgpt_oauth_status": _call_chatgpt_oauth_status,
+    "chatgpt_oauth_cancel": _call_chatgpt_oauth_cancel,
     "list_harness_sessions": _call_list_harness_sessions,
     "create_harness_session": _call_create_harness_session,
     "send_harness_message": _call_send_harness_message,

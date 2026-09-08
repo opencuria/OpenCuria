@@ -11,7 +11,7 @@
 ## 1. What is opencuria?
 
 opencuria is a platform for **centrally provisioning, managing and monitoring an
-integrated AI agent harness** (OpenRouter provider, workspace tools, permissions,
+integrated AI agent harness** (multi-provider LLM backends, workspace tools, permissions,
 plan/build modes, subagents).
 
 It consists of three components:
@@ -369,7 +369,8 @@ The backend follows **Clean Architecture** with strict separation of concerns:
 | `HarnessSession`/`HarnessMessage`/`HarnessPart` | Agent conversation with streamed block parts (text/reasoning/tool/step/subtask/patch). |
 | `PermissionRequest` | Tool permission gate (`pending`/`approved`/`rejected`, once/always). |
 | `Todo` | Session todo list. |
-| `ProviderConfig` | Org-wide LLM provider config (encrypted key, base URL, models). |
+| `ProviderConfig` | Org-wide default models only (`default_model`, `small_model`, `computer_use_model`). |
+| `ProviderConnection` | One row per (organization, provider). Fernet-encrypted credentials JSON + non-secret config JSON (e.g. `base_url`, `region`). |
 
 **Credentials models** (`apps/credentials/models.py`):
 
@@ -386,7 +387,7 @@ Six separate routers:
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
 | `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
-| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/`, `GET /provider-config/models/` |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/` (default models; deprecated OpenRouter `api_key`/`base_url` aliases), `GET /provider-config/models/`, `GET /provider-config/providers/`, `PUT/DELETE /provider-config/providers/{provider}/`, ChatGPT OAuth `POST .../chatgpt/oauth/start|cancel/`, `GET .../oauth/status/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 
@@ -398,7 +399,12 @@ tool/operation in the same change.
 
 **API key permission requirement:** New endpoints must come with explicit
 fine-grained API key permissions that can be assigned in API key management.
-Existing API keys must not automatically receive newly introduced permissions.
+Existing API keys must not automatically receive newly introduced permissions
+(e.g. provider connection endpoints require `harness:providers`).
+
+**MCP parity (providers):** `list_provider_connections`, `save_provider_connection`,
+`delete_provider_connection`, `chatgpt_oauth_start`, `chatgpt_oauth_status`,
+`chatgpt_oauth_cancel`.
 
 ### 5.5 Socket.IO Server (`sio_server.py`)
 
@@ -478,6 +484,15 @@ When a workspace is created or resumed, `CredentialSvc.resolve_credentials()` de
 
 ### 6.5 Harness Agents/Modes
 
+**Providers:** `openrouter`, `chatgpt` (OAuth device-code → Codex Responses API),
+`amazon-bedrock` (Converse Stream; SigV4 keys/bearer + region prefixing).
+`ProviderConnection` holds per-org credentials/config; `ProviderConfig` default
+models only. Model refs are `{provider}/{model_id}` (`parse_model_ref`; legacy
+unprefixed → `openrouter`). `ProviderResolver` picks an adapter per provider
+step (`HarnessMessage.provider`); defaults may span providers. Catalog merges
+connected providers into a flat list (`ProviderModel.provider`); OpenRouter
+live fetch, ChatGPT + Bedrock static.
+
 Agents are static code definitions in `backend/apps/harness/agents/definitions.py`
 (`build`/`plan` primary, `general`/`explore`/hidden `title`+`compaction`
 subagents, plus `computeruse` for desktop automation) — no DB records. Modes
@@ -531,6 +546,7 @@ credentials or other sensitive content visible on screen may appear in the mp4.
 - Managed via `requirements.txt` with version pins (e.g. `>=7.0,<8.0`).
 - Core dependencies: `docker`, `python-socketio[asyncio_client]`,
   `pydantic-settings`, `structlog`, `typer`, `rich`.
+- Backend harness adds `aioboto3` (Amazon Bedrock).
 - Do not add dependencies without a clear justification.
 
 ### 6.8 Logging

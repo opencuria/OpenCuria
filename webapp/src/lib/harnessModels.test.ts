@@ -6,14 +6,16 @@ import { describe, expect, it } from 'vitest'
 import {
   formatEffort,
   formatHarnessModelEffort,
+  providerDisplayName,
   resolveCatalogModel,
   snapEffort,
   type ProviderModel,
 } from './harnessModels'
 
 const withEffort: ProviderModel = {
-  id: 'acme/think',
+  id: 'openrouter/think',
   name: 'Think',
+  provider: 'openrouter',
   reasoning_efforts: ['low', 'medium', 'high'],
   default_effort: 'medium',
   supports_tools: true,
@@ -22,8 +24,9 @@ const withEffort: ProviderModel = {
 }
 
 const plain: ProviderModel = {
-  id: 'acme/plain',
+  id: 'chatgpt/plain',
   name: 'Plain',
+  provider: 'chatgpt',
   reasoning_efforts: [],
   default_effort: '',
   supports_tools: true,
@@ -47,15 +50,22 @@ describe('harnessModels', () => {
 
   it('resolves Auto to the org default catalog row', () => {
     const models = [withEffort, plain]
-    expect(resolveCatalogModel(models, '', 'acme/think')?.id).toBe('acme/think')
-    expect(resolveCatalogModel(models, 'acme/plain')?.id).toBe('acme/plain')
+    expect(resolveCatalogModel(models, '', 'openrouter/think')?.id).toBe('openrouter/think')
+    expect(resolveCatalogModel(models, 'chatgpt/plain')?.id).toBe('chatgpt/plain')
+  })
+
+  it('maps provider ids to display names', () => {
+    expect(providerDisplayName('openrouter')).toBe('OpenRouter')
+    expect(providerDisplayName('chatgpt')).toBe('ChatGPT')
+    expect(providerDisplayName('amazon-bedrock')).toBe('Amazon Bedrock')
+    expect(providerDisplayName('custom')).toBe('custom')
   })
 
   it('formats model and effort for conversation cards', () => {
     const models = [withEffort, plain]
-    expect(formatHarnessModelEffort('acme/think', 'high', models)).toBe('Think High')
-    expect(formatHarnessModelEffort('', 'medium', models, 'acme/think')).toBe('Auto Medium')
-    expect(formatHarnessModelEffort('acme/plain', '', models)).toBe('Plain')
+    expect(formatHarnessModelEffort('openrouter/think', 'high', models)).toBe('Think High')
+    expect(formatHarnessModelEffort('', 'medium', models, 'openrouter/think')).toBe('Auto Medium')
+    expect(formatHarnessModelEffort('chatgpt/plain', '', models)).toBe('Plain')
     expect(formatHarnessModelEffort('missing/id', 'low', [])).toBe('missing/id Low')
   })
 })

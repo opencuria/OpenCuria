@@ -173,12 +173,10 @@ async function loadProviderModels(): Promise<void> {
   try {
     const config = await getProviderConfig()
     orgDefaultModel.value = config.default_model || ''
-    if (!config.has_api_key) {
-      providerMissing.value = true
-      catalog.value = []
-      return
-    }
     catalog.value = await loadProviderModelsCached()
+    if (catalog.value.length === 0) {
+      providerMissing.value = true
+    }
   } catch {
     providerMissing.value = true
     catalog.value = []
@@ -610,7 +608,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
         class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
         @click="openProviderSettings"
       >
-        Configure OpenRouter in Org Settings
+        Connect a provider in Settings
       </button>
 
       <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">

@@ -24,7 +24,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from asgiref.sync import sync_to_async
@@ -77,6 +77,7 @@ from .providers.base import (
     ToolSchema,
     Usage,
 )
+from .providers.resolver import ResolvedModel, StaticModelResolver
 from .tools.base import ToolContext, ToolRegistry, ToolResult
 
 log = structlog.get_logger(__name__)
@@ -117,6 +118,14 @@ DOOM_LOOP_REPEATS = 3
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 PermissionCallback = Callable[..., Awaitable[str]]
 QuestionCallback = Callable[..., Awaitable[list[Any]]]
+
+
+class ModelResolver(Protocol):
+    """Resolve a model ref to an adapter plus bare provider model id."""
+
+    def __call__(self, model_ref: str) -> ResolvedModel:
+        """Return provider adapter and limits for *model_ref*."""
+        ...
 
 
 #: Max raw-argument characters appended to tool-error messages.
@@ -287,7 +296,8 @@ class HarnessRunner:
     def __init__(
         self,
         *,
-        provider: ProviderAdapter,
+        provider: ProviderAdapter | None = None,
+        model_resolver: ModelResolver | None = None,
         tools: ToolRegistry,
         evaluator: PermissionEvaluator | None = None,
         accessor: WorkspaceAccessor | None = None,
@@ -297,14 +307,24 @@ class HarnessRunner:
         """Create a runner.
 
         Args:
-            provider: LLM provider adapter for chat streaming.
+            provider: Legacy single-adapter injection (tests). Wrapped into a
+                static resolver so existing fakes keep working.
+            model_resolver: Callable ``resolve(model_ref) -> ResolvedModel`` used
+                for per-step adapter selection in multi-provider setups.
             tools: Registry of executable tools.
             evaluator: Base (global/org) permission evaluator.
             accessor: Workspace accessor for tools and context files.
             emit: Async callback receiving streaming event dicts.
             chat_options: Optional per-request provider settings.
         """
-        self.provider = provider
+        if model_resolver is not None:
+            self._resolve_model = model_resolver
+            self.provider = None
+        elif provider is not None:
+            self._resolve_model = StaticModelResolver(provider).resolve
+            self.provider = provider
+        else:
+            raise ValueError("HarnessRunner requires provider or model_resolver")
         self.tools = tools
         if evaluator is None:
             evaluator = PermissionEvaluator(
@@ -870,6 +890,7 @@ class HarnessRunner:
             model=model,
             parent_emit=self._emit,
             provider=self.provider,
+            model_resolver=self._resolve_model,
             registry=self.tools,
             evaluator=self.evaluator,
             run_subagent=opts.run_subagent,
@@ -1124,6 +1145,7 @@ class HarnessRunner:
             model=model,
             parent_emit=self._emit,
             provider=self.provider,
+            model_resolver=self._resolve_model,
             registry=self.tools,
             evaluator=self.evaluator,
             run_subagent=opts.run_subagent,
@@ -1492,8 +1514,12 @@ class HarnessRunner:
         text_parts: list[str] = []
         usage = Usage()
         finish_reason = ""
-        async for delta in self.provider.chat_stream(
-            model, messages, schemas, chat_options or self.chat_options
+        resolved = self._resolve_model(model)
+        async for delta in resolved.adapter.chat_stream(
+            resolved.model_id,
+            messages,
+            schemas,
+            chat_options or self.chat_options,
         ):
             if delta.usage is not None:
                 usage = usage.merge(delta.usage)
@@ -1584,7 +1610,7 @@ class HarnessRunner:
             return messages
         try:
             child = HarnessRunner(
-                provider=self.provider,
+                model_resolver=self._resolve_model,
                 tools=self.tools,
                 evaluator=self.evaluator,
                 accessor=self.accessor,

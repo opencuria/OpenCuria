@@ -19,8 +19,8 @@ import type {
   HarnessSessionPatchIn,
   HarnessTodo,
 } from '@/types/harness'
-import type { ProviderModel } from '@/lib/harnessModels'
-import { get, post, put, del, patch } from './api'
+import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
+import { ApiRequestError, get, post, put, del, patch, requestWithStatus } from './api'
 
 export interface HarnessProviderConfig {
   base_url: string
@@ -32,11 +32,44 @@ export interface HarnessProviderConfig {
 }
 
 export interface HarnessProviderConfigIn {
-  api_key: string
+  api_key?: string
   base_url?: string
   default_model?: string
   small_model?: string
   computer_use_model?: string
+}
+
+export interface ProviderConnection {
+  provider: ProviderId
+  connected: boolean
+  base_url?: string
+  api_key_hint?: string
+  account_id?: string
+  region?: string
+  auth_method?: 'access_keys' | 'bearer' | ''
+}
+
+export interface ProviderConnectionUpsertIn {
+  api_key?: string
+  base_url?: string
+  auth_method?: string
+  region?: string
+  access_key_id?: string
+  secret_access_key?: string
+  session_token?: string
+  bearer_token?: string
+}
+
+export interface ChatGptOAuthStart {
+  user_code: string
+  verification_url: string
+  interval: number
+  expires_in: number
+}
+
+export interface ChatGptOAuthStatus {
+  status: 'pending' | 'connected' | 'expired' | 'denied' | 'no_flow'
+  account_id?: string
 }
 
 export interface HarnessSessionOut extends HarnessSession {}
@@ -164,6 +197,57 @@ export function saveProviderConfig(
 
 export function deleteProviderConfig(): Promise<void> {
   return del<void>('/provider-config/')
+}
+
+export function listProviderConnections(): Promise<ProviderConnection[]> {
+  return get<ProviderConnection[]>('/provider-config/providers/')
+}
+
+export function saveProviderConnection(
+  provider: ProviderId,
+  payload: ProviderConnectionUpsertIn,
+): Promise<ProviderConnection> {
+  return put<ProviderConnection>(`/provider-config/providers/${provider}/`, payload)
+}
+
+export function deleteProviderConnection(provider: ProviderId): Promise<void> {
+  return del<void>(`/provider-config/providers/${provider}/`)
+}
+
+export function startChatGptOAuth(): Promise<ChatGptOAuthStart> {
+  return post<ChatGptOAuthStart>('/provider-config/providers/chatgpt/oauth/start/')
+}
+
+export async function getChatGptOAuthStatus(): Promise<ChatGptOAuthStatus> {
+  const result = await requestWithStatus<ChatGptOAuthStatus>(
+    'GET',
+    '/provider-config/providers/chatgpt/oauth/status/',
+  )
+  if (result.status === 404) {
+    return { status: 'no_flow', account_id: result.data.account_id ?? '' }
+  }
+  if (result.status === 410) {
+    return {
+      status: result.data.status === 'denied' ? 'denied' : 'expired',
+      account_id: result.data.account_id ?? '',
+    }
+  }
+  if (!result.ok) {
+    throw new ApiRequestError(
+      result.status,
+      typeof result.data === 'object' && result.data && 'detail' in result.data
+        ? String((result.data as { detail?: string }).detail)
+        : 'OAuth status request failed',
+      typeof result.data === 'object' && result.data && 'code' in result.data
+        ? String((result.data as { code?: string }).code)
+        : 'error',
+    )
+  }
+  return result.data
+}
+
+export function cancelChatGptOAuth(): Promise<void> {
+  return post<void>('/provider-config/providers/chatgpt/oauth/cancel/')
 }
 
 export function listHarnessConversations(): Promise<HarnessConversation[]> {

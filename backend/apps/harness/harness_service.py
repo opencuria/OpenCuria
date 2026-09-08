@@ -46,6 +46,7 @@ from .models import (
 from .permissions.service import PermissionService
 from .providers.base import ChatOptions, LLMMessage, ProviderAdapter, Usage
 from .providers.models_catalog import normalize_reasoning_effort
+from .providers.model_ref import namespaced_model_id, parse_model_ref
 from .repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
@@ -404,11 +405,10 @@ class HarnessService:
 
         config_service = ProviderConfigService()
         config = config_service.get_config(organization_id)
-        if not config.api_key_encrypted:
-            raise ValueError("Provider API key not configured")
         model = session_model or (config.default_model or "").strip()
         if not model:
             raise ValueError("No model configured for harness run")
+        config_service.provider_connected_for_model(organization_id, model)
         return model
 
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
@@ -546,6 +546,12 @@ class HarnessService:
         resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id, session, provider=provider
         )
+        resolved_provider = ""
+        if provider is not None:
+            resolved_provider = provider.name
+        else:
+            provider_id, _ = parse_model_ref(resolved_model)
+            resolved_provider = provider_id
         prior_user_messages = await sync_to_async(
             lambda: self.messages.model.objects.filter(
                 session_id=session.id, role="user"
@@ -562,7 +568,7 @@ class HarnessService:
             content="",
             model=resolved_model,
             reasoning_effort=session.reasoning_effort or "",
-            provider=(provider.name if provider is not None else ""),
+            provider=resolved_provider,
         )
         await sync_to_async(self.sessions.mark_status)(
             session, HarnessSessionStatus.BUSY
@@ -921,8 +927,9 @@ class HarnessService:
             models = ProviderConfigService().list_models(organization_id)
         except Exception:
             return 0, 0
+        namespaced = namespaced_model_id(model_id)
         for model in models:
-            if model.id == model_id:
+            if model.id in {model_id, namespaced}:
                 return model.context_length, model.max_output_tokens
         return 0, 0
 
@@ -1025,30 +1032,35 @@ class HarnessService:
         organization_id: uuid.UUID,
     ) -> None:
         """Run the loop, persist events, and finalize the assistant message."""
+        from .providers.resolver import StaticModelResolver
         from .services import ProviderConfigService
 
         key = str(session.id)
-        active_provider = provider
+        model_resolver = None
         small_model = ""
         computer_use_model = ""
         default_model = ""
-        if active_provider is None:
-            if self._provider_factory is not None:
-                active_provider = self._provider_factory(organization_id)
+        if provider is not None:
+            model_resolver = StaticModelResolver(provider).resolve
+        elif self._provider_factory is not None:
+            model_resolver = StaticModelResolver(
+                self._provider_factory(organization_id)
+            ).resolve
+        else:
+            config_service = ProviderConfigService()
+            config = await sync_to_async(config_service.get_config)(organization_id)
+            resolver = await sync_to_async(config_service.build_resolver)(organization_id)
+            model_resolver = resolver.resolve
+            small_model = (config.small_model or "").strip()
+            computer_use_model = (config.computer_use_model or "").strip()
+            default_model = (config.default_model or "").strip()
+            if session.model:
+                model_default = session.model
             else:
-                config_service = ProviderConfigService()
-                config = await sync_to_async(config_service.get_config)(organization_id)
-                active_provider = config_service.adapter_from_config(config)
-                small_model = (config.small_model or "").strip()
-                computer_use_model = (config.computer_use_model or "").strip()
-                default_model = (config.default_model or "").strip()
-                if session.model:
-                    model_default = session.model
-                else:
-                    model_default = config.default_model
-                if not model_default:
-                    raise ValueError("No model configured for harness run")
-                session.model = model_default
+                model_default = config.default_model
+            if not model_default:
+                raise ValueError("No model configured for harness run")
+            session.model = model_default
         model = session.model or "default"
         context_length = 0
         model_max_output_tokens = 0
@@ -1071,7 +1083,8 @@ class HarnessService:
         tools = self._tools_for_session(key, session.agent_name or "build")
         if self._runner_factory is not None:
             loop_runner = self._runner_factory(
-                provider=active_provider,
+                provider=provider,
+                model_resolver=model_resolver,
                 tools=tools,
                 accessor=accessor,
                 emit=lambda event: self._on_runner_event(session, assistant, event),
@@ -1079,7 +1092,7 @@ class HarnessService:
         else:
             effort = (session.reasoning_effort or "").strip() or None
             loop_runner = HarnessRunner(
-                provider=active_provider,
+                model_resolver=model_resolver,
                 tools=tools,
                 accessor=accessor,
                 emit=lambda event: self._on_runner_event(session, assistant, event),
@@ -1810,6 +1823,7 @@ class HarnessService:
     ) -> None:
         """Run the hidden title agent asynchronously (never raises)."""
         try:
+            from .providers.resolver import StaticModelResolver
             from .services import ProviderConfigService
 
             config_service = ProviderConfigService()
@@ -1818,10 +1832,18 @@ class HarnessService:
             if not small_model:
                 return
             if self._provider_factory is not None:
-                provider = self._provider_factory(organization_id)
+                model_resolver = StaticModelResolver(
+                    self._provider_factory(organization_id)
+                ).resolve
             else:
-                provider = config_service.adapter_from_config(config)
-            runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+                resolver = await sync_to_async(config_service.build_resolver)(
+                    organization_id
+                )
+                model_resolver = resolver.resolve
+            runner = HarnessRunner(
+                model_resolver=model_resolver,
+                tools=default_tool_registry(),
+            )
             result = await runner.run(
                 prompt,
                 "title",

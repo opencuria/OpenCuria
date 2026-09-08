@@ -176,3 +176,30 @@ export function patch<T>(path: string, body?: unknown): Promise<T> {
 export function put<T>(path: string, body?: unknown): Promise<T> {
   return request<T>('PUT', path, body)
 }
+
+/** Fetch JSON and return HTTP status without throwing on non-2xx responses. */
+export async function requestWithStatus<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: T }> {
+  const url = `${getApiBaseUrl()}${path}`
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...getAuthHeaders(),
+  }
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+
+  if (res.status === 204) {
+    return { ok: res.ok, status: res.status, data: undefined as T }
+  }
+
+  const data = (await res.json()) as T
+  return { ok: res.ok, status: res.status, data }
+}

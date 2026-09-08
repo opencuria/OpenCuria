@@ -38,6 +38,7 @@ def test_normalize_openrouter_catalog_extracts_effort_and_tools() -> None:
     )
     assert len(models) == 2
     assert models[0].id == "openai/gpt-5"
+    assert models[0].provider == "openrouter"
     assert models[0].reasoning_efforts == ("low", "medium", "high")
     assert models[0].default_effort == "medium"
     assert models[0].supports_tools is True
@@ -137,6 +138,7 @@ def test_fetch_openrouter_models_happy_path() -> None:
     client = httpx.Client(transport=httpx.MockTransport(handler))
     models = fetch_openrouter_models(api_key="test-key", client=client)
     assert [m.id for m in models] == ["acme/fast"]
+    assert models[0].provider == "openrouter"
 
 
 def test_fetch_openrouter_models_auth_error() -> None:
@@ -182,5 +184,6 @@ def test_list_cached_provider_models_hits_cache() -> None:
     )
     assert first == second
     assert calls["n"] == 1
+    assert first[0].id == "openrouter/cached/one"
     clear_models_cache("org-1")
     json.dumps(first[0].to_dict())

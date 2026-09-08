@@ -477,6 +477,8 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     calls = {"n": 0}
 
     class _SlowProvider:
+        name = "fake"
+
         async def chat_stream(self, model, messages, schemas, opts=None):  # type: ignore[no-untyped-def]
             calls["n"] += 1
             from apps.harness.providers.base import ProviderTimeoutError

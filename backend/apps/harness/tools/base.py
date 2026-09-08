@@ -63,6 +63,7 @@ class ToolContext:
     model: str = ""
     parent_emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     provider: Any | None = None
+    model_resolver: Any | None = None
     registry: ToolRegistry | None = None
     evaluator: Any | None = None
     run_subagent: Any | None = None

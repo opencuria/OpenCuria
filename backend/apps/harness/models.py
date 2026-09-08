@@ -20,6 +20,7 @@ import uuid
 
 from django.db import models
 
+from .enums import ProviderType
 from .permissions.models import PermissionAllowlist, PermissionRequest
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "PermissionAllowlist",
     "PermissionRequest",
     "ProviderConfig",
+    "ProviderConnection",
+    "ProviderType",
     "QuestionRequest",
     "Todo",
 ]
@@ -50,10 +53,11 @@ class HarnessSessionMode(models.TextChoices):
 
 class ProviderConfig(models.Model):
     """
-    Org-wide LLM provider configuration.
+    Org-wide LLM model defaults.
 
-    Exactly one record per organization (OneToOne). Stores the
-    encrypted provider API key plus endpoint and model defaults.
+    Exactly one record per organization (OneToOne). Provider credentials
+    and per-provider settings live in ``ProviderConnection``; this record
+    holds only the default model selections shared across providers.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -62,14 +66,6 @@ class ProviderConfig(models.Model):
         on_delete=models.CASCADE,
         related_name="harness_provider_config",
         help_text="Owning organization (exactly one config per org).",
-    )
-    api_key_encrypted = models.TextField(
-        help_text="Fernet-encrypted provider API key.",
-    )
-    base_url = models.URLField(
-        max_length=1024,
-        default="https://openrouter.ai/api/v1",
-        help_text="OpenAI-compatible API base URL.",
     )
     default_model = models.CharField(
         max_length=255,
@@ -99,6 +95,56 @@ class ProviderConfig(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the config."""
         return f"ProviderConfig(org={self.organization_id})"
+
+
+class ProviderConnection(models.Model):
+    """
+    Per-organization credentials and settings for one LLM provider.
+
+    Each organization may have at most one connection per provider type
+    (OpenRouter, ChatGPT, Amazon Bedrock). Secrets are stored as a
+    Fernet-encrypted JSON object in ``credentials_encrypted``; non-secret
+    provider options (base URL, region, etc.) live in ``config``.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="provider_connections",
+        help_text="Owning organization.",
+    )
+    provider = models.CharField(
+        max_length=32,
+        choices=ProviderType.choices,
+        help_text="Provider identifier (openrouter, chatgpt, amazon-bedrock).",
+    )
+    credentials_encrypted = models.TextField(
+        blank=True,
+        default="",
+        help_text="Fernet-encrypted JSON object with provider secrets.",
+    )
+    config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Non-secret provider settings (base_url, region, etc.).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_provider_connection"
+        ordering = ["provider"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "provider"],
+                name="harness_provider_connection_org_provider_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the connection."""
+        return f"ProviderConnection(org={self.organization_id}, {self.provider})"
 
 
 class HarnessSession(models.Model):

@@ -212,7 +212,7 @@ def test_computeruse_registry_excludes_bash_and_task() -> None:
 def test_filtered_schemas_hide_computer_use_from_build_agent(fake_accessor) -> None:
     """Build agent is not offered view_screen."""
     runner = HarnessRunner(
-        provider=None,
+        provider=ComputerUseTextProvider(),
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -230,7 +230,7 @@ def test_filtered_schemas_hide_computer_use_from_build_agent(fake_accessor) -> N
 def test_filtered_schemas_offer_computer_use_to_child(fake_accessor) -> None:
     """Computer-use child gets view_screen but not bash."""
     runner = HarnessRunner(
-        provider=None,
+        provider=ComputerUseTextProvider(),
         tools=computeruse_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,

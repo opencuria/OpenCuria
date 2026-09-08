@@ -24,8 +24,9 @@ const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
 
 const catalog: ProviderModel[] = [
   {
-    id: 'model-big',
+    id: 'openrouter/model-big',
     name: 'Big',
+    provider: 'openrouter',
     reasoning_efforts: ['low', 'high'],
     default_effort: 'high',
     supports_tools: true,
@@ -33,8 +34,9 @@ const catalog: ProviderModel[] = [
     max_output_tokens: 32_768,
   },
   {
-    id: 'model-small',
+    id: 'openrouter/model-small',
     name: 'Small',
+    provider: 'openrouter',
     reasoning_efforts: [],
     default_effort: '',
     supports_tools: true,
@@ -68,16 +70,16 @@ describe('HarnessChatInput', () => {
     resetProviderCatalogCache()
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'model-big',
-      small_model: 'model-small',
-      computer_use_model: 'model-cu',
+      default_model: 'openrouter/model-big',
+      small_model: 'openrouter/model-small',
+      computer_use_model: 'openrouter/model-cu',
       has_api_key: true,
       api_key_hint: '',
     })
     listProviderModelsMock.mockResolvedValue(catalog)
   })
 
-  it('loads the OpenRouter catalog into the model picker', async () => {
+  it('loads the provider catalog into the model picker', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => {
       expect(listProviderModelsMock).toHaveBeenCalled()
@@ -153,7 +155,7 @@ describe('HarnessChatInput', () => {
       const cta = wrapper.find('[data-testid="composer-provider-cta"]')
       expect(cta.exists()).toBe(true)
       expect(cta.element.tagName).toBe('BUTTON')
-      expect(cta.text()).toContain('Configure OpenRouter in Org Settings')
+      expect(cta.text()).toContain('Connect a provider in Settings')
       await cta.trigger('click')
       expect(events).toEqual([{ tab: 'provider' }])
     } finally {
@@ -161,22 +163,22 @@ describe('HarnessChatInput', () => {
     }
   })
 
-  it('shows org settings CTA when provider config has no API key', async () => {
+  it('shows settings CTA when no provider models are available', async () => {
+    listProviderModelsMock.mockResolvedValue([])
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'model-big',
-      small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      has_api_key: false,
+      default_model: 'openrouter/model-big',
+      small_model: 'openrouter/model-small',
+      computer_use_model: 'openrouter/model-cu',
+      has_api_key: true,
       api_key_hint: '',
     })
     const wrapper = mountInput()
     await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
+      expect(listProviderModelsMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
-    expect(listProviderModelsMock).not.toHaveBeenCalled()
   })
 
   it('toggles plan/build with Shift+Tab', async () => {
@@ -311,7 +313,7 @@ describe('HarnessChatInput', () => {
   })
 
   it('fills the context ring from catalog limit and used tokens', async () => {
-    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
     await vi.waitFor(() => {
       expect(listProviderModelsMock).toHaveBeenCalled()
     })
@@ -326,7 +328,7 @@ describe('HarnessChatInput', () => {
   })
 
   it('emits context metrics when used tokens or catalog limit change', async () => {
-    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
     await vi.waitFor(() => {
       expect(listProviderModelsMock).toHaveBeenCalled()
     })

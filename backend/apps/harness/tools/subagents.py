@@ -95,10 +95,14 @@ class TaskTool(Tool):
                 "not allowed.",
                 tool=self.name,
             )
-        if ctx.provider is None or ctx.registry is None:
+        if ctx.registry is None:
             raise ToolError(
-                "Subagent execution is not wired (no provider/registry "
-                "in ToolContext).",
+                "Subagent execution is not wired (no registry in ToolContext).",
+                tool=self.name,
+            )
+        if ctx.model_resolver is None and ctx.provider is None:
+            raise ToolError(
+                "Subagent execution is not wired (no provider in ToolContext).",
                 tool=self.name,
             )
         from ..runner import HarnessRunner, RunOptions
@@ -131,13 +135,22 @@ class TaskTool(Tool):
             },
         )
         child_registry = _child_registry(ctx.registry, agent)
-        child = HarnessRunner(
-            provider=ctx.provider,
-            tools=child_registry,
-            evaluator=_child_evaluator(ctx.evaluator),
-            accessor=ctx.accessor,
-            emit=self._child_emit(ctx),
-        )
+        if ctx.model_resolver is not None:
+            child = HarnessRunner(
+                model_resolver=ctx.model_resolver,
+                tools=child_registry,
+                evaluator=_child_evaluator(ctx.evaluator),
+                accessor=ctx.accessor,
+                emit=self._child_emit(ctx),
+            )
+        else:
+            child = HarnessRunner(
+                provider=ctx.provider,
+                tools=child_registry,
+                evaluator=_child_evaluator(ctx.evaluator),
+                accessor=ctx.accessor,
+                emit=self._child_emit(ctx),
+            )
         child_opts = RunOptions(
             history=[],
             session_id=f"{ctx.session_id}/sub-{subtask_id}",

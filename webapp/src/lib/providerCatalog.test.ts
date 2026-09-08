@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from './harnessModels'
-import { loadProviderModelsCached, resetProviderCatalogCache } from './providerCatalog'
+import {
+  invalidateProviderCatalog,
+  loadProviderModelsCached,
+  resetProviderCatalogCache,
+} from './providerCatalog'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -17,8 +21,9 @@ const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
 
 const catalog: ProviderModel[] = [
   {
-    id: 'acme/think',
+    id: 'openrouter/think',
     name: 'Think',
+    provider: 'openrouter',
     reasoning_efforts: ['high'],
     default_effort: 'high',
     supports_tools: true,
@@ -49,6 +54,14 @@ describe('loadProviderModelsCached', () => {
     listProviderModelsMock.mockResolvedValueOnce(catalog)
     await expect(loadProviderModelsCached()).rejects.toThrow('down')
     await expect(loadProviderModelsCached()).resolves.toEqual(catalog)
+    expect(listProviderModelsMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('invalidates the cached promise so the next load refetches', async () => {
+    listProviderModelsMock.mockResolvedValue(catalog)
+    await loadProviderModelsCached()
+    invalidateProviderCatalog()
+    await loadProviderModelsCached()
     expect(listProviderModelsMock).toHaveBeenCalledTimes(2)
   })
 })

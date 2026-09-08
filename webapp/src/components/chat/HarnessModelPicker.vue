@@ -15,10 +15,17 @@ import {
 } from '@/components/ui/dropdown-menu'
 import {
   formatEffort,
+  providerDisplayName,
   resolveCatalogModel,
   snapEffort,
   type ProviderModel,
 } from '@/lib/harnessModels'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 
 const props = defineProps<{
   model: string
@@ -55,9 +62,16 @@ const triggerEffortLabel = computed(() => {
 const filteredModels = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return props.models
-  return props.models.filter(
-    (item) => item.name.toLowerCase().includes(q) || item.id.toLowerCase().includes(q),
-  )
+  return props.models.filter((item) => {
+    const providerLabel = providerDisplayName(item.provider).toLowerCase()
+    const providerId = (item.provider ?? '').toLowerCase()
+    return (
+      item.name.toLowerCase().includes(q) ||
+      item.id.toLowerCase().includes(q) ||
+      providerId.includes(q) ||
+      providerLabel.includes(q)
+    )
+  })
 })
 
 watch(
@@ -86,7 +100,8 @@ function modelEffortHint(item: ProviderModel): string {
 </script>
 
 <template>
-  <DropdownMenu>
+  <TooltipProvider>
+    <DropdownMenu>
     <DropdownMenuTrigger as-child :disabled="disabled">
       <Button
         type="button"
@@ -152,9 +167,23 @@ function modelEffortHint(item: ProviderModel): string {
               :key="item.id"
               class="text-xs"
               :title="item.id"
+              :data-testid="`composer-model-${item.id}`"
               @click="selectModel(item.id)"
             >
               <span class="min-w-0 flex-1 truncate">{{ item.name }}</span>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <span
+                    class="ml-2 shrink-0 text-muted-foreground"
+                    :data-testid="`composer-model-provider-${item.id}`"
+                  >
+                    {{ providerDisplayName(item.provider) }}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {{ providerDisplayName(item.provider) }}
+                </TooltipContent>
+              </Tooltip>
               <span v-if="modelEffortHint(item)" class="ml-2 shrink-0 text-muted-foreground">
                 {{ modelEffortHint(item) }}
               </span>
@@ -171,4 +200,5 @@ function modelEffortHint(item: ProviderModel): string {
       </DropdownMenuSub>
     </DropdownMenuContent>
   </DropdownMenu>
+  </TooltipProvider>
 </template>

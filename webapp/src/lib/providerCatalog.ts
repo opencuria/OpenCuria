@@ -1,5 +1,5 @@
 /**
- * Shared OpenRouter catalog fetch so chat surfaces reuse one in-flight request.
+ * Shared provider catalog fetch so chat surfaces reuse one in-flight request.
  */
 
 import { listProviderModels } from '@/services/harness.api'
@@ -16,6 +16,11 @@ export function loadProviderModelsCached(): Promise<ProviderModel[]> {
     })
   }
   return inflight
+}
+
+/** Drop the cached promise so the next load refetches. */
+export function invalidateProviderCatalog(): void {
+  inflight = null
 }
 
 /** Drop the cached promise (tests only). */

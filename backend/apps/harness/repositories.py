@@ -17,6 +17,7 @@ from .models import (
     HarnessSession,
     HarnessSessionStatus,
     ProviderConfig,
+    ProviderConnection,
     QuestionRequest,
     QuestionRequestStatus,
     Todo,
@@ -40,8 +41,6 @@ class ProviderConfigRepository:
     def create(
         *,
         organization_id: uuid.UUID,
-        api_key_encrypted: str,
-        base_url: str,
         default_model: str = "",
         small_model: str = "",
         computer_use_model: str = "",
@@ -49,8 +48,6 @@ class ProviderConfigRepository:
         """Create a provider config for an organization."""
         return ProviderConfig.objects.create(
             organization_id=organization_id,
-            api_key_encrypted=api_key_encrypted,
-            base_url=base_url,
             default_model=default_model,
             small_model=small_model,
             computer_use_model=computer_use_model,
@@ -60,20 +57,12 @@ class ProviderConfigRepository:
     def update(
         config: ProviderConfig,
         *,
-        api_key_encrypted: str | None = None,
-        base_url: str | None = None,
         default_model: str | None = None,
         small_model: str | None = None,
         computer_use_model: str | None = None,
     ) -> ProviderConfig:
         """Update provider config fields."""
         update_fields = ["updated_at"]
-        if api_key_encrypted is not None:
-            config.api_key_encrypted = api_key_encrypted
-            update_fields.append("api_key_encrypted")
-        if base_url is not None:
-            config.base_url = base_url
-            update_fields.append("base_url")
         if default_model is not None:
             config.default_model = default_model
             update_fields.append("default_model")
@@ -91,6 +80,77 @@ class ProviderConfigRepository:
         """Delete the provider config for an organization."""
         count, _ = ProviderConfig.objects.filter(organization_id=org_id).delete()
         return count
+
+
+class ProviderConnectionRepository:
+    """Data access for ProviderConnection records."""
+
+    @staticmethod
+    def get_by_org_and_provider(
+        organization_id: uuid.UUID,
+        provider: str,
+    ) -> ProviderConnection | None:
+        """Fetch a provider connection for an organization and provider."""
+        return ProviderConnection.objects.filter(
+            organization_id=organization_id,
+            provider=provider,
+        ).first()
+
+    @staticmethod
+    def list_by_org(organization_id: uuid.UUID) -> list[ProviderConnection]:
+        """List all provider connections for an organization."""
+        return list(
+            ProviderConnection.objects.filter(
+                organization_id=organization_id,
+            ).order_by("provider")
+        )
+
+    @staticmethod
+    def upsert(
+        organization_id: uuid.UUID,
+        provider: str,
+        credentials_encrypted: str,
+        config: dict | None = None,
+    ) -> ProviderConnection:
+        """Create or update a provider connection for an organization."""
+        connection, _ = ProviderConnection.objects.update_or_create(
+            organization_id=organization_id,
+            provider=provider,
+            defaults={
+                "credentials_encrypted": credentials_encrypted,
+                "config": dict(config or {}),
+            },
+        )
+        return connection
+
+    @staticmethod
+    def update_credentials(
+        organization_id: uuid.UUID,
+        provider: str,
+        credentials_encrypted: str,
+    ) -> ProviderConnection | None:
+        """Update stored credentials for a provider connection."""
+        connection = ProviderConnection.objects.filter(
+            organization_id=organization_id,
+            provider=provider,
+        ).first()
+        if connection is None:
+            return None
+        connection.credentials_encrypted = credentials_encrypted
+        connection.save(update_fields=["credentials_encrypted", "updated_at"])
+        return connection
+
+    @staticmethod
+    def delete_by_org_and_provider(
+        organization_id: uuid.UUID,
+        provider: str,
+    ) -> bool:
+        """Delete a provider connection; return whether a row was removed."""
+        deleted, _ = ProviderConnection.objects.filter(
+            organization_id=organization_id,
+            provider=provider,
+        ).delete()
+        return deleted > 0
 
 
 class HarnessSessionRepository:

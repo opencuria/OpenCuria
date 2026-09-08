@@ -1,15 +1,30 @@
 /**
- * OpenRouter catalog helpers for the composer model/effort picker.
+ * Multi-provider catalog helpers for the composer model/effort picker.
  */
+
+export type ProviderId = 'openrouter' | 'chatgpt' | 'amazon-bedrock'
 
 export interface ProviderModel {
   id: string
   name: string
+  provider?: string
   reasoning_efforts: string[]
   default_effort: string
   supports_tools: boolean
   context_length: number
   max_output_tokens: number
+}
+
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  openrouter: 'OpenRouter',
+  chatgpt: 'ChatGPT',
+  'amazon-bedrock': 'Amazon Bedrock',
+}
+
+/** Human-readable provider label for catalog rows and tooltips. */
+export function providerDisplayName(provider?: string): string {
+  if (!provider) return ''
+  return PROVIDER_DISPLAY_NAMES[provider] ?? provider
 }
 
 export const EFFORT_LABELS: Record<string, string> = {
@@ -22,7 +37,7 @@ export const EFFORT_LABELS: Record<string, string> = {
   max: 'Max',
 }
 
-/** Human-readable label for an OpenRouter effort token. */
+/** Human-readable label for a reasoning effort token. */
 export function formatEffort(effort: string): string {
   const key = effort.trim().toLowerCase()
   return EFFORT_LABELS[key] ?? effort
