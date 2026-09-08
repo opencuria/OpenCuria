@@ -9,8 +9,14 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { GitBranch, GitCommit, GitRepo } from '@/types/git'
-import { createMockRepos } from '@/mock/git'
+import type {
+  GitBranch,
+  GitCommit,
+  GitCommitDetails,
+  GitCommitFile,
+  GitRepo,
+} from '@/types/git'
+import { createMockCommitDetails, createMockRepos, getMockCommitDetails } from '@/mock/git'
 import { computeGraphLayout } from '@/lib/gitGraph'
 import { useNotificationStore } from '@/stores/notifications'
 
@@ -28,6 +34,49 @@ export interface GitRefTag {
   current: boolean
 }
 
+const CDV_HEIGHT_KEY = 'opencuria:git:cdvHeight'
+const COLUMN_WIDTHS_KEY = 'opencuria:git:columnWidths'
+const CDV_HEIGHT_DEFAULT = 250
+const CDV_HEIGHT_MIN = 120
+const CDV_HEIGHT_MAX = 600
+
+function loadCdvHeight(): number {
+  try {
+    const raw = localStorage.getItem(CDV_HEIGHT_KEY)
+    const parsed = raw === null ? NaN : Number.parseInt(raw, 10)
+    if (!Number.isFinite(parsed)) return CDV_HEIGHT_DEFAULT
+    return Math.min(CDV_HEIGHT_MAX, Math.max(CDV_HEIGHT_MIN, parsed))
+  } catch {
+    return CDV_HEIGHT_DEFAULT
+  }
+}
+
+function loadColumnWidths(): number[] | null {
+  try {
+    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      parsed.every((v) => typeof v === 'number' && Number.isFinite(v))
+    ) {
+      return parsed as number[]
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function persist(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Storage may be unavailable (private mode, SSR) — UI state still works.
+  }
+}
+
 export const useGitStore = defineStore('git', () => {
   const notifications = useNotificationStore()
 
@@ -37,6 +86,24 @@ export const useGitStore = defineStore('git', () => {
   const selectedRepoId = ref<string>(repos.value[0]?.id ?? '')
   /** Path of the change whose diff is open in the main area, if any. */
   const viewingDiffPath = ref<string | null>(null)
+  // -- commit details (expandable commit rows) --------------------------------
+  /** Hash of the commit whose details row is expanded, if any. */
+  const expandedCommitHash = ref<string | null>(null)
+  /** newPath (or oldPath) of the commit file selected for diff, if any. */
+  const expandedFilePath = ref<string | null>(null)
+  /** Details cache keyed by commit hash. */
+  const commitDetailsByHash = ref<Record<string, GitCommitDetails>>({})
+  /** Commit details view height in px (persisted). */
+  const cdvHeight = ref<number>(loadCdvHeight())
+  /** Resizable column widths in px, or null for auto layout (persisted). */
+  const columnWidths = ref<number[] | null>(loadColumnWidths())
+
+  // Seed the details cache with deterministic mock details.
+  for (const repo of repos.value) {
+    for (const [hash, details] of createMockCommitDetails(repo.commits)) {
+      commitDetailsByHash.value[hash] = details
+    }
+  }
 
   // -- getters --------------------------------------------------------------
 
@@ -92,12 +159,86 @@ export const useGitStore = defineStore('git', () => {
     )
   })
 
+  /** Details of the expanded commit, from cache with a commit-list fallback. */
+  const expandedCommitDetails = computed<GitCommitDetails | null>(() => {
+    const hash = expandedCommitHash.value
+    if (!hash) return null
+    const cached = commitDetailsByHash.value[hash]
+    if (cached) return cached
+    const commit = currentRepo.value?.commits.find((c) => c.hash === hash)
+    if (!commit) return null
+    const fallback = getMockCommitDetails(hash)
+    if (fallback) {
+      commitDetailsByHash.value[hash] = fallback
+      return fallback
+    }
+    // Last resort: synthesize empty details so expand never crashes.
+    const empty: GitCommitDetails = {
+      hash: commit.hash,
+      parents: [...commit.parents],
+      author: commit.author,
+      authorEmail: '',
+      authorDate: commit.timestamp,
+      committer: commit.author,
+      committerEmail: '',
+      committerDate: commit.timestamp,
+      body: commit.body ?? '',
+      fileChanges: [],
+    }
+    commitDetailsByHash.value[hash] = empty
+    return empty
+  })
+
+  /** File of the expanded commit selected for diff, if any. */
+  const viewingCommitFile = computed<GitCommitFile | null>(() => {
+    if (!expandedFilePath.value) return null
+    const details = expandedCommitDetails.value
+    if (!details) return null
+    return (
+      details.fileChanges.find(
+        (f) =>
+          f.newPath === expandedFilePath.value ||
+          f.oldPath === expandedFilePath.value,
+      ) ?? null
+    )
+  })
+
+  /** Commit diff selection for the main area (hash + file), if any. */
+  const viewingCommitDiff = computed<{ hash: string; file: GitCommitFile } | null>(
+    () => {
+      const details = expandedCommitDetails.value
+      const file = viewingCommitFile.value
+      if (!details || !file) return null
+      return { hash: details.hash, file }
+    },
+  )
+
+  /** Whether the given commit row is currently expanded. */
+  function isCommitExpanded(hash: string): boolean {
+    return expandedCommitHash.value === hash
+  }
+
   // -- helpers ---------------------------------------------------------------
 
   function requireRepo(): GitRepo | null {
     const repo = currentRepo.value
     if (!repo) notifications.error('No repository selected')
     return repo
+  }
+
+  function registerEmptyDetails(commit: GitCommit): void {
+    commitDetailsByHash.value[commit.hash] = {
+      hash: commit.hash,
+      parents: [...commit.parents],
+      author: commit.author,
+      authorEmail: '',
+      authorDate: commit.timestamp,
+      committer: commit.author,
+      committerEmail: '',
+      committerDate: commit.timestamp,
+      body: commit.body ?? '',
+      fileChanges: [],
+    }
   }
 
   function appendCommit(
@@ -113,6 +254,9 @@ export const useGitStore = defineStore('git', () => {
       parents,
     }
     repo.commits.unshift(commit)
+    // New commits carry no per-file details yet — register an empty entry
+    // so expanding them never crashes.
+    registerEmptyDetails(commit)
     return commit
   }
 
@@ -132,14 +276,63 @@ export const useGitStore = defineStore('git', () => {
     if (!repos.value.some((r) => r.id === id)) return
     selectedRepoId.value = id
     closeDiff()
+    closeCommitDetails()
   }
 
   function openDiff(path: string): void {
+    // Working-tree and commit diffs are mutually exclusive.
+    expandedFilePath.value = null
     viewingDiffPath.value = path
   }
 
   function closeDiff(): void {
     viewingDiffPath.value = null
+  }
+
+  // -- actions: commit details (expandable rows) --------------------------------
+
+  function ensureDetails(hash: string): void {
+    if (commitDetailsByHash.value[hash]) return
+    const details = getMockCommitDetails(hash)
+    if (details) {
+      commitDetailsByHash.value[hash] = details
+      return
+    }
+    const commit = currentRepo.value?.commits.find((c) => c.hash === hash)
+    if (commit) registerEmptyDetails(commit)
+  }
+
+  function toggleCommitDetails(hash: string): void {
+    if (expandedCommitHash.value === hash) {
+      closeCommitDetails()
+      return
+    }
+    expandedCommitHash.value = hash
+    // Switching commits clears the previously selected file.
+    expandedFilePath.value = null
+    ensureDetails(hash)
+  }
+
+  function closeCommitDetails(): void {
+    expandedCommitHash.value = null
+    expandedFilePath.value = null
+  }
+
+  function selectCommitFile(path: string | null): void {
+    // Commit and working-tree diffs are mutually exclusive.
+    viewingDiffPath.value = null
+    expandedFilePath.value = path
+  }
+
+  function setCdvHeight(h: number): void {
+    const clamped = Math.min(CDV_HEIGHT_MAX, Math.max(CDV_HEIGHT_MIN, h))
+    cdvHeight.value = clamped
+    persist(CDV_HEIGHT_KEY, String(clamped))
+  }
+
+  function setColumnWidths(w: number[] | null): void {
+    columnWidths.value = w ? [...w] : null
+    persist(COLUMN_WIDTHS_KEY, JSON.stringify(w))
   }
 
   // -- actions: staging --------------------------------------------------------
@@ -328,6 +521,11 @@ export const useGitStore = defineStore('git', () => {
     repos,
     selectedRepoId,
     viewingDiffPath,
+    expandedCommitHash,
+    expandedFilePath,
+    commitDetailsByHash,
+    cdvHeight,
+    columnWidths,
     // getters
     currentRepo,
     currentBranch,
@@ -336,10 +534,19 @@ export const useGitStore = defineStore('git', () => {
     graphLayout,
     tagsByHash,
     viewingDiffChange,
+    expandedCommitDetails,
+    viewingCommitFile,
+    viewingCommitDiff,
     // actions
     selectRepo,
     openDiff,
     closeDiff,
+    toggleCommitDetails,
+    closeCommitDetails,
+    selectCommitFile,
+    setCdvHeight,
+    setColumnWidths,
+    isCommitExpanded,
     stage,
     unstage,
     stageAll,

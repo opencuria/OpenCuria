@@ -4,9 +4,19 @@
  * Frontend-only stand-in until a backend git API exists. `createMockRepos`
  * returns fresh object graphs on every call so Pinia store instances (and
  * tests) never share mutable state.
+ *
+ * IMPORTANT: `commits` must stay in newest-first (topological child-before-
+ * parent) order — the graph engine (`computeGitGraphLayout`) treats input
+ * order as authoritative, exactly like the Git Graph reference.
  */
 
-import type { GitRepo } from '@/types/git'
+import type {
+  GitCommit,
+  GitCommitDetails,
+  GitCommitFile,
+  GitDiffHunk,
+  GitRepo,
+} from '@/types/git'
 
 function hoursAgo(hours: number): string {
   return new Date(Date.now() - hours * 3_600_000).toISOString()
@@ -51,18 +61,18 @@ function createAppRepo(): GitRepo {
         parents: ['p2q8r41'],
       },
       {
+        hash: 'a7u2v9w',
+        message: 'Redirect to login on 401',
+        author: 'Ada Lovelace',
+        timestamp: hoursAgo(4),
+        parents: ['e8b7d3a'],
+      },
+      {
         hash: 'e8b7d3a',
         message: 'Polish settings sheet spacing',
         author: 'Ada Lovelace',
         timestamp: hoursAgo(5),
         parents: ['9c2f1e7'],
-      },
-      {
-        hash: 'a7u2v9w',
-        message: 'Redirect to login on 401',
-        author: 'Ada Lovelace',
-        timestamp: hoursAgo(6),
-        parents: ['e8b7d3a'],
       },
       {
         hash: 'p2q8r41',
@@ -366,4 +376,172 @@ function createApiClientRepo(): GitRepo {
 
 export function createMockRepos(): GitRepo[] {
   return [createAppRepo(), createDocsRepo(), createApiClientRepo()]
+}
+
+// ---------------------------------------------------------------------------
+// Commit details (Phase 1: Git Graph Redesign)
+// ---------------------------------------------------------------------------
+
+const DETAIL_PATH_POOL = [
+  'webapp/src/components/git/GitPanel.vue',
+  'webapp/src/stores/git.ts',
+  'webapp/src/lib/gitGraph.ts',
+  'webapp/src/views/WorkspaceDetailView.vue',
+  'webapp/src/components/git/GitDiffViewer.vue',
+  'backend/api/routes.py',
+  'backend/models/session.py',
+  'docs/getting-started.md',
+  'webapp/src/assets/main.css',
+  'runner/src/runner.py',
+] as const
+
+const DETAIL_STATUS_POOL = ['M', 'M', 'M', 'A', 'D', 'R'] as const
+
+/** Deterministic numeric seed derived from a short hash. */
+function seedFromHash(hash: string): number {
+  let seed = 0
+  for (let i = 0; i < hash.length; i += 1) {
+    seed = (seed * 31 + hash.charCodeAt(i)) >>> 0
+  }
+  return seed
+}
+
+function emailForAuthor(author: string): string {
+  if (author === 'Timo Kamphaus') return 'timo@opencuria.local'
+  if (author === 'Ada Lovelace') return 'ada@opencuria.local'
+  return 'you@opencuria.local'
+}
+
+/** Single-hunk diff matching the shape used in `changes`. */
+function makeDetailHunk(
+  status: GitCommitFile['status'],
+  filePath: string,
+): GitDiffHunk {
+  const base = filePath.split('/').pop() ?? filePath
+  if (status === 'A') {
+    return {
+      header: '@@ -0,0 +1,4 @@',
+      oldStart: 0,
+      newStart: 1,
+      lines: [
+        { type: 'add', content: `// ${base} (added)` },
+        { type: 'add', content: 'export const created = true' },
+        { type: 'add', content: '' },
+        { type: 'add', content: 'export default created' },
+      ],
+    }
+  }
+  if (status === 'D') {
+    return {
+      header: '@@ -1,4 +0,0 @@',
+      oldStart: 1,
+      newStart: 0,
+      lines: [
+        { type: 'del', content: `// ${base} (removed)` },
+        { type: 'del', content: 'export const legacy = true' },
+        { type: 'del', content: '' },
+        { type: 'del', content: 'export default legacy' },
+      ],
+    }
+  }
+  return {
+    header: '@@ -12,5 +12,6 @@',
+    oldStart: 12,
+    newStart: 12,
+    lines: [
+      { type: 'context', content: `// ${base}` },
+      { type: 'del', content: 'const before = 1' },
+      { type: 'add', content: 'const after = 2' },
+      { type: 'add', content: 'const extra = after + 1' },
+      { type: 'context', content: '' },
+    ],
+  }
+}
+
+function makeDetailFile(
+  seed: number,
+  index: number,
+  statusOverride?: GitCommitFile['status'],
+  pathOverride?: string,
+): GitCommitFile {
+  const path =
+    pathOverride ?? DETAIL_PATH_POOL[(seed + index) % DETAIL_PATH_POOL.length]!
+  const status =
+    statusOverride ??
+    DETAIL_STATUS_POOL[(seed + index * 3) % DETAIL_STATUS_POOL.length]!
+  const additions = status === 'D' ? 0 : ((seed >> index) % 18) + 2
+  const deletions =
+    status === 'A' ? 0 : ((seed >> (index + 2)) % 12) + 1
+  // Renames carry both paths; everything else keeps them identical.
+  const oldPath =
+    status === 'R' ? path.replace(/(\.\w+)?$/, '.bak$1').replace('.bak', '.old') : path
+  return {
+    oldPath,
+    newPath: path,
+    status,
+    additions,
+    deletions,
+    diff: [makeDetailHunk(status, path)],
+  }
+}
+
+function buildCommitDetails(commit: GitCommit): GitCommitDetails {
+  const email = commit.email ?? emailForAuthor(commit.author)
+  const body = commit.body ?? ''
+  const seed = seedFromHash(commit.hash)
+
+  let fileChanges: GitCommitFile[]
+  if (commit.hash === '9c2f1e7') {
+    // Merge commit: hint at files from both parents (login-form + main line).
+    fileChanges = [
+      makeDetailFile(seed, 0, 'M', 'webapp/src/views/LoginView.vue'),
+      makeDetailFile(seed, 1, 'M', 'webapp/src/components/chat/ChatComposer.vue'),
+    ]
+  } else if (commit.parents.length === 0) {
+    // Initial commits always add at least one file.
+    fileChanges = [
+      makeDetailFile(seed, 0, 'A', DETAIL_PATH_POOL[seed % DETAIL_PATH_POOL.length]),
+    ]
+  } else {
+    const count = (seed % 4) + 1 // 1-4 files, deterministic per hash
+    fileChanges = Array.from({ length: count }, (_, i) =>
+      makeDetailFile(seed, i),
+    )
+  }
+
+  return {
+    hash: commit.hash,
+    parents: [...commit.parents],
+    author: commit.author,
+    authorEmail: email,
+    authorDate: commit.timestamp,
+    committer: commit.author,
+    committerEmail: email,
+    committerDate: commit.timestamp,
+    body,
+    fileChanges,
+  }
+}
+
+/**
+ * Build commit details for the given commits. Returns a fresh Map on every
+ * call so stores/tests never share mutable state.
+ */
+export function createMockCommitDetails(
+  commits: GitCommit[],
+): Map<string, GitCommitDetails> {
+  const map = new Map<string, GitCommitDetails>()
+  for (const commit of commits) {
+    map.set(commit.hash, buildCommitDetails(commit))
+  }
+  return map
+}
+
+/** Convenience lookup across all mock repos (fresh objects each call). */
+export function getMockCommitDetails(hash: string): GitCommitDetails | null {
+  for (const repo of createMockRepos()) {
+    const commit = repo.commits.find((c) => c.hash === hash)
+    if (commit) return buildCommitDetails(commit)
+  }
+  return null
 }

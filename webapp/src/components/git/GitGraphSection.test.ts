@@ -54,6 +54,10 @@ const dialogStubs = {
     props: ['open', 'direction', 'branch'],
     template: '<div v-if="open" data-testid="stub-merge-dialog" />',
   },
+  GitCommitDetailsView: {
+    props: ['hash'],
+    template: '<div data-testid="stub-commit-details" :data-hash="hash" />',
+  },
 }
 
 function mountSection() {
@@ -150,5 +154,84 @@ describe('GitGraphSection', () => {
     const rows = wrapper.findAll('[data-testid="git-graph-row"]')
     expect(rows.length).toBeLessThan(total)
     expect(rows.length).toBeGreaterThan(0)
+  })
+
+  it('renders the Git Graph table columns with resize handles', () => {
+    const wrapper = mountSection()
+
+    expect(wrapper.find('[data-testid="git-graph-header-graph"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-header-description"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-header-date"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-header-commit"]').exists()).toBe(true)
+    // All columns except the last visible one are resizable.
+    expect(wrapper.find('[data-testid="git-column-resize-0"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-column-resize-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-column-toggle-date"]').exists()).toBe(true)
+  })
+
+  it('toggles optional columns off and on', async () => {
+    const wrapper = mountSection()
+
+    await wrapper.find('[data-testid="git-column-toggle-author"]').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="git-column-toggle-author"]').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(true)
+  })
+
+  it('expands a commit row on click and collapses on second click', async () => {
+    const store = useGitStore()
+    const wrapper = mountSection()
+    const hash = store.currentRepo!.commits[0]!.hash
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+
+    await rows[0]!.trigger('click')
+    await nextTick()
+    expect(store.expandedCommitHash).toBe(hash)
+    expect(wrapper.find('[data-testid="git-commit-details-row"]').exists()).toBe(true)
+
+    await rows[0]!.trigger('click')
+    await nextTick()
+    expect(store.expandedCommitHash).toBeNull()
+    expect(wrapper.find('[data-testid="git-commit-details-row"]').exists()).toBe(false)
+  })
+
+  it('persists column widths when a column is resized', async () => {
+    const store = useGitStore()
+    const wrapper = mountSection()
+    const handle = wrapper.find('[data-testid="git-column-resize-0"]')
+    const pointerDown = new PointerEvent('pointerdown', { bubbles: true })
+    Object.defineProperty(pointerDown, 'clientX', { value: 100 })
+    handle.element.dispatchEvent(pointerDown)
+    await nextTick()
+    const pointerMove = new PointerEvent('pointermove', { bubbles: true })
+    Object.defineProperty(pointerMove, 'clientX', { value: 130 })
+    window.dispatchEvent(pointerMove)
+    await nextTick()
+    window.dispatchEvent(new PointerEvent('pointerup'))
+    await nextTick()
+
+    expect(store.columnWidths).not.toBeNull()
+    expect(store.columnWidths![0]).toBeGreaterThan(0)
+  })
+
+  it('marks the HEAD node as current and mutes merge commits', () => {
+    const store = useGitStore()
+    const wrapper = mountSection()
+    const headHash = store.currentRepo!.headHash
+
+    const headNode = wrapper.find(`[data-testid="git-graph-node-${headHash}"]`)
+    expect(headNode.exists()).toBe(true)
+    // Current nodes render hollow (card fill, width 2).
+    expect(headNode.attributes('stroke-width')).toBe('2')
+
+    // The merge commit message renders muted.
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    const mergeIndex = store.currentRepo!.commits.findIndex((c) => c.parents.length > 1)
+    expect(mergeIndex).toBeGreaterThanOrEqual(0)
+    expect(rows[mergeIndex]!.html()).toContain('opacity-50')
   })
 })

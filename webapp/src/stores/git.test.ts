@@ -253,4 +253,109 @@ describe('git store', () => {
       current: false,
     })
   })
+
+  it('toggles commit details and selects a commit file exclusively', () => {
+    const store = useGitStore()
+    const hash = store.currentRepo!.commits[0]!.hash
+
+    expect(store.expandedCommitDetails).toBeNull()
+    expect(store.isCommitExpanded(hash)).toBe(false)
+
+    store.toggleCommitDetails(hash)
+    expect(store.isCommitExpanded(hash)).toBe(true)
+    expect(store.expandedCommitDetails?.hash).toBe(hash)
+    expect(store.expandedCommitDetails!.fileChanges.length).toBeGreaterThan(0)
+
+    const filePath = store.expandedCommitDetails!.fileChanges[0]!.newPath
+    store.selectCommitFile(filePath)
+    expect(store.viewingCommitFile?.newPath).toBe(filePath)
+    expect(store.viewingCommitDiff?.hash).toBe(hash)
+    // Commit and working-tree diffs are mutually exclusive.
+    expect(store.viewingDiffPath).toBeNull()
+    expect(store.viewingDiffChange).toBeNull()
+
+    // Opening a working-tree diff clears the commit file selection.
+    store.openDiff(store.currentRepo!.changes[0]!.path)
+    expect(store.viewingCommitFile).toBeNull()
+    expect(store.viewingCommitDiff).toBeNull()
+    expect(store.viewingDiffChange).not.toBeNull()
+  })
+
+  it('closes commit details when toggled again and on repo switch', () => {
+    const store = useGitStore()
+    const hash = store.currentRepo!.commits[0]!.hash
+
+    store.toggleCommitDetails(hash)
+    const filePath = store.expandedCommitDetails!.fileChanges[0]!.newPath
+    store.selectCommitFile(filePath)
+    store.toggleCommitDetails(hash)
+    expect(store.expandedCommitDetails).toBeNull()
+    expect(store.viewingCommitFile).toBeNull()
+
+    store.toggleCommitDetails(hash)
+    store.selectRepo('repo-docs')
+    expect(store.expandedCommitHash).toBeNull()
+    expect(store.expandedFilePath).toBeNull()
+    expect(store.expandedCommitDetails).toBeNull()
+  })
+
+  it('provides details for the merge commit and initial commits', () => {
+    const store = useGitStore()
+
+    store.toggleCommitDetails('9c2f1e7')
+    const merge = store.expandedCommitDetails
+    expect(merge?.parents.length).toBe(2)
+    expect(merge!.fileChanges.length).toBeGreaterThanOrEqual(2)
+
+    store.toggleCommitDetails('c0a1b2c')
+    const initial = store.expandedCommitDetails
+    expect(initial?.parents.length).toBe(0)
+    expect(initial!.fileChanges.length).toBeGreaterThanOrEqual(1)
+    expect(
+      initial!.fileChanges.every(
+        (f) => f.additions >= 0 && f.deletions >= 0 && f.diff.length > 0,
+      ),
+    ).toBe(true)
+  })
+
+  it('clamps and persists the commit details height', () => {
+    localStorage.clear()
+    const store = useGitStore()
+    expect(store.cdvHeight).toBe(250)
+
+    store.setCdvHeight(400)
+    expect(store.cdvHeight).toBe(400)
+    expect(localStorage.getItem('opencuria:git:cdvHeight')).toBe('400')
+
+    store.setCdvHeight(50)
+    expect(store.cdvHeight).toBe(120)
+    store.setCdvHeight(900)
+    expect(store.cdvHeight).toBe(600)
+  })
+
+  it('persists column widths and restores them', () => {
+    localStorage.clear()
+    const store = useGitStore()
+    expect(store.columnWidths).toBeNull()
+
+    store.setColumnWidths([40, 200, 120])
+    expect(store.columnWidths).toEqual([40, 200, 120])
+    expect(localStorage.getItem('opencuria:git:columnWidths')).toBe(
+      '[40,200,120]',
+    )
+
+    store.setColumnWidths(null)
+    expect(store.columnWidths).toBeNull()
+  })
+
+  it('registers empty details for newly created commits', () => {
+    const store = useGitStore()
+    const ok = store.commit('Add git panel')
+    expect(ok).toBe(true)
+    const created = store.currentRepo!.commits[0]!
+
+    store.toggleCommitDetails(created.hash)
+    expect(store.expandedCommitDetails?.hash).toBe(created.hash)
+    expect(store.expandedCommitDetails?.fileChanges).toEqual([])
+  })
 })

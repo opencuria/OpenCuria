@@ -34,6 +34,36 @@ export interface GitCommit {
   timestamp: string
   /** Parent commit hashes — first entry is the first parent. */
   parents: string[]
+  /** Author email, if known. */
+  email?: string
+  /** Full commit message body beyond the subject line. */
+  body?: string
+}
+
+export type GitCommitFileStatus = 'A' | 'M' | 'D' | 'R' | 'U'
+
+export interface GitCommitFile {
+  oldPath: string
+  newPath: string
+  status: GitCommitFileStatus
+  additions: number
+  deletions: number
+  diff: GitDiffHunk[]
+}
+
+export interface GitCommitDetails {
+  hash: string
+  parents: string[]
+  author: string
+  authorEmail: string
+  /** ISO date string. */
+  authorDate: string
+  committer: string
+  committerEmail: string
+  /** ISO date string. */
+  committerDate: string
+  body: string
+  fileChanges: GitCommitFile[]
 }
 
 export interface GitBranch {

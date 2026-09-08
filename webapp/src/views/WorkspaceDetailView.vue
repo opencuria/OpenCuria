@@ -384,7 +384,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
             <!-- Harness chat area -->
             <div v-else class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
               <GitDiffViewer
-                v-if="gitStore.viewingDiffChange"
+                v-if="gitStore.viewingDiffChange || gitStore.viewingCommitDiff"
                 :workspace-id="workspaceId"
               />
               <FileViewer

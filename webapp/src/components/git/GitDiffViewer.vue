@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * GitDiffViewer — mock diff view for a changed file, shown in the main
- * content area (replacing the chat) when a change is clicked in the Git
- * tab. Mirrors the FileViewer chrome; diff content comes from the mock
- * git store until a backend git API exists.
+ * GitDiffViewer — diff view for a changed file, shown in the main content
+ * area (replacing the chat) when a change is clicked in the Git tab or a
+ * file is selected in an expanded commit. Mirrors the FileViewer chrome;
+ * diff content comes from the mock git store until a backend git API exists.
  */
 import { computed } from 'vue'
-import type { GitFileStatus } from '@/types/git'
+import type { GitCommitFile, GitDiffHunk, GitFileStatus } from '@/types/git'
 import { useGitStore } from '@/stores/git'
 import { Button } from '@/components/ui/button'
 import { FileCode2, FileText, X } from '@lucide/vue'
@@ -19,13 +19,26 @@ defineProps<{
 const store = useGitStore()
 
 const change = computed(() => store.viewingDiffChange)
+/** Commit file selected from an expanded commit, if any (mutually exclusive). */
+const commitFile = computed(() => store.viewingCommitFile)
+const commitHash = computed(() => store.viewingCommitDiff?.hash ?? null)
 
-const fileName = computed(
-  () => change.value?.path.split('/').pop() ?? '',
+/** Unified diff target: working-tree change or commit file. */
+const activePath = computed(
+  () => change.value?.path ?? commitFile.value?.newPath ?? '',
 )
+const activeStatus = computed<GitFileStatus | GitCommitFile['status'] | null>(
+  () => change.value?.status ?? commitFile.value?.status ?? null,
+)
+const activeHunks = computed<GitDiffHunk[]>(
+  () => change.value?.diff ?? commitFile.value?.diff ?? [],
+)
+const isStaged = computed(() => change.value?.staged ?? false)
+
+const fileName = computed(() => activePath.value.split('/').pop() ?? '')
 const directoryPath = computed(() => {
-  if (!change.value) return ''
-  const parts = change.value.path.split('/')
+  if (!activePath.value) return ''
+  const parts = activePath.value.split('/')
   return parts.length > 1 ? parts.slice(0, -1).join('/') : '/'
 })
 
@@ -40,16 +53,20 @@ const fileIcon = computed(() => {
   return CODE_EXTENSIONS.has(ext) ? FileCode2 : FileText
 })
 
-const STATUS_LABELS: Record<GitFileStatus, string> = {
+const STATUS_LABELS: Record<string, string> = {
   M: 'Modified',
   A: 'Added',
   D: 'Deleted',
+  R: 'Renamed',
+  U: 'Untracked',
 }
 
-const STATUS_COLORS: Record<GitFileStatus, string> = {
+const STATUS_COLORS: Record<string, string> = {
   M: 'border-warning/40 text-warning',
   A: 'border-success/40 text-success',
   D: 'border-error/40 text-error',
+  R: 'border-purple-500/40 text-purple-500',
+  U: 'border-border text-muted-foreground',
 }
 
 interface DiffRow {
@@ -63,7 +80,7 @@ interface DiffRow {
 /** Flatten hunks into renderable rows with old/new line numbers. */
 const rows = computed<DiffRow[]>(() => {
   const result: DiffRow[] = []
-  for (const [hunkIndex, hunk] of (change.value?.diff ?? []).entries()) {
+  for (const [hunkIndex, hunk] of activeHunks.value.entries()) {
     result.push({
       key: `h-${hunkIndex}`,
       type: 'hunk',
@@ -117,7 +134,11 @@ function rowSign(row: DiffRow): string {
 }
 
 function handleClose(): void {
-  store.closeDiff()
+  if (commitFile.value) {
+    store.selectCommitFile(null)
+  } else {
+    store.closeDiff()
+  }
 }
 </script>
 
@@ -139,13 +160,14 @@ function handleClose(): void {
         </div>
       </div>
       <span
-        v-if="change"
+        v-if="activeStatus"
         class="hidden shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium sm:inline-block"
-        :class="STATUS_COLORS[change.status]"
+        :class="STATUS_COLORS[activeStatus] ?? STATUS_COLORS.M"
         data-testid="git-diff-status"
       >
-        {{ STATUS_LABELS[change.status] }}
-        <template v-if="change.staged"> · Staged</template>
+        {{ STATUS_LABELS[activeStatus] ?? activeStatus }}
+        <template v-if="isStaged"> · Staged</template>
+        <template v-else-if="commitHash"> · {{ commitHash.slice(0, 7) }}</template>
       </span>
       <Button
         variant="ghost"
