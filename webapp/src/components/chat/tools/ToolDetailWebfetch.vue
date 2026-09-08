@@ -14,6 +14,12 @@ const url = computed(() => {
   return stringArg(parseToolArguments(props.part), 'url')
 })
 
+const format = computed(() => {
+  const fromMeta = props.part.meta?.['format']
+  if (typeof fromMeta === 'string' && fromMeta) return fromMeta
+  return stringArg(parseToolArguments(props.part), 'format')
+})
+
 const preview = computed(() => truncatePreview(props.part.output || ''))
 </script>
 
@@ -26,6 +32,7 @@ const preview = computed(() => truncatePreview(props.part.output || ''))
       rel="noopener noreferrer"
       class="block truncate font-mono text-[11px] text-primary hover:underline"
     >{{ url }}</a>
+    <p v-if="format" class="text-[11px] text-muted-foreground">{{ format }}</p>
     <pre
       v-if="preview"
       class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[11px] text-muted-foreground"

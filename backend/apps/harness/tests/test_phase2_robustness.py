@@ -33,7 +33,7 @@ from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.file_locks import get_lock
 from apps.harness.tools.files import ReadTool
 from apps.harness.tools.shell import GREP_MAX_LINE_LENGTH
-from apps.harness.tools.subagents import WebfetchTool, is_blocked_url
+from apps.harness.tools.webfetch import WebfetchTool, is_blocked_url
 
 
 class ScriptProvider(ProviderAdapter):

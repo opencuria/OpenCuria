@@ -15,8 +15,9 @@ from .process import (
 )
 from .question import QuestionTool
 from .shell import BashTool, GlobTool, GrepTool, ListTool
-from .subagents import TaskTool, WebfetchTool
+from .subagents import TaskTool
 from .todos import TodoWriteTool
+from .webfetch import WebfetchTool
 
 
 def default_tool_registry() -> ToolRegistry:

@@ -92,6 +92,20 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('<html>ok</html>')
   })
 
+  it('renders a webfetch format from arguments', () => {
+    const wrapper = mount(ToolDetailWebfetch, {
+      props: {
+        part: makePart({
+          tool: 'webfetch',
+          output: '# Hello',
+          input: { arguments: '{"url":"https://example.com","format":"markdown"}' },
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('markdown')
+    expect(wrapper.get('a').attributes('href')).toBe('https://example.com')
+  })
+
   it('pairs questions with answers and handles missing answers', () => {
     const wrapper = mount(ToolDetailQuestion, {
       props: {

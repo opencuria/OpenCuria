@@ -1,12 +1,9 @@
-"""Subagent (task) tool with real child-run execution (M5) and webfetch."""
+"""Subagent (task) tool with real child-run execution (M5)."""
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 import uuid
 from typing import Any
-from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -14,10 +11,6 @@ from pydantic import BaseModel, Field
 from .base import Tool, ToolContext, ToolError, ToolResult
 
 log = structlog.get_logger(__name__)
-
-# Fetch guard: never buffer more than this per URL.
-WEBFETCH_MAX_BYTES = 256 * 1024
-WEBFETCH_TIMEOUT = 15.0
 
 #: Max characters of a child result forwarded as the parent tool output.
 TASK_OUTPUT_MAX_CHARS = 8000
@@ -357,148 +350,3 @@ def _child_evaluator(parent_evaluator: Any) -> Any:
             )
 
     return _ChildEvaluator()
-
-
-class WebfetchArgs(BaseModel):
-    """Arguments for the webfetch tool."""
-
-    url: str = Field(description="https:// URL to fetch.")
-    max_size: int = Field(default=WEBFETCH_MAX_BYTES, gt=0)
-
-
-#: Hostnames that always resolve to local/cloud-metadata targets.
-WEBFETCH_BLOCKED_HOSTS = frozenset(
-    {
-        "localhost",
-        "metadata.google.internal",
-    }
-)
-
-#: IP literal blocked as a cloud-metadata endpoint.
-WEBFETCH_BLOCKED_IP = "169.254.169.254"
-
-
-def _host_is_blocked(host: str) -> bool:
-    """Return True when *host* is a localhost/metadata name."""
-    normalized = (host or "").strip().lower().rstrip(".")
-    if not normalized:
-        return True
-    if normalized in WEBFETCH_BLOCKED_HOSTS:
-        return True
-    if normalized == WEBFETCH_BLOCKED_IP:
-        return True
-    if normalized.endswith(".localhost"):
-        return True
-    return False
-
-
-def _ip_is_blocked(address: ipaddress._BaseAddress) -> bool:
-    """Return True for private/loopback/link-local/reserved IPs."""
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-    )
-
-
-def is_blocked_url(url: str) -> bool:
-    """Return True when *url* targets a blocked SSRF host.
-
-    Checks the hostname blocklist, IP-literal classification, and a
-    best-effort DNS lookup (``socket.gethostbyname``): a resolvable
-    private IP blocks, an unresolvable name does not fail closed.
-    """
-    try:
-        host = urlparse(url).hostname or ""
-    except ValueError:
-        return True
-    if _host_is_blocked(host):
-        return True
-    try:
-        literal = ipaddress.ip_address(host)
-    except ValueError:
-        literal = None
-    if literal is not None:
-        return _ip_is_blocked(literal)
-    try:
-        resolved = socket.gethostbyname(host)
-    except (OSError, ValueError):
-        return False
-    if resolved == WEBFETCH_BLOCKED_IP:
-        return True
-    try:
-        return _ip_is_blocked(ipaddress.ip_address(resolved))
-    except ValueError:
-        return False
-
-
-class WebfetchTool(Tool):
-    """Fetch a URL as text with size and timeout guards."""
-
-    name = "webfetch"
-    description = (
-        "Fetch a URL and return its text content. Enforces a timeout "
-        f"({WEBFETCH_TIMEOUT:.0f}s) and a size limit. HTTPS only."
-    )
-    args_schema: type[BaseModel] = WebfetchArgs
-    permission_key = "webfetch"
-
-    def title(self, args: BaseModel) -> str:
-        """Return a short title for a webfetch invocation."""
-        assert isinstance(args, WebfetchArgs)
-        return f"Fetch {args.url[:80]}"
-
-    async def execute(
-        self, args: BaseModel | dict[str, object], ctx: ToolContext
-    ) -> ToolResult:
-        """Fetch *url* via httpx without touching the workspace."""
-        validated = self.coerce_args(args)
-        assert isinstance(validated, WebfetchArgs)
-        args = validated
-        url = args.url.strip()
-        if not url.startswith("https://"):
-            raise ToolError(
-                f"Only https:// URLs are allowed: {args.url}",
-                tool=self.name,
-            )
-        if is_blocked_url(url):
-            raise ToolError(
-                f"Blocked private/internal URL: {url}",
-                tool=self.name,
-            )
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=WEBFETCH_TIMEOUT, follow_redirects=True
-            ) as client:
-                async with client.stream("GET", url) as response:
-                    if str(response.url.scheme or "").lower() != "https":
-                        raise ToolError(
-                            f"Redirect downgraded to insecure scheme: "
-                            f"{response.url}",
-                            tool=self.name,
-                        )
-                    response.raise_for_status()
-                    chunks: list[bytes] = []
-                    buffered = 0
-                    async for chunk in response.aiter_bytes(65536):
-                        buffered += len(chunk)
-                        if buffered > args.max_size:
-                            raise ToolError(
-                                f"Response exceeds {args.max_size} bytes: {url}",
-                                tool=self.name,
-                            )
-                        chunks.append(chunk)
-                    raw = b"".join(chunks)
-        except ToolError:
-            raise
-        except Exception as exc:
-            raise ToolError(f"Failed to fetch {url}: {exc}", tool=self.name) from exc
-        text = raw.decode("utf-8", errors="replace")
-        return ToolResult(
-            output=text,
-            metadata={"url": url, "size": len(raw)},
-        )

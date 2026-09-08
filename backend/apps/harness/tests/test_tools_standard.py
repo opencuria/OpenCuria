@@ -18,7 +18,6 @@ from apps.harness.tools import (
     ReadTool,
     TaskTool,
     TodoWriteTool,
-    WebfetchTool,
     WriteTool,
     default_tool_registry,
 )
@@ -442,12 +441,6 @@ async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:
         await TaskTool().execute(
             {"description": "d", "prompt": "p"}, ctx
         )
-
-
-async def test_webfetch_rejects_non_https(fake_accessor) -> None:
-    """Only https:// URLs are fetched."""
-    with pytest.raises(ToolError, match="https"):
-        await WebfetchTool().execute({"url": "http://example.com"}, _ctx(fake_accessor))
 
 
 async def test_read_missing_file_is_tool_error(fake_accessor) -> None:
