@@ -498,7 +498,10 @@ Agents are static code definitions in `backend/apps/harness/agents/definitions.p
 subagents, plus `computeruse` for desktop automation) — no DB records. Modes
 (`plan`/`build`) and per-agent permission rules come from the same definitions.
 `plan` asks for file edits but allows `bash` and background processes
-(`process_*`) exactly like `build`. `explore` allows research bash
+(`process_*`) exactly like `build`. Global ask gates that survive
+agent `* allow` are `.env` / `.env.*` reads and the doom-loop guard
+(three identical tool+input calls); paths outside `/workspace` are
+allowed. `explore` allows research bash
 (`find`/`rg`/…) and denies edits plus
 destructive shell (`rm`/`sudo`/…); pending permission/question gates of
 child sessions surface on the parent composer (and on `GET …/parts`).

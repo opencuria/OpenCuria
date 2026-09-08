@@ -156,30 +156,16 @@ describe('GitGraphSection', () => {
     expect(rows.length).toBeGreaterThan(0)
   })
 
-  it('renders the Git Graph table columns with resize handles', () => {
+  it('renders Graph, Description and Date columns without resize handles', () => {
     const wrapper = mountSection()
 
     expect(wrapper.find('[data-testid="git-graph-header-graph"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-graph-header-description"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-graph-header-date"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="git-graph-header-commit"]').exists()).toBe(true)
-    // All columns except the last visible one are resizable.
-    expect(wrapper.find('[data-testid="git-column-resize-0"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="git-column-resize-1"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="git-column-toggle-date"]').exists()).toBe(true)
-  })
-
-  it('toggles optional columns off and on', async () => {
-    const wrapper = mountSection()
-
-    await wrapper.find('[data-testid="git-column-toggle-author"]').trigger('click')
-    await nextTick()
     expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(false)
-
-    await wrapper.find('[data-testid="git-column-toggle-author"]').trigger('click')
-    await nextTick()
-    expect(wrapper.find('[data-testid="git-graph-header-author"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-header-commit"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="git-columns-toggle"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="git-column-resize-0"]').exists()).toBe(false)
   })
 
   it('expands a commit row on click and collapses on second click', async () => {
@@ -199,39 +185,41 @@ describe('GitGraphSection', () => {
     expect(wrapper.find('[data-testid="git-commit-details-row"]').exists()).toBe(false)
   })
 
-  it('persists column widths when a column is resized', async () => {
+  it('offsets expanded commit details past the graph column', async () => {
     const store = useGitStore()
     const wrapper = mountSection()
-    const handle = wrapper.find('[data-testid="git-column-resize-0"]')
-    const pointerDown = new PointerEvent('pointerdown', { bubbles: true })
-    Object.defineProperty(pointerDown, 'clientX', { value: 100 })
-    handle.element.dispatchEvent(pointerDown)
-    await nextTick()
-    const pointerMove = new PointerEvent('pointermove', { bubbles: true })
-    Object.defineProperty(pointerMove, 'clientX', { value: 130 })
-    window.dispatchEvent(pointerMove)
-    await nextTick()
-    window.dispatchEvent(new PointerEvent('pointerup'))
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+
+    await rows[0]!.trigger('click')
     await nextTick()
 
-    expect(store.columnWidths).not.toBeNull()
-    expect(store.columnWidths![0]).toBeGreaterThan(0)
+    const detailsCell = wrapper.find('[data-testid="git-commit-details-row"] td')
+    expect(detailsCell.exists()).toBe(true)
+    const padding = Number.parseInt(detailsCell.element.style.paddingLeft, 10)
+    expect(padding).toBeGreaterThan(0)
+    expect(store.expandedCommitHash).toBe(store.currentRepo!.commits[0]!.hash)
   })
 
-  it('marks the HEAD node as current and mutes merge commits', () => {
+  it('marks the HEAD node as current and colours branch tags with the lane colour', () => {
     const store = useGitStore()
     const wrapper = mountSection()
     const headHash = store.currentRepo!.headHash
 
     const headNode = wrapper.find(`[data-testid="git-graph-node-${headHash}"]`)
     expect(headNode.exists()).toBe(true)
-    // Current nodes render hollow (card fill, width 2).
     expect(headNode.attributes('stroke-width')).toBe('2')
 
-    // The merge commit message renders muted.
-    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    const mainTag = wrapper.find('[data-testid="git-branch-tag-main"]')
+    const mainRow = wrapper
+      .findAll('[data-testid="git-graph-row"]')
+      .find((row) => row.find('[data-testid="git-branch-tag-main"]').exists())
+    expect(mainRow).toBeDefined()
+    const colour = Number(mainRow!.attributes('data-color'))
+    expect(mainTag.attributes('style')).toContain(`var(--git-branch-${colour + 1})`)
+
     const mergeIndex = store.currentRepo!.commits.findIndex((c) => c.parents.length > 1)
     expect(mergeIndex).toBeGreaterThanOrEqual(0)
-    expect(rows[mergeIndex]!.html()).toContain('opacity-50')
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    expect(rows[mergeIndex]!.html()).not.toContain('opacity-50')
   })
 })

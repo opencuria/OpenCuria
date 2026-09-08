@@ -17,7 +17,6 @@ import type {
   GitRepo,
 } from '@/types/git'
 import { createMockCommitDetails, createMockRepos, getMockCommitDetails } from '@/mock/git'
-import { computeGraphLayout } from '@/lib/gitGraph'
 import { useNotificationStore } from '@/stores/notifications'
 
 let commitCounter = 0
@@ -35,7 +34,6 @@ export interface GitRefTag {
 }
 
 const CDV_HEIGHT_KEY = 'opencuria:git:cdvHeight'
-const COLUMN_WIDTHS_KEY = 'opencuria:git:columnWidths'
 const CDV_HEIGHT_DEFAULT = 250
 const CDV_HEIGHT_MIN = 120
 const CDV_HEIGHT_MAX = 600
@@ -48,24 +46,6 @@ function loadCdvHeight(): number {
     return Math.min(CDV_HEIGHT_MAX, Math.max(CDV_HEIGHT_MIN, parsed))
   } catch {
     return CDV_HEIGHT_DEFAULT
-  }
-}
-
-function loadColumnWidths(): number[] | null {
-  try {
-    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY)
-    if (!raw) return null
-    const parsed: unknown = JSON.parse(raw)
-    if (
-      Array.isArray(parsed) &&
-      parsed.length > 0 &&
-      parsed.every((v) => typeof v === 'number' && Number.isFinite(v))
-    ) {
-      return parsed as number[]
-    }
-    return null
-  } catch {
-    return null
   }
 }
 
@@ -95,8 +75,6 @@ export const useGitStore = defineStore('git', () => {
   const commitDetailsByHash = ref<Record<string, GitCommitDetails>>({})
   /** Commit details view height in px (persisted). */
   const cdvHeight = ref<number>(loadCdvHeight())
-  /** Resizable column widths in px, or null for auto layout (persisted). */
-  const columnWidths = ref<number[] | null>(loadColumnWidths())
 
   // Seed the details cache with deterministic mock details.
   for (const repo of repos.value) {
@@ -122,10 +100,6 @@ export const useGitStore = defineStore('git', () => {
   )
   const unstagedChanges = computed(
     () => currentRepo.value?.changes.filter((c) => !c.staged) ?? [],
-  )
-
-  const graphLayout = computed(() =>
-    computeGraphLayout(currentRepo.value?.commits ?? []),
   )
 
   /** Branch / remote-ref tags keyed by the commit hash they point at. */
@@ -330,11 +304,6 @@ export const useGitStore = defineStore('git', () => {
     persist(CDV_HEIGHT_KEY, String(clamped))
   }
 
-  function setColumnWidths(w: number[] | null): void {
-    columnWidths.value = w ? [...w] : null
-    persist(COLUMN_WIDTHS_KEY, JSON.stringify(w))
-  }
-
   // -- actions: staging --------------------------------------------------------
 
   function stage(path: string): void {
@@ -525,13 +494,11 @@ export const useGitStore = defineStore('git', () => {
     expandedFilePath,
     commitDetailsByHash,
     cdvHeight,
-    columnWidths,
     // getters
     currentRepo,
     currentBranch,
     stagedChanges,
     unstagedChanges,
-    graphLayout,
     tagsByHash,
     viewingDiffChange,
     expandedCommitDetails,
@@ -545,7 +512,6 @@ export const useGitStore = defineStore('git', () => {
     closeCommitDetails,
     selectCommitFile,
     setCdvHeight,
-    setColumnWidths,
     isCommitExpanded,
     stage,
     unstage,

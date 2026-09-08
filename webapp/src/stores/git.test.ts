@@ -333,21 +333,6 @@ describe('git store', () => {
     expect(store.cdvHeight).toBe(600)
   })
 
-  it('persists column widths and restores them', () => {
-    localStorage.clear()
-    const store = useGitStore()
-    expect(store.columnWidths).toBeNull()
-
-    store.setColumnWidths([40, 200, 120])
-    expect(store.columnWidths).toEqual([40, 200, 120])
-    expect(localStorage.getItem('opencuria:git:columnWidths')).toBe(
-      '[40,200,120]',
-    )
-
-    store.setColumnWidths(null)
-    expect(store.columnWidths).toBeNull()
-  })
-
   it('registers empty details for newly created commits', () => {
     const store = useGitStore()
     const ok = store.commit('Add git panel')

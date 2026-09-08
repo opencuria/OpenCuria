@@ -3,12 +3,8 @@
  * vscode-git-graph's `web/graph.ts` (Branch/Vertex/Graph classes), without
  * any DOM/SVG rendering.
  *
- * The component layer (Phase 3) converts the returned vertices/branches to
- * SVG pixels via `vertexPixel` / `branchPaths`.
- *
- * Legacy lane API (`computeGraphLayout`, `GitGraphRow`, `GitGraphEdge`) is
- * kept below as a deprecated compatibility wrapper until Phase 3 migrates
- * `GitGraphSection.vue` and the store.
+ * The component layer converts the returned vertices/branches to SVG pixels
+ * via `vertexPixel` / `branchPaths`.
  */
 
 import type { GitCommit } from '@/types/git'
@@ -27,20 +23,16 @@ export const GIT_GRAPH_OFFSET_Y = 12
 export const GIT_GRAPH_NODE_R = 4
 /** Extra vertical space in px when a commit row is expanded. */
 export const GIT_GRAPH_EXPAND_Y = 250
-/** Default branch colours (12) from the reference config. */
+/** Theme-aware branch colours (`--git-branch-1` … `--git-branch-8`). */
 export const GIT_GRAPH_COLORS: string[] = [
-  '#0085d9',
-  '#d9008f',
-  '#00d90a',
-  '#d98500',
-  '#a300d9',
-  '#ff0000',
-  '#00d9cc',
-  '#e138e8',
-  '#85d900',
-  '#dc5b23',
-  '#6f24d6',
-  '#ffcc00',
+  'var(--git-branch-1)',
+  'var(--git-branch-2)',
+  'var(--git-branch-3)',
+  'var(--git-branch-4)',
+  'var(--git-branch-5)',
+  'var(--git-branch-6)',
+  'var(--git-branch-7)',
+  'var(--git-branch-8)',
 ]
 /** Bezier control offset factor for the rounded graph style. */
 export const GIT_GRAPH_CURVE_FACTOR_ROUNDED = 0.8
@@ -554,8 +546,8 @@ interface PlacedPixelLine {
 
 /**
  * Convert a branch into SVG path strings (port of `Branch.draw`).
- * Returns one entry per contiguous committed/uncommitted run so Phase 3 can
- * render each directly as a `<path>` (colour via
+ * Returns one entry per contiguous committed/uncommitted run so the graph
+ * can render each directly as a `<path>` (colour via
  * `GIT_GRAPH_COLORS[colour % len]`).
  */
 export function branchPaths(
@@ -702,132 +694,6 @@ export function getContentWidth(vertices: Pick<GraphVertex, 'nextX'>[]): number 
     if (v.nextX > x) x = v.nextX
   }
   return 2 * GIT_GRAPH_OFFSET_X + (x - 1) * GIT_GRAPH_GRID_X
-}
-
-// ---------------------------------------------------------------------------
-// Legacy lane API (deprecated) — kept for GitGraphSection.vue + store until
-// Phase 3 migrates the component to the engine above.
-// ---------------------------------------------------------------------------
-
-/** Number of chart color tokens (--chart-1 .. --chart-5) lanes cycle through. */
-export const GRAPH_LANE_COLORS = 5
-
-export interface GitGraphRow {
-  commit: GitCommit
-  lane: number
-  /** Chart color index (1-based) for the commit node. */
-  color: number
-}
-
-export interface GitGraphEdge {
-  fromRow: number
-  fromLane: number
-  toRow: number
-  toLane: number
-  /** Chart color index (1-based) of the lane the edge travels towards. */
-  color: number
-  /** True when the edge changes lane and should be drawn as a curve. */
-  curved: boolean
-}
-
-export interface LegacyGitGraphLayout {
-  rows: GitGraphRow[]
-  edges: GitGraphEdge[]
-  laneCount: number
-}
-
-/**
- * @deprecated Use {@link computeGitGraphLayout} instead. Kept as a
- * compatibility wrapper so `GitGraphSection.vue` and the store keep working
- * until Phase 3 migrates them to the new engine.
- *
- * Compute row/lane layout for a commit list.
- *
- * Commits are sorted newest first by timestamp; mock data and locally
- * created commits guarantee parents are always older than their children.
- */
-export function computeGraphLayout(commits: GitCommit[]): LegacyGitGraphLayout {
-  const ordered = [...commits].sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  )
-  const known = new Set(ordered.map((c) => c.hash))
-
-  // lanes[i] = hash of the commit expected next in lane i (null = free).
-  const lanes: (string | null)[] = []
-  const laneColors: number[] = []
-  let colorCounter = 0
-
-  const rows: GitGraphRow[] = []
-  const rowByHash = new Map<string, number>()
-  const laneByHash = new Map<string, number>()
-  const colorByHash = new Map<string, number>()
-
-  function nextColor(): number {
-    colorCounter += 1
-    return ((colorCounter - 1) % GRAPH_LANE_COLORS) + 1
-  }
-
-  /** Find the leftmost free slot, or append a new one. */
-  function claimFreeLane(): number {
-    const free = lanes.indexOf(null)
-    if (free >= 0) return free
-    lanes.push(null)
-    laneColors.push(0)
-    return lanes.length - 1
-  }
-
-  for (const commit of ordered) {
-    // Claim the leftmost lane expecting this commit; free any duplicates.
-    let lane = lanes.indexOf(commit.hash)
-    if (lane === -1) {
-      lane = claimFreeLane()
-      laneColors[lane] = nextColor()
-    }
-    for (let i = lane + 1; i < lanes.length; i++) {
-      if (lanes[i] === commit.hash) lanes[i] = null
-    }
-
-    const row = rows.length
-    const color = laneColors[lane] ?? 1
-    rows.push({ commit, lane, color })
-    rowByHash.set(commit.hash, row)
-    laneByHash.set(commit.hash, lane)
-    colorByHash.set(commit.hash, color)
-
-    // First parent continues in this lane; extra parents get their own.
-    const [firstParent, ...mergeParents] = commit.parents
-    lanes[lane] = firstParent && known.has(firstParent) ? firstParent : null
-    for (const parent of mergeParents) {
-      if (!known.has(parent) || lanes.includes(parent)) continue
-      const parentLane = claimFreeLane()
-      lanes[parentLane] = parent
-      laneColors[parentLane] = nextColor()
-    }
-  }
-
-  // Edges connect each commit node directly to each known parent node.
-  const edges: GitGraphEdge[] = []
-  for (const { commit } of rows) {
-    const fromRow = rowByHash.get(commit.hash)
-    const fromLane = laneByHash.get(commit.hash)
-    if (fromRow === undefined || fromLane === undefined) continue
-    for (const parent of commit.parents) {
-      const toRow = rowByHash.get(parent)
-      const toLane = laneByHash.get(parent)
-      if (toRow === undefined || toLane === undefined) continue
-      edges.push({
-        fromRow,
-        fromLane,
-        toRow,
-        toLane,
-        color: colorByHash.get(parent) ?? 1,
-        curved: toLane !== fromLane,
-      })
-    }
-  }
-
-  const laneCount = rows.reduce((max, row) => Math.max(max, row.lane + 1), 0)
-  return { rows, edges, laneCount }
 }
 
 /**

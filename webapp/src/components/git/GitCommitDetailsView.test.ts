@@ -43,6 +43,7 @@ describe('GitCommitDetailsView', () => {
       store.currentRepo!.commits[0]!.message,
     )
     expect(wrapper.find('[data-testid="git-cdv-hash"]').text()).toContain(hash)
+    expect(wrapper.find('[data-testid="git-cdv-copy-hash"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-cdv-parents"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('Files (')
     const fileCount = store.expandedCommitDetails!.fileChanges.length

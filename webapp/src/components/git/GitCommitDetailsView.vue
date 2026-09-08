@@ -1,11 +1,10 @@
 <script setup lang="ts">
 /**
- * GitCommitDetailsView — inline commit details (Git Graph style).
+ * GitCommitDetailsView — inline commit details below an expanded graph row.
  *
- * Rendered as an inline row below the expanded commit: summary on the
- * left, file view on the right. Clicking a file selects it for diff in
- * the main area (via the git store). Height is resizable and persisted
- * through the store (cdvHeight).
+ * Stacked layout: summary (subject, meta, stats) on top, file list below.
+ * Clicking a file selects it for diff in the main area. Height is resizable
+ * and persisted through the store (cdvHeight).
  */
 import { computed, ref } from 'vue'
 import type { GitCommitFile } from '@/types/git'
@@ -261,6 +260,12 @@ function copyPath(path: string): void {
   notifications.info('Copied file path', path)
 }
 
+function copyHash(): void {
+  const value = details.value?.hash ?? props.hash
+  navigator.clipboard.writeText(value)
+  notifications.info('Copied commit hash', value)
+}
+
 // --- Height resize (persisted via the store) ---
 
 const isResizing = ref(false)
@@ -293,262 +298,261 @@ function onResizeUp(event: PointerEvent): void {
 
 <template>
   <div
-    class="flex flex-col border-y border-border bg-muted/30"
+    class="flex flex-col"
     :style="{ height: `${store.cdvHeight}px` }"
     data-testid="git-commit-details"
   >
-    <div class="flex min-h-0 flex-1">
-      <!-- Summary -->
+    <div
+      class="min-h-0 max-h-[45%] shrink-0 overflow-auto border-b border-border p-2"
+      data-testid="git-cdv-summary"
+    >
       <div
-        class="w-1/2 min-w-0 overflow-auto border-r border-border p-2"
-        data-testid="git-cdv-summary"
+        v-if="commit?.message"
+        class="text-xs font-medium text-foreground"
+        data-testid="git-cdv-subject"
       >
-        <div
-          v-if="commit?.message"
-          class="text-xs font-medium text-foreground"
-          data-testid="git-cdv-subject"
-        >
-          {{ commit.message }}
-        </div>
-        <dl class="mt-1 space-y-0.5 text-[11px] leading-4">
-          <div class="flex min-w-0 gap-1">
-            <dt class="shrink-0 font-semibold text-foreground">Commit:</dt>
-            <dd
-              class="min-w-0 truncate font-mono text-muted-foreground"
-              data-testid="git-cdv-hash"
-              :title="details?.hash ?? hash"
-            >
-              {{ details?.hash ?? hash }}
-            </dd>
-          </div>
-          <div class="flex min-w-0 gap-1">
-            <dt class="shrink-0 font-semibold text-foreground">Parents:</dt>
-            <dd class="min-w-0 truncate text-muted-foreground" data-testid="git-cdv-parents">
-              <span v-if="(details?.parents ?? []).length === 0">None</span>
-              <template v-else>
-                <button
-                  v-for="(parent, index) in details?.parents ?? []"
-                  :key="parent"
-                  type="button"
-                  class="cursor-pointer font-mono hover:text-foreground hover:underline"
-                  :data-testid="`git-cdv-parent-${parent}`"
-                  :title="`Show commit ${parent}`"
-                  @click="store.toggleCommitDetails(parent)"
-                >
-                  {{ parent.slice(0, 7) }}<span v-if="index < (details?.parents.length ?? 0) - 1">, </span>
-                </button>
-              </template>
-            </dd>
-          </div>
-          <div class="flex min-w-0 gap-1">
-            <dt class="shrink-0 font-semibold text-foreground">Author:</dt>
-            <dd
-              class="min-w-0 truncate text-muted-foreground"
-              :title="details ? `${details.author} <${details.authorEmail}>` : ''"
-            >
-              {{ details?.author }}
-              <span v-if="details?.authorEmail">&lt;{{ details.authorEmail }}&gt;</span>
-            </dd>
-          </div>
-          <div class="flex min-w-0 gap-1">
-            <dt class="shrink-0 font-semibold text-foreground">Date:</dt>
-            <dd
-              class="min-w-0 truncate text-muted-foreground"
-              :title="details?.authorDate ?? ''"
-            >
-              {{ details ? formatDate(details.authorDate) : '' }}
-            </dd>
-          </div>
-          <div
-            v-if="details && details.committerDate !== details.authorDate"
-            class="flex min-w-0 gap-1"
-          >
-            <dt class="shrink-0 font-semibold text-foreground">Committer:</dt>
-            <dd class="min-w-0 truncate text-muted-foreground">
-              {{ details.committer }}
-              <span v-if="details.committerEmail">&lt;{{ details.committerEmail }}&gt;</span>
-              · {{ formatDate(details.committerDate) }}
-            </dd>
-          </div>
-        </dl>
-        <p
-          v-if="details?.body"
-          class="mt-1 whitespace-pre-wrap text-[11px] text-muted-foreground"
-          data-testid="git-cdv-body"
-        >
-          {{ details.body }}
-        </p>
-        <p class="mt-1 text-[11px] text-muted-foreground">
-          <span class="text-success">+{{ totalAdditions }}</span>
-          {{ ' ' }}
-          <span class="text-error">−{{ totalDeletions }}</span>
-          {{ ' ' }}· {{ files.length }} file{{ files.length === 1 ? '' : 's' }}
-        </p>
+        {{ commit.message }}
       </div>
-
-      <!-- Files -->
-      <div class="flex w-1/2 min-w-0 flex-col" data-testid="git-cdv-files">
-        <div class="flex shrink-0 items-center gap-1 border-b border-border px-1.5 py-1">
-          <span class="truncate text-[11px] font-medium text-foreground">
-            Files ({{ files.length }})
+      <dl class="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[11px] leading-4">
+        <dt class="font-medium text-muted-foreground">Commit</dt>
+        <dd class="flex min-w-0 items-center gap-1" data-testid="git-cdv-hash">
+          <span
+            class="min-w-0 truncate font-mono text-foreground"
+            :title="details?.hash ?? hash"
+          >
+            {{ details?.hash ?? hash }}
           </span>
-          <span class="flex-1" />
           <Button
             variant="ghost"
             size="icon-sm"
-            class="h-5 w-5"
-            :class="{ 'bg-muted': viewType === 'tree' }"
-            title="File tree view"
-            data-testid="git-cdv-view-tree"
-            @click="setViewType('tree')"
+            class="h-5 w-5 shrink-0"
+            title="Copy commit hash"
+            data-testid="git-cdv-copy-hash"
+            @click="copyHash"
           >
-            <FolderTree :size="12" />
+            <Copy :size="11" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="h-5 w-5"
-            :class="{ 'bg-muted': viewType === 'list' }"
-            title="File list view"
-            data-testid="git-cdv-view-list"
-            @click="setViewType('list')"
-          >
-            <List :size="12" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="h-5 w-5"
-            title="Close commit details"
-            data-testid="git-cdv-close"
-            @click="store.closeCommitDetails()"
-          >
-            <X :size="12" />
-          </Button>
-        </div>
-        <ScrollArea class="min-h-0 flex-1">
-          <div v-if="files.length === 0" class="px-2 py-1 text-[11px] text-muted-foreground">
-            No files changed in this commit.
-          </div>
-          <!-- Tree view -->
-          <div v-else-if="viewType === 'tree'" class="p-1">
-            <div
-              v-for="row in treeRows"
-              :key="`${row.kind}-${row.fullPath}`"
+        </dd>
+        <dt class="font-medium text-muted-foreground">Parents</dt>
+        <dd class="min-w-0 truncate" data-testid="git-cdv-parents">
+          <span v-if="(details?.parents ?? []).length === 0" class="text-muted-foreground">
+            None
+          </span>
+          <template v-else>
+            <button
+              v-for="(parent, index) in details?.parents ?? []"
+              :key="parent"
+              type="button"
+              class="cursor-pointer font-mono text-foreground hover:underline"
+              :data-testid="`git-cdv-parent-${parent}`"
+              :title="`Show commit ${parent}`"
+              @click="store.toggleCommitDetails(parent)"
             >
-              <div
-                v-if="row.kind === 'folder'"
-                class="flex cursor-pointer items-center gap-1 rounded px-1 py-0.5 hover:bg-muted"
-                :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-                :data-testid="`git-cdv-folder-${row.fullPath}`"
-                @click="toggleFolder(row.fullPath)"
-              >
-                <component
-                  :is="row.open ? ChevronDown : ChevronRight"
-                  :size="12"
-                  class="shrink-0 text-muted-foreground"
-                />
-                <component
-                  :is="row.open ? FolderOpen : Folder"
-                  :size="12"
-                  class="shrink-0 text-muted-foreground"
-                />
-                <span class="min-w-0 truncate text-[11px] text-foreground">{{ row.name }}</span>
-              </div>
-              <div
-                v-else-if="row.file"
-                class="group flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-muted"
-                :class="{ 'bg-muted': isSelected(row.file) }"
-                :style="{ paddingLeft: `${4 + row.depth * 14}px` }"
-                :data-testid="`git-cdv-file-${row.file.newPath}`"
-                :title="row.file.oldPath !== row.file.newPath ? `${row.file.oldPath} → ${row.file.newPath}` : row.file.newPath"
-                @click="selectFile(row.file)"
-              >
-                <component
-                  :is="fileIcon(row.file.newPath)"
-                  :size="12"
-                  class="shrink-0 text-muted-foreground"
-                />
-                <span class="min-w-0 flex-1 truncate text-[11px] text-foreground">
-                  {{ fileName(row.file.newPath) }}
-                  <span class="text-muted-foreground">{{ dirName(row.file.newPath) }}</span>
-                </span>
-                <span v-if="row.file.additions > 0" class="shrink-0 text-[10px] text-success">
-                  +{{ row.file.additions }}
-                </span>
-                <span v-if="row.file.deletions > 0" class="shrink-0 text-[10px] text-error">
-                  −{{ row.file.deletions }}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                  title="Copy file path"
-                  :data-testid="`git-cdv-copy-${row.file.newPath}`"
-                  @click.stop="copyPath(row.file.newPath)"
-                >
-                  <Copy :size="11" />
-                </Button>
-                <span
-                  class="w-3 shrink-0 text-center text-[10px] font-semibold"
-                  :class="STATUS_COLORS[row.file.status]"
-                  :title="STATUS_LABELS[row.file.status]"
-                >
-                  {{ row.file.status }}
-                </span>
-              </div>
-            </div>
-          </div>
-          <!-- List view -->
-          <div v-else class="p-1">
+              {{ parent.slice(0, 7) }}<span v-if="index < (details?.parents.length ?? 0) - 1">, </span>
+            </button>
+          </template>
+        </dd>
+        <dt class="font-medium text-muted-foreground">Author</dt>
+        <dd
+          class="min-w-0 truncate text-foreground"
+          :title="details ? `${details.author} <${details.authorEmail}>` : ''"
+        >
+          {{ details?.author }}
+          <span v-if="details?.authorEmail" class="text-muted-foreground">
+            &lt;{{ details.authorEmail }}&gt;
+          </span>
+        </dd>
+        <dt class="font-medium text-muted-foreground">Date</dt>
+        <dd
+          class="min-w-0 truncate text-foreground"
+          :title="details?.authorDate ?? ''"
+        >
+          {{ details ? formatDate(details.authorDate) : '' }}
+        </dd>
+        <template v-if="details && details.committerDate !== details.authorDate">
+          <dt class="font-medium text-muted-foreground">Committer</dt>
+          <dd class="min-w-0 truncate text-foreground">
+            {{ details.committer }}
+            <span v-if="details.committerEmail" class="text-muted-foreground">
+              &lt;{{ details.committerEmail }}&gt;
+            </span>
+            · {{ formatDate(details.committerDate) }}
+          </dd>
+        </template>
+      </dl>
+      <p
+        v-if="details?.body"
+        class="mt-1.5 whitespace-pre-wrap text-[11px] text-muted-foreground"
+        data-testid="git-cdv-body"
+      >
+        {{ details.body }}
+      </p>
+      <p class="mt-1.5 text-[11px] text-muted-foreground">
+        <span class="text-success">+{{ totalAdditions }}</span>
+        {{ ' ' }}
+        <span class="text-error">−{{ totalDeletions }}</span>
+        {{ ' ' }}· {{ files.length }} file{{ files.length === 1 ? '' : 's' }}
+      </p>
+    </div>
+
+    <div class="flex min-h-0 flex-1 flex-col" data-testid="git-cdv-files">
+      <div class="flex shrink-0 items-center gap-1 px-2 py-1">
+        <span class="truncate text-[11px] font-medium text-foreground">
+          Files ({{ files.length }})
+        </span>
+        <span class="flex-1" />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="h-5 w-5"
+          :class="{ 'bg-muted': viewType === 'tree' }"
+          title="File tree view"
+          data-testid="git-cdv-view-tree"
+          @click="setViewType('tree')"
+        >
+          <FolderTree :size="12" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="h-5 w-5"
+          :class="{ 'bg-muted': viewType === 'list' }"
+          title="File list view"
+          data-testid="git-cdv-view-list"
+          @click="setViewType('list')"
+        >
+          <List :size="12" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="h-5 w-5"
+          title="Close commit details"
+          data-testid="git-cdv-close"
+          @click="store.closeCommitDetails()"
+        >
+          <X :size="12" />
+        </Button>
+      </div>
+      <ScrollArea class="min-h-0 flex-1">
+        <div v-if="files.length === 0" class="px-2 py-1 text-[11px] text-muted-foreground">
+          No files changed in this commit.
+        </div>
+        <div v-else-if="viewType === 'tree'" class="p-1">
+          <div
+            v-for="row in treeRows"
+            :key="`${row.kind}-${row.fullPath}`"
+          >
             <div
-              v-for="file in listRows"
-              :key="file.newPath"
-              class="group flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-muted"
-              :class="{ 'bg-muted': isSelected(file) }"
-              :data-testid="`git-cdv-file-${file.newPath}`"
-              :title="file.oldPath !== file.newPath ? `${file.oldPath} → ${file.newPath}` : file.newPath"
-              @click="selectFile(file)"
+              v-if="row.kind === 'folder'"
+              class="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 hover:bg-muted"
+              :style="{ paddingLeft: `${6 + row.depth * 14}px` }"
+              :data-testid="`git-cdv-folder-${row.fullPath}`"
+              @click="toggleFolder(row.fullPath)"
             >
               <component
-                :is="fileIcon(file.newPath)"
+                :is="row.open ? ChevronDown : ChevronRight"
                 :size="12"
                 class="shrink-0 text-muted-foreground"
               />
-              <span class="min-w-0 flex-1 truncate text-[11px] text-foreground">
-                {{ fileName(file.newPath) }}
-                <span class="text-muted-foreground">{{ dirName(file.newPath) }}</span>
+              <component
+                :is="row.open ? FolderOpen : Folder"
+                :size="12"
+                class="shrink-0 text-muted-foreground"
+              />
+              <span class="min-w-0 truncate text-xs text-foreground">{{ row.name }}</span>
+            </div>
+            <div
+              v-else-if="row.file"
+              class="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-muted"
+              :class="{ 'bg-muted': isSelected(row.file) }"
+              :style="{ paddingLeft: `${6 + row.depth * 14}px` }"
+              :data-testid="`git-cdv-file-${row.file.newPath}`"
+              :title="row.file.oldPath !== row.file.newPath ? `${row.file.oldPath} → ${row.file.newPath}` : row.file.newPath"
+              @click="selectFile(row.file)"
+            >
+              <component
+                :is="fileIcon(row.file.newPath)"
+                :size="13"
+                class="shrink-0 text-muted-foreground"
+              />
+              <span class="min-w-0 flex-1 truncate text-xs text-foreground">
+                {{ fileName(row.file.newPath) }}
+                <span class="text-muted-foreground">{{ dirName(row.file.newPath) }}</span>
               </span>
-              <span v-if="file.additions > 0" class="shrink-0 text-[10px] text-success">
-                +{{ file.additions }}
+              <span v-if="row.file.additions > 0" class="shrink-0 text-[10px] text-success">
+                +{{ row.file.additions }}
               </span>
-              <span v-if="file.deletions > 0" class="shrink-0 text-[10px] text-error">
-                −{{ file.deletions }}
+              <span v-if="row.file.deletions > 0" class="shrink-0 text-[10px] text-error">
+                −{{ row.file.deletions }}
               </span>
               <Button
                 variant="ghost"
                 size="icon-sm"
                 class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                 title="Copy file path"
-                :data-testid="`git-cdv-copy-${file.newPath}`"
-                @click.stop="copyPath(file.newPath)"
+                :data-testid="`git-cdv-copy-${row.file.newPath}`"
+                @click.stop="copyPath(row.file.newPath)"
               >
                 <Copy :size="11" />
               </Button>
               <span
                 class="w-3 shrink-0 text-center text-[10px] font-semibold"
-                :class="STATUS_COLORS[file.status]"
-                :title="STATUS_LABELS[file.status]"
+                :class="STATUS_COLORS[row.file.status]"
+                :title="STATUS_LABELS[row.file.status]"
               >
-                {{ file.status }}
+                {{ row.file.status }}
               </span>
             </div>
           </div>
-        </ScrollArea>
-      </div>
+        </div>
+        <div v-else class="p-1">
+          <div
+            v-for="file in listRows"
+            :key="file.newPath"
+            class="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-muted"
+            :class="{ 'bg-muted': isSelected(file) }"
+            :data-testid="`git-cdv-file-${file.newPath}`"
+            :title="file.oldPath !== file.newPath ? `${file.oldPath} → ${file.newPath}` : file.newPath"
+            @click="selectFile(file)"
+          >
+            <component
+              :is="fileIcon(file.newPath)"
+              :size="13"
+              class="shrink-0 text-muted-foreground"
+            />
+            <span class="min-w-0 flex-1 truncate text-xs text-foreground">
+              {{ fileName(file.newPath) }}
+              <span class="text-muted-foreground">{{ dirName(file.newPath) }}</span>
+            </span>
+            <span v-if="file.additions > 0" class="shrink-0 text-[10px] text-success">
+              +{{ file.additions }}
+            </span>
+            <span v-if="file.deletions > 0" class="shrink-0 text-[10px] text-error">
+              −{{ file.deletions }}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+              title="Copy file path"
+              :data-testid="`git-cdv-copy-${file.newPath}`"
+              @click.stop="copyPath(file.newPath)"
+            >
+              <Copy :size="11" />
+            </Button>
+            <span
+              class="w-3 shrink-0 text-center text-[10px] font-semibold"
+              :class="STATUS_COLORS[file.status]"
+              :title="STATUS_LABELS[file.status]"
+            >
+              {{ file.status }}
+            </span>
+          </div>
+        </div>
+      </ScrollArea>
     </div>
 
-    <!-- Height resize handle -->
     <div
       role="separator"
       aria-orientation="horizontal"
