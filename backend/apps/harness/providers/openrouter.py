@@ -14,6 +14,10 @@ from typing import Any
 import httpx
 import structlog
 
+from ._lowering import (
+    project_openai_tool_schema,
+    wrap_system_update,
+)
 from .base import (
     ChatOptions,
     Delta,
@@ -199,10 +203,27 @@ class OpenRouterAdapter(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions,
     ) -> dict[str, Any]:
-        """Build the OpenAI-compatible request payload."""
+        """Build the OpenAI-compatible request payload.
+
+        Mirrors OpenCode ``openai-chat.ts`` ``fromRequest``: tools go
+        through the OpenAI schema projection, ``tool_choice`` maps
+        ``auto``/``none``/``required`` verbatim and a specific tool name
+        to ``{"type": "function", "function": {"name": ...}}``.
+
+        Generation gap (documented, no fake fields): :class:`ChatOptions`
+        only carries ``temperature``/``max_tokens``, so ``top_p``,
+        ``frequency_penalty``, ``presence_penalty``, ``seed`` and
+        ``stop`` (sent by OpenCode ``fromRequest``) cannot be set — they
+        are intentionally omitted rather than invented.
+
+        Usage gap: ``stream_options: {"include_usage": True}`` is always
+        sent (OpenCode parity). The OpenRouter ``usage``/``prompt_cache_key``
+        provider-options passthrough (``openrouter.ts:55-66``) has no
+        :class:`ChatOptions` field to read from, so it is not sent.
+        """
         payload: dict[str, Any] = {
             "model": model,
-            "messages": [self._message_to_dict(m) for m in messages],
+            "messages": self._messages_to_dicts(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -213,13 +234,19 @@ class OpenRouterAdapter(ProviderAdapter):
                     "function": {
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.parameters,
+                        "parameters": project_openai_tool_schema(t.parameters),
                     },
                 }
                 for t in tools
             ]
         if opts.tool_choice:
-            payload["tool_choice"] = opts.tool_choice
+            if opts.tool_choice in ("auto", "none", "required"):
+                payload["tool_choice"] = opts.tool_choice
+            else:
+                payload["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": opts.tool_choice},
+                }
         if opts.temperature is not None:
             payload["temperature"] = opts.temperature
         if opts.max_tokens is not None:
@@ -293,9 +320,67 @@ class OpenRouterAdapter(ProviderAdapter):
         )
 
     @staticmethod
+    def _messages_to_dicts(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+        """Convert a conversation, wrapping 2nd+ system messages.
+
+        Mirrors OpenCode ``openai-chat.ts`` ``lowerMessages`` + shared
+        ``wrappedSystemUpdate``: the first ``system`` message keeps the
+        privileged role; later ones become in-order ``user`` text wrapped
+        in ``<system-update>`` so temporal position is preserved.
+        """
+        converted: list[dict[str, Any]] = []
+        seen_system = False
+        for message in messages:
+            if message.role == "system" and seen_system:
+                text = OpenRouterAdapter._content_text(message.content)
+                converted.append(
+                    {"role": "user", "content": wrap_system_update(text)}
+                )
+                continue
+            if message.role == "system":
+                seen_system = True
+            converted.append(OpenRouterAdapter._message_to_dict(message))
+        return converted
+
+    @staticmethod
+    def _content_text(content: str | list[dict[str, Any]] | None) -> str:
+        """Join text parts of harness content without crashing on dicts."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        texts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return "\n".join(texts)
+
+    @staticmethod
     def _message_to_dict(message: LLMMessage) -> dict[str, Any]:
-        """Convert an LLMMessage to the OpenAI wire format."""
-        data: dict[str, Any] = {"role": message.role}
+        """Convert an LLMMessage to the OpenAI wire format.
+
+        Assistant messages replay ``tool_calls`` plus joined
+        ``reasoning_content`` from ``reasoning`` content parts
+        (openai-chat.ts ``lowerAssistantMessage`` parity). Tool results
+        join text parts so image parts never crash the lowering.
+        """
+        if message.role == "assistant":
+            return OpenRouterAdapter._assistant_to_dict(message)
+        if message.role == "tool":
+            data: dict[str, Any] = {
+                "role": "tool",
+                "content": OpenRouterAdapter._content_text(message.content)
+                if not isinstance(message.content, str)
+                else message.content,
+            }
+            if message.tool_call_id is not None:
+                data["tool_call_id"] = message.tool_call_id
+            return data
+        data = {"role": message.role}
         if message.content is not None:
             data["content"] = message.content
         if message.tool_calls:
@@ -304,17 +389,70 @@ class OpenRouterAdapter(ProviderAdapter):
                 if "function" in call:
                     converted.append(call)
                 else:
+                    arguments = call.get("arguments", "")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments)
                     converted.append(
                         {
                             "id": call.get("id", ""),
                             "type": "function",
                             "function": {
                                 "name": call.get("name", ""),
-                                "arguments": call.get("arguments", ""),
+                                "arguments": arguments,
                             },
                         }
                     )
             data["tool_calls"] = converted
+        if message.tool_call_id is not None:
+            data["tool_call_id"] = message.tool_call_id
+        return data
+
+    @staticmethod
+    def _assistant_to_dict(message: LLMMessage) -> dict[str, Any]:
+        """Convert an assistant message with reasoning/tool-call replay."""
+        data: dict[str, Any] = {"role": "assistant"}
+        reasoning_parts: list[str] = []
+        if isinstance(message.content, str):
+            data["content"] = message.content
+        elif isinstance(message.content, list):
+            texts: list[str] = []
+            for part in message.content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("text", "input_text", "output_text"):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        texts.append(text)
+                elif part_type in ("reasoning", "reasoning_content", "reasoning_text"):
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        reasoning_parts.append(text)
+            data["content"] = "\n".join(texts) if texts else None
+        else:
+            data["content"] = None
+        if message.tool_calls:
+            converted = []
+            for call in message.tool_calls:
+                if "function" in call and isinstance(call.get("function"), dict):
+                    converted.append(call)
+                    continue
+                arguments = call.get("arguments", "")
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments)
+                converted.append(
+                    {
+                        "id": call.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": call.get("name", ""),
+                            "arguments": arguments,
+                        },
+                    }
+                )
+            data["tool_calls"] = converted
+        if reasoning_parts:
+            data["reasoning_content"] = "".join(reasoning_parts)
         if message.tool_call_id is not None:
             data["tool_call_id"] = message.tool_call_id
         return data
@@ -457,11 +595,89 @@ class OpenRouterAdapter(ProviderAdapter):
             return False
         return None
 
+    def _raise_stream_error(self, error: dict[str, Any]) -> None:
+        """Raise a provider error for an SSE ``error`` chunk payload.
+
+        Mirrors the ChatGPT ``"code: message"`` format: when both code and
+        message are present the message is prefixed. ``context_length_exceeded``
+        (or any overflow text per the shared compaction patterns) raises a
+        non-retryable :class:`ProviderResponseError` whose message and
+        ``response_body`` both carry the overflow text.
+        """
+        from ..compaction import is_context_overflow_error as _is_overflow
+
+        code = str(error.get("code", "") or "")
+        message = str(error.get("message", "") or "")
+        if code and message:
+            text = f"{code}: {message}"
+        else:
+            text = message or code or "OpenRouter stream failed"
+        if code == "context_length_exceeded" or _is_overflow(RuntimeError(text)):
+            raise ProviderResponseError(
+                text,
+                provider=self.name,
+                response_body=text[:RESPONSE_BODY_MAX_CHARS],
+                is_retryable=False,
+            )
+        raise ProviderResponseError(
+            text,
+            provider=self.name,
+            response_body=text[:RESPONSE_BODY_MAX_CHARS],
+        )
+
+    @staticmethod
+    def _map_finish_reason(finish_reason: Any) -> str | None:
+        """Normalize an OpenAI-Chat finish reason (openai-chat.ts parity).
+
+        Returns ``None`` only when no finish reason was provided (``None``
+        stays ``None``); any other raw value maps to a known harness
+        reason, falling back to ``"unknown"``.
+        """
+        if finish_reason is None:
+            return None
+        if finish_reason == "stop":
+            return "stop"
+        if finish_reason == "length":
+            return "length"
+        if finish_reason in ("content_filter", "content-filter"):
+            return "content_filter"
+        if finish_reason in ("function_call", "tool_calls"):
+            return "tool_calls"
+        return "unknown"
+
+    @staticmethod
+    def _map_usage(raw_usage: Any) -> Usage | None:
+        """Map OpenAI-Chat usage (totalTokens policy: honor reported total)."""
+        if not isinstance(raw_usage, dict):
+            return None
+        prompt_tokens = int(raw_usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(raw_usage.get("completion_tokens", 0) or 0)
+        reported_total = int(raw_usage.get("total_tokens", 0) or 0)
+        cost = float(raw_usage.get("cost", 0.0) or 0.0)
+        if reported_total > 0:
+            total_tokens = reported_total
+        elif prompt_tokens > 0 or completion_tokens > 0:
+            total_tokens = prompt_tokens + completion_tokens
+        else:
+            total_tokens = 0
+        return Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost=cost,
+        )
+
     def _parse_chunk(self, data: str) -> Delta | None:
         """Parse one SSE data payload into a Delta.
 
         Raises:
-            ProviderResponseError: If the payload is not valid JSON.
+            ProviderResponseError: If the payload is not valid JSON or
+                carries an ``{"error": {...}}`` failure chunk (OpenRouter
+                sends mid-stream failures as SSE-data with an error field).
+                Error chunks use the ``"code: message"`` format and are
+                classified as non-retryable context overflow when the code
+                is ``context_length_exceeded`` or the text matches the
+                shared overflow patterns.
         """
         try:
             chunk = json.loads(data)
@@ -476,15 +692,13 @@ class OpenRouterAdapter(ProviderAdapter):
                 provider=self.name,
             )
 
+        error_payload = chunk.get("error")
+        if isinstance(error_payload, dict):
+            self._raise_stream_error(error_payload)
+
         usage: Usage | None = None
         raw_usage = chunk.get("usage")
-        if isinstance(raw_usage, dict):
-            usage = Usage(
-                prompt_tokens=int(raw_usage.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(raw_usage.get("completion_tokens", 0) or 0),
-                total_tokens=int(raw_usage.get("total_tokens", 0) or 0),
-                cost=float(raw_usage.get("cost", 0.0) or 0.0),
-            )
+        usage = self._map_usage(raw_usage)
 
         choices = chunk.get("choices", [])
         if not choices:
@@ -492,7 +706,7 @@ class OpenRouterAdapter(ProviderAdapter):
                 return Delta(usage=usage)
             return None
         choice = choices[0] if isinstance(choices[0], dict) else {}
-        finish_reason = choice.get("finish_reason")
+        finish_reason = self._map_finish_reason(choice.get("finish_reason"))
         raw_delta = choice.get("delta", {})
         if not isinstance(raw_delta, dict):
             raw_delta = {}

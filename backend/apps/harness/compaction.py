@@ -81,31 +81,57 @@ _CONTEXT_OVERFLOW_PHRASES = (
     "too many tokens",
 )
 
-#: Pi/OpenCode parity overflow patterns (case-insensitive regexes).
+#: OpenCode ``provider-error.ts`` parity overflow patterns
+#: (case-insensitive regexes, 28 patterns + 400/413-no-body).
 CONTEXT_OVERFLOW_PATTERNS = (
     re.compile(r"prompt is too long", re.I),
     re.compile(r"request_too_large", re.I),
-    re.compile(r"exceeds (?:the )?context window", re.I),
-    re.compile(r"exceeds (?:the )?(?:model'?s )?maximum context length", re.I),
-    re.compile(r"input token count.*exceeds (?:the )?maximum", re.I),
-    re.compile(r"maximum prompt length", re.I),
-    re.compile(r"reduce (?:the )?length of (?:the )?messages", re.I),
-    re.compile(r"maximum allowed input length", re.I),
-    re.compile(r"longer than (?:the )?(?:model'?s )?context length", re.I),
-    re.compile(r"exceeds (?:the )?(?:available context size|limit)", re.I),
-    re.compile(r"available context size", re.I),
-    re.compile(r"greater than (?:the )?context length", re.I),
+    re.compile(r"input is too long for requested model", re.I),
+    re.compile(r"exceeds the context window", re.I),
+    re.compile(
+        r"exceeds (?:the )?(?:model'?s )?maximum context length"
+        r"(?: of [\d,]+ tokens?|\s*\([\d,]+\))?",
+        re.I,
+    ),
+    re.compile(r"input token count.*exceeds the maximum", re.I),
+    re.compile(r"tokens in request more than max tokens allowed", re.I),
+    re.compile(r"maximum prompt length is \d+", re.I),
+    re.compile(r"reduce the length of the messages", re.I),
+    re.compile(r"maximum context length is \d+ tokens", re.I),
+    re.compile(
+        r"exceeds (?:the )?maximum allowed input length of [\d,]+ tokens?",
+        re.I,
+    ),
+    re.compile(
+        r"input \(\d+ tokens\) is longer than the model'?s context length"
+        r" \(\d+ tokens\)",
+        re.I,
+    ),
+    re.compile(r"exceeds the limit of \d+", re.I),
+    re.compile(r"exceeds the available context size", re.I),
+    re.compile(r"greater than the context length", re.I),
     re.compile(r"context window exceeds limit", re.I),
     re.compile(r"exceeded model token limit", re.I),
-    re.compile(r"too large for model", re.I),
-    re.compile(r"configured context size", re.I),
-    re.compile(r"model_context_window_exceeded", re.I),
-    re.compile(r"prompt too long", re.I),
-    re.compile(r"range of input length", re.I),
     re.compile(r"context[_ ]length[_ ]exceeded", re.I),
+    re.compile(r"request entity too large", re.I),
+    re.compile(r"context length is only \d+ tokens", re.I),
+    re.compile(r"input length.*exceeds.*context length", re.I),
+    re.compile(r"prompt too long; exceeded (?:max )?context length", re.I),
+    re.compile(r"too large for model with \d+ maximum context length", re.I),
+    re.compile(
+        r"prompt has [\d,]+ tokens?, but the configured context size is"
+        r" [\d,]+ tokens?",
+        re.I,
+    ),
+    re.compile(r"model_context_window_exceeded", re.I),
     re.compile(r"too many tokens", re.I),
     re.compile(r"token limit exceeded", re.I),
     re.compile(r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", re.I),
+    # Pi-legacy broad fallbacks (superset of the strict OpenCode literals
+    # above so older provider messages keep classifying as overflow).
+    re.compile(r"exceeds (?:the )?maximum allowed input length", re.I),
+    re.compile(r"too large for model", re.I),
+    re.compile(r"range of input length", re.I),
 )
 
 #: Non-overflow exclusions checked before overflow patterns (Pi parity).

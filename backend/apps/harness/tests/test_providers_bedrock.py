@@ -23,6 +23,7 @@ from botocore import UNSIGNED
 from apps.harness.providers.bedrock import (
     AUTH_SETTINGS_MESSAGE,
     BedrockAdapter,
+    is_context_overflow,
     resolve_bedrock_model_id,
 )
 
@@ -336,7 +337,8 @@ async def test_chat_stream_text_reasoning_tool_usage_finish() -> None:
     assert finish.usage is not None
     assert finish.usage.prompt_tokens == 10
     assert finish.usage.completion_tokens == 5
-    assert finish.usage.total_tokens == 18
+    # inputTokens is the inclusive total: cache subsets are NOT added.
+    assert finish.usage.total_tokens == 15
 
 
 async def test_chat_stream_throttling_event_raises_rate_limit() -> None:
@@ -394,6 +396,72 @@ async def test_chat_stream_validation_overflow_non_retryable() -> None:
     assert exc.value.is_retryable is False
 
 
+def test_is_context_overflow_opencode_parity() -> None:
+    """Bedrock overflow matches OpenCode provider-error.ts patterns."""
+    from apps.harness.compaction import is_context_overflow_error
+
+    positives = [
+        "Input is too long for requested model",
+        "Prompt has 100 tokens, but the configured context size is 50 tokens",
+        "input (10 tokens) is longer than the model's context length (5 tokens)",
+        "tokens in request more than max tokens allowed",
+        "request entity too large",
+        "This model's maximum context length is 200000 tokens (of 100 tokens)",
+        "exceeds the limit of 100",
+        "context length is only 10 tokens",
+        "input length 10 exceeds the context length 5",
+        "prompt too long; exceeded max context length",
+        "too large for model with 5 maximum context length",
+        "This request exceeds the context window",
+        "model_context_window_exceeded",
+        "400 (no body)",
+        "413 status code (no body)",
+    ]
+    for message in positives:
+        assert is_context_overflow(message), message
+        assert is_context_overflow_error(RuntimeError(message)), message
+    negatives = [
+        "Throttling error: slow down",
+        "Service unavailable: busy",
+        "rate limit exceeded",
+        "too many requests, retry later",
+    ]
+    for message in negatives:
+        assert not is_context_overflow(message), message
+
+
+async def test_chat_stream_validation_overflow_stream_event_non_retryable() -> None:
+    """In-stream validation overflow is non-retryable and compaction-visible."""
+    from apps.harness.compaction import is_context_overflow_error
+
+    events = [
+        {
+            "validationException": {
+                "message": "This request exceeds the context window"
+            }
+        }
+    ]
+    adapter, _ = _adapter(session=_MockSession(events))
+    with pytest.raises(ProviderResponseError) as exc:
+        await _collect(adapter)
+    assert exc.value.is_retryable is False
+    assert exc.value.response_body
+    assert is_context_overflow_error(exc.value)
+
+
+async def test_chat_stream_throttling_stream_event_retryable() -> None:
+    """In-stream throttling stays retryable and is not overflow."""
+    from apps.harness.compaction import is_context_overflow_error
+
+    adapter, _ = _adapter(session=_MockSession([]))
+    error = adapter._stream_error_from_event(
+        {"throttlingException": {"message": "Slow down"}}
+    )
+    assert isinstance(error, ProviderRateLimitError)
+    assert error.is_retryable is True
+    assert not is_context_overflow_error(error)
+
+
 def test_bearer_client_uses_unsigned_and_dummy_keys() -> None:
     """Bearer auth configures UNSIGNED signing and placeholder credentials."""
     adapter = BedrockAdapter({"bearer_token": "bedrock-key"})
@@ -437,5 +505,234 @@ async def test_bearer_auth_registers_before_sign_handler() -> None:
 def test_map_finish_reason_variants() -> None:
     """Finish reason mapping covers Bedrock stop reasons."""
     assert BedrockAdapter._map_finish_reason("end_turn") == "stop"
+    assert BedrockAdapter._map_finish_reason("stop_sequence") == "stop"
     assert BedrockAdapter._map_finish_reason("max_tokens") == "length"
     assert BedrockAdapter._map_finish_reason("tool_use") == "tool_calls"
+    assert BedrockAdapter._map_finish_reason("content_filtered") == "content_filter"
+    assert BedrockAdapter._map_finish_reason("guardrail_intervened") == "content_filter"
+    assert BedrockAdapter._map_finish_reason("something_new") == "unknown"
+
+
+async def test_chat_stream_reported_total_honored_without_double_count() -> None:
+    """Reported totalTokens wins; cache subsets are never added on top."""
+    events = [
+        {"messageStop": {"stopReason": "content_filtered"}},
+        {
+            "metadata": {
+                "usage": {
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "cacheReadInputTokens": 4,
+                    "cacheWriteInputTokens": 3,
+                    "totalTokens": 15,
+                }
+            }
+        },
+    ]
+    adapter, _ = _adapter(session=_MockSession(events))
+    deltas = await _collect(adapter)
+    finish = deltas[-1]
+    assert finish.finish_reason == "content_filter"
+    assert finish.usage is not None
+    assert finish.usage.total_tokens == 15
+
+
+async def test_chat_stream_stop_with_tool_calls_becomes_tool_calls() -> None:
+    """Pending 'stop' + observed tool calls finishes as 'tool_calls'."""
+    events = [
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 0,
+                "start": {"toolUse": {"toolUseId": "t1", "name": "bash"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": "{}"}},
+            }
+        },
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "end_turn"}},
+    ]
+    adapter, _ = _adapter(session=_MockSession(events))
+    deltas = await _collect(adapter)
+    assert deltas[-1].finish_reason == "tool_calls"
+
+
+async def test_chat_stream_parallel_tool_blocks_carry_index() -> None:
+    """Two toolUse blocks (index 1/2) yield two deltas with index 1/2."""
+    events = [
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 1,
+                "start": {"toolUse": {"toolUseId": "t1", "name": "bash"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 1,
+                "delta": {"toolUse": {"input": '{"cmd":"a"}'}},
+            }
+        },
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 2,
+                "start": {"toolUse": {"toolUseId": "t2", "name": "read"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 2,
+                "delta": {"toolUse": {"input": '{"path":"b"}'}},
+            }
+        },
+        {"contentBlockStop": {"contentBlockIndex": 1}},
+        {"contentBlockStop": {"contentBlockIndex": 2}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ]
+    adapter, _ = _adapter(session=_MockSession(events))
+    deltas = await _collect(adapter)
+
+    tool_deltas = [d for d in deltas if d.tool_calls]
+    assert len(tool_deltas) == 2
+    by_index = {d.tool_calls[0]["index"]: d.tool_calls[0] for d in tool_deltas}
+    assert by_index[1]["id"] == "t1"
+    assert by_index[1]["name"] == "bash"
+    assert by_index[1]["arguments"] == '{"cmd":"a"}'
+    assert by_index[2]["id"] == "t2"
+    assert by_index[2]["name"] == "read"
+    assert by_index[2]["arguments"] == '{"path":"b"}'
+
+
+def test_tool_schema_projection_anyof_merges_properties() -> None:
+    """Bedrock tool input schemas go through the OpenAI projection."""
+    from apps.harness.providers._lowering import project_openai_tool_schema
+
+    projected = project_openai_tool_schema(
+        {"anyOf": [{"properties": {"a": {"type": "string"}}}]}
+    )
+    assert projected["type"] == "object"
+    assert set(projected["properties"]) == {"a"}
+
+    adapter, _ = _adapter()
+    body = adapter._build_converse_body(
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        [LLMMessage(role="user", content="hi")],
+        [
+            ToolSchema(
+                name="read",
+                description="r",
+                parameters={"anyOf": [{"properties": {"a": {"type": "string"}}}]},
+            )
+        ],
+        ChatOptions(),
+    )
+    spec = body["toolConfig"]["tools"][0]["toolSpec"]
+    assert spec["inputSchema"]["json"]["type"] == "object"
+    assert set(spec["inputSchema"]["json"]["properties"]) == {"a"}
+
+
+def test_tool_choice_mapping_variants() -> None:
+    """auto/required/tool-name map; none omits toolConfig entirely."""
+    adapter, _ = _adapter()
+    user = [LLMMessage(role="user", content="hi")]
+    tools = [ToolSchema(name="read", description="r", parameters={"type": "object"})]
+    assert (
+        adapter._build_converse_body("nova-micro", user, tools, ChatOptions())[
+            "toolConfig"
+        ]["toolChoice"]
+        == {"auto": {}}
+    )
+    assert (
+        adapter._build_converse_body(
+            "nova-micro", user, tools, ChatOptions(tool_choice="required")
+        )["toolConfig"]["toolChoice"]
+        == {"any": {}}
+    )
+    assert (
+        adapter._build_converse_body(
+            "nova-micro", user, tools, ChatOptions(tool_choice="read")
+        )["toolConfig"]["toolChoice"]
+        == {"tool": {"name": "read"}}
+    )
+    assert (
+        "toolConfig"
+        not in adapter._build_converse_body(
+            "nova-micro", user, tools, ChatOptions(tool_choice="none")
+        )
+    )
+
+
+def test_tool_result_error_status_heuristic() -> None:
+    """Runner failure text maps to status error; success stays success."""
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content="Tool 'read' failed: boom",
+                tool_call_id="t1",
+            ),
+            LLMMessage(role="tool", content="file body", tool_call_id="t2"),
+        ]
+    )
+    results = [
+        block["toolResult"]
+        for msg in messages
+        for block in msg["content"]
+        if "toolResult" in block
+    ]
+    assert results[0]["status"] == "error"
+    assert results[1]["status"] == "success"
+
+
+def test_user_image_part_becomes_bedrock_image_block() -> None:
+    """image_url data-URL parts lower to typed Bedrock image blocks."""
+    import base64
+
+    raw = base64.b64encode(b"\x89PNGdata").decode()
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{raw}"},
+                    },
+                    {"type": "text", "text": ""},
+                ],
+            )
+        ]
+    )
+    blocks = messages[0]["content"]
+    assert {"text": "see"} in blocks
+    images = [b["image"] for b in blocks if "image" in b]
+    assert images and images[0]["format"] == "png"
+    assert images[0]["source"]["bytes"] == b"\x89PNGdata"
+    assert not [b for b in blocks if b == {"text": ""}]
+
+
+def test_user_unknown_image_mime_raises() -> None:
+    """Unknown image MIMEs raise instead of being silently dropped."""
+    import base64
+
+    raw = base64.b64encode(b"svg").decode()
+    adapter, _ = _adapter()
+    with pytest.raises(ProviderResponseError, match="does not support image"):
+        adapter._convert_messages(
+            [
+                LLMMessage(
+                    role="user",
+                    content=[
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/svg+xml;base64,{raw}"},
+                        }
+                    ],
+                )
+            ]
+        )

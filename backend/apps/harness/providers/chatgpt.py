@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ._lowering import project_openai_tool_schema
 from .base import (
     ChatOptions,
     Delta,
@@ -197,7 +198,7 @@ class ChatGPTAdapter(ProviderAdapter):
                     "type": "function",
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters,
+                    "parameters": project_openai_tool_schema(tool.parameters),
                     "strict": False,
                 }
                 for tool in tools
@@ -215,11 +216,26 @@ class ChatGPTAdapter(ProviderAdapter):
         for part in content:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") in ("text", "input_text"):
+            if part.get("type") in ("text", "input_text", "output_text"):
                 text = part.get("text")
                 if isinstance(text, str):
                     parts.append(text)
         return "\n".join(parts)
+
+    @staticmethod
+    def _tool_arguments(call: dict[str, Any]) -> str:
+        """Return authoritative function-call arguments as a JSON string.
+
+        Mirrors OpenCode ``ProviderShared.encodeJson``: dict input is
+        serialized, strings pass through verbatim.
+        """
+        function = call.get("function", call)
+        if not isinstance(function, dict):
+            function = {}
+        arguments = function.get("arguments", call.get("arguments", ""))
+        if isinstance(arguments, dict):
+            return json.dumps(arguments)
+        return str(arguments if isinstance(arguments, str) else "")
 
     def _convert_messages(
         self,
@@ -253,16 +269,29 @@ class ChatGPTAdapter(ProviderAdapter):
                         function = call.get("function", call)
                         if not isinstance(function, dict):
                             function = {}
+                        call_id = str(call.get("id", call.get("call_id", "")) or "")
+                        if not call_id:
+                            # OpenCode requires call_id; without one the
+                            # replay would be rejected, so fall back to a
+                            # best-effort id derived from name/index.
+                            fallback = (
+                                function.get("name", call.get("name", ""))
+                                or "tool"
+                            )
+                            call_id = f"{fallback}-{len(input_items)}"
                         input_items.append(
                             {
                                 "type": "function_call",
-                                "call_id": call.get("id", call.get("call_id", "")),
+                                "call_id": call_id,
                                 "name": function.get("name", call.get("name", "")),
-                                "arguments": function.get(
-                                    "arguments", call.get("arguments", "")
-                                ),
+                                "arguments": ChatGPTAdapter._tool_arguments(call),
                             }
                         )
+                    # NOTE: reasoning replay gap — LLMMessage carries no
+                    # providerMetadata/item ids, so reasoning parts cannot be
+                    # replayed as encrypted reasoning items under
+                    # store:false (openai-responses.ts filters reasoning
+                    # without encrypted_content). No fake replay is sent.
                     continue
                 text = self._message_text(message.content)
                 if text:
@@ -277,10 +306,15 @@ class ChatGPTAdapter(ProviderAdapter):
 
             if message.role == "tool":
                 output = self._message_text(message.content)
+                call_id = str(message.tool_call_id or "")
+                if not call_id:
+                    # OpenCode requires call_id; keep a best-effort id so
+                    # an empty call_id is never sent on the wire.
+                    call_id = f"tool-{len(input_items)}"
                 input_items.append(
                     {
                         "type": "function_call_output",
-                        "call_id": message.tool_call_id or "",
+                        "call_id": call_id,
                         "output": output,
                     }
                 )
@@ -455,6 +489,7 @@ class ChatGPTAdapter(ProviderAdapter):
                 response_body=full_body,
             )
 
+        stream_state: dict[str, Any] = {}
         async for line in self._aiter_lines(
             response,
             chunk_timeout=chunk_timeout,
@@ -469,7 +504,7 @@ class ChatGPTAdapter(ProviderAdapter):
             data = stripped[len("data:") :].strip()
             if not data or data == "[DONE]":
                 continue
-            delta = self._parse_event(data)
+            delta = self._parse_event(data, stream_state)
             if delta is not None:
                 yield delta
 
@@ -512,8 +547,48 @@ class ChatGPTAdapter(ProviderAdapter):
             )
         return ProviderStreamTimeoutError(provider=self.name)
 
-    def _parse_event(self, data: str) -> Delta | None:
-        """Parse one SSE data payload into a :class:`Delta`."""
+    @staticmethod
+    def _stream_key(
+        raw_id: Any, state: dict[str, Any], *, reuse_last: bool = False
+    ) -> str:
+        """Return the provider-local stream key for a function-call item.
+
+        Non-empty string ids are used verbatim (parallel calls keep
+        distinct keys); missing ids fall back to a deterministic
+        per-stream counter so fragments still group stably. With
+        ``reuse_last``, a missing id reuses the most recent key (used for
+        ``done``/``delta`` continuations of an ``added`` slot that had no
+        id); ``added`` always mints a fresh key so parallel id-less items
+        never share one slot.
+        """
+        if isinstance(raw_id, str) and raw_id:
+            state["last_key"] = raw_id
+            return raw_id
+        if reuse_last and isinstance(state.get("last_key"), str):
+            return str(state["last_key"])
+        counter = int(state.get("fallback_counter", 0) or 0)
+        state["fallback_counter"] = counter + 1
+        state["last_key"] = str(counter)
+        return str(counter)
+
+    def _parse_event(
+        self, data: str, stream_state: dict[str, Any] | None = None
+    ) -> Delta | None:
+        """Parse one SSE data payload into a :class:`Delta`.
+
+        Function-call streaming follows OpenCode's Responses protocol
+        (``openai-responses.ts``): ``response.output_item.added`` opens a
+        slot keyed by ``item.id``, ``response.function_call_arguments.delta``
+        appends fragments keyed by ``item_id``, and
+        ``response.output_item.done`` finalizes with authoritative arguments.
+
+        ``stream_state`` is a per-stream scratch dict (owned by
+        :meth:`_parse_stream`; ``None`` creates a throwaway one so direct
+        calls stay stateless). It tracks ``args_sent`` (``item.id`` ->
+        already-emitted argument chars) so the ``done`` event only carries
+        the not-yet-sent suffix — the runner concatenates fragments per
+        key, and re-sending the full arguments would double them.
+        """
         try:
             event = json.loads(data)
         except json.JSONDecodeError as exc:
@@ -543,58 +618,184 @@ class ChatGPTAdapter(ProviderAdapter):
             if isinstance(delta, str) and delta:
                 return Delta(reasoning=delta)
             return None
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                return None
+            state = stream_state if stream_state is not None else {}
+            state["has_tool_calls"] = True
+            key = self._stream_key(item.get("id"), state)
+            call_id = str(item.get("call_id", "") or "") or key
+            name = str(item.get("name", "") or "")
+            arguments = str(item.get("arguments", "") or "")
+            if arguments:
+                args_sent = state.setdefault("args_sent", {})
+                args_sent[key] = int(args_sent.get(key, 0) or 0) + len(arguments)
+            return Delta(
+                tool_calls=(
+                    {
+                        "index": key,
+                        "id": call_id,
+                        "name": name,
+                        "arguments": arguments,
+                    },
+                )
+            )
+        if event_type == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            fragment = event.get("delta")
+            if not isinstance(fragment, str) or not fragment:
+                return None
+            state = stream_state if stream_state is not None else {}
+            state["has_tool_calls"] = True
+            key = self._stream_key(
+                item_id if isinstance(item_id, str) and item_id else None,
+                state,
+                reuse_last=True,
+            )
+            args_sent = state.setdefault("args_sent", {})
+            args_sent[key] = int(args_sent.get(key, 0) or 0) + len(fragment)
+            return Delta(tool_calls=({"index": key, "arguments": fragment},))
         if event_type == "response.output_item.done":
             item = event.get("item")
             if isinstance(item, dict) and item.get("type") == "function_call":
+                state = stream_state if stream_state is not None else {}
+                state["has_tool_calls"] = True
+                key = self._stream_key(item.get("id"), state, reuse_last=True)
+                call_id = str(item.get("call_id", "") or "") or key
+                name = str(item.get("name", "") or "")
+                full_arguments = str(item.get("arguments", "") or "")
+                # finishWithInput semantics: ``done`` carries the
+                # authoritative full arguments, but the runner concatenates
+                # every fragment per key — so only the suffix not already
+                # streamed via added/delta events is emitted (usually ""
+                # when deltas were complete, or the full string when no
+                # deltas arrived). Python slicing yields "" when the
+                # recorded prefix is longer than the final string.
+                args_sent = state.setdefault("args_sent", {})
+                sent = int(args_sent.get(key, 0) or 0)
+                rest = full_arguments[sent:] if sent else full_arguments
+                if rest:
+                    args_sent[key] = sent + len(rest)
                 return Delta(
                     tool_calls=(
                         {
-                            "id": str(item.get("call_id", "") or ""),
-                            "name": str(item.get("name", "") or ""),
-                            "arguments": str(item.get("arguments", "") or ""),
+                            "index": key,
+                            "id": call_id,
+                            "name": name,
+                            "arguments": rest,
                         },
                     )
                 )
             return None
-        if event_type == "response.completed":
+        if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response")
             if not isinstance(response, dict):
-                return Delta(finish_reason="stop")
+                has_tools = bool(
+                    stream_state is not None and stream_state.get("has_tool_calls")
+                )
+                return Delta(finish_reason="tool_calls" if has_tools else "stop")
+            if response.get("status") == "failed":
+                self._raise_stream_error(response)
             usage = self._usage_from_response(response)
-            finish_reason = response.get("status")
-            if isinstance(finish_reason, str):
-                return Delta(usage=usage, finish_reason=finish_reason)
-            return Delta(usage=usage, finish_reason="stop")
+            has_tools = bool(
+                stream_state is not None and stream_state.get("has_tool_calls")
+            )
+            return Delta(
+                usage=usage,
+                finish_reason=self._map_finish_reason(response, has_tools),
+            )
         return None
 
+    @staticmethod
+    def _map_finish_reason(response: dict[str, Any], has_tool_calls: bool) -> str:
+        """Map ``incomplete_details.reason`` to harness finish reasons.
+
+        OpenCode parity (openai-responses.ts ``mapFinishReason``): the
+        top-level ``response.status`` ("completed"/"incomplete"/"failed")
+        is a lifecycle marker, not a finish reason. Only ``failed`` is an
+        error (handled via ``response.failed``/``error`` events upstream);
+        here ``completed``/``incomplete`` both finish normally with the
+        reason taken from ``incomplete_details.reason``.
+        """
+        details = response.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        if reason is None:
+            return "tool_calls" if has_tool_calls else "stop"
+        if reason == "max_output_tokens":
+            return "length"
+        if reason == "content_filter":
+            return "content_filter"
+        return "tool_calls" if has_tool_calls else "unknown"
+
     def _raise_stream_error(self, event: dict[str, Any]) -> None:
-        """Raise a provider error for failed stream events."""
+        """Raise a provider error for failed stream events.
+
+        Mirrors OpenCode ``openai-responses.ts`` ``providerError``: when both
+        code and message are present the message is prefixed as
+        ``"code: message"``; ``context_length_exceeded`` (or any overflow
+        text per :func:`compaction.is_context_overflow_error`) is raised as
+        a non-retryable :class:`ProviderResponseError` whose message and
+        ``response_body`` both carry the overflow text so downstream
+        compaction detection finds it.
+        """
+        from ..compaction import is_context_overflow_error as _is_overflow
+
         error = event.get("error")
         if not isinstance(error, dict):
             error = event
+        nested = event.get("response")
+        nested_error = (
+            nested.get("error") if isinstance(nested, dict) else None
+        )
         code = str(error.get("code", "") or "")
-        message = str(error.get("message", "") or "ChatGPT stream failed")
+        message = str(error.get("message", "") or "")
+        if not code and isinstance(nested_error, dict):
+            code = str(nested_error.get("code", "") or "")
+        if not message and isinstance(nested_error, dict):
+            message = str(nested_error.get("message", "") or "")
         if code == "usage_not_included":
             raise ProviderAuthError(
                 USAGE_NOT_INCLUDED_MESSAGE,
                 provider=self.name,
                 is_retryable=False,
             )
-        raise ProviderResponseError(message, provider=self.name)
+        if code and message:
+            text = f"{code}: {message}"
+        else:
+            text = message or code or "ChatGPT stream failed"
+        if code == "context_length_exceeded" or _is_overflow(RuntimeError(text)):
+            raise ProviderResponseError(
+                text,
+                provider=self.name,
+                response_body=text[:RESPONSE_BODY_MAX_CHARS],
+                is_retryable=False,
+            )
+        raise ProviderResponseError(
+            text,
+            provider=self.name,
+            response_body=text[:RESPONSE_BODY_MAX_CHARS],
+        )
 
     @staticmethod
     def _usage_from_response(response: dict[str, Any]) -> Usage | None:
-        """Map Responses API usage into harness :class:`Usage`."""
+        """Map Responses API usage into harness :class:`Usage`.
+
+        ``input_tokens`` is the inclusive total (``cached_tokens`` is a
+        subset), so cached tokens are never added on top (OpenCode
+        totalTokens policy: honor the provider total, else input+output).
+        """
         raw_usage = response.get("usage")
         if not isinstance(raw_usage, dict):
             return None
         prompt_tokens = int(raw_usage.get("input_tokens", 0) or 0)
         completion_tokens = int(raw_usage.get("output_tokens", 0) or 0)
-        cached_tokens = 0
-        input_details = raw_usage.get("input_tokens_details")
-        if isinstance(input_details, dict):
-            cached_tokens = int(input_details.get("cached_tokens", 0) or 0)
-        total_tokens = prompt_tokens + completion_tokens + cached_tokens
+        reported_total = raw_usage.get("total_tokens")
+        total_tokens = (
+            int(reported_total)
+            if reported_total is not None
+            else prompt_tokens + completion_tokens
+        )
         return Usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

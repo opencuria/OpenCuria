@@ -55,7 +55,14 @@ class Usage:
 
 @dataclass(frozen=True)
 class Delta:
-    """One incremental update from a streaming chat completion."""
+    """One incremental update from a streaming chat completion.
+
+    Tool fragments in :attr:`tool_calls` carry a provider-local stream key
+    in ``index`` (numeric content index for OpenAI Chat/Bedrock, string
+    ``item_id`` for OpenAI Responses). The stream key is *not* the final
+    tool-call ID: it only groups argument chunks while streaming, and the
+    runner must never concatenate arguments of two different call IDs.
+    """
 
     text: str = ""
     reasoning: str = ""

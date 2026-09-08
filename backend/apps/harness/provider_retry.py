@@ -179,7 +179,10 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
     text = _error_text(exc)
     if matches_non_retryable_message(text):
         return False
-    if is_context_overflow_error(exc):
+    # Overflow wins over the ``x-should-retry`` header hint below: a
+    # provider error that classifies as context overflow is never retried.
+    overflow = is_context_overflow_error(exc)
+    if overflow:
         return False
     if isinstance(exc, ProviderAuthError):
         return False
@@ -188,6 +191,8 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
     if isinstance(exc, ProviderRateLimitError):
         hint = _should_retry_hint(exc)
         if hint is not None:
+            if is_context_overflow_error(exc):
+                return False
             return hint
         if matches_non_retryable_message(text):
             return False
@@ -195,11 +200,17 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
     if isinstance(exc, ProviderResponseError):
         hint = _should_retry_hint(exc)
         if hint is not None:
+            # Context overflow is never retried, even when a provider
+            # sends ``x-should-retry: true`` alongside an overflow body.
+            if is_context_overflow_error(exc):
+                return False
             return hint
         if exc.status_code is not None and exc.status_code >= 500:
             return True
         return matches_retryable_message(text)
     hint = _should_retry_hint(exc)
     if hint is not None:
+        if overflow:
+            return False
         return hint
     return matches_retryable_message(text)

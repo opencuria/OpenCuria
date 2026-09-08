@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -17,6 +16,20 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from ..compaction import (
+    CONTEXT_OVERFLOW_PATTERNS as _SHARED_OVERFLOW_PATTERNS,
+)
+from ..compaction import (
+    NON_OVERFLOW_EXCLUSIONS as _SHARED_OVERFLOW_EXCLUSIONS,
+)
+from ..compaction import (
+    is_context_overflow_error as _shared_is_context_overflow_error,
+)
+from ._lowering import (
+    bedrock_media_block,
+    is_tool_error_text,
+    project_openai_tool_schema,
+)
 from .base import (
     ChatOptions,
     Delta,
@@ -85,21 +98,15 @@ _AU_CLAUDE_MODELS = (
     "anthropic.claude-haiku",
 )
 
-_CONTEXT_OVERFLOW_PATTERNS = (
-    r"prompt is too long",
-    r"input is too long for requested model",
-    r"exceeds the context window",
-    r"maximum context length",
-    r"reduce the length of the messages",
-    r"too many tokens",
-    r"token limit exceeded",
-    r"model_context_window_exceeded",
+#: Bedrock overflow detection reuses the shared OpenCode-parity patterns from
+#: :mod:`apps.harness.compaction` (single source of truth — no divergent list).
+#: Kept as module aliases so existing imports keep working.
+_CONTEXT_OVERFLOW_PATTERNS = tuple(
+    pattern.pattern for pattern in _SHARED_OVERFLOW_PATTERNS
 )
 
-_CONTEXT_OVERFLOW_EXCLUSIONS = (
-    r"^throttling error:",
-    r"rate limit",
-    r"too many requests",
+_CONTEXT_OVERFLOW_EXCLUSIONS = tuple(
+    pattern.pattern for pattern in _SHARED_OVERFLOW_EXCLUSIONS
 )
 
 
@@ -153,11 +160,14 @@ def resolve_bedrock_model_id(model_id: str, region: str) -> str:
 
 
 def is_context_overflow(message: str) -> bool:
-    """Return True when a Bedrock validation message indicates context overflow."""
-    lowered = message.lower()
-    if any(re.search(pattern, lowered) for pattern in _CONTEXT_OVERFLOW_EXCLUSIONS):
-        return False
-    return any(re.search(pattern, lowered) for pattern in _CONTEXT_OVERFLOW_PATTERNS)
+    """Return True when a Bedrock validation message indicates context overflow.
+
+    Delegates to the shared :func:`compaction.is_context_overflow_error`
+    classification (OpenCode ``provider-error.ts`` parity) so Bedrock and
+    compaction never diverge. Accepts a plain message string for the
+    validation/stream call sites.
+    """
+    return _shared_is_context_overflow_error(RuntimeError(message))
 
 
 def _is_anthropic_claude_model(model_id: str) -> bool:
@@ -169,7 +179,11 @@ def _is_anthropic_claude_model(model_id: str) -> bool:
 
 
 def _message_text(content: str | list[dict[str, Any]] | None) -> str:
-    """Extract plain text from harness message content."""
+    """Extract plain text from harness message content.
+
+    Non-text parts (image/media/reasoning) contribute nothing here;
+    media is lowered separately via :func:`bedrock_media_block`.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -178,11 +192,89 @@ def _message_text(content: str | list[dict[str, Any]] | None) -> str:
     for part in content:
         if not isinstance(part, dict):
             continue
-        if part.get("type") in ("text", "input_text"):
+        if part.get("type") in ("text", "input_text", "output_text"):
             text = part.get("text")
             if isinstance(text, str):
                 parts.append(text)
     return "\n".join(parts)
+
+
+def _tool_choice_block(tool_choice: str | None) -> dict[str, Any] | None:
+    """Map harness tool_choice to a Converse ``toolChoice`` block.
+
+    Mirrors OpenCode ``bedrock-converse.ts`` ``lowerToolChoice``:
+    ``auto`` → ``{"auto": {}}``, ``none`` → no toolConfig at all,
+    ``required`` → ``{"any": {}}``, tool name → ``{"tool": {"name"}}``.
+    ``None``/unknown defaults to ``{"auto": {}}``.
+    """
+    if tool_choice == "none":
+        return None
+    if tool_choice == "required":
+        return {"any": {}}
+    if tool_choice and tool_choice not in ("auto",):
+        return {"tool": {"name": tool_choice}}
+    return {"auto": {}}
+
+
+def _user_content_blocks(
+    content: str | list[dict[str, Any]] | None,
+    *,
+    provider: str,
+) -> list[dict[str, Any]]:
+    """Lower user content to Converse blocks, keeping media and text.
+
+    Empty text blocks are filtered (Converse rejects ``{"text": ""}``).
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"text": content}] if content else []
+    blocks: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        media = bedrock_media_block(part, provider=provider)
+        if media is not None:
+            blocks.append(media)
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                blocks.append({"text": text})
+    return blocks
+
+
+def _tool_result_content(
+    content: str | list[dict[str, Any]] | None,
+    *,
+    provider: str,
+) -> list[dict[str, Any]]:
+    """Lower tool output to Converse ``toolResult.content`` blocks."""
+    if isinstance(content, str):
+        return [{"text": content}] if content else [{"text": ""}]
+    blocks: list[dict[str, Any]] = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        media = bedrock_media_block(part, provider=provider)
+        if media is not None:
+            # Only image media is meaningful inside tool results;
+            # a document block would be rejected there, so re-raise.
+            if "image" not in media:
+                raise ProviderResponseError(
+                    "Bedrock Converse only supports image media in tool results",
+                    provider=provider,
+                )
+            blocks.append(media)
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                blocks.append({"text": text})
+    if not blocks:
+        text = _message_text(content)
+        blocks.append({"text": text})
+    return blocks
 
 
 def _parse_tool_arguments(raw: str) -> dict[str, Any]:
@@ -194,6 +286,21 @@ def _parse_tool_arguments(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _reasoning_texts(content: str | list[dict[str, Any]] | None) -> list[str]:
+    """Extract reasoning content parts (no signature metadata available)."""
+    if not isinstance(content, list):
+        return []
+    texts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("reasoning", "reasoning_content", "reasoning_text"):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                texts.append(text)
+    return texts
 
 
 def _merge_message(
@@ -211,9 +318,10 @@ def _merge_message(
 class _ToolCallState:
     """Accumulates one in-flight Bedrock tool-use block."""
 
-    def __init__(self, tool_use_id: str, name: str) -> None:
+    def __init__(self, tool_use_id: str, name: str, index: int) -> None:
         self.tool_use_id = tool_use_id
         self.name = name
+        self.index = index
         self.input_parts: list[str] = []
 
     def append_input(self, fragment: str) -> None:
@@ -227,6 +335,7 @@ class _ToolCallState:
         return Delta(
             tool_calls=(
                 {
+                    "index": self.index,
                     "id": self.tool_use_id,
                     "name": self.name,
                     "arguments": arguments,
@@ -401,7 +510,15 @@ class BedrockAdapter(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions,
     ) -> dict[str, Any]:
-        """Build the Converse Stream request body."""
+        """Build the Converse Stream request body.
+
+        Generation gap (documented): :class:`ChatOptions` only carries
+        ``temperature``/``max_tokens``, so ``topP``/``stopSequences``
+        (sent by OpenCode ``fromRequest``) and ``topK`` via
+        ``additionalModelRequestFields.top_k`` cannot be set —
+        ``additionalModelRequestFields`` only carries the Claude
+        thinking config.
+        """
         model_id = resolve_bedrock_model_id(model, self._region)
         system_blocks, converse_messages = self._convert_messages(messages)
         body: dict[str, Any] = {"modelId": model_id, "messages": converse_messages}
@@ -431,19 +548,22 @@ class BedrockAdapter(ProviderAdapter):
         if additional_fields is not None:
             body["additionalModelRequestFields"] = additional_fields
 
-        if tools:
+        tool_choice = _tool_choice_block(opts.tool_choice)
+        if tools and tool_choice is not None:
             body["toolConfig"] = {
                 "tools": [
                     {
                         "toolSpec": {
                             "name": tool.name,
                             "description": tool.description,
-                            "inputSchema": {"json": tool.parameters},
+                            "inputSchema": {
+                                "json": project_openai_tool_schema(tool.parameters)
+                            },
                         }
                     }
                     for tool in tools
                 ],
-                "toolChoice": {"auto": {}},
+                "toolChoice": tool_choice,
             }
 
         return body
@@ -464,17 +584,15 @@ class BedrockAdapter(ProviderAdapter):
                 continue
 
             if message.role == "user":
-                text = _message_text(message.content)
-                if text:
-                    _merge_message(
-                        converse_messages,
-                        "user",
-                        [{"text": text}],
-                    )
+                blocks = _user_content_blocks(message.content, provider=self.name)
+                if blocks:
+                    _merge_message(converse_messages, "user", blocks)
                 continue
 
             if message.role == "assistant":
                 blocks: list[dict[str, Any]] = []
+                text_parts: list[str] = []
+                reasoning_texts: list[str] = []
                 if message.tool_calls:
                     for call in message.tool_calls:
                         function = call.get("function", call)
@@ -494,16 +612,32 @@ class BedrockAdapter(ProviderAdapter):
                                 }
                             }
                         )
+                    text_parts.append(_message_text(message.content))
+                    reasoning_texts.extend(_reasoning_texts(message.content))
                 else:
-                    text = _message_text(message.content)
-                    if text:
-                        blocks.append({"text": text})
+                    text_parts.append(_message_text(message.content))
+                    reasoning_texts.extend(_reasoning_texts(message.content))
+                for reasoning_text in reasoning_texts:
+                    if reasoning_text:
+                        blocks.append(
+                            {
+                                "reasoningContent": {
+                                    "reasoningText": {"text": reasoning_text},
+                                }
+                            }
+                        )
+                for text_part in text_parts:
+                    if text_part:
+                        blocks.append({"text": text_part})
                 if blocks:
                     _merge_message(converse_messages, "assistant", blocks)
                 continue
 
             if message.role == "tool":
-                output = _message_text(message.content)
+                content_blocks = _tool_result_content(
+                    message.content, provider=self.name
+                )
+                output_text = _message_text(message.content)
                 tool_use_id = str(message.tool_call_id or "")
                 _merge_message(
                     converse_messages,
@@ -512,8 +646,16 @@ class BedrockAdapter(ProviderAdapter):
                         {
                             "toolResult": {
                                 "toolUseId": tool_use_id,
-                                "content": [{"text": output}],
-                                "status": "success",
+                                "content": content_blocks,
+                                # LLMMessage carries no error marker; the
+                                # runner writes failures as "Permission …:",
+                                # "Unknown tool …" or "Tool '…' failed:"
+                                # (see _lowering.is_tool_error_text).
+                                "status": (
+                                    "error"
+                                    if is_tool_error_text(output_text)
+                                    else "success"
+                                ),
                             }
                         }
                     ],
@@ -534,6 +676,7 @@ class BedrockAdapter(ProviderAdapter):
         active_tools: dict[int, _ToolCallState] = {}
         pending_finish: str | None = None
         pending_usage: Usage | None = None
+        has_tool_calls = False
         # aiobotocore AioEventStream is an async iterable whose __anext__
         # is an async generator (yield). anext(stream) therefore returns
         # that generator, which cannot be awaited. aiter() is what
@@ -551,9 +694,15 @@ class BedrockAdapter(ProviderAdapter):
                     )
             except StopAsyncIteration:
                 if pending_finish is not None or pending_usage is not None:
+                    # OpenCode onHalt parity (bedrock-converse.ts:622-623):
+                    # pending "stop" with tool calls observed becomes
+                    # "tool_calls" so the runner dispatches tools.
+                    reason = pending_finish or "stop"
+                    if reason == "stop" and has_tool_calls:
+                        reason = "tool_calls"
                     yield Delta(
                         usage=pending_usage,
-                        finish_reason=pending_finish or "stop",
+                        finish_reason=reason,
                     )
                 return
             except TimeoutError as exc:
@@ -569,6 +718,8 @@ class BedrockAdapter(ProviderAdapter):
                 ) from exc
 
             for delta in self._event_to_deltas(event, active_tools):
+                if delta.tool_calls:
+                    has_tool_calls = True
                 yield delta
 
             stream_error = self._stream_error_from_event(event)
@@ -605,6 +756,7 @@ class BedrockAdapter(ProviderAdapter):
                     active_tools[index] = _ToolCallState(
                         str(tool_use.get("toolUseId", "") or ""),
                         str(tool_use.get("name", "") or ""),
+                        index,
                     )
 
         block_delta = event.get("contentBlockDelta")
@@ -639,7 +791,15 @@ class BedrockAdapter(ProviderAdapter):
         return deltas
 
     def _stream_error_from_event(self, event: dict[str, Any]) -> ProviderResponseError | ProviderRateLimitError | None:
-        """Raise mapped provider errors encoded in stream exception events."""
+        """Map provider errors encoded in stream exception events.
+
+        OpenCode ``bedrock-converse.ts`` parity: throttling is retryable,
+        internal/server/stream errors are retryable, and validation errors
+        are non-retryable only when they classify as context overflow
+        (``is_context_overflow``); other validation errors carry no retry
+        hint. Overflow errors also carry ``response_body`` so
+        :func:`compaction.is_context_overflow_error` detects them.
+        """
         throttling = event.get("throttlingException")
         if isinstance(throttling, dict):
             message = str(throttling.get("message", "") or "Bedrock throttling")
@@ -647,6 +807,7 @@ class BedrockAdapter(ProviderAdapter):
                 message,
                 provider=self.name,
                 status_code=429,
+                response_body=message[:2000],
                 is_retryable=True,
             )
 
@@ -661,6 +822,7 @@ class BedrockAdapter(ProviderAdapter):
                 return ProviderResponseError(
                     message,
                     provider=self.name,
+                    response_body=message[:2000],
                     is_retryable=True,
                 )
 
@@ -671,6 +833,7 @@ class BedrockAdapter(ProviderAdapter):
             return ProviderResponseError(
                 message,
                 provider=self.name,
+                response_body=message[:2000],
                 is_retryable=False if overflow else None,
             )
 
@@ -685,22 +848,27 @@ class BedrockAdapter(ProviderAdapter):
             return "tool_calls"
         if stop_reason == "max_tokens":
             return "length"
-        return "stop"
+        if stop_reason in ("content_filtered", "guardrail_intervened"):
+            return "content_filter"
+        return "unknown"
 
     @staticmethod
     def _map_usage(raw_usage: Any) -> Usage | None:
-        """Map Bedrock usage metadata to harness :class:`Usage`."""
+        """Map Bedrock usage metadata to harness :class:`Usage`.
+
+        ``inputTokens`` is the inclusive total (cache subsets included),
+        so cache counts are never added on top (OpenCode totalTokens
+        policy: honor the provider total, else input+output).
+        """
         if not isinstance(raw_usage, dict):
             return None
         prompt_tokens = int(raw_usage.get("inputTokens", 0) or 0)
         completion_tokens = int(raw_usage.get("outputTokens", 0) or 0)
-        cache_read = int(raw_usage.get("cacheReadInputTokens", 0) or 0)
-        cache_write = int(raw_usage.get("cacheWriteInputTokens", 0) or 0)
         reported_total = raw_usage.get("totalTokens")
         total_tokens = (
             int(reported_total)
             if reported_total is not None
-            else prompt_tokens + completion_tokens + cache_read + cache_write
+            else prompt_tokens + completion_tokens
         )
         return Usage(
             prompt_tokens=prompt_tokens,
