@@ -193,6 +193,14 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('process:removed', (data) => {
+      if (data.workspace_id === workspaceId.value) {
+        processesStore.handleRemoved(data)
+      }
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('files:list_result', (data) => {
       if (data.workspace_id === workspaceId.value) {
         fileExplorerStore.handleListResult(data.request_id, data.path, data.entries, data.error)

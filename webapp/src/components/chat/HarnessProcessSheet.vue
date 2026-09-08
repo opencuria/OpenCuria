@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
-import { Copy, RefreshCw, Square, X } from '@lucide/vue'
+import { Copy, Play, RefreshCw, RotateCcw, Square, Trash2, X } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
@@ -51,12 +51,34 @@ function stopping(processId: string): boolean {
   return processesStore.isStopping(processId)
 }
 
+function restarting(processId: string): boolean {
+  return processesStore.isRestarting(processId)
+}
+
+function deleting(processId: string): boolean {
+  return processesStore.isDeleting(processId)
+}
+
 async function handleRefresh(): Promise<void> {
   await processesStore.fetchProcesses(workspaceId.value)
 }
 
 async function handleStop(process: WorkspaceProcess): Promise<void> {
   await processesStore.stopProcess(workspaceId.value, process.id)
+}
+
+async function handleRestart(process: WorkspaceProcess): Promise<void> {
+  await processesStore.restartProcess(workspaceId.value, process.id)
+}
+
+async function handleStart(process: WorkspaceProcess): Promise<void> {
+  // Restart the stored config of a stopped process.
+  await processesStore.restartProcess(workspaceId.value, process.id)
+}
+
+async function handleDelete(process: WorkspaceProcess): Promise<void> {
+  if (!confirm(`Delete process '${process.name || process.id}' from the list?`)) return
+  await processesStore.deleteProcess(workspaceId.value, process.id)
 }
 
 async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
@@ -137,6 +159,38 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             {{ displayName(process) }}
           </span>
           <Badge :variant="statusVariant(process.status)">{{ process.status }}</Badge>
+          <span
+            v-if="(process.run_count ?? 0) > 1"
+            class="shrink-0 text-xs text-muted-foreground"
+            data-testid="composer-process-run"
+          >
+            run {{ process.run_count }}
+          </span>
+          <Button
+            v-if="!isRunning(process)"
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="restarting(process.id)"
+            title="Start process"
+            data-testid="composer-process-start"
+            @click="handleStart(process)"
+          >
+            <Play :size="13" />
+            Start
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="restarting(process.id)"
+            title="Restart process"
+            data-testid="composer-process-restart"
+            @click="handleRestart(process)"
+          >
+            <RotateCcw :size="13" />
+            Restart
+          </Button>
           <Button
             v-if="isRunning(process)"
             type="button"
@@ -149,6 +203,18 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
           >
             <Square :size="13" />
             Stop
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="deleting(process.id)"
+            title="Delete process"
+            data-testid="composer-process-delete"
+            @click="handleDelete(process)"
+          >
+            <Trash2 :size="13" />
+            Delete
           </Button>
         </div>
         <p

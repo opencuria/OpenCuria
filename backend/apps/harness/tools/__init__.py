@@ -6,8 +6,10 @@ from .base import ToolRegistry
 from .computeruse import COMPUTER_USE_TOOL_NAMES, computeruse_tools
 from .files import EditTool, ReadTool, WriteTool
 from .process import (
+    ProcessDeleteTool,
     ProcessGetTool,
     ProcessListTool,
+    ProcessRestartTool,
     ProcessStartTool,
     ProcessStopTool,
 )
@@ -36,6 +38,8 @@ def default_tool_registry() -> ToolRegistry:
         ProcessListTool(),
         ProcessGetTool(),
         ProcessStopTool(),
+        ProcessRestartTool(),
+        ProcessDeleteTool(),
     ):
         registry.register(tool)
     return registry
@@ -56,8 +60,10 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "ListTool",
+    "ProcessDeleteTool",
     "ProcessGetTool",
     "ProcessListTool",
+    "ProcessRestartTool",
     "ProcessStartTool",
     "ProcessStopTool",
     "QuestionTool",

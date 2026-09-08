@@ -505,6 +505,7 @@ class WorkspaceProcessRepository:
         name: str = "",
         created_by=None,
         session_id: uuid.UUID | None = None,
+        run_count: int = 1,
     ) -> WorkspaceProcess:
         """Create a new process record in running state."""
         from .enums import ProcessStatus
@@ -518,6 +519,7 @@ class WorkspaceProcessRepository:
             status=ProcessStatus.RUNNING,
             created_by=created_by,
             session_id=session_id,
+            run_count=run_count,
         )
 
     @staticmethod
@@ -542,6 +544,86 @@ class WorkspaceProcessRepository:
             .select_related("workspace", "workspace__runner", "created_by")
             .first()
         )
+
+    @staticmethod
+    def get_by_name(
+        workspace_id: uuid.UUID,
+        name: str,
+    ) -> WorkspaceProcess | None:
+        """Fetch a process by exact (case-sensitive) name in a workspace."""
+        return (
+            WorkspaceProcess.objects.filter(
+                workspace_id=workspace_id,
+                name=name,
+            )
+            .select_related("workspace", "workspace__runner", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def resolve_for_workspace(
+        workspace_id: uuid.UUID,
+        id_or_name: str | uuid.UUID,
+    ) -> WorkspaceProcess | None:
+        """Resolve a process by UUID first, then by exact name.
+
+        Never raises on unparsable UUIDs — falls back to name lookup.
+        """
+        candidate: WorkspaceProcess | None = None
+        try:
+            parsed = (
+                id_or_name
+                if isinstance(id_or_name, uuid.UUID)
+                else uuid.UUID(str(id_or_name))
+            )
+        except (ValueError, TypeError, AttributeError):
+            parsed = None
+        if parsed is not None:
+            candidate = WorkspaceProcessRepository.get_for_workspace(
+                parsed, workspace_id
+            )
+            if candidate is not None:
+                return candidate
+        return WorkspaceProcessRepository.get_by_name(
+            workspace_id, str(id_or_name)
+        )
+
+    @staticmethod
+    def update_for_restart(
+        process_id: uuid.UUID,
+        *,
+        command: str,
+        workdir: str,
+        log_path: str = "",
+        run_count: int = 1,
+        created_by=None,
+        session_id: uuid.UUID | None = None,
+    ) -> int:
+        """Reset a row for a new run on the same process id.
+
+        Keeps ``name`` unchanged; overwrites command/workdir, resets
+        lifecycle to RUNNING, clears pid/exit/ended_at, sets log path,
+        run count and a fresh started_at (auto_now_add needs explicit set).
+        Returns rows updated.
+        """
+        from .enums import ProcessStatus
+
+        fields: dict[str, Any] = {
+            "command": command,
+            "workdir": workdir or "/workspace",
+            "status": ProcessStatus.RUNNING,
+            "pid": None,
+            "exit_code": None,
+            "ended_at": None,
+            "log_path": log_path or "",
+            "run_count": run_count,
+            "started_at": timezone.now(),
+        }
+        if created_by is not None:
+            fields["created_by"] = created_by
+        if session_id is not None:
+            fields["session_id"] = session_id
+        return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
 
     @staticmethod
     def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[WorkspaceProcess]:
@@ -616,6 +698,17 @@ class WorkspaceProcessRepository:
     def delete(process_id: uuid.UUID) -> int:
         """Delete a process record. Returns rows deleted."""
         deleted, _ = WorkspaceProcess.objects.filter(id=process_id).delete()
+        return deleted
+
+    @staticmethod
+    def delete_for_workspace(
+        process_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+    ) -> int:
+        """Delete a process scoped to a workspace. Returns rows deleted."""
+        deleted, _ = WorkspaceProcess.objects.filter(
+            id=process_id, workspace_id=workspace_id
+        ).delete()
         return deleted
 
 

@@ -18,6 +18,7 @@ import type {
   FilesContentResultEvent,
   FilesUploadResultEvent,
   FilesDownloadResultEvent,
+  ProcessRemovedEvent,
   ProcessStatusChangedEvent,
 } from '@/types'
 import type {
@@ -169,6 +170,7 @@ type EventMap = {
   'runner:offline': RunnerOfflineEvent
   'runner:online': RunnerOnlineEvent
   'process:status_changed': ProcessStatusChangedEvent
+  'process:removed': ProcessRemovedEvent
 }
 
 type EventName = keyof EventMap

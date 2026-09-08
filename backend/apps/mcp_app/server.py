@@ -60,6 +60,8 @@ Tools and their required permissions
 - get_process            → workspaces:processes_read
 - start_process          → workspaces:processes_run
 - stop_process           → workspaces:processes_run
+- restart_process        → workspaces:processes_run
+- delete_process         → workspaces:processes_run
 """
 
 from __future__ import annotations
@@ -677,7 +679,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
                 "process_id": {
                     "type": "string",
-                    "description": "Background process UUID.",
+                    "description": "Background process UUID or exact name.",
                 },
             },
             "required": ["workspace_id", "process_id"],
@@ -685,7 +687,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="start_process",
-        description="Start a detached background process in a workspace.",
+        description="Start or restart a detached background process in a workspace (same name restarts the same app with a new log, run_count+1).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -701,7 +703,7 @@ _TOOLS: list[Tool] = [
                 },
                 "name": {"type": "string", "description": "Process display name."},
             },
-            "required": ["workspace_id", "command"],
+            "required": ["workspace_id", "command", "name"],
         },
     ),
     Tool(
@@ -713,7 +715,37 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
                 "process_id": {
                     "type": "string",
-                    "description": "Background process UUID.",
+                    "description": "Background process UUID or exact name.",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
+    Tool(
+        name="restart_process",
+        description="Restart a background process on the same row with a new log. Accepts UUID or name, keeps stored command/workdir.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID or exact name.",
+                },
+            },
+            "required": ["workspace_id", "process_id"],
+        },
+    ),
+    Tool(
+        name="delete_process",
+        description="Delete a background process (stops first if running). Accepts UUID or name.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "process_id": {
+                    "type": "string",
+                    "description": "Background process UUID or exact name.",
                 },
             },
             "required": ["workspace_id", "process_id"],
@@ -775,6 +807,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "get_process": APIKeyPermission.WORKSPACES_PROCESSES_READ,
     "start_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
     "stop_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
+    "restart_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
+    "delete_process": APIKeyPermission.WORKSPACES_PROCESSES_RUN,
 }
 
 
@@ -2542,6 +2576,7 @@ def _process_payload(process) -> dict:
         "log_path": getattr(process, "log_path", "") or "",
         "status": str(getattr(process, "status", "") or ""),
         "exit_code": getattr(process, "exit_code", None),
+        "run_count": getattr(process, "run_count", None),
         "started_at": started_at.isoformat() if started_at else None,
         "ended_at": ended_at.isoformat() if ended_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
@@ -2590,9 +2625,12 @@ async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
     """Return one background process scoped to an owned workspace."""
     from asgiref.sync import sync_to_async
 
-    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    parsed, error = _parse_process_args(args, "workspace_id")
     if error is not None:
         return error
+    process_id = args.get("process_id")
+    if not process_id:
+        return _error("process_id is required")
 
     workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
         api_key, org_id, parsed["workspace_id"]
@@ -2604,7 +2642,7 @@ async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
 
     svc = _runner_service()
     try:
-        process = await svc.get_process(workspace.id, parsed["process_id"])
+        process = await svc.get_process(workspace.id, str(process_id))
     except NotFoundError as exc:
         return _error(str(exc))
     except Exception as exc:
@@ -2617,10 +2655,13 @@ async def _call_start_process(api_key, org_id, args: dict) -> list[TextContent]:
     from asgiref.sync import sync_to_async
 
     command = (args.get("command") or "").strip()
+    name = (args.get("name") or "").strip()
     if not args.get("workspace_id"):
         return _error("workspace_id is required")
     if not command:
         return _error("command is required")
+    if not name:
+        return _error("name is required")
     parsed, error = _parse_process_args(args, "workspace_id")
     if error is not None:
         return error
@@ -2640,7 +2681,7 @@ async def _call_start_process(api_key, org_id, args: dict) -> list[TextContent]:
             command,
             workdir=str(args.get("workdir") or "/workspace"),
             env=dict(args.get("env") or {}),
-            name=str(args.get("name") or ""),
+            name=name,
             user=api_key.user,
         )
     except (NotFoundError, ConflictError, ValueError) as exc:
@@ -2654,9 +2695,12 @@ async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
     """Stop a background process in an owned workspace."""
     from asgiref.sync import sync_to_async
 
-    parsed, error = _parse_process_args(args, "workspace_id", "process_id")
+    parsed, error = _parse_process_args(args, "workspace_id")
     if error is not None:
         return error
+    process_id = args.get("process_id")
+    if not process_id:
+        return _error("process_id is required")
 
     workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
         api_key, org_id, parsed["workspace_id"]
@@ -2670,13 +2714,78 @@ async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
     try:
         process = await svc.stop_process(
             workspace.id,
-            parsed["process_id"],
+            str(process_id),
         )
     except (NotFoundError, ConflictError) as exc:
         return _error(str(exc))
     except Exception as exc:
         return _error(str(exc))
     return _text(_process_payload(process))
+
+
+async def _call_restart_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Restart a background process on the same row (new log)."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+    process_id = args.get("process_id")
+    if not process_id:
+        return _error("process_id is required")
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        process = await svc.restart_process(
+            workspace.id,
+            str(process_id),
+            user=api_key.user,
+        )
+    except (NotFoundError, ConflictError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text(_process_payload(process))
+
+
+async def _call_delete_process(api_key, org_id, args: dict) -> list[TextContent]:
+    """Delete a background process (stops first if running)."""
+    from asgiref.sync import sync_to_async
+
+    parsed, error = _parse_process_args(args, "workspace_id")
+    if error is not None:
+        return error
+    process_id = args.get("process_id")
+    if not process_id:
+        return _error("process_id is required")
+
+    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, parsed["workspace_id"]
+    )
+    if owned_error is not None:
+        return owned_error
+
+    from common.exceptions import ConflictError, NotFoundError
+
+    svc = _runner_service()
+    try:
+        deleted_id = await svc.delete_process(
+            workspace.id,
+            str(process_id),
+        )
+    except (NotFoundError, ConflictError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    return _text({"deleted": True, "process_id": str(deleted_id)})
 
 
 def _call_list_org_credential_services(
@@ -2821,6 +2930,8 @@ _TOOL_HANDLERS = {
     "get_process": _call_get_process,
     "start_process": _call_start_process,
     "stop_process": _call_stop_process,
+    "restart_process": _call_restart_process,
+    "delete_process": _call_delete_process,
 }
 
 

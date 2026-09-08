@@ -293,12 +293,19 @@ class DesktopClipboardReadOut(Schema):
 
 
 class ProcessStartIn(Schema):
-    """Request schema for starting a background process."""
+    """Request schema for starting a background process.
+
+    ``name`` is required and is the identity of the process within its
+    workspace: a new name creates a fresh row, an existing name restarts
+    the same row (upsert by name). Empty/blank names are rejected by the
+    service with ``ValueError`` (mapped to 400) — no ``min_length``
+    constraint here on purpose so empty names surface as 400, not 422.
+    """
 
     command: str
     workdir: str = "/workspace"
     env: dict[str, str] = {}
-    name: str = ""
+    name: str
 
 
 class ProcessOut(Schema):
@@ -313,6 +320,7 @@ class ProcessOut(Schema):
     log_path: str = ""
     status: str
     exit_code: int | None = None
+    run_count: int = 0
     started_at: datetime
     ended_at: datetime | None = None
     updated_at: datetime

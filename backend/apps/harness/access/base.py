@@ -224,10 +224,14 @@ class WorkspaceAccessor(abc.ABC):
     ) -> dict[str, Any]:
         """Start a detached background process in the workspace.
 
-        Returns a JSON-serializable dict (``process_id``, ``status``,
-        ``pid``, ``exit_code``, ``log_path``, ...). The backend assigns
-        the process id; logs stay in the workspace and are read back
-        via ``read_file`` using the returned ``log_path``.
+        ``name`` is the identity per workspace (required by the tool
+        layer): reusing an existing name restarts the same application
+        in place (stable id, new log, run count +1, command/workdir
+        overwritten). Returns a JSON-serializable dict (``process_id``,
+        ``status``, ``pid``, ``exit_code``, ``log_path``, ``run_count``,
+        ...). The backend assigns the process id; logs stay in the
+        workspace and are read back via ``read_file`` using the returned
+        ``log_path``.
         """
 
     @abc.abstractmethod
@@ -236,8 +240,30 @@ class WorkspaceAccessor(abc.ABC):
 
     @abc.abstractmethod
     async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one background process scoped to the workspace."""
+        """Return one background process scoped to the workspace.
+
+        ``process_id`` accepts the process UUID or its exact name.
+        """
 
     @abc.abstractmethod
     async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Stop a background process (SIGTERM, then SIGKILL after grace)."""
+        """Stop a background process (SIGTERM, then SIGKILL after grace).
+
+        ``process_id`` accepts the process UUID or its exact name.
+        """
+
+    @abc.abstractmethod
+    async def process_restart(self, process_id: str) -> dict[str, Any]:
+        """Restart a background process on the same row (stable id, new log).
+
+        ``process_id`` accepts the process UUID or its exact name; the
+        stored command/workdir are reused.
+        """
+
+    @abc.abstractmethod
+    async def process_delete(self, process_id: str) -> dict[str, Any]:
+        """Delete a background process from the list (stops first if running).
+
+        ``process_id`` accepts the process UUID or its exact name.
+        Returns ``{"process_id": ..., "deleted": True}``.
+        """

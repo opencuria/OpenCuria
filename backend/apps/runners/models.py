@@ -255,14 +255,19 @@ class WorkspaceProcess(models.Model):
     """
     A backend-tracked background process running inside a workspace.
 
-    The backend is the source of truth for process bookkeeping (status,
-    exit code, pid, log path). The runner owns the actual OS process and
+    The process ``name`` is the identity of a persistent application
+    within its workspace (unique per workspace, case-sensitive). Starting
+    an existing name reuses the same row (stable id), bumps ``run_count``
+    and writes a fresh log file — earlier logs are kept. The backend is
+    the source of truth for process bookkeeping (status, exit code, pid,
+    log path, run count). The runner owns the actual OS process and
     reports live state via ``harness:process_*`` RPC results and the
     per-workspace ``processes`` heartbeat payload. Log content stays
-    decentralised as a file inside the workspace
-    (``.opencuria/processes/<id>.log``); agents read it via file tools.
-    Processes are workspace-bound: stopping or removing the workspace
-    kills them. There is no auto-restart.
+    decentralised as files inside the workspace
+    (``.opencuria/processes/<id>.log``, ``<id>_r<run>.log`` for later
+    runs); agents read them via file tools. Processes are
+    workspace-bound: stopping or removing the workspace kills them.
+    There is no auto-restart — every run is explicit (same name).
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -275,7 +280,19 @@ class WorkspaceProcess(models.Model):
             "Deleting the workspace deletes its processes."
         ),
     )
-    name = models.CharField(max_length=255, blank=True, default="")
+    name = models.CharField(
+        max_length=255,
+        default="",
+        blank=False,
+        help_text=(
+            "Identity of this persistent application within its workspace. "
+            "Unique per workspace (case-sensitive); restarts reuse the row."
+        ),
+    )
+    run_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of starts of this named application.",
+    )
     command = models.TextField(
         help_text="Shell command the process was started with.",
     )
@@ -307,6 +324,12 @@ class WorkspaceProcess(models.Model):
     class Meta:
         db_table = "runners_workspace_process"
         ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                name="uniq_workspace_process_name",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"WorkspaceProcess({str(self.id)[:8]}, {self.status})"

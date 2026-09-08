@@ -239,18 +239,42 @@ class FakeAccessor(WorkspaceAccessor):
         env: dict[str, str] | None = None,
         name: str = "",
     ) -> dict[str, Any]:
-        """Return a canned started-process record."""
+        """Return a canned started-process record (upsert by name)."""
         self._maybe_fail()
+        cleaned_name = (name or "").strip()
+        if cleaned_name:
+            for record in self.processes.values():
+                if record.get("name") == cleaned_name:
+                    run_count = int(record.get("run_count") or 1) + 1
+                    record.update(
+                        {
+                            "command": command,
+                            "workdir": workdir,
+                            "pid": 1234 + run_count,
+                            "log_path": (
+                                "/workspace/.opencuria/processes/"
+                                f"{record['process_id']}_r{run_count}.log"
+                            ),
+                            "status": "running",
+                            "exit_code": None,
+                            "run_count": run_count,
+                        }
+                    )
+                    return dict(record)
         record = {
-            "process_id": "proc-1",
+            "process_id": f"proc-{len(self.processes) + 1}",
             "workspace_id": self.workspace_id,
-            "name": name or "",
+            "name": cleaned_name,
             "command": command,
             "workdir": workdir,
             "pid": 1234,
-            "log_path": "/workspace/.opencuria/processes/proc-1.log",
+            "log_path": (
+                "/workspace/.opencuria/processes/"
+                f"proc-{len(self.processes) + 1}.log"
+            ),
             "status": "running",
             "exit_code": None,
+            "run_count": 1,
         }
         self.processes[record["process_id"]] = record
         return dict(record)
@@ -260,28 +284,56 @@ class FakeAccessor(WorkspaceAccessor):
         self._maybe_fail()
         return [dict(record) for record in self.processes.values()]
 
+    def _resolve_process_record(self, process_id: str) -> dict[str, Any]:
+        """Resolve a canned record by id or exact name."""
+        key = (process_id or "").strip()
+        if key in self.processes:
+            return self.processes[key]
+        for record in self.processes.values():
+            if record.get("name") == key:
+                return record
+        raise RunnerAccessorError(
+            f"process lookup failed: unknown process {process_id}"
+        )
+
     async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one canned process record."""
+        """Return one canned process record (id or name)."""
         self._maybe_fail()
-        try:
-            return dict(self.processes[process_id])
-        except KeyError as exc:
-            raise RunnerAccessorError(
-                f"process_get failed: unknown process {process_id}"
-            ) from exc
+        return dict(self._resolve_process_record(process_id))
 
     async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Mark a canned process record stopped."""
+        """Mark a canned process record stopped (id or name)."""
         self._maybe_fail()
-        try:
-            record = self.processes[process_id]
-        except KeyError as exc:
-            raise RunnerAccessorError(
-                f"process_stop failed: unknown process {process_id}"
-            ) from exc
+        record = self._resolve_process_record(process_id)
         record["status"] = "exited"
         record["exit_code"] = 0
         return dict(record)
+
+    async def process_restart(self, process_id: str) -> dict[str, Any]:
+        """Restart a canned record: run_count+1, new pid/log (id or name)."""
+        self._maybe_fail()
+        record = self._resolve_process_record(process_id)
+        run_count = int(record.get("run_count") or 1) + 1
+        record.update(
+            {
+                "pid": 1234 + run_count,
+                "log_path": (
+                    "/workspace/.opencuria/processes/"
+                    f"{record['process_id']}_r{run_count}.log"
+                ),
+                "status": "running",
+                "exit_code": None,
+                "run_count": run_count,
+            }
+        )
+        return dict(record)
+
+    async def process_delete(self, process_id: str) -> dict[str, Any]:
+        """Delete a canned record (id or name)."""
+        self._maybe_fail()
+        record = self._resolve_process_record(process_id)
+        removed = self.processes.pop(record["process_id"])
+        return {"process_id": removed["process_id"], "deleted": True}
 
 
 @pytest.fixture

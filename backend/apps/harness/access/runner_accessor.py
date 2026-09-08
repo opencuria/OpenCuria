@@ -141,6 +141,7 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     ended_at = getattr(process, "ended_at", None)
     started_at = getattr(process, "started_at", None)
     updated_at = getattr(process, "updated_at", None)
+    run_count = getattr(process, "run_count", None)
     return {
         "process_id": str(getattr(process, "id", "")),
         "workspace_id": str(getattr(process, "workspace_id", "")),
@@ -151,18 +152,11 @@ def _serialize_process(process: Any) -> dict[str, Any]:
         "log_path": getattr(process, "log_path", "") or "",
         "status": str(getattr(process, "status", "") or ""),
         "exit_code": getattr(process, "exit_code", None),
+        "run_count": int(run_count) if run_count is not None else None,
         "started_at": started_at.isoformat() if started_at else None,
         "ended_at": ended_at.isoformat() if ended_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
     }
-
-
-def _parse_process_uuid(process_id: str) -> uuid.UUID:
-    """Parse *process_id* into a UUID or raise ValueError."""
-    try:
-        return uuid.UUID(str(process_id))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise ValueError(f"Invalid process_id: {process_id}") from exc
 
 
 class RunnerWorkspaceAccessor(WorkspaceAccessor):
@@ -613,7 +607,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 env=dict(env or {}),
                 name=name or "",
             )
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_start failed: {exc}") from exc
         return _serialize_process(process)
 
@@ -622,31 +621,90 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         service = self._runner_service()
         try:
             processes = await service.list_processes(self._workspace_uuid())
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_list failed: {exc}") from exc
         return [_serialize_process(process) for process in processes]
 
     async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one background process via RunnerService."""
-        parsed = _parse_process_uuid(process_id)
+        """Return one background process via RunnerService (UUID or name)."""
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.get_process(self._workspace_uuid(), parsed)
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            process = await service.get_process(self._workspace_uuid(), key)
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_get failed: {exc}") from exc
         return _serialize_process(process)
 
     async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Stop a background process via RunnerService."""
-        parsed = _parse_process_uuid(process_id)
+        """Stop a background process via RunnerService (UUID or name)."""
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
             process = await service.stop_process(
-                self._workspace_uuid(), parsed
+                self._workspace_uuid(), key
             )
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_stop failed: {exc}") from exc
         return _serialize_process(process)
+
+    async def process_restart(self, process_id: str) -> dict[str, Any]:
+        """Restart a background process via RunnerService (UUID or name)."""
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
+        service = self._runner_service()
+        try:
+            process = await service.restart_process(
+                self._workspace_uuid(), key
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
+            raise RunnerAccessorError(
+                f"process_restart failed: {exc}"
+            ) from exc
+        return _serialize_process(process)
+
+    async def process_delete(self, process_id: str) -> dict[str, Any]:
+        """Delete a background process via RunnerService (UUID or name)."""
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
+        service = self._runner_service()
+        try:
+            deleted_id = await service.delete_process(
+                self._workspace_uuid(), key
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
+            raise RunnerAccessorError(f"process_delete failed: {exc}") from exc
+        return {"process_id": str(deleted_id), "deleted": True}
 
 
 def _resolve_future(
