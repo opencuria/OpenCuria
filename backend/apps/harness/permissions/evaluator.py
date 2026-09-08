@@ -15,8 +15,10 @@ Matching rules:
 - Merge order across layers: global -> agent -> mode. ``deny``
   in any layer beats a merged allow; ``ask`` beats ``allow``
   (see ``_combine_decisions`` in ``runner``).
-- Default when nothing matches: ``allow``, except the reserved keys
-  ``external_directory`` and ``doom_loop`` which default to ``ask``.
+- Default when nothing matches: ``allow``, except the reserved key
+  ``doom_loop`` which defaults to ``ask``. ``external_directory``
+  falls through to normal tool rules unless an explicit reserved-key
+  rule is set (paths outside ``/workspace`` are allowed by default).
 - Filename-only secret matching: granular ``read`` rules are matched
   against both the full action path and its basename, so ``*.env``
   fires for ``/workspace/.env`` (OpenCode parity).
@@ -48,7 +50,7 @@ DENY: Decision = "deny"
 VALID_DECISIONS = (ALLOW, ASK, DENY)
 
 #: Reserved permission keys with an ``ask`` default instead of ``allow``.
-ASK_BY_DEFAULT_KEYS = ("external_directory", "doom_loop")
+ASK_BY_DEFAULT_KEYS = ("doom_loop",)
 
 #: Global baseline rules (OpenCode parity): secret files ask for
 #: approval while everything else reads freely. Order matters
@@ -206,7 +208,8 @@ class PermissionEvaluator:
             decision = self._lookup("external_directory", "")
             if decision is not None:
                 return decision
-            return Evaluation(decision=ASK, matched_rule="external_directory")
+            # No reserved-key rule: fall through to normal tool matching
+            # so bash/process denies (e.g. explore ``rm``) still apply.
         layers: list[tuple[str, list[PermissionRule]]] = [
             ("global", self._global),
             ("agent", self._agent),

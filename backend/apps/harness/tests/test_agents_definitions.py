@@ -122,7 +122,7 @@ def test_global_read_env_asks() -> None:
 
 
 def test_global_read_env_survives_build_wildcard() -> None:
-    """Base ask beats agent * allow (deny > ask > allow precedence)."""
+    """Build keeps .env and doom-loop asks; external paths stay allow."""
     from apps.harness.agents.definitions import get_agent
     from apps.harness.runner import HarnessRunner
     from apps.harness.tests.conftest import FakeAccessor
@@ -141,6 +141,20 @@ def test_global_read_env_survives_build_wildcard() -> None:
     )
     assert (
         runner._decide(agent, "read", "/workspace/a.py", "build") == "allow"
+    )
+    assert (
+        runner._decide(
+            agent,
+            "bash",
+            "cat /etc/passwd",
+            "build",
+            external_directory=True,
+        )
+        == "allow"
+    )
+    assert (
+        runner._decide(agent, "read", "/workspace/a.py", "build", doom_loop=True)
+        == "ask"
     )
 
 

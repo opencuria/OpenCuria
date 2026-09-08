@@ -512,8 +512,32 @@ async def test_explore_research_bash_skips_ask() -> None:
     assert any(event["type"] == "tool_completed" for event in events)
 
 
-async def test_external_directory_triggers_ask_gate() -> None:
-    """Bash touching /etc hits the ask gate even when bash allows."""
+async def test_external_directory_bash_allows_without_ask() -> None:
+    """Bash outside /workspace runs without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("ok"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=on_permission
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "ok"
+    assert called == []
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_explicit_ask_still_gates() -> None:
+    """An explicit external_directory ask rule still hits the permission gate."""
 
     async def approve(**kwargs):  # type: ignore[no-untyped-def]
         return "once"
@@ -526,15 +550,18 @@ async def test_external_directory_triggers_ask_gate() -> None:
     )
     events: list[dict[str, Any]] = []
     runner, opts = _runner(
-        provider, events, agent_rules={"bash": "allow"}, on_permission=approve
+        provider,
+        events,
+        agent_rules={"bash": "allow", "external_directory": "ask"},
+        on_permission=approve,
     )
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "gated"
     assert any(event["type"] == "tool_completed" for event in events)
 
 
-async def test_external_directory_auto_denies_without_callback() -> None:
-    """Without on_permission the external ask gate denies (failure path)."""
+async def test_external_directory_explicit_ask_denies_without_callback() -> None:
+    """Without on_permission an explicit external ask denies (failure path)."""
     provider = FakeProvider(
         [
             _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
@@ -542,11 +569,15 @@ async def test_external_directory_auto_denies_without_callback() -> None:
         ]
     )
     events: list[dict[str, Any]] = []
-    runner, opts = _runner(provider, events, agent_rules={"bash": "allow"})
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "allow", "external_directory": "ask"},
+    )
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "skipped"
     errors = [event for event in events if event["type"] == "tool_error"]
-    assert errors and "external directory" in errors[0]["error"]
+    assert errors and "denied by permissions" in errors[0]["error"]
 
 
 async def test_workspace_bash_skips_external_gate() -> None:
@@ -790,10 +821,13 @@ async def test_plan_mode_bash_and_process_auto_flow() -> None:
                 [
                     ("bash", {"command": "rm -rf /workspace/build"}, "c1"),
                     (
-                        "process_start",
-                        {"command": "python -m http.server 8000"},
-                        "c2",
-                    ),
+                            "process_start",
+                            {
+                                "command": "python -m http.server 8000",
+                                "name": "dev-server",
+                            },
+                            "c2",
+                        ),
                 ]
             ),
             _text_step("plan ready"),

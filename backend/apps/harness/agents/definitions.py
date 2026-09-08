@@ -33,6 +33,8 @@ Permission design (OpenCode-like defaults):
   stays ``allow`` except ``*.env`` / ``*.env.*`` which ``ask``
   (OpenCode parity); ``*.env.example`` stays ``allow``. Combined with
   deny > ask > allow precedence so agent ``* allow`` cannot override.
+  ``doom_loop`` defaults to ``ask``. Paths outside ``/workspace``
+  (``external_directory``) fall through to normal tool rules.
 """
 
 from __future__ import annotations

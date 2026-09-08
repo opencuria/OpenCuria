@@ -14,10 +14,10 @@ def test_default_is_allow() -> None:
     assert evaluator.evaluate("bash", "ls") == "allow"
 
 
-def test_reserved_defaults_are_ask() -> None:
-    """external_directory and doom_loop default to ask."""
+def test_reserved_defaults() -> None:
+    """doom_loop defaults to ask; external_directory falls through to allow."""
     evaluator = PermissionEvaluator()
-    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "ask"
+    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "allow"
     assert evaluator.evaluate("bash", "ls", doom_loop=True) == "ask"
 
 
@@ -109,12 +109,27 @@ def test_unknown_mode_ignored() -> None:
 
 
 def test_reserved_keys_overridable() -> None:
-    """Explicit rules can override the ask default for reserved keys."""
+    """Explicit rules can override reserved-key defaults."""
     evaluator = PermissionEvaluator(
-        global_rules={"doom_loop": "deny", "external_directory": "allow"}
+        global_rules={"doom_loop": "deny", "external_directory": "ask"}
     )
     assert evaluator.evaluate("bash", "x", doom_loop=True) == "deny"
-    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "allow"
+    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "ask"
+
+
+def test_external_directory_does_not_bypass_tool_deny() -> None:
+    """Fall-through still applies bash deny rules (e.g. explore)."""
+    evaluator = PermissionEvaluator(
+        agent_rules={"bash": {"*": "allow", "rm *": "deny"}}
+    )
+    assert (
+        evaluator.evaluate("bash", "rm /etc/passwd", external_directory=True)
+        == "deny"
+    )
+    assert (
+        evaluator.evaluate("bash", "cat /etc/passwd", external_directory=True)
+        == "allow"
+    )
 
 
 @pytest.mark.parametrize("decision", ["allow", "ask", "deny"])

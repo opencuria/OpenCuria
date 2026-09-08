@@ -109,7 +109,9 @@ LENGTH_TRUNCATION_NOTICE = (
 )
 
 #: Shell/background tools whose commands are scanned for absolute
-#: paths outside /workspace (``external_directory`` permission gate).
+#: paths outside /workspace (``external_directory`` reserved key).
+#: Default is allow; an explicit ``external_directory`` rule can still
+#: ask or deny.
 EXTERNAL_PATH_TOOLS = frozenset({"bash", "process_start"})
 
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
@@ -405,9 +407,9 @@ class HarnessRunner:
         decision (Phase 3 wiring decision). The permission *key* (not
         the tool name) is evaluated: ``write`` and ``list`` share keys
         with ``edit``/``read`` (see tools), so key-level rules apply
-        to them as well. ``external_directory`` routes through the
-        reserved ``ask``-by-default key so shell commands escaping
-        /workspace always hit the ask gate.
+        to them as well. ``external_directory`` only overrides when an
+        explicit reserved-key rule exists; otherwise normal tool rules
+        apply (paths outside /workspace are allowed by default).
         """
         key = self._permission_key(tool_name)
         agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
@@ -578,7 +580,7 @@ class HarnessRunner:
         approved = True
         if decision == DENY:
             approved = False
-        elif decision == ASK or doom_loop or external:
+        elif decision == ASK or doom_loop:
             approved = await self._resolve_ask(
                 tool_name=call.name,
                 action=action,
@@ -591,8 +593,6 @@ class HarnessRunner:
         if not approved:
             if doom_loop:
                 reason = "doom-loop guard denied"
-            elif external:
-                reason = "external directory access denied"
             else:
                 reason = "denied by permissions"
             await self._send(
