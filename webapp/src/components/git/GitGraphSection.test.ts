@@ -195,7 +195,10 @@ describe('GitGraphSection', () => {
 
     const detailsCell = wrapper.find('[data-testid="git-commit-details-row"] td')
     expect(detailsCell.exists()).toBe(true)
-    const padding = Number.parseInt(detailsCell.element.style.paddingLeft, 10)
+    const padding = Number.parseInt(
+      (detailsCell.element as HTMLElement).style.paddingLeft,
+      10,
+    )
     expect(padding).toBeGreaterThan(0)
     expect(store.expandedCommitHash).toBe(store.currentRepo!.commits[0]!.hash)
   })
