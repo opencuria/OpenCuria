@@ -251,8 +251,9 @@ and executed there. The runner exposes plain operations the harness calls via
 `harness:*` RPC:
 - **Lifecycle** — `task:create_workspace` (clone repos), stop/resume/remove.
 - **Harness exec/file RPC** — `harness:exec_stream`, `harness:exec_wait`,
-  `harness:read_file`, `harness:write_file`, `harness:list`, `harness:stat`
-  (all sandboxed to `/workspace`), plus terminal/desktop/files.
+  `harness:read_file`, `harness:write_file`, `harness:list`, `harness:stat`.
+  File paths are sandboxed to `/workspace`; exec `workdir` may be any
+  absolute path in the workspace VM/container. Plus terminal/desktop/files.
 - **Desktop display I/O** — `harness:desktop_action` (ensure/hold/release,
   screenshot, xdotool input, ffmpeg session recording). One shared X11
   display per workspace with independent viewer and computer-use leases.

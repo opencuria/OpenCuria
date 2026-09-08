@@ -66,6 +66,7 @@ from .base import (
     FileStat,
     WorkspaceAccessor,
     guess_mime_type,
+    sanitize_exec_workdir,
     sanitize_harness_path,
 )
 
@@ -333,7 +334,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ):  # type: ignore[override]
         """Stream command output; final chunk carries the exit code."""
-        safe_workdir = sanitize_harness_path(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir)
         normalized = _normalize_command(command)
         timeout_s = self._resolve_timeout(timeout)
         request_id = uuid.uuid4().hex
@@ -395,7 +396,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> ExecResult:
         """Execute a command and return the buffered result."""
-        safe_workdir = sanitize_harness_path(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir)
         normalized = _normalize_command(command)
         timeout_s = self._resolve_timeout(timeout)
         request_id = uuid.uuid4().hex
@@ -597,7 +598,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """Start a detached background process via RunnerService."""
         if not (command or "").strip():
             raise ValueError("command must not be empty")
-        safe_workdir = sanitize_harness_path(workdir or "/workspace")
+        safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
         service = self._runner_service()
         try:
             process = await service.start_process(

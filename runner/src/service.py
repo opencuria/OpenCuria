@@ -451,7 +451,7 @@ class WorkspaceService:
             workspace_id: Target workspace.
             process_id: Backend-assigned unique id (used for log/exit files).
             command: Shell command to run detached (non-empty).
-            workdir: Working directory, must be under ``/workspace``.
+            workdir: Working directory inside the workspace VM/container.
             env: Optional per-process environment overrides.
             name: Optional human-readable process name.
             log_path: Optional backend-assigned log path. Used only when it
@@ -466,7 +466,7 @@ class WorkspaceService:
         cleaned_process_id = self._sanitize_process_id(process_id)
         if not (command or "").strip():
             raise ValueError("command must not be empty")
-        safe_workdir = self._sanitize_path(workdir)
+        safe_workdir = self._sanitize_exec_workdir(workdir)
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
@@ -2785,6 +2785,19 @@ class WorkspaceService:
         return normalized
 
     @staticmethod
+    def _sanitize_exec_workdir(path: str) -> str:
+        """Normalize an exec working directory (not sandboxed to /workspace)."""
+        raw_input = path or ""
+        if "\x00" in raw_input or "\n" in raw_input:
+            raise ValueError(f"Invalid workdir: {path}")
+        raw = raw_input.strip() or "/workspace"
+        candidate = raw if os.path.isabs(raw) else f"/workspace/{raw}"
+        normalized = os.path.normpath(candidate)
+        if not os.path.isabs(normalized):
+            raise ValueError(f"Invalid workdir: {path}")
+        return normalized
+
+    @staticmethod
     def _sanitize_filename(filename: str) -> str:
         """Validate and return a safe filename for workspace uploads."""
         if not filename:
@@ -3321,7 +3334,7 @@ class WorkspaceService:
         streams into tagged base64 frames, then decodes them back into
         separate buffers. Returns ``(exit_code, stdout, stderr)``.
         """
-        safe_workdir = self._sanitize_path(workdir)
+        safe_workdir = self._sanitize_exec_workdir(workdir)
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
@@ -3370,7 +3383,7 @@ class WorkspaceService:
         Yields ``("stdout", text)`` / ``("stderr", text)`` tuples while the
         command runs, then a final ``("exit", str(exit_code))`` tuple.
         """
-        safe_workdir = self._sanitize_path(workdir)
+        safe_workdir = self._sanitize_exec_workdir(workdir)
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:

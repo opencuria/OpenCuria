@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..access.base import (
     HARNESS_WORKSPACE_ROOT,
-    sanitize_harness_path,
+    sanitize_exec_workdir,
     validate_harness_env,
 )
 from ..access.runner_accessor import RunnerAccessorError
@@ -128,7 +128,7 @@ class ProcessStartTool(Tool):
         if not name:
             raise ToolError("name must not be empty", tool=self.name)
         try:
-            workdir = sanitize_harness_path(args.workdir or ctx.directory)
+            workdir = sanitize_exec_workdir(args.workdir or ctx.directory)
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         try:

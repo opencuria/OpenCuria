@@ -306,6 +306,28 @@ async def test_bash_empty_env_ok() -> None:
     assert result.output == "ok"
 
 
+async def test_bash_external_workdir_allowed() -> None:
+    """workdir outside /workspace is forwarded to the accessor."""
+    accessor = FakeAccessor(
+        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
+    )
+    result = await BashTool().execute(
+        {"command": "pwd", "workdir": "/tmp"}, _ctx(accessor)
+    )
+    assert result.output == "ok"
+    assert accessor.exec_calls[0][1] == "/tmp"
+
+
+async def test_bash_invalid_workdir_rejected() -> None:
+    """A workdir with a newline is rejected before exec."""
+    accessor = FakeAccessor()
+    with pytest.raises(ToolError, match="Invalid workdir"):
+        await BashTool().execute(
+            {"command": "pwd", "workdir": "/tmp\n"}, _ctx(accessor)
+        )
+    assert accessor.exec_calls == []
+
+
 @pytest.mark.parametrize(
     "key", ["LD_PRELOAD", "PATH", "PYTHONPATH", "HOME", "ld_preload"]
 )

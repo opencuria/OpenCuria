@@ -1,8 +1,9 @@
 """WorkspaceAccessor ABC and shared types for harness workspace access.
 
 All harness tools reach workspace files and processes exclusively through
-this interface. The interface sandboxes every path to ``/workspace`` and
-keeps stdout and stderr of executed commands strictly separated.
+this interface. File paths are sandboxed to ``/workspace``; exec working
+directories may be any absolute path in the workspace VM/container.
+Stdout and stderr of executed commands stay strictly separated.
 """
 
 from __future__ import annotations
@@ -87,6 +88,28 @@ def sanitize_harness_path(path: str) -> str:
         HARNESS_WORKSPACE_ROOT + "/"
     ):
         raise ValueError(f"Path must be under /workspace: {path}")
+    return normalized
+
+
+def sanitize_exec_workdir(path: str) -> str:
+    """Normalize an exec working directory (not sandboxed to /workspace).
+
+    Relative paths resolve against ``/workspace`` and may escape it
+    after ``normpath``. Absolute paths anywhere in the workspace
+    filesystem are allowed. Empty input defaults to ``/workspace``.
+
+    Raises:
+        ValueError: If the path is empty after normalize, not absolute,
+            or contains a NUL/newline.
+    """
+    raw_input = path or ""
+    if "\x00" in raw_input or "\n" in raw_input:
+        raise ValueError(f"Invalid workdir: {path}")
+    raw = raw_input.strip() or HARNESS_WORKSPACE_ROOT
+    candidate = raw if os.path.isabs(raw) else f"{HARNESS_WORKSPACE_ROOT}/{raw}"
+    normalized = os.path.normpath(candidate)
+    if not os.path.isabs(normalized):
+        raise ValueError(f"Invalid workdir: {path}")
     return normalized
 
 

@@ -56,5 +56,14 @@ class CommandNormalizationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service._sanitize_path("/workspace_backup/secrets.txt")
 
+    def test_sanitize_exec_workdir_allows_tmp(self) -> None:
+        self.assertEqual(self.service._sanitize_exec_workdir("/tmp"), "/tmp")
+        self.assertEqual(self.service._sanitize_exec_workdir(""), "/workspace")
+        self.assertEqual(self.service._sanitize_exec_workdir("src"), "/workspace/src")
+
+    def test_sanitize_exec_workdir_rejects_newlines(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service._sanitize_exec_workdir("/tmp\n")
+
 if __name__ == "__main__":
     unittest.main()

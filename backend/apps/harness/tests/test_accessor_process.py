@@ -111,14 +111,22 @@ async def test_process_start_calls_service_and_serializes() -> None:
 
 
 async def test_process_start_rejects_bad_input() -> None:
-    """Empty commands and escaping workdirs raise ValueError."""
+    """Empty commands and invalid workdirs raise ValueError."""
     service = _service()
     accessor = _accessor(service)
     with pytest.raises(ValueError, match="command must not be empty"):
         await accessor.process_start("   ", name="web")
-    with pytest.raises(ValueError, match="under /workspace"):
-        await accessor.process_start("sleep 1", workdir="/etc", name="web")
+    with pytest.raises(ValueError, match="Invalid workdir"):
+        await accessor.process_start("sleep 1", workdir="/tmp\n", name="web")
     assert service.calls == []
+
+
+async def test_process_start_allows_external_workdir() -> None:
+    """workdir outside /workspace is forwarded to the service."""
+    service = _service()
+    accessor = _accessor(service)
+    await accessor.process_start("sleep 1", workdir="/tmp", name="web")
+    assert service.calls[0][3]["workdir"] == "/tmp"
 
 
 async def test_process_start_empty_name_maps_to_service_value_error() -> None:

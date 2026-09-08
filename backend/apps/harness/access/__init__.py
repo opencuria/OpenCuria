@@ -9,6 +9,7 @@ from .base import (
     FileContent,
     FileStat,
     WorkspaceAccessor,
+    sanitize_exec_workdir,
     sanitize_harness_path,
 )
 from .runner_accessor import RunnerWorkspaceAccessor, create_harness_accessor
@@ -22,5 +23,6 @@ __all__ = [
     "RunnerWorkspaceAccessor",
     "WorkspaceAccessor",
     "create_harness_accessor",
+    "sanitize_exec_workdir",
     "sanitize_harness_path",
 ]

@@ -73,6 +73,29 @@ async def test_exec_wait_result_and_request_id_correlation() -> None:
     assert payload["request_id"]
 
 
+async def test_exec_wait_allows_external_workdir() -> None:
+    """exec_wait forwards workdir outside /workspace to the runner."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "exit_code": 0,
+                "stdout": "/tmp",
+                "stderr": "",
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    accessor = _accessor(transport)
+    result = await accessor.exec_wait(["pwd"], workdir="/tmp")
+    assert result.stdout == "/tmp"
+    payload = _request_id(transport, "harness:exec_wait")
+    assert payload["workdir"] == "/tmp"
+
+
 async def test_exec_stream_chunks_stdout_stderr_and_exit() -> None:
     """exec_stream yields separated stdout/stderr chunks then exit code."""
     transport = FakeTransport()

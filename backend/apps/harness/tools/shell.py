@@ -12,6 +12,7 @@ from ..access.base import (
     BLOCKED_ENV_EXACT,
     BLOCKED_ENV_PREFIXES,
     HARNESS_WORKSPACE_ROOT,
+    sanitize_exec_workdir,
     sanitize_harness_path,
     validate_harness_env,
 )
@@ -189,7 +190,10 @@ class BashTool(Tool):
         args = validated
         if not args.command.strip():
             raise ToolError("command must not be empty", tool=self.name)
-        workdir = sanitize_harness_path(args.workdir or ctx.directory)
+        try:
+            workdir = sanitize_exec_workdir(args.workdir or ctx.directory)
+        except ValueError as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
         try:
             env = validate_harness_env(args.env or {})
         except ValueError as exc:

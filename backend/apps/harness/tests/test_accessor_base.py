@@ -7,6 +7,7 @@ import pytest
 from apps.harness.access.base import (
     HARNESS_WORKSPACE_ROOT,
     WorkspaceAccessor,
+    sanitize_exec_workdir,
     sanitize_harness_path,
 )
 
@@ -35,6 +36,22 @@ def test_sandbox_rejects_traversal(path: str) -> None:
     """Traversal outside /workspace raises ValueError."""
     with pytest.raises(ValueError, match="under /workspace"):
         sanitize_harness_path(path)
+
+
+def test_exec_workdir_allows_paths_outside_workspace() -> None:
+    """Exec workdirs may leave /workspace; relative paths still resolve."""
+    assert sanitize_exec_workdir("/tmp") == "/tmp"
+    assert sanitize_exec_workdir("/etc") == "/etc"
+    assert sanitize_exec_workdir("") == "/workspace"
+    assert sanitize_exec_workdir("src") == "/workspace/src"
+    assert sanitize_exec_workdir("/workspace/../tmp") == "/tmp"
+
+
+@pytest.mark.parametrize("path", ["\n/tmp", "/tmp\n", "/tmp\x00"])
+def test_exec_workdir_rejects_control_characters(path: str) -> None:
+    """NUL/newline in an exec workdir raises ValueError."""
+    with pytest.raises(ValueError, match="Invalid workdir"):
+        sanitize_exec_workdir(path)
 
 
 def test_workspace_accessor_is_abstract() -> None:
