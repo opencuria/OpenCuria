@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 
@@ -16,7 +14,6 @@ from apps.harness.providers.models_catalog import (
     list_merged_provider_models,
 )
 from apps.harness.services import ProviderConfigService
-from common.utils import decrypt_value
 
 
 def test_parse_model_ref_namespaced_and_legacy() -> None:
@@ -38,12 +35,31 @@ def test_chatgpt_models_static_catalog() -> None:
     """ChatGPT allowlist is namespaced and tool-capable."""
     models = chatgpt_models()
     assert len(models) == 4
-    assert models[0].id == "chatgpt/gpt-5.5"
+    assert [model.id for model in models] == [
+        "chatgpt/gpt-5.6-sol",
+        "chatgpt/gpt-5.6-terra",
+        "chatgpt/gpt-5.6-luna",
+        "chatgpt/gpt-6-astra",
+    ]
     assert models[0].provider == "chatgpt"
     assert models[0].supports_tools is True
-    assert models[0].context_length == 400_000
+    assert models[0].context_length == 1_050_000
     assert models[0].max_output_tokens == 128_000
-    assert "xhigh" in models[0].reasoning_efforts
+    assert models[0].reasoning_efforts == (
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert models[3].reasoning_efforts == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
 
 
 def test_bedrock_models_region_prefixing() -> None:
@@ -96,7 +112,7 @@ def test_list_merged_provider_models_only_connected(organization) -> None:
     providers = {model.provider for model in models}
     assert "chatgpt" in providers
     assert "openrouter" not in providers
-    assert any(model.id == "chatgpt/gpt-5.5" for model in models)
+    assert any(model.id == "chatgpt/gpt-5.6-sol" for model in models)
     clear_models_cache(str(organization.id))
 
 
