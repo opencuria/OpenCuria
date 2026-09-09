@@ -149,6 +149,19 @@ class HarnessService:
                 user_id=user_id,
                 organization_id=organization_id,
             )
+        normalized_effort = normalize_reasoning_effort(reasoning_effort)
+        if not normalized_effort:
+            # Fall back to the org default effort (best-effort: a missing
+            # ProviderConfig must never break session creation).
+            try:
+                from .services import ProviderConfigService
+
+                config = ProviderConfigService().get_config(organization_id)
+                normalized_effort = normalize_reasoning_effort(
+                    config.default_effort or ""
+                )
+            except NotFoundError:
+                normalized_effort = ""
         session = self.sessions.create(
             workspace_id=workspace_id,
             organization_id=organization_id,
@@ -156,7 +169,7 @@ class HarnessService:
             mode=normalized_mode,
             agent_name=resolved_agent,
             model=(model or "").strip(),
-            reasoning_effort=normalize_reasoning_effort(reasoning_effort),
+            reasoning_effort=normalized_effort,
             parent_id=parent_id,
             skill_ids=normalized_skills,
         )
@@ -409,6 +422,12 @@ class HarnessService:
         if not model:
             raise ValueError("No model configured for harness run")
         config_service.provider_connected_for_model(organization_id, model)
+        if not (session.reasoning_effort or "").strip():
+            # Früher Fallback, damit der Assistant-Snapshot den Default trägt
+            # (Altsessions ohne Effort liefen sonst mit Default, snapshotteten aber "").
+            session.reasoning_effort = normalize_reasoning_effort(
+                config.default_effort or ""
+            )
         return model
 
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
@@ -1040,6 +1059,9 @@ class HarnessService:
         small_model = ""
         computer_use_model = ""
         default_model = ""
+        small_effort = ""
+        computer_use_effort = ""
+        default_effort = ""
         if provider is not None:
             model_resolver = StaticModelResolver(provider).resolve
         elif self._provider_factory is not None:
@@ -1054,6 +1076,11 @@ class HarnessService:
             small_model = (config.small_model or "").strip()
             computer_use_model = (config.computer_use_model or "").strip()
             default_model = (config.default_model or "").strip()
+            small_effort = normalize_reasoning_effort(config.small_effort or "")
+            computer_use_effort = normalize_reasoning_effort(
+                config.computer_use_effort or ""
+            )
+            default_effort = normalize_reasoning_effort(config.default_effort or "")
             if session.model:
                 model_default = session.model
             else:
@@ -1061,6 +1088,10 @@ class HarnessService:
             if not model_default:
                 raise ValueError("No model configured for harness run")
             session.model = model_default
+            if not (session.reasoning_effort or "").strip() and default_effort:
+                # Robust fallback for sessions created before effort defaults
+                # existed (or while no config existed at create time).
+                session.reasoning_effort = default_effort
         model = session.model or "default"
         context_length = 0
         model_max_output_tokens = 0
@@ -1124,6 +1155,9 @@ class HarnessService:
                 small_model=small_model,
                 computer_use_model=computer_use_model,
                 default_model=default_model,
+                small_effort=small_effort,
+                computer_use_effort=computer_use_effort,
+                default_effort=default_effort,
             ),
         )
         try:
@@ -1831,6 +1865,7 @@ class HarnessService:
             small_model = (config.small_model or "").strip()
             if not small_model:
                 return
+            small_effort = normalize_reasoning_effort(config.small_effort or "")
             if self._provider_factory is not None:
                 model_resolver = StaticModelResolver(
                     self._provider_factory(organization_id)
@@ -1843,6 +1878,11 @@ class HarnessService:
             runner = HarnessRunner(
                 model_resolver=model_resolver,
                 tools=default_tool_registry(),
+                chat_options=(
+                    ChatOptions(reasoning_effort=small_effort)
+                    if small_effort
+                    else None
+                ),
             )
             result = await runner.run(
                 prompt,
@@ -1875,8 +1915,17 @@ class HarnessService:
         small_model: str,
         computer_use_model: str = "",
         default_model: str = "",
+        small_effort: str = "",
+        computer_use_effort: str = "",
+        default_effort: str = "",
     ) -> Any:
-        """Create a child session, run it to completion, return tool output."""
+        """Create a child session, run it to completion, return tool output.
+
+        Effort routing: the ``computeruse`` agent gets *computer_use_effort*,
+        every other subagent gets *small_effort* (title/background style
+        small-model work). When the respective default is empty, ``""`` is
+        passed so :meth:`create_session` falls back to *default_effort*.
+        """
         from .computeruse_loop import sanitize_run_id, truncate_task_output
         from .tools.base import ToolError, ToolResult
         from .tools.subagents import TASK_OUTPUT_MAX_CHARS
@@ -1908,6 +1957,13 @@ class HarnessService:
         parent_assistant = await sync_to_async(self.messages.model.objects.get)(
             id=message_id
         )
+        if agent == "computeruse":
+            child_effort = normalize_reasoning_effort(computer_use_effort)
+        else:
+            child_effort = normalize_reasoning_effort(small_effort)
+        if not child_effort:
+            # create_session falls back to config.default_effort for "".
+            child_effort = normalize_reasoning_effort(default_effort)
         child = await sync_to_async(self.create_session)(
             workspace_id=parent.workspace_id,
             organization_id=parent.organization_id,
@@ -1915,6 +1971,7 @@ class HarnessService:
             agent_name=agent,
             mode=parent.mode,
             model=model,
+            reasoning_effort=child_effort,
             title=args.description[:255],
             parent_id=parent.id,
         )

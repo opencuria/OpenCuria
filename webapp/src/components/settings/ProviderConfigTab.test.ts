@@ -5,6 +5,7 @@ import { toast } from 'vue-sonner'
 
 import ProviderConfigTab from './ProviderConfigTab.vue'
 import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
+import ProviderModelCombobox from './ProviderModelCombobox.vue'
 import * as harnessApi from '@/services/harness.api'
 import * as providerCatalog from '@/lib/providerCatalog'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -38,8 +39,8 @@ const catalog: ProviderModel[] = [
     id: 'openrouter/model-big',
     name: 'Big',
     provider: 'openrouter',
-    reasoning_efforts: ['high'],
-    default_effort: 'high',
+    reasoning_efforts: ['low', 'medium', 'high'],
+    default_effort: 'medium',
     supports_tools: true,
     context_length: 128_000,
     max_output_tokens: 8_192,
@@ -95,6 +96,9 @@ describe('ProviderConfigTab', () => {
       default_model: 'openrouter/model-big',
       small_model: 'chatgpt/gpt-5',
       computer_use_model: 'openrouter/model-big',
+      default_effort: 'high',
+      small_effort: '',
+      computer_use_effort: 'high',
       has_api_key: true,
       api_key_hint: '••••cdef',
     })
@@ -113,6 +117,9 @@ describe('ProviderConfigTab', () => {
       default_model: data.default_model ?? '',
       small_model: data.small_model ?? '',
       computer_use_model: data.computer_use_model ?? '',
+      default_effort: data.default_effort ?? '',
+      small_effort: data.small_effort ?? '',
+      computer_use_effort: data.computer_use_effort ?? '',
       has_api_key: true,
       api_key_hint: '••••cdef',
     }))
@@ -167,6 +174,9 @@ describe('ProviderConfigTab', () => {
       default_model: 'chatgpt/gpt-5',
       small_model: 'chatgpt/gpt-5',
       computer_use_model: 'openrouter/model-big',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: 'high',
     })
     expect(toast.success).toHaveBeenCalledWith('Default models saved', { duration: 5000 })
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
@@ -212,6 +222,38 @@ describe('ProviderConfigTab', () => {
 
     expect(getProviderConfigMock).toHaveBeenCalledTimes(2)
     expect(wrapper.findComponent(ProviderConnectionDialog).props('open')).toBe(false)
+  })
+
+  it('marks dirty and saves when effort changes on the default picker', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+
+    const combos = wrapper.findAllComponents(ProviderModelCombobox)
+    expect(combos.length).toBe(3)
+    const defaultCombo = combos[0]
+    // Configures default_effort='high'; cleared prop-effort below must dirty the form.
+    expect(defaultCombo?.props('effort')).toBe('high')
+
+    const saveButton = wrapper.find('[data-testid="save-default-models"]')
+    expect(saveButton.attributes('disabled')).toBeDefined()
+
+    await defaultCombo?.vm.$emit('update:effort', '')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Unsaved changes')
+    expect(saveButton.attributes('disabled')).toBeUndefined()
+
+    await saveButton.trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConfigMock).toHaveBeenCalledWith({
+      default_model: 'openrouter/model-big',
+      small_model: 'chatgpt/gpt-5',
+      computer_use_model: 'openrouter/model-big',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: 'high',
+    })
   })
 
   it('shows a hint when no provider is connected', async () => {

@@ -102,3 +102,31 @@ def test_build_adapter_uses_stored_connection(organization) -> None:
 
     with pytest.raises(NotFoundError):
         service.build_adapter(organization.id, provider_name="nope")
+
+
+@pytest.mark.django_db
+def test_save_config_persists_reasoning_efforts(organization) -> None:
+    """Effort defaults are stored on create and updated on upsert."""
+    service = ProviderConfigService()
+    config = service.save_config(
+        organization_id=organization.id,
+        default_model="m1",
+        default_effort="high",
+        small_effort="low",
+        computer_use_effort="medium",
+    )
+    assert config.default_effort == "high"
+    assert config.small_effort == "low"
+    assert config.computer_use_effort == "medium"
+
+    updated = service.save_config(
+        organization_id=organization.id,
+        default_model="m1",
+        default_effort="low",
+        small_effort="medium",
+        computer_use_effort="high",
+    )
+    assert updated.id == config.id
+    assert updated.default_effort == "low"
+    assert updated.small_effort == "medium"
+    assert updated.computer_use_effort == "high"

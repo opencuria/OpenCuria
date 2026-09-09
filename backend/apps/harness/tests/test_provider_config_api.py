@@ -676,3 +676,35 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
         client.post(start_url)
     assert client.post(cancel_url).status_code == 204
     assert client.get(status_url).status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_org_provider_config_efforts_roundtrip(provider_setup):
+    """PUT/GET persist the reasoning-effort defaults."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
+    )
+    put = client.put(
+        ORG_URL,
+        data=json.dumps(
+            {
+                "default_model": "model-a",
+                "default_effort": "high",
+                "small_effort": "low",
+                "computer_use_effort": "medium",
+            }
+        ),
+        content_type="application/json",
+    )
+    assert put.status_code == 200, put.content[:500]
+    body = put.json()
+    assert body["default_effort"] == "high"
+    assert body["small_effort"] == "low"
+    assert body["computer_use_effort"] == "medium"
+
+    get = client.get(ORG_URL)
+    assert get.status_code == 200, get.content[:500]
+    stored = get.json()
+    assert stored["default_effort"] == "high"
+    assert stored["small_effort"] == "low"
+    assert stored["computer_use_effort"] == "medium"

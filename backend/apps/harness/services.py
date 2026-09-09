@@ -71,8 +71,11 @@ class ProviderConfigService:
         default_model: str = "",
         small_model: str = "",
         computer_use_model: str = "",
+        default_effort: str = "",
+        small_effort: str = "",
+        computer_use_effort: str = "",
     ) -> ProviderConfig:
-        """Create or update org-wide default models.
+        """Create or update org-wide default models and reasoning efforts.
 
         ``api_key`` and ``base_url`` are accepted for backward compatibility
         and routed to the OpenRouter :class:`ProviderConnection` when provided.
@@ -87,6 +90,9 @@ class ProviderConfigService:
                 default_model=default_model.strip(),
                 small_model=small_model.strip(),
                 computer_use_model=computer_use_model.strip(),
+                default_effort=default_effort.strip(),
+                small_effort=small_effort.strip(),
+                computer_use_effort=computer_use_effort.strip(),
             )
             log.info("provider_config_created", organization_id=str(organization_id))
         else:
@@ -95,6 +101,9 @@ class ProviderConfigService:
                 default_model=default_model.strip(),
                 small_model=small_model.strip(),
                 computer_use_model=computer_use_model.strip(),
+                default_effort=default_effort.strip(),
+                small_effort=small_effort.strip(),
+                computer_use_effort=computer_use_effort.strip(),
             )
             log.info("provider_config_updated", organization_id=str(organization_id))
 

@@ -85,6 +85,24 @@ class ProviderConfig(models.Model):
         blank=True,
         help_text="Model for the computeruse subagent; falls back to default_model.",
     )
+    default_effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Default reasoning effort for default model.",
+    )
+    small_effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Default reasoning effort for small model.",
+    )
+    computer_use_effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Default reasoning effort for computer-use model.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

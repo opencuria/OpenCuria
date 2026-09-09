@@ -44,6 +44,9 @@ class ProviderConfigRepository:
         default_model: str = "",
         small_model: str = "",
         computer_use_model: str = "",
+        default_effort: str = "",
+        small_effort: str = "",
+        computer_use_effort: str = "",
     ) -> ProviderConfig:
         """Create a provider config for an organization."""
         return ProviderConfig.objects.create(
@@ -51,6 +54,9 @@ class ProviderConfigRepository:
             default_model=default_model,
             small_model=small_model,
             computer_use_model=computer_use_model,
+            default_effort=default_effort,
+            small_effort=small_effort,
+            computer_use_effort=computer_use_effort,
         )
 
     @staticmethod
@@ -60,6 +66,9 @@ class ProviderConfigRepository:
         default_model: str | None = None,
         small_model: str | None = None,
         computer_use_model: str | None = None,
+        default_effort: str | None = None,
+        small_effort: str | None = None,
+        computer_use_effort: str | None = None,
     ) -> ProviderConfig:
         """Update provider config fields."""
         update_fields = ["updated_at"]
@@ -72,6 +81,15 @@ class ProviderConfigRepository:
         if computer_use_model is not None:
             config.computer_use_model = computer_use_model
             update_fields.append("computer_use_model")
+        if default_effort is not None:
+            config.default_effort = default_effort
+            update_fields.append("default_effort")
+        if small_effort is not None:
+            config.small_effort = small_effort
+            update_fields.append("small_effort")
+        if computer_use_effort is not None:
+            config.computer_use_effort = computer_use_effort
+            update_fields.append("computer_use_effort")
         config.save(update_fields=update_fields)
         return config
 
