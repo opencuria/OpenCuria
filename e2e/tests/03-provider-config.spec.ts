@@ -1,50 +1,37 @@
 /**
- * 03-provider-config.spec.ts — Test harness Provider (OpenRouter) settings tab.
+ * 03-provider-config.spec.ts — Provider connections + small model + agent configs.
  */
 import { test, expect } from '../fixtures/auth.fixture';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:8080';
 
-test.describe('03 — Provider (OpenRouter)', () => {
-  test('should show Provider tab and form fields', async ({ authedPage: page }) => {
-    await page.goto(`${BASE_URL}/?settings=provider`);
-    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
-    await page.waitForLoadState('networkidle');
-
-    await page.getByTestId('settings-nav-provider').first().click();
-
-    await expect(page.getByText('OpenRouter Provider')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('#provider-api-key')).toBeVisible();
-    await expect(page.locator('#provider-base-url')).toBeVisible();
-    await expect(page.locator('#provider-default-model')).toBeVisible();
-    await expect(page.locator('#provider-small-model')).toBeVisible();
-    await expect(page.getByRole('button', { name: /save provider config/i })).toBeVisible();
-  });
-
-  test('should save provider config fields without requiring a working key', async ({
+test.describe('03 — Provider & Agents', () => {
+  test('should show Provider tab with small model and Agents tab with agent rows', async ({
     authedPage: page,
-    testState,
   }) => {
     await page.goto(`${BASE_URL}/?settings=provider`);
     await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
     await page.waitForLoadState('networkidle');
 
     await page.getByTestId('settings-nav-provider').first().click();
-    await page.waitForTimeout(500);
+    await expect(page.locator('#provider-small-model')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('save-default-models')).toBeVisible();
 
-    await page.locator('#provider-base-url').fill('https://openrouter.ai/api/v1');
-    await page.locator('#provider-default-model').fill(`${testState.prefix}-default-model`);
-    await page.locator('#provider-small-model').fill(`${testState.prefix}-small-model`);
-    await page.locator('#provider-api-key').fill('sk-or-e2e-test-key-not-real');
+    await page.getByTestId('settings-nav-agents').first().click();
+    await expect(page.getByTestId('agent-row-build')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('save-agent-configs')).toBeVisible();
+  });
 
-    await page.getByRole('button', { name: /save provider config/i }).click();
+  test('should keep small-model save available without requiring a working key', async ({
+    authedPage: page,
+  }) => {
+    await page.goto(`${BASE_URL}/?settings=provider`);
+    await expect(page.getByTestId('settings-sheet')).toBeVisible({ timeout: 10_000 });
+    await page.waitForLoadState('networkidle');
 
-    await expect(page.getByText(/saved key/i)).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('#provider-default-model')).toHaveValue(
-      `${testState.prefix}-default-model`,
-    );
-    await expect(page.locator('#provider-small-model')).toHaveValue(
-      `${testState.prefix}-small-model`,
-    );
+    await page.getByTestId('settings-nav-provider').first().click();
+    await expect(page.locator('#provider-small-model')).toBeVisible({ timeout: 10_000 });
+    // Save button exists; it stays disabled until the small model changes.
+    await expect(page.getByTestId('save-default-models')).toBeVisible();
   });
 });

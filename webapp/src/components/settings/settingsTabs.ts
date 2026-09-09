@@ -15,6 +15,7 @@ export const SETTINGS_QUERY_PARAM = 'settings'
 export type SettingsTabId =
   | 'general'
   | 'provider'
+  | 'agents'
   | 'skills'
   | 'credentials'
   | 'api-keys'
@@ -35,6 +36,8 @@ export function resolveSettingsTab(tab: unknown): SettingsTabId {
       return 'general'
     case 'provider':
       return 'provider'
+    case 'agents':
+      return 'agents'
     case 'skills':
       return 'skills'
     case 'credentials':

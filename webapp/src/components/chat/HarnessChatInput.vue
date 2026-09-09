@@ -22,7 +22,7 @@ import {
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
 import { getProviderConfig } from '@/services/harness.api'
-import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
+import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
@@ -30,6 +30,7 @@ import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
 import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useHarnessStore } from '@/stores/harness'
 import {
   applyMentionCandidate,
   consumeSlashQuery,
@@ -93,11 +94,12 @@ const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
 const catalog = ref<ProviderModel[]>([])
-const orgDefaultModel = ref('')
 const modelLoading = ref(false)
 const providerMissing = ref(false)
 const selectedSkillIds = ref<string[]>([])
 const filePickerOpen = ref(false)
+const harness = useHarnessStore()
+let applyingDefaults = false
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
@@ -118,11 +120,7 @@ const CONTEXT_RING_RADIUS = 6
 const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
 
 const contextLimit = computed(() => {
-  const catalogModel = resolveCatalogModel(
-    catalog.value,
-    localModel.value,
-    orgDefaultModel.value,
-  )
+  const catalogModel = resolveCatalogModel(catalog.value, localModel.value)
   return catalogModel?.context_length ?? 0
 })
 
@@ -167,13 +165,30 @@ function openProviderSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
 }
 
+function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolean } = {}): void {
+  const defaults = harness.agentDefault(mode)
+  if (!defaults.model && !defaults.effort) return
+  applyingDefaults = true
+  try {
+    localModel.value = defaults.model
+    const catalogModel = resolveCatalogModel(catalog.value, defaults.model)
+    localEffort.value = catalogModel ? snapEffort(catalogModel, defaults.effort) : defaults.effort
+    emit('update:model', localModel.value)
+    emit('update:effort', localEffort.value)
+  } finally {
+    applyingDefaults = false
+  }
+  if (opts.resetDirty) harness.composerDirty = false
+}
+
 async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
   try {
     const config = await getProviderConfig()
-    orgDefaultModel.value = config.default_model || ''
-    catalog.value = await loadProviderModelsCached()
+    void config
+    const [models] = await Promise.all([loadProviderModelsCached(), harness.loadAgentConfigs()])
+    catalog.value = models
     if (catalog.value.length === 0) {
       providerMissing.value = true
     }
@@ -182,6 +197,9 @@ async function loadProviderModels(): Promise<void> {
     catalog.value = []
   } finally {
     modelLoading.value = false
+  }
+  if (!harness.composerDirty && !props.model && !props.effort) {
+    applyModeDefaults(localMode.value, { resetDirty: true })
   }
 }
 
@@ -208,8 +226,7 @@ onBeforeUnmount(() => {
 watch(
   () => props.workspaceId,
   () => {
-    localModel.value = ''
-    emit('update:model', '')
+    harness.composerDirty = false
     prompt.value = loadFromCache()
     void loadProviderModels()
   },
@@ -260,8 +277,13 @@ function handleSend(): void {
 }
 
 function setMode(mode: HarnessSessionMode): void {
+  if (mode === localMode.value) {
+    emit('update:mode', mode)
+    return
+  }
   localMode.value = mode
   emit('update:mode', mode)
+  if (!harness.composerDirty) applyModeDefaults(mode, { resetDirty: true })
 }
 
 function toggleMode(): void {
@@ -271,11 +293,13 @@ function toggleMode(): void {
 function setModel(value: string): void {
   localModel.value = value
   emit('update:model', value)
+  if (!applyingDefaults) harness.markComposerDirty()
 }
 
 function setEffort(value: string): void {
   localEffort.value = value
   emit('update:effort', value)
+  if (!applyingDefaults) harness.markComposerDirty()
 }
 
 function addSkill(id: string): void {
@@ -714,7 +738,6 @@ function onComposerKeydown(e: KeyboardEvent): void {
           :effort="localEffort"
           :models="catalog"
           :loading="modelLoading"
-          :default-model="orgDefaultModel"
           :disabled="disabled"
           @update:model="setModel"
           @update:effort="setEffort"

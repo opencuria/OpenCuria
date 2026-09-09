@@ -59,10 +59,11 @@ describe('harnessModels', () => {
     expect(snapEffort(undefined, 'high')).toBe('')
   })
 
-  it('resolves Auto to the org default catalog row', () => {
+  it('resolves empty model id via the default fallback only', () => {
     const models = [withEffort, plain]
     expect(resolveCatalogModel(models, '', 'openrouter/think')?.id).toBe('openrouter/think')
     expect(resolveCatalogModel(models, 'chatgpt/plain')?.id).toBe('chatgpt/plain')
+    expect(resolveCatalogModel(models, '')).toBeUndefined()
   })
 
   it('maps provider ids to display names', () => {
@@ -75,8 +76,9 @@ describe('harnessModels', () => {
   it('formats model and effort for conversation cards', () => {
     const models = [withEffort, plain]
     expect(formatHarnessModelEffort('openrouter/think', 'high', models)).toBe('Think High')
-    expect(formatHarnessModelEffort('', 'medium', models, 'openrouter/think')).toBe('Auto Medium')
+    expect(formatHarnessModelEffort('', 'medium', models, 'openrouter/think')).toBe('Think Medium')
     expect(formatHarnessModelEffort('chatgpt/plain', '', models)).toBe('Plain')
+    expect(formatHarnessModelEffort('', '', [], '')).toBe('')
     expect(formatHarnessModelEffort('missing/id', 'low', [])).toBe('missing/id Low')
   })
 })

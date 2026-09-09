@@ -355,12 +355,16 @@ watch(
     syncSessionQuery(sessionId)
     if (!sessionId) {
       composerMode.value = 'build'
+      harness.resetComposerDirty()
       return
     }
     void harness.fetchParts(sessionId)
     void harness.fetchTodos(sessionId)
     const session = harness.sessions.find((item) => item.id === sessionId)
-    if (session) composerMode.value = session.mode
+    if (session) {
+      composerMode.value = session.mode
+      harness.loadSessionIntoComposer(session.model ?? '', session.reasoning_effort ?? '')
+    }
   },
   { immediate: true },
 )
@@ -494,8 +498,8 @@ function handleOpenSubtask(childSessionId: string): void {
           mention-controlled
           :mention-active-index="mentionActiveIndex"
           @update:mode="composerMode = $event"
-          @update:model="harness.modelInput = $event"
-          @update:effort="harness.effortInput = $event"
+          @update:model="harness.setComposerModel($event)"
+          @update:effort="harness.setComposerEffort($event)"
           @send="handleSend"
           @stop="handleStop"
           @toggle-context="handleToggleContext"

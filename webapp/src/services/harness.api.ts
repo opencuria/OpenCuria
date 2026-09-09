@@ -20,15 +20,33 @@ import type {
   HarnessTodo,
 } from '@/types/harness'
 import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
+import type { AgentConfig as LibAgentConfig } from '@/lib/harnessAgents'
 import { ApiRequestError, get, post, put, del, patch, requestWithStatus } from './api'
+
+export type AgentConfig = LibAgentConfig
+
+export interface AgentConfigIn {
+  agent: string
+  description?: string
+  model?: string
+  effort?: string
+  inherit_model?: boolean
+  effort_strategy?: string
+}
 
 export interface HarnessProviderConfig {
   base_url: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   default_model: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   small_model: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   computer_use_model: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   default_effort: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   small_effort: string
+  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   computer_use_effort: string
   has_api_key: boolean
   api_key_hint: string
@@ -183,6 +201,14 @@ export function resolveHarnessQuestion(
 
 export function listProviderModels(): Promise<ProviderModel[]> {
   return get<ProviderModel[]>('/provider-config/models/')
+}
+
+export function listAgentConfigs(): Promise<AgentConfig[]> {
+  return get<AgentConfig[]>('/agent-configs/')
+}
+
+export function saveAgentConfigs(configs: AgentConfigIn[]): Promise<AgentConfig[]> {
+  return put<AgentConfig[]>('/agent-configs/', { configs })
 }
 
 export function getProviderConfig(): Promise<HarnessProviderConfig> {

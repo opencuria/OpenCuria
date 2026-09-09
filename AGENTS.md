@@ -370,7 +370,7 @@ The backend follows **Clean Architecture** with strict separation of concerns:
 | `HarnessSession`/`HarnessMessage`/`HarnessPart` | Agent conversation with streamed block parts (text/reasoning/tool/step/subtask/patch). |
 | `PermissionRequest` | Tool permission gate (`pending`/`approved`/`rejected`, once/always). |
 | `Todo` | Session todo list. |
-| `ProviderConfig` | Org-wide default models only (`default_model`, `small_model`, `computer_use_model`). |
+| `ProviderConfig` | Org-wide small model only (`small_model`/`small_effort` for background tasks like titles; primary/subagent models live in `AgentConfig`). |
 | `ProviderConnection` | One row per (organization, provider). Fernet-encrypted credentials JSON + non-secret config JSON (e.g. `base_url`, `region`). |
 
 **Credentials models** (`apps/credentials/models.py`):
@@ -388,7 +388,7 @@ Six separate routers:
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
 | `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
-| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT/DELETE /provider-config/` (default models; deprecated OpenRouter `api_key`/`base_url` aliases), `GET /provider-config/models/`, `GET /provider-config/providers/`, `PUT/DELETE /provider-config/providers/{provider}/`, ChatGPT OAuth `POST .../chatgpt/oauth/start|cancel/`, `GET .../oauth/status/` |
+| `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT /agent-configs/` (per-agent model/effort: `build`/`plan` primary fixed, subagents `inherit_model` + `effort_strategy`; `small_model` title/compaction helper), `GET/PUT/DELETE /provider-config/` (small model only; legacy `default_model`/`computer_use_model` aliases preserved), `GET /provider-config/models/`, `GET /provider-config/providers/`, `PUT/DELETE /provider-config/providers/{provider}/`, ChatGPT OAuth `POST .../chatgpt/oauth/start|cancel/`, `GET .../oauth/status/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 

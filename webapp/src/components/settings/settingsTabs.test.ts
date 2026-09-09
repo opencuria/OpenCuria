@@ -5,6 +5,7 @@ describe('resolveSettingsTab', () => {
   it('maps current sheet tabs onto themselves', () => {
     expect(resolveSettingsTab('general')).toBe('general')
     expect(resolveSettingsTab('provider')).toBe('provider')
+    expect(resolveSettingsTab('agents')).toBe('agents')
     expect(resolveSettingsTab('skills')).toBe('skills')
     expect(resolveSettingsTab('credentials')).toBe('credentials')
     expect(resolveSettingsTab('api-keys')).toBe('api-keys')

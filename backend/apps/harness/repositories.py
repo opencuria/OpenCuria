@@ -12,6 +12,7 @@ from datetime import datetime
 from django.utils import timezone
 
 from .models import (
+    AgentConfig,
     HarnessMessage,
     HarnessPart,
     HarnessSession,
@@ -98,6 +99,52 @@ class ProviderConfigRepository:
         """Delete the provider config for an organization."""
         count, _ = ProviderConfig.objects.filter(organization_id=org_id).delete()
         return count
+
+
+class AgentConfigRepository:
+    """Data access for AgentConfig records."""
+
+    @staticmethod
+    def get_by_org_agent(org_id: uuid.UUID, agent: str) -> AgentConfig | None:
+        """Fetch one agent config for an organization."""
+        return AgentConfig.objects.filter(organization_id=org_id, agent=agent).first()
+
+    @staticmethod
+    def list_by_org(org_id: uuid.UUID) -> list[AgentConfig]:
+        """List all agent configs for an organization."""
+        return list(AgentConfig.objects.filter(organization_id=org_id).order_by("agent"))
+
+    @staticmethod
+    def upsert(
+        org,
+        agent: str,
+        *,
+        model: str = "",
+        effort: str = "",
+        inherit_model: bool = False,
+        effort_strategy: str = "fixed",
+    ) -> AgentConfig:
+        """Create or update the agent config for an org+agent."""
+        org_id = getattr(org, "id", org)
+        config, _ = AgentConfig.objects.update_or_create(
+            organization_id=org_id,
+            agent=agent,
+            defaults={
+                "model": model,
+                "effort": effort,
+                "inherit_model": inherit_model,
+                "effort_strategy": effort_strategy,
+            },
+        )
+        return config
+
+    @staticmethod
+    def delete_by_org_agent(org_id: uuid.UUID, agent: str) -> bool:
+        """Delete one agent config; return whether a row was removed."""
+        deleted, _ = AgentConfig.objects.filter(
+            organization_id=org_id, agent=agent
+        ).delete()
+        return deleted > 0
 
 
 class ProviderConnectionRepository:

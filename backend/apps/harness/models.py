@@ -24,6 +24,7 @@ from .enums import ProviderType
 from .permissions.models import PermissionAllowlist, PermissionRequest
 
 __all__ = [
+    "AgentConfig",
     "HarnessMessage",
     "HarnessPart",
     "HarnessSession",
@@ -49,6 +50,55 @@ class HarnessSessionMode(models.TextChoices):
 
     PLAN = "plan", "Plan"
     BUILD = "build", "Build"
+
+
+class AgentEffortStrategy(models.TextChoices):
+    """How a subagent derives its reasoning effort."""
+
+    FIXED = "fixed", "Fixed"
+    INHERIT = "inherit", "Inherit"
+    LOWEST = "lowest", "Lowest"
+    MEDIUM = "medium", "Medium"
+    HIGHEST = "highest", "Highest"
+
+
+class AgentConfig(models.Model):
+    """
+    Per-agent model/effort config (one row per org+agent).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_agent_configs",
+        help_text="Owning organization.",
+    )
+    agent = models.CharField(max_length=64, help_text="Agent name (build, plan, ...).")
+    model = models.CharField(max_length=255, default="", blank=True)
+    effort = models.CharField(max_length=50, default="", blank=True)
+    inherit_model = models.BooleanField(default=False)
+    effort_strategy = models.CharField(
+        max_length=16,
+        choices=AgentEffortStrategy.choices,
+        default=AgentEffortStrategy.FIXED,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_agent_config"
+        ordering = ["agent"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "agent"],
+                name="harness_agent_config_org_agent_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the config."""
+        return f"AgentConfig(org={self.organization_id}, {self.agent})"
 
 
 class ProviderConfig(models.Model):
