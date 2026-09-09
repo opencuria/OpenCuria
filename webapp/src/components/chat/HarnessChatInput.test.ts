@@ -73,6 +73,9 @@ describe('HarnessChatInput', () => {
       default_model: 'openrouter/model-big',
       small_model: 'openrouter/model-small',
       computer_use_model: 'openrouter/model-cu',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: '',
       has_api_key: true,
       api_key_hint: '',
     })
@@ -170,6 +173,9 @@ describe('HarnessChatInput', () => {
       default_model: 'openrouter/model-big',
       small_model: 'openrouter/model-small',
       computer_use_model: 'openrouter/model-cu',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: '',
       has_api_key: true,
       api_key_hint: '',
     })

@@ -244,6 +244,9 @@ class ProviderConfigIn(Schema):
     default_model: str = ""
     small_model: str = ""
     computer_use_model: str = ""
+    default_effort: str = ""
+    small_effort: str = ""
+    computer_use_effort: str = ""
 
 
 class ProviderConfigOut(Schema):
@@ -253,6 +256,9 @@ class ProviderConfigOut(Schema):
     default_model: str
     small_model: str
     computer_use_model: str
+    default_effort: str
+    small_effort: str
+    computer_use_effort: str
     has_api_key: bool
     api_key_hint: str
 
@@ -382,6 +388,9 @@ def _provider_config_to_out(config, org_id: uuid.UUID) -> ProviderConfigOut:  # 
         default_model=config.default_model or "",
         small_model=config.small_model or "",
         computer_use_model=config.computer_use_model or "",
+        default_effort=config.default_effort or "",
+        small_effort=config.small_effort or "",
+        computer_use_effort=config.computer_use_effort or "",
         has_api_key=has_key,
         api_key_hint=hint,
     )
@@ -595,6 +604,9 @@ def _save_org_provider_config(
         default_model=payload.default_model or "",
         small_model=payload.small_model or "",
         computer_use_model=payload.computer_use_model or "",
+        default_effort=payload.default_effort or "",
+        small_effort=payload.small_effort or "",
+        computer_use_effort=payload.computer_use_effort or "",
     )
     return _provider_config_to_out(config, org_id)
 

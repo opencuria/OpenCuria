@@ -27,6 +27,9 @@ export interface HarnessProviderConfig {
   default_model: string
   small_model: string
   computer_use_model: string
+  default_effort: string
+  small_effort: string
+  computer_use_effort: string
   has_api_key: boolean
   api_key_hint: string
 }
@@ -37,6 +40,9 @@ export interface HarnessProviderConfigIn {
   default_model?: string
   small_model?: string
   computer_use_model?: string
+  default_effort?: string
+  small_effort?: string
+  computer_use_effort?: string
 }
 
 export interface ProviderConnection {
@@ -192,6 +198,9 @@ export function saveProviderConfig(
     default_model: data.default_model ?? '',
     small_model: data.small_model ?? '',
     computer_use_model: data.computer_use_model ?? '',
+    default_effort: data.default_effort ?? '',
+    small_effort: data.small_effort ?? '',
+    computer_use_effort: data.computer_use_effort ?? '',
   })
 }
 

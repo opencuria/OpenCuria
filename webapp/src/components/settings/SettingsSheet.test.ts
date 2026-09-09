@@ -172,6 +172,9 @@ describe('SettingsSheet', () => {
       default_model: 'model-big',
       small_model: 'model-small',
       computer_use_model: 'model-cu',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: '',
       has_api_key: true,
       api_key_hint: '••••cdef',
     })

@@ -38,6 +38,9 @@ const catalog = ref<ProviderModel[]>([])
 const defaultModel = ref('')
 const smallModel = ref('')
 const computerUseModel = ref('')
+const defaultEffort = ref('')
+const smallEffort = ref('')
+const computerUseEffort = ref('')
 
 const activeProvider = ref<ProviderId | null>(null)
 
@@ -69,7 +72,10 @@ const defaultsDirty = computed(
   () =>
     defaultModel.value.trim() !== (config.value?.default_model ?? '') ||
     smallModel.value.trim() !== (config.value?.small_model ?? '') ||
-    computerUseModel.value.trim() !== (config.value?.computer_use_model ?? ''),
+    computerUseModel.value.trim() !== (config.value?.computer_use_model ?? '') ||
+    defaultEffort.value.trim() !== (config.value?.default_effort ?? '') ||
+    smallEffort.value.trim() !== (config.value?.small_effort ?? '') ||
+    computerUseEffort.value.trim() !== (config.value?.computer_use_effort ?? ''),
 )
 
 function applyConfig(next: HarnessProviderConfig): void {
@@ -77,6 +83,9 @@ function applyConfig(next: HarnessProviderConfig): void {
   defaultModel.value = next.default_model || ''
   smallModel.value = next.small_model || ''
   computerUseModel.value = next.computer_use_model || ''
+  defaultEffort.value = next.default_effort || ''
+  smallEffort.value = next.small_effort || ''
+  computerUseEffort.value = next.computer_use_effort || ''
 }
 
 async function refreshAll(): Promise<void> {
@@ -103,6 +112,9 @@ async function loadState(): Promise<void> {
     defaultModel.value = ''
     smallModel.value = ''
     computerUseModel.value = ''
+    defaultEffort.value = ''
+    smallEffort.value = ''
+    computerUseEffort.value = ''
     const message = e instanceof Error ? e.message : 'Failed to load provider settings'
     if (!message.toLowerCase().includes('not found')) {
       error.value = message
@@ -146,6 +158,9 @@ async function handleSaveDefaults(): Promise<void> {
       default_model: defaultModel.value.trim(),
       small_model: smallModel.value.trim(),
       computer_use_model: computerUseModel.value.trim(),
+      default_effort: defaultEffort.value.trim(),
+      small_effort: smallEffort.value.trim(),
+      computer_use_effort: computerUseEffort.value.trim(),
     })
     applyConfig(saved)
     notifications.success('Default models saved')
@@ -248,7 +263,7 @@ onMounted(() => {
 
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
-            class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
               <Label for="provider-default-model" class="block text-sm font-medium">
@@ -256,18 +271,20 @@ onMounted(() => {
               </Label>
               <p class="text-sm text-muted-foreground">Primary model for new chat sessions.</p>
             </div>
-            <div class="w-full shrink-0 sm:w-72">
+            <div class="w-full shrink-0 sm:w-80">
               <ProviderModelCombobox
                 input-id="provider-default-model"
                 v-model="defaultModel"
+                :effort="defaultEffort"
                 :models="catalog"
                 empty-hint="Connect a provider to browse models, or enter a provider/model id manually."
+                @update:effort="defaultEffort = $event"
               />
             </div>
           </div>
 
           <div
-            class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
               <Label for="provider-small-model" class="block text-sm font-medium">
@@ -277,18 +294,20 @@ onMounted(() => {
                 Background tasks like session titles and compaction.
               </p>
             </div>
-            <div class="w-full shrink-0 sm:w-72">
+            <div class="w-full shrink-0 sm:w-80">
               <ProviderModelCombobox
                 input-id="provider-small-model"
                 v-model="smallModel"
+                :effort="smallEffort"
                 :models="catalog"
                 empty-hint="Connect a provider to browse models, or enter a provider/model id manually."
+                @update:effort="smallEffort = $event"
               />
             </div>
           </div>
 
           <div
-            class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
               <Label for="provider-computer-use-model" class="block text-sm font-medium">
@@ -298,12 +317,14 @@ onMounted(() => {
                 Desktop automation with the computer-use agent.
               </p>
             </div>
-            <div class="w-full shrink-0 sm:w-72">
+            <div class="w-full shrink-0 sm:w-80">
               <ProviderModelCombobox
                 input-id="provider-computer-use-model"
                 v-model="computerUseModel"
+                :effort="computerUseEffort"
                 :models="catalog"
                 empty-hint="Connect a provider to browse models, or enter a provider/model id manually."
+                @update:effort="computerUseEffort = $event"
               />
             </div>
           </div>
