@@ -151,17 +151,29 @@ class HarnessService:
             )
         normalized_effort = normalize_reasoning_effort(reasoning_effort)
         if not normalized_effort:
-            # Fall back to the org default effort (best-effort: a missing
-            # ProviderConfig must never break session creation).
+            # Fall back to the AgentConfig fixed effort of the resolved agent
+            # (inherit-mode leaves "" so the caller decides). Legacy
+            # ProviderConfig.default_effort is only a deprecated fallback.
             try:
-                from .services import ProviderConfigService
-
-                config = ProviderConfigService().get_config(organization_id)
-                normalized_effort = normalize_reasoning_effort(
-                    config.default_effort or ""
+                defaults = HarnessService._agent_defaults(
+                    organization_id, resolved_agent
                 )
-            except NotFoundError:
+                if not defaults["inherit_model"]:
+                    normalized_effort = normalize_reasoning_effort(
+                        defaults["effort"]
+                    )
+            except Exception:
                 normalized_effort = ""
+            if not normalized_effort:
+                try:
+                    from .services import ProviderConfigService
+
+                    config = ProviderConfigService().get_config(organization_id)
+                    normalized_effort = normalize_reasoning_effort(
+                        config.default_effort or ""
+                    )
+                except NotFoundError:
+                    normalized_effort = ""
         session = self.sessions.create(
             workspace_id=workspace_id,
             organization_id=organization_id,
@@ -395,6 +407,50 @@ class HarnessService:
             }
         return result
 
+    @staticmethod
+    def _agent_configs_map(organization_id: uuid.UUID) -> dict[str, dict[str, Any]]:
+        """Return AgentConfig rows keyed by agent name (best-effort)."""
+        try:
+            from .services import AgentConfigService
+
+            return {
+                str(row.get("agent", "")): row
+                for row in AgentConfigService().list_configs(organization_id)
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _agent_defaults(
+        organization_id: uuid.UUID, agent_name: str
+    ) -> dict[str, Any]:
+        """Return AgentConfig defaults for *agent_name* (best-effort).
+
+        Keys: ``model``, ``effort``, ``inherit_model``, ``effort_strategy``.
+        Missing rows fall back to ``""``/inherit for subagents.
+        """
+        agent = (agent_name or "").strip().lower() or "build"
+        try:
+            from .services import AgentConfigService
+
+            for row in AgentConfigService().list_configs(organization_id):
+                if str(row.get("agent", "")) == agent:
+                    return {
+                        "model": str(row.get("model") or "").strip(),
+                        "effort": normalize_reasoning_effort(
+                            str(row.get("effort") or "")
+                        ),
+                        "inherit_model": bool(row.get("inherit_model", False)),
+                        "effort_strategy": str(
+                            row.get("effort_strategy") or "fixed"
+                        ).strip()
+                        or "fixed",
+                    }
+        except Exception:
+            pass
+        return {"model": "", "effort": "", "inherit_model": True,
+                "effort_strategy": "inherit"}
+
     def validate_provider_for_run(
         self,
         organization_id: uuid.UUID,
@@ -418,15 +474,21 @@ class HarnessService:
 
         config_service = ProviderConfigService()
         config = config_service.get_config(organization_id)
-        model = session_model or (config.default_model or "").strip()
+        agent_name = (session.agent_name or session.mode or "build").strip().lower()
+        agent_defaults = self._agent_defaults(organization_id, agent_name)
+        agent_model = "" if agent_defaults["inherit_model"] else agent_defaults["model"]
+        model = session_model or agent_model or (config.default_model or "").strip()
         if not model:
             raise ValueError("No model configured for harness run")
         config_service.provider_connected_for_model(organization_id, model)
         if not (session.reasoning_effort or "").strip():
             # Früher Fallback, damit der Assistant-Snapshot den Default trägt
             # (Altsessions ohne Effort liefen sonst mit Default, snapshotteten aber "").
+            agent_effort = (
+                "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
+            )
             session.reasoning_effort = normalize_reasoning_effort(
-                config.default_effort or ""
+                agent_effort or config.default_effort or ""
             )
         return model
 
@@ -1057,11 +1119,7 @@ class HarnessService:
         key = str(session.id)
         model_resolver = None
         small_model = ""
-        computer_use_model = ""
-        default_model = ""
-        small_effort = ""
-        computer_use_effort = ""
-        default_effort = ""
+        agent_configs: dict[str, dict[str, Any]] = {}
         if provider is not None:
             model_resolver = StaticModelResolver(provider).resolve
         elif self._provider_factory is not None:
@@ -1074,24 +1132,33 @@ class HarnessService:
             resolver = await sync_to_async(config_service.build_resolver)(organization_id)
             model_resolver = resolver.resolve
             small_model = (config.small_model or "").strip()
-            computer_use_model = (config.computer_use_model or "").strip()
-            default_model = (config.default_model or "").strip()
-            small_effort = normalize_reasoning_effort(config.small_effort or "")
-            computer_use_effort = normalize_reasoning_effort(
-                config.computer_use_effort or ""
+            agent_configs = await sync_to_async(
+                HarnessService._agent_configs_map
+            )(organization_id)
+            agent_name = (session.agent_name or session.mode or "build").strip().lower()
+            row = agent_configs.get(agent_name, {})
+            agent_model = (
+                "" if row.get("inherit_model") else str(row.get("model") or "").strip()
             )
-            default_effort = normalize_reasoning_effort(config.default_effort or "")
+            agent_effort = (
+                "" if row.get("inherit_model") else normalize_reasoning_effort(
+                    str(row.get("effort") or "")
+                )
+            )
             if session.model:
                 model_default = session.model
             else:
-                model_default = config.default_model
+                model_default = agent_model or config.default_model
             if not model_default:
                 raise ValueError("No model configured for harness run")
             session.model = model_default
-            if not (session.reasoning_effort or "").strip() and default_effort:
+            run_effort = normalize_reasoning_effort(
+                agent_effort or config.default_effort or ""
+            )
+            if not (session.reasoning_effort or "").strip() and run_effort:
                 # Robust fallback for sessions created before effort defaults
                 # existed (or while no config existed at create time).
-                session.reasoning_effort = default_effort
+                session.reasoning_effort = run_effort
         model = session.model or "default"
         context_length = 0
         model_max_output_tokens = 0
@@ -1152,12 +1219,7 @@ class HarnessService:
                 ctx=ctx,
                 subtask_id=subtask_id,
                 organization_id=organization_id,
-                small_model=small_model,
-                computer_use_model=computer_use_model,
-                default_model=default_model,
-                small_effort=small_effort,
-                computer_use_effort=computer_use_effort,
-                default_effort=default_effort,
+                agent_configs=dict(agent_configs),
             ),
         )
         try:
@@ -1904,6 +1966,24 @@ class HarnessService:
         except Exception:  # pragma: no cover - title must never break runs
             log.warning("harness_title_generation_failed", session_id=str(session_id))
 
+    @staticmethod
+    def _catalog_efforts_for_model(
+        organization_id: uuid.UUID, model_id: str
+    ) -> list[str]:
+        """Return catalog reasoning efforts for *model_id* (best-effort)."""
+        try:
+            from .services import ProviderConfigService
+
+            models = ProviderConfigService().list_models(organization_id)
+        except Exception:
+            return []
+        target = (model_id or "").strip()
+        ns = namespaced_model_id(target)
+        for item in models:
+            if item.id in {target, ns}:
+                return list(getattr(item, "reasoning_efforts", None) or [])
+        return []
+
     async def _run_subagent_tool(
         self,
         *,
@@ -1912,7 +1992,9 @@ class HarnessService:
         ctx: Any,
         subtask_id: str,
         organization_id: uuid.UUID,
-        small_model: str,
+        agent_configs: dict[str, dict[str, Any]] | None = None,
+        # Deprecated legacy kwargs (ignored, kept for backward compat).
+        small_model: str = "",
         computer_use_model: str = "",
         default_model: str = "",
         small_effort: str = "",
@@ -1921,27 +2003,48 @@ class HarnessService:
     ) -> Any:
         """Create a child session, run it to completion, return tool output.
 
-        Effort routing: the ``computeruse`` agent gets *computer_use_effort*,
-        every other subagent gets *small_effort* (title/background style
-        small-model work). When the respective default is empty, ``""`` is
-        passed so :meth:`create_session` falls back to *default_effort*.
+        Model/effort routing comes from AgentConfig: custom mode uses the
+        fixed config model/effort; inherit mode reuses the parent run model
+        (``args.model_override`` always wins). Effort strategies
+        lowest/medium/highest resolve against the catalog efforts of the
+        inherited model; ``inherit`` reuses the parent reasoning effort.
         """
         from .computeruse_loop import sanitize_run_id, truncate_task_output
         from .tools.base import ToolError, ToolResult
         from .tools.subagents import TASK_OUTPUT_MAX_CHARS
 
         agent = (args.agent or args.subagent_type or "general").strip().lower()
-        if agent == "computeruse":
-            model = (
-                args.model_override
-                or computer_use_model
-                or ctx.model
-                or parent.model
-                or default_model
-                or ""
-            ).strip()
+        configs = dict(agent_configs or {}) or self._agent_configs_map(
+            organization_id
+        )
+        # Deprecated compat: explicit legacy kwargs act as fixed config
+        # when no AgentConfig row exists (old tests callers).
+        if agent not in configs and (computer_use_model or default_model or small_model):
+            if agent == "computeruse" and computer_use_model:
+                configs[agent] = {"model": computer_use_model,
+                                  "effort": computer_use_effort or default_effort,
+                                  "inherit_model": False, "effort_strategy": "fixed"}
+            elif agent not in ("general", "explore", "computeruse") and default_model:
+                configs[agent] = {"model": default_model,
+                                  "effort": default_effort,
+                                  "inherit_model": False, "effort_strategy": "fixed"}
+        row = configs.get(agent, {})
+        inherit = bool(row.get("inherit_model", True))
+        fixed_model = str(row.get("model") or "").strip()
+        fixed_effort = normalize_reasoning_effort(str(row.get("effort") or ""))
+        strategy = str(row.get("effort_strategy") or "inherit").strip() or "inherit"
+        override = (args.model_override or "").strip()
+        if inherit:
+            model = (override or (getattr(ctx, "model", "") or "") or parent.model or "").strip()
+            # Deprecated compat: legacy callers pass computer_use_model
+            # explicitly; honor it when no AgentConfig fixed model exists.
+            if agent == "computeruse" and not override and computer_use_model.strip():
+                model = computer_use_model.strip()
         else:
-            model = (args.model_override or ctx.model or parent.model or "").strip()
+            model = (
+                override or fixed_model or (getattr(ctx, "model", "") or "")
+                or parent.model or ""
+            ).strip()
         if not model:
             raise ToolError(
                 "No model available for subagent run",
@@ -1957,13 +2060,20 @@ class HarnessService:
         parent_assistant = await sync_to_async(self.messages.model.objects.get)(
             id=message_id
         )
-        if agent == "computeruse":
-            child_effort = normalize_reasoning_effort(computer_use_effort)
+        if inherit:
+            if strategy in ("lowest", "medium", "highest"):
+                catalog_efforts = self._catalog_efforts_for_model(
+                    organization_id, model
+                )
+                from .agents.effort_strategy import resolve_strategy_effort
+
+                child_effort = resolve_strategy_effort(catalog_efforts, strategy)
+            else:
+                child_effort = normalize_reasoning_effort(
+                    parent.reasoning_effort or ""
+                )
         else:
-            child_effort = normalize_reasoning_effort(small_effort)
-        if not child_effort:
-            # create_session falls back to config.default_effort for "".
-            child_effort = normalize_reasoning_effort(default_effort)
+            child_effort = fixed_effort
         child = await sync_to_async(self.create_session)(
             workspace_id=parent.workspace_id,
             organization_id=parent.organization_id,

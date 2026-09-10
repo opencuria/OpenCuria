@@ -149,8 +149,8 @@ async function handleCreateSession(
           :skill-options="skillStore.skills"
           :disabled="creating"
           @update:mode="composerMode = $event"
-          @update:model="harnessStore.modelInput = $event"
-          @update:effort="harnessStore.effortInput = $event"
+          @update:model="harnessStore.setComposerModel($event)"
+          @update:effort="harnessStore.setComposerEffort($event)"
           @send="handleCreateSession"
         />
       </div>

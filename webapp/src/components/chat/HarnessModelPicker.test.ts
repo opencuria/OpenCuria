@@ -43,12 +43,13 @@ const stubs = {
 }
 
 describe('HarnessModelPicker', () => {
-  it('lists Auto plus catalog models and hides Fast', () => {
+  it('lists catalog models without an Auto entry', () => {
     const wrapper = mount(HarnessModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
-    expect(wrapper.text()).toContain('Auto')
+    expect(wrapper.text()).not.toContain('Auto')
+    expect(wrapper.find('[data-testid="composer-model-auto"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Think')
     expect(wrapper.text()).toContain('Plain')
     expect(wrapper.text()).not.toContain('Fast')
@@ -86,6 +87,14 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Plain')
     expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('High')
+  })
+
+  it('shows a placeholder trigger when no model is selected', () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: '', effort: '', models },
+      global: { stubs },
+    })
+    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Select model\u2026')
   })
 
   it('filters the catalog by model name and provider label', async () => {

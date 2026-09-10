@@ -15,8 +15,16 @@ const workspaceStore = {
 const harnessStore = {
   modelInput: '',
   effortInput: '',
+  composerDirty: false,
+  agentConfigs: [] as unknown[],
   activeSessionId: null as string | null,
   createSession: vi.fn(),
+  setComposerModel: vi.fn(),
+  setComposerEffort: vi.fn(),
+  loadAgentConfigs: vi.fn().mockResolvedValue(undefined),
+  agentDefault: vi.fn().mockReturnValue({ model: '', effort: '' }),
+  ensureComposerDefaults: vi.fn(),
+  resetComposerDirty: vi.fn(),
 }
 
 const skillStore = {

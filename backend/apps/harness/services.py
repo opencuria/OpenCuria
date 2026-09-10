@@ -16,12 +16,14 @@ import structlog
 from common.exceptions import ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value
 
-from .models import ProviderConfig, ProviderConnection
+from .agents.definitions import AGENT_DEFINITIONS
+from .models import AgentConfig, ProviderConfig, ProviderConnection
 from .providers.base import ProviderAdapter
 from .providers.models_catalog import (
     ProviderModel,
     clear_models_cache,
     list_merged_provider_models,
+    normalize_reasoning_effort,
 )
 from .providers.bedrock import BedrockAdapter
 from .providers.chatgpt import ChatGPTAdapter
@@ -29,7 +31,11 @@ from .providers.model_ref import parse_model_ref
 from .providers.openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
 from .providers.registry import ProviderRegistry, default_registry
 from .providers.resolver import ProviderResolver
-from .repositories import ProviderConfigRepository, ProviderConnectionRepository
+from .repositories import (
+    AgentConfigRepository,
+    ProviderConfigRepository,
+    ProviderConnectionRepository,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +52,105 @@ def _ensure_default_adapters(registry: ProviderRegistry) -> None:
         # ProviderConnection resolver constructs BedrockAdapter with AWS
         # credentials; registration exposes the factory for discovery only.
         registry.register("amazon-bedrock", BedrockAdapter)
+
+
+CONFIGURABLE_AGENTS = ("build", "plan", "general", "explore", "computeruse")
+PRIMARY_AGENTS = ("build", "plan")
+VALID_EFFORT_STRATEGIES = ("fixed", "inherit", "lowest", "medium", "highest")
+
+
+class AgentConfigService:
+    """Business logic for per-agent model/effort configuration."""
+
+    def __init__(
+        self,
+        repository: type[AgentConfigRepository] | None = None,
+    ) -> None:
+        self.repository = repository or AgentConfigRepository
+
+    def list_configs(self, org_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Return one row per configurable agent with stored values or defaults."""
+        stored = {
+            row.agent: row for row in self.repository.list_by_org(org_id)
+        }
+        rows: list[dict[str, Any]] = []
+        for name in CONFIGURABLE_AGENTS:
+            definition = AGENT_DEFINITIONS[name]
+            row = stored.get(name)
+            if definition.mode == "primary":
+                rows.append(
+                    {
+                        "agent": name,
+                        "mode": definition.mode,
+                        "description": definition.description,
+                        "model": (row.model if row else "") or "",
+                        "effort": (row.effort if row else "") or "",
+                        "inherit_model": False,
+                        "effort_strategy": "fixed",
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "agent": name,
+                        "mode": definition.mode,
+                        "description": definition.description,
+                        "model": (row.model if row else "") or "",
+                        "effort": (row.effort if row else "") or "",
+                        "inherit_model": row.inherit_model if row else True,
+                        "effort_strategy": (
+                            row.effort_strategy if row else "inherit"
+                        ),
+                    }
+                )
+        return rows
+
+    def save_configs(
+        self, org_id: uuid.UUID, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Validate and upsert per-agent configs, then return the list view."""
+        from apps.organizations.models import Organization
+
+        org = Organization.objects.filter(id=org_id).first()
+        if org is None:
+            from common.exceptions import NotFoundError
+
+            raise NotFoundError("Organization", str(org_id))
+        for item in items:
+            agent = str(item.get("agent") or "").strip().lower()
+            if agent not in CONFIGURABLE_AGENTS:
+                raise ValueError(f"Unknown agent '{item.get('agent')}'")
+            model = str(item.get("model") or "").strip()
+            effort = str(item.get("effort") or "").strip()
+            inherit_model = bool(item.get("inherit_model", False))
+            effort_strategy = str(item.get("effort_strategy") or "fixed").strip()
+            if effort_strategy not in VALID_EFFORT_STRATEGIES:
+                raise ValueError(
+                    f"Invalid effort_strategy '{effort_strategy}' for '{agent}'"
+                )
+            if agent in PRIMARY_AGENTS:
+                inherit_model = False
+                effort_strategy = "fixed"
+                effort = normalize_reasoning_effort(effort)
+            else:
+                if inherit_model:
+                    model = ""
+                    effort = ""
+                    if effort_strategy == "fixed":
+                        effort_strategy = "inherit"
+                else:
+                    effort_strategy = "fixed"
+                    effort = normalize_reasoning_effort(effort)
+            self.repository.upsert(
+                org,
+                agent,
+                model=model,
+                effort=effort,
+                inherit_model=inherit_model,
+                effort_strategy=effort_strategy,
+            )
+            log.info("agent_config_saved", organization_id=str(org_id), agent=agent)
+        return self.list_configs(org_id)
 
 
 class ProviderConfigService:

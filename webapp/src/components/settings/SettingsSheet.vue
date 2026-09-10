@@ -24,6 +24,7 @@ import {
   Server,
   Settings2,
   Shield,
+  Sparkles,
 } from '@lucide/vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -31,6 +32,7 @@ import { useAuthStore } from '@/stores/auth'
 import { cn } from '@/lib/utils'
 import WorkspacePolicyTab from './WorkspacePolicyTab.vue'
 import ProviderConfigTab from './ProviderConfigTab.vue'
+import AgentConfigTab from './AgentConfigTab.vue'
 import CredentialServicesTab from './CredentialServicesTab.vue'
 import SkillsPanel from './SkillsPanel.vue'
 import CredentialsPanel from './CredentialsPanel.vue'
@@ -61,6 +63,7 @@ interface SettingsNavItem {
 const navItems: SettingsNavItem[] = [
   { id: 'general', label: 'General', icon: Settings2 },
   { id: 'provider', label: 'Provider & Models', icon: Bot },
+  { id: 'agents', label: 'Agents', icon: Sparkles },
   { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
   { id: 'api-keys', label: 'API Keys', icon: Key },
@@ -204,6 +207,7 @@ watch(isAdmin, (admin) => {
           <div class="mx-auto w-full max-w-3xl p-4 lg:p-6" role="tabpanel" :aria-label="activeLabel">
             <WorkspacePolicyTab v-if="activeTab === 'general'" />
             <ProviderConfigTab v-else-if="activeTab === 'provider'" />
+            <AgentConfigTab v-else-if="activeTab === 'agents'" />
             <SkillsPanel v-else-if="activeTab === 'skills'" />
             <CredentialsPanel v-else-if="activeTab === 'credentials'" />
             <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />

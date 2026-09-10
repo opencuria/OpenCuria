@@ -164,6 +164,7 @@ afterEach(() => {
 
 describe('SettingsSheet', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.clearAllMocks()
     authMock.isAdmin = true
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
@@ -190,6 +191,7 @@ describe('SettingsSheet', () => {
     for (const tab of [
       'general',
       'provider',
+      'agents',
       'skills',
       'credentials',
       'api-keys',

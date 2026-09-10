@@ -237,7 +237,10 @@ class HarnessPermissionOut(Schema):
 
 
 class ProviderConfigIn(Schema):
-    """Request schema for saving the org-wide provider config."""
+    """Request schema for saving the org-wide provider config.
+
+    deprecated: use agent-configs. Fields below remain for backward compat.
+    """
 
     api_key: str = ""
     base_url: str = ""
@@ -250,7 +253,10 @@ class ProviderConfigIn(Schema):
 
 
 class ProviderConfigOut(Schema):
-    """Response schema for the org-wide provider config (no secret)."""
+    """Response schema for the org-wide provider config (no secret).
+
+    deprecated: use agent-configs. Fields remain for backward compat.
+    """
 
     base_url: str
     default_model: str
@@ -261,6 +267,34 @@ class ProviderConfigOut(Schema):
     computer_use_effort: str
     has_api_key: bool
     api_key_hint: str
+
+
+class AgentConfigIn(Schema):
+    """Request schema for one agent config row."""
+
+    agent: str
+    model: str = ""
+    effort: str = ""
+    inherit_model: bool = False
+    effort_strategy: str = "fixed"
+
+
+class AgentConfigSaveIn(Schema):
+    """Bulk save payload for agent configs."""
+
+    configs: list[AgentConfigIn] = []
+
+
+class AgentConfigOut(Schema):
+    """Response schema for one agent config row."""
+
+    agent: str
+    mode: str
+    description: str
+    model: str = ""
+    effort: str = ""
+    inherit_model: bool = False
+    effort_strategy: str = "fixed"
 
 
 class ProviderModelOut(Schema):
@@ -561,6 +595,19 @@ def _delete_org_provider_connection(org_id: uuid.UUID, provider: str) -> None:
     from apps.harness.services import ProviderConfigService
 
     ProviderConfigService().delete_connection(org_id, provider)
+
+
+def _agent_config_to_out(row: dict) -> AgentConfigOut:
+    """Map an AgentConfigService row to AgentConfigOut."""
+    return AgentConfigOut(
+        agent=row["agent"],
+        mode=row["mode"],
+        description=row["description"],
+        model=row.get("model") or "",
+        effort=row.get("effort") or "",
+        inherit_model=bool(row.get("inherit_model", False)),
+        effort_strategy=row.get("effort_strategy") or "fixed",
+    )
 
 
 def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
@@ -1195,6 +1242,55 @@ async def resolve_harness_question(
 # ---------------------------------------------------------------------------
 # Provider config endpoints (org-scoped; workspace paths are aliases)
 # ---------------------------------------------------------------------------
+
+
+@harness_router.get(
+    "/agent-configs/",
+    response={200: list[AgentConfigOut], 401: dict, 403: dict, 404: dict},
+    summary="List per-agent model/effort configs",
+)
+def list_org_agent_configs(request: HttpRequest):
+    """Return one row per configurable agent (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import AgentConfigService
+
+        rows = AgentConfigService().list_configs(org_id)
+        return 200, [_agent_config_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/agent-configs/",
+    response={200: list[AgentConfigOut], 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (bulk upsert) per-agent model/effort configs",
+)
+def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
+    """Validate and upsert per-agent configs."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import AgentConfigService
+
+        rows = AgentConfigService().save_configs(
+            org_id,
+            [item.model_dump() for item in payload.configs],
+        )
+        return 200, [_agent_config_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
 
 
 @harness_router.get(

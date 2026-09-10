@@ -68,7 +68,7 @@ export function snapEffort(model: ProviderModel | undefined, current: string): s
   return model.reasoning_efforts[0] ?? ''
 }
 
-/** Catalog row for the selected model id, or the org default when Auto. */
+/** Catalog row for the selected model id (empty model id returns undefined – Auto mode removed). */
 export function resolveCatalogModel(
   models: ProviderModel[],
   modelId: string,
@@ -79,17 +79,16 @@ export function resolveCatalogModel(
   return models.find((item) => item.id === effective)
 }
 
-/** Compact "Model Effort" label for conversation cards. */
+/** Compact "Model Effort" label for conversation cards (empty model id yields '' – Auto mode removed). */
 export function formatHarnessModelEffort(
   modelId: string,
   effort: string,
   models: ProviderModel[],
   defaultModel = '',
 ): string {
-  const trimmedModel = modelId.trim()
-  const modelName = trimmedModel
-    ? (resolveCatalogModel(models, trimmedModel, defaultModel)?.name ?? trimmedModel)
-    : 'Auto'
+  const trimmedModel = modelId.trim() || defaultModel.trim()
+  if (!trimmedModel) return ''
+  const modelName = resolveCatalogModel(models, trimmedModel)?.name ?? trimmedModel
   const effortLabel = effort.trim() ? formatEffort(effort) : ''
   return effortLabel ? `${modelName} ${effortLabel}` : modelName
 }

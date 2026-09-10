@@ -7,6 +7,7 @@ import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 
 vi.mock('@/services/harness.api', async () => {
@@ -16,11 +17,13 @@ vi.mock('@/services/harness.api', async () => {
     ...actual,
     getProviderConfig: vi.fn(),
     listProviderModels: vi.fn(),
+    listAgentConfigs: vi.fn(),
   }
 })
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
+const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
 
 const catalog: ProviderModel[] = [
   {
@@ -68,6 +71,11 @@ describe('HarnessChatInput', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     resetProviderCatalogCache()
+    resetAgentConfigsCache()
+    listAgentConfigsMock.mockResolvedValue([
+      { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
+      { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
+    ])
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'openrouter/model-big',
@@ -89,7 +97,6 @@ describe('HarnessChatInput', () => {
     })
     await wrapper.vm.$nextTick()
     const html = wrapper.html()
-    expect(html).toContain('Auto')
     expect(html).toContain('Big')
     expect(html).toContain('Small')
     expect(wrapper.text()).not.toContain('Skills')

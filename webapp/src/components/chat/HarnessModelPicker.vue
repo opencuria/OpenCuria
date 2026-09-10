@@ -7,7 +7,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -32,7 +31,6 @@ const props = defineProps<{
   effort: string
   models: ProviderModel[]
   loading?: boolean
-  defaultModel?: string
   disabled?: boolean
 }>()
 
@@ -44,13 +42,13 @@ const emit = defineEmits<{
 const search = ref('')
 
 const catalogModel = computed(() =>
-  resolveCatalogModel(props.models, props.model, props.defaultModel ?? ''),
+  resolveCatalogModel(props.models, props.model),
 )
 
 const effortOptions = computed(() => catalogModel.value?.reasoning_efforts ?? [])
 
 const triggerModelName = computed(() => {
-  if (!props.model.trim()) return 'Auto'
+  if (!props.model.trim()) return 'Select model…'
   return catalogModel.value?.name ?? props.model
 })
 
@@ -75,7 +73,7 @@ const filteredModels = computed(() => {
 })
 
 watch(
-  () => [props.model, props.defaultModel, props.models] as const,
+  () => [props.model, props.models] as const,
   () => {
     const next = snapEffort(catalogModel.value, props.effort)
     if (next !== props.effort) emit('update:effort', next)
@@ -84,7 +82,7 @@ watch(
 
 function selectModel(id: string): void {
   emit('update:model', id)
-  const selected = resolveCatalogModel(props.models, id, props.defaultModel ?? '')
+  const selected = resolveCatalogModel(props.models, id)
   emit('update:effort', snapEffort(selected, props.effort))
 }
 
@@ -113,7 +111,7 @@ function modelEffortHint(item: ProviderModel): string {
       >
         <span v-if="loading">Loading…</span>
         <template v-else>
-          <span class="min-w-0 truncate text-foreground">{{ triggerModelName }}</span>
+          <span class="min-w-0 truncate" :class="model.trim() ? 'text-foreground' : 'text-muted-foreground'">{{ triggerModelName }}</span>
           <span v-if="triggerEffortLabel" class="shrink-0 text-muted-foreground">
             {{ triggerEffortLabel }}
           </span>
@@ -144,7 +142,7 @@ function modelEffortHint(item: ProviderModel): string {
         <DropdownMenuSubTrigger class="justify-between text-xs" data-testid="composer-model-row">
           <span>Model</span>
           <span class="max-w-28 truncate text-muted-foreground">
-            {{ model.trim() ? (catalogModel?.name ?? model) : 'Auto' }}
+            {{ model.trim() ? (catalogModel?.name ?? model) : 'Select model…' }}
           </span>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent class="w-72 p-1" data-testid="composer-model-list">
@@ -156,11 +154,6 @@ function modelEffortHint(item: ProviderModel): string {
               data-testid="composer-model-search"
             />
           </div>
-          <DropdownMenuItem class="text-xs" data-testid="composer-model-auto" @click="selectModel('')">
-            <span>Auto</span>
-            <Check v-if="!model.trim()" class="ml-auto size-3.5" />
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
           <div class="max-h-64 overflow-y-auto">
             <DropdownMenuItem
               v-for="item in filteredModels"

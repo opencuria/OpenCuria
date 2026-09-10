@@ -43,6 +43,9 @@ import {
   settleOpenStreamParts,
 } from '@/lib/harnessReducer'
 import { collectDescendantSessionIds, collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
+import { loadAgentConfigsCached } from '@/lib/agentConfigs'
+import type { AgentConfig } from '@/lib/harnessAgents'
+import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { useNotificationStore } from './notifications'
 import { useHarnessConversationStore } from './harnessConversations'
 
@@ -62,10 +65,14 @@ export const useHarnessStore = defineStore('harness', () => {
   const viewingSessionId = ref<string | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
-  /** Model picker value; empty string means "org default". */
+  // Composer selection; empty means "no selection yet" (placeholder).
   const modelInput = ref('')
-  /** Reasoning effort for the next run; empty uses the model default. */
+  // Reasoning effort for the next run; empty uses the model default.
   const effortInput = ref('')
+  // Cached agent configs backing mode defaults.
+  const agentConfigs = ref<AgentConfig[]>([])
+  // True once the user manually changed model or effort.
+  const composerDirty = ref(false)
   /** Message ids whose error/abort notice the user dismissed. */
   const dismissedNoticeIds = ref<Record<string, true>>({})
 
@@ -542,6 +549,66 @@ export const useHarnessStore = defineStore('harness', () => {
     dismissedNoticeIds.value = { ...dismissedNoticeIds.value, [messageId]: true }
   }
 
+  // Load agent configs (cached); failures yield [].
+  async function loadAgentConfigs(): Promise<void> {
+    try {
+      agentConfigs.value = await loadAgentConfigsCached()
+    } catch {
+      agentConfigs.value = []
+    }
+  }
+
+  // Agent default {model, effort} for a mode.
+  function agentDefault(mode: HarnessSessionMode): { model: string; effort: string } {
+    const found = agentConfigs.value.find((item) => item.agent === mode && item.mode === 'primary')
+      ?? agentConfigs.value.find((item) => item.agent === mode)
+    return { model: found?.model ?? '', effort: found?.effort ?? '' }
+  }
+
+  // Apply mode defaults unless the user customized the composer.
+  function ensureComposerDefaults(mode: HarnessSessionMode, catalog: ProviderModel[] = []): void {
+    if (composerDirty.value) return
+    const defaults = agentDefault(mode)
+    modelInput.value = defaults.model
+    const catalogModel = resolveCatalogModel(catalog, defaults.model)
+    effortInput.value = catalogModel ? snapEffort(catalogModel, defaults.effort) : defaults.effort
+  }
+
+  // Manual model change.
+  function setComposerModel(v: string): void {
+    modelInput.value = v
+    composerDirty.value = true
+  }
+
+  // Manual effort change.
+  function setComposerEffort(v: string): void {
+    effortInput.value = v
+    composerDirty.value = true
+  }
+
+  // Mark dirty without changing values (child-driven updates).
+  function markComposerDirty(): void {
+    composerDirty.value = true
+  }
+
+  // Load session values into the composer; resets dirty.
+  function loadSessionIntoComposer(model: string, effort: string): void {
+    if (model) modelInput.value = model
+    effortInput.value = effort
+    composerDirty.value = false
+  }
+
+  // Clear the dirty flag.
+  function resetComposerDirty(): void {
+    composerDirty.value = false
+  }
+
+  // Force-apply mode defaults (clears dirty first).
+  function resetComposer(mode: HarnessSessionMode, catalog: ProviderModel[] = []): void {
+    composerDirty.value = false
+    ensureComposerDefaults(mode, catalog)
+  }
+
   function reset(): void {
     sessions.value = []
     messagesBySession.value = {}
@@ -553,6 +620,8 @@ export const useHarnessStore = defineStore('harness', () => {
     loading.value = false
     error.value = null
     dismissedNoticeIds.value = {}
+    agentConfigs.value = []
+    composerDirty.value = false
   }
 
   return {
@@ -568,6 +637,8 @@ export const useHarnessStore = defineStore('harness', () => {
     error,
     modelInput,
     effortInput,
+    agentConfigs,
+    composerDirty,
     dismissedNoticeIds,
     // Getters
     activeSession,
@@ -590,6 +661,15 @@ export const useHarnessStore = defineStore('harness', () => {
     removeSession,
     updateSessionMode,
     abortSession,
+    loadAgentConfigs,
+    agentDefault,
+    ensureComposerDefaults,
+    setComposerModel,
+    setComposerEffort,
+    markComposerDirty,
+    loadSessionIntoComposer,
+    resetComposerDirty,
+    resetComposer,
     dismissNotice,
     resolvePermission,
     resolveQuestion,

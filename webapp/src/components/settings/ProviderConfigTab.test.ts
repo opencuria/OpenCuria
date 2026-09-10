@@ -89,12 +89,13 @@ function mountTab() {
 
 describe('ProviderConfigTab', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.clearAllMocks()
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'openrouter/model-big',
-      small_model: 'chatgpt/gpt-5',
+      small_model: 'openrouter/model-big',
       computer_use_model: 'openrouter/model-big',
       default_effort: 'high',
       small_effort: '',
@@ -134,7 +135,7 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('[data-testid="provider-row-openrouter"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-chatgpt"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-amazon-bedrock"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="provider-default-model-trigger"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-small-model-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Connected')
     expect(wrapper.find('[data-testid="provider-status-chatgpt"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="provider-detail-openrouter"]').text()).toContain('••••cdef')
@@ -152,7 +153,7 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('[data-testid="provider-model-count-amazon-bedrock"]').exists()).toBe(false)
   })
 
-  it('keeps save disabled until a default model changes, then saves with toast', async () => {
+  it('keeps save disabled until the small model changes, then saves with toast', async () => {
     const wrapper = mountTab()
     await flushPromises()
 
@@ -171,11 +172,11 @@ describe('ProviderConfigTab', () => {
     await flushPromises()
 
     expect(saveProviderConfigMock).toHaveBeenCalledWith({
-      default_model: 'chatgpt/gpt-5',
       small_model: 'chatgpt/gpt-5',
-      computer_use_model: 'openrouter/model-big',
-      default_effort: '',
       small_effort: '',
+      default_model: 'openrouter/model-big',
+      computer_use_model: 'openrouter/model-big',
+      default_effort: 'high',
       computer_use_effort: 'high',
     })
     expect(toast.success).toHaveBeenCalledWith('Default models saved', { duration: 5000 })
@@ -224,20 +225,20 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.findComponent(ProviderConnectionDialog).props('open')).toBe(false)
   })
 
-  it('marks dirty and saves when effort changes on the default picker', async () => {
+  it('marks dirty and saves when effort changes on the small picker', async () => {
     const wrapper = mountTab()
     await flushPromises()
 
     const combos = wrapper.findAllComponents(ProviderModelCombobox)
-    expect(combos.length).toBe(3)
+    expect(combos.length).toBe(1)
     const defaultCombo = combos[0]
-    // Configures default_effort='high'; cleared prop-effort below must dirty the form.
-    expect(defaultCombo?.props('effort')).toBe('high')
+    // Small combo binds small_effort='' initially.
+    expect(defaultCombo?.props('effort')).toBe('')
 
     const saveButton = wrapper.find('[data-testid="save-default-models"]')
     expect(saveButton.attributes('disabled')).toBeDefined()
 
-    await defaultCombo?.vm.$emit('update:effort', '')
+    await defaultCombo?.vm.$emit('update:effort', 'high')
     await flushPromises()
 
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Unsaved changes')
@@ -247,11 +248,11 @@ describe('ProviderConfigTab', () => {
     await flushPromises()
 
     expect(saveProviderConfigMock).toHaveBeenCalledWith({
+      small_model: 'openrouter/model-big',
+      small_effort: 'high',
       default_model: 'openrouter/model-big',
-      small_model: 'chatgpt/gpt-5',
       computer_use_model: 'openrouter/model-big',
-      default_effort: '',
-      small_effort: '',
+      default_effort: 'high',
       computer_use_effort: 'high',
     })
   })
