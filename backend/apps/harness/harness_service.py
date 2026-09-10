@@ -272,6 +272,180 @@ class HarnessService:
             await self.abort_run(session.id)
         await sync_to_async(self.sessions.delete)(session)
 
+    async def fork_session(
+        self,
+        session_id: uuid.UUID,
+        message_id: uuid.UUID | None = None,
+    ) -> HarnessSession:
+        """Fork a root session, copying the message prefix before *message_id*.
+
+        Inspired by OpenCode
+        ``packages/opencode/src/session/session.ts`` fork (title part
+        only); no file rollback or snapshot is performed here.
+        """
+        session = await sync_to_async(self.get_session)(session_id)
+        self.ensure_user_promptable(session)
+        # Fork is read-only (no assertNotBusy, like OpenCode): it must
+        # also work while the source session has an active run.
+        if message_id is not None:
+            ids = await sync_to_async(self.messages.list_ids_for_session)(
+                session.id
+            )
+            if message_id not in ids:
+                raise ValueError(f"Message '{message_id}' not in session")
+        title = _forked_title(session.title or "")
+        forked = await sync_to_async(self.sessions.create_fork)(
+            workspace_id=session.workspace_id,
+            organization_id=session.organization_id,
+            title=title,
+            mode=session.mode,
+            agent_name=session.agent_name,
+            model=session.model or "",
+            reasoning_effort=session.reasoning_effort or "",
+            skill_ids=list(session.skill_ids or []),
+        )
+        await sync_to_async(self.messages.copy_prefix)(
+            session.id, forked.id, message_id
+        )
+        log.info(
+            "harness_session_forked",
+            session_id=str(session.id),
+            fork_id=str(forked.id),
+        )
+        return forked
+
+    async def edit_user_message(
+        self,
+        session_id: uuid.UUID,
+        *,
+        message_id: uuid.UUID,
+        prompt: str,
+        mode: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        skill_ids: list[str] | None = None,
+        organization_id: uuid.UUID | None = None,
+        workspace_id: str = "",
+        user_id: int | None = None,
+    ) -> HarnessMessage:
+        """Edit a user message, drop the suffix, and rerun with *prompt*."""
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        session = await sync_to_async(self.get_session)(session_id)
+        self.ensure_user_promptable(session)
+        if self.is_running(session.id):
+            raise ConflictError(
+                f"Harness session '{session.id}' already has an active run"
+            )
+        stored = await sync_to_async(self.messages.list_for_session)(session.id)
+        target = next((row for row in stored if row.id == message_id), None)
+        if target is None:
+            raise NotFoundError("HarnessMessage", str(message_id))
+        if target.role != "user":
+            raise ValueError("Only user messages can be edited")
+        ordered = sorted(stored, key=lambda row: (row.created_at, str(row.id)))
+        index = next(pos for pos, row in enumerate(ordered) if row.id == message_id)
+        suffix = ordered[index:]
+        suffix_ids = [row.id for row in suffix]
+        child_ids = await self._collect_suffix_child_ids(suffix_ids)
+        for child_id in child_ids:
+            try:
+                aborted_child = await self.abort_run(child_id)
+            except Exception:
+                aborted_child = await sync_to_async(self.sessions.get_by_id)(
+                    child_id
+                )
+                if aborted_child is None:
+                    continue
+            await sync_to_async(self.sessions.delete)(aborted_child)
+        await self._reject_suffix_user_gates(session, suffix_ids)
+        original_title = session.title or ""
+        await sync_to_async(self.messages.delete_from)(session.id, message_id)
+        # Empty/whitespace overrides are a no-op (API sends "" by default).
+        if mode is not None and mode.strip():
+            normalized = mode.strip().lower()
+            if normalized not in ("plan", "build"):
+                raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+            session = await sync_to_async(self.sessions.set_mode)(session, normalized)
+        if model is not None and model.strip():
+            session = await sync_to_async(self.sessions.set_model)(
+                session, model.strip()
+            )
+        if reasoning_effort is not None and reasoning_effort.strip():
+            normalized_effort = normalize_reasoning_effort(reasoning_effort)
+            session = await sync_to_async(self.sessions.set_reasoning_effort)(
+                session, normalized_effort
+            )
+        assistant = await self.start_run(
+            session,
+            prompt.strip(),
+            organization_id=organization_id or session.organization_id,
+            workspace_id=workspace_id or str(session.workspace_id),
+            user_id=user_id,
+            skill_ids=skill_ids,
+        )
+        if session.title != original_title:
+            session = await sync_to_async(self.sessions.set_title)(
+                session, original_title
+            )
+        return assistant
+
+    async def _collect_suffix_child_ids(
+        self, suffix_ids: list[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """Return child session ids referenced by subtask parts in suffix."""
+        parts = await sync_to_async(
+            lambda: list(self.parts.model.objects.filter(message_id__in=suffix_ids))
+        )()
+        child_ids: list[uuid.UUID] = []
+        seen: set[str] = set()
+        for part in parts:
+            if part.type != "subtask":
+                continue
+            raw = str((part.meta or {}).get("child_session_id", "") or "").strip()
+            if not raw or raw in seen:
+                continue
+            seen.add(raw)
+            try:
+                child_ids.append(uuid.UUID(raw))
+            except ValueError:
+                continue
+        return child_ids
+
+    async def _reject_suffix_user_gates(
+        self, session: HarnessSession, suffix_ids: list[uuid.UUID]
+    ) -> None:
+        """Reject pending permission/question gates linked to *suffix_ids*."""
+        suffix_set = set(suffix_ids)
+        pending_perms = await sync_to_async(
+            self.permissions.requests.list_pending_for_session
+        )(session.id)
+        for request in pending_perms:
+            if request.message_id is not None:
+                if request.message_id not in suffix_set:
+                    continue
+            await sync_to_async(self.permissions.requests.mark_resolved)(
+                request, approved=False, remember="once"
+            )
+            future = self._pending_permissions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+        pending_questions = await sync_to_async(
+            QuestionRequestRepository.list_pending_for_session
+        )(session.id)
+        for request in pending_questions:
+            if request.message_id is not None:
+                if request.message_id not in suffix_set:
+                    continue
+            await sync_to_async(QuestionRequestRepository.resolve)(
+                request,
+                answers=[],
+                status="rejected",
+            )
+            future = self._pending_questions.pop(str(request.id), None)
+            if future is not None and not future.done():
+                future.cancel()
+
     def list_conversations(
         self,
         *,
@@ -2242,6 +2416,17 @@ def _title_from_prompt(prompt: str) -> str:
     first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
     title = first_line.strip()[:80]
     return title or "Harness session"
+
+
+def _forked_title(title: str) -> str:
+    """Return the fork title (inspired by OpenCode ``getForkedTitle``)."""
+    import re
+
+    match = re.match(r"^(.+) \(fork #(\d+)\)$", (title or "").strip())
+    if match:
+        base = match.group(1)
+        return f"{base} (fork #{int(match.group(2)) + 1})"
+    return f"{(title or '').strip()} (fork #1)"
 
 
 _default_harness_service: HarnessService | None = None

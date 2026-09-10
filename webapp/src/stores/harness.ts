@@ -23,6 +23,8 @@ import {
   abortHarnessSession,
   createHarnessSession,
   deleteHarnessSession,
+  editHarnessMessage,
+  forkHarnessSession,
   listHarnessParts,
   listHarnessSessions,
   listHarnessTodos,
@@ -32,6 +34,7 @@ import {
   sendHarnessMessage,
   setSessionMode,
 } from '@/services/harness.api'
+import { ApiRequestError } from '@/services/api'
 import { hydrateHarnessPart } from '@/lib/toolDisplay'
 import {
   applyPartDelta,
@@ -366,6 +369,75 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  /**
+   * Fork a session at a user message (or full session when messageId is
+   * omitted). Inspired by OpenCode `session.fork`: the backend copies the
+   * message prefix without starting a run; the caller prefills the composer
+   * with the returned `prefill` text and never auto-sends.
+   */
+  async function forkSession(
+    sessionId: string,
+    messageId?: string,
+  ): Promise<{ session: HarnessSession; prefill: string } | null> {
+    const notifications = useNotificationStore()
+    try {
+      const prefill =
+        messagesBySession.value[sessionId]?.find((item) => item.id === messageId)
+          ?.content ?? ''
+      const session = await forkHarnessSession(
+        sessionId,
+        messageId ? { message_id: messageId } : {},
+      )
+      upsertSession(session)
+      activeSessionId.value = session.id
+      await fetchParts(session.id)
+      void useHarnessConversationStore().fetchConversations()
+      return { session, prefill }
+    } catch (e: unknown) {
+      notifications.error('Fork failed', e instanceof Error ? e.message : 'Unknown error')
+      return null
+    }
+  }
+
+  /**
+   * Edit a user message and rerun the session from there (OpenCode
+   * `session.revert` parity). The panel socket refetches on
+   * `session_status:idle`; an optimistic fetch covers the gap.
+   */
+  async function editMessage(
+    sessionId: string,
+    messageId: string,
+    prompt: string,
+    options: {
+      mode?: HarnessSessionMode
+      model?: string
+      skillIds?: string[]
+      reasoningEffort?: string
+    } = {},
+  ): Promise<void> {
+    const notifications = useNotificationStore()
+    try {
+      const session = await editHarnessMessage(sessionId, messageId, {
+        prompt,
+        mode: options.mode,
+        model: options.model,
+        skill_ids: options.skillIds,
+        reasoning_effort: options.reasoningEffort,
+      })
+      upsertSession(session)
+      await fetchParts(sessionId)
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestError && e.status === 409) {
+        notifications.error(
+          'Agent is running — stop it before editing this message.',
+          e.message,
+        )
+        return
+      }
+      notifications.error('Edit failed', e instanceof Error ? e.message : 'Unknown error')
+    }
+  }
+
   function upsertSession(session: HarnessSession): void {
     const idx = sessions.value.findIndex((s) => s.id === session.id)
     if (idx === -1) {
@@ -657,6 +729,8 @@ export const useHarnessStore = defineStore('harness', () => {
     fetchTodos,
     createSession,
     sendMessage,
+    forkSession,
+    editMessage,
     renameSession,
     removeSession,
     updateSessionMode,

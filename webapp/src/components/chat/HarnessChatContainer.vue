@@ -10,10 +10,14 @@ const props = defineProps<{
   loading?: boolean
   streamingSessionId?: string | null
   childSessionIds?: Record<string, string>
+  /** Hide per-message edit/fork actions (busy run or subagent session). */
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   openSubtask: [childSessionId: string]
+  edit: [messageId: string, text: string]
+  fork: [messageId: string]
 }>()
 
 const scrollEl = ref<HTMLElement | null>(null)
@@ -106,7 +110,10 @@ watch(
         :message="message"
         :streaming="message.id === streamingMessageId"
         :child-session-ids="childSessionIds"
+        :disabled="disabled"
         @open-subtask="emit('openSubtask', $event)"
+        @edit="(messageId, text) => emit('edit', messageId, text)"
+        @fork="(messageId) => emit('fork', messageId)"
       />
     </div>
     <div v-else class="flex h-full flex-col items-center justify-center px-6 py-12 text-center">

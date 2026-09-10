@@ -42,6 +42,8 @@ Tools and their required permissions
 - list_harness_sessions → harness:read
 - create_harness_session → harness:run
 - send_harness_message → harness:run
+- fork_harness_session → harness:run
+- edit_harness_message → harness:run
 - abort_harness_session → harness:run
 - take_desktop_control → harness:run (also requires terminal:access)
 - list_harness_parts → harness:read
@@ -521,6 +523,41 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="fork_harness_session",
+        description=(
+            "Fork a harness session, copying messages before a "
+            "message (or the full session)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "message_id": {"type": "string"},
+            },
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="edit_harness_message",
+        description="Edit a user message, then drop later turns and rerun.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "message_id": {"type": "string"},
+                "prompt": {"type": "string"},
+                "mode": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
+                "skill_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["session_id", "message_id", "prompt"],
+        },
+    ),
+    Tool(
         name="abort_harness_session",
         description="Abort the active run of a harness session.",
         inputSchema={
@@ -789,6 +826,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_harness_sessions": APIKeyPermission.HARNESS_READ,
     "create_harness_session": APIKeyPermission.HARNESS_RUN,
     "send_harness_message": APIKeyPermission.HARNESS_RUN,
+    "fork_harness_session": APIKeyPermission.HARNESS_RUN,
+    "edit_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
     "take_desktop_control": APIKeyPermission.HARNESS_RUN,
     "list_harness_parts": APIKeyPermission.HARNESS_READ,
@@ -1770,6 +1809,14 @@ def _session_dict_with_unread(service, session) -> dict:
     return _session_dict(session, unread=service.is_session_unread(session))
 
 
+def _optional_text(value: object) -> str | None:
+    """Return the stripped string or None when blank (edit no-op)."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _owned_harness_session_or_error(api_key, org_id, session_id):
     """Return a harness session scoped to an owned workspace."""
     import uuid as _uuid
@@ -2126,9 +2173,8 @@ async def _call_create_harness_session(
             skill_ids=list(args.get("skill_ids") or []),
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return _text(
-            await sync_to_async(_session_dict_with_unread)(service, fresh)
-        )
+        payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
+        return _text(payload)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -2182,9 +2228,102 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
             skill_ids=list(args.get("skill_ids") or []) or None,
         )
         fresh = await sync_to_async(service.get_session)(current.id)
-        return _text(
-            await sync_to_async(_session_dict_with_unread)(service, fresh)
+        payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
+        return _text(payload)
+    except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+async def _call_fork_harness_session(api_key, org_id, args) -> list:  # type: ignore[no-untyped-def]
+    """Fork a session, copying the message prefix (no run, no busy guard)."""
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+    from common.exceptions import ConflictError, NotFoundError
+
+    session_id_str = args.get("session_id")
+    if not session_id_str:
+        return _error("session_id is required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    message_id = None
+    if args.get("message_id"):
+        try:
+            message_id = _uuid.UUID(args["message_id"])
+        except ValueError:
+            return _error("Invalid message_id UUID")
+
+    session, error = await sync_to_async(_owned_harness_session_or_error)(
+        api_key, org_id, session_id
+    )
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+
+    try:
+        current = await sync_to_async(service.get_session)(session.id)
+        await sync_to_async(service.ensure_user_promptable)(current)
+        forked = await service.fork_session(current.id, message_id)
+        payload = await sync_to_async(_session_dict_with_unread)(service, forked)
+        return _text(payload)
+    except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ignore[no-untyped-def]
+    """Edit a user message, drop the suffix, and rerun with a new prompt."""
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+    from common.exceptions import ConflictError, NotFoundError
+
+    session_id_str = args.get("session_id")
+    message_id_str = args.get("message_id")
+    prompt = (args.get("prompt") or "").strip()
+    if not session_id_str or not message_id_str or not prompt:
+        return _error("session_id, message_id and prompt are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+    try:
+        message_id = _uuid.UUID(message_id_str)
+    except ValueError:
+        return _error("Invalid message_id UUID")
+
+    session, error = await sync_to_async(_owned_harness_session_or_error)(
+        api_key, org_id, session_id
+    )
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    mode = _optional_text(args.get("mode"))
+    model = _optional_text(args.get("model"))
+    effort = _optional_text(args.get("reasoning_effort"))
+
+    try:
+        current = await sync_to_async(service.get_session)(session.id)
+        await sync_to_async(service.ensure_user_promptable)(current)
+        await service.edit_user_message(
+            current.id,
+            message_id=message_id,
+            prompt=prompt,
+            mode=mode,
+            model=model,
+            reasoning_effort=effort,
+            skill_ids=list(args.get("skill_ids") or []) or None,
+            organization_id=org_id,
+            workspace_id=str(current.workspace_id),
+            user_id=api_key.user.id,
         )
+        fresh = await sync_to_async(service.get_session)(current.id)
+        payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
+        return _text(payload)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -2912,6 +3051,8 @@ _TOOL_HANDLERS = {
     "list_harness_sessions": _call_list_harness_sessions,
     "create_harness_session": _call_create_harness_session,
     "send_harness_message": _call_send_harness_message,
+    "fork_harness_session": _call_fork_harness_session,
+    "edit_harness_message": _call_edit_harness_message,
     "abort_harness_session": _call_abort_harness_session,
     "take_desktop_control": _call_take_desktop_control,
     "list_harness_parts": _call_list_harness_parts,

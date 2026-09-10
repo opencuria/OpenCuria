@@ -163,6 +163,20 @@ export interface HarnessMessageIn {
   skill_ids?: string[]
 }
 
+/** Fork payload (`HarnessForkIn` in the backend). Omit message_id for full-session fork. */
+export interface HarnessForkIn {
+  message_id?: string
+}
+
+/** Edit payload (`HarnessMessageEditIn` in the backend): rerun from a user message. */
+export interface HarnessMessageEditIn {
+  prompt: string
+  mode?: HarnessSessionMode | ''
+  model?: string
+  reasoning_effort?: string
+  skill_ids?: string[]
+}
+
 export interface HarnessPartsOut {
   session: HarnessSession
   messages: HarnessMessage[]

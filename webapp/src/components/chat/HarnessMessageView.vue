@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { User, ChevronDown } from '@lucide/vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { GitFork, Pencil, User, ChevronDown } from '@lucide/vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
@@ -13,6 +13,14 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
@@ -25,10 +33,14 @@ const props = defineProps<{
   streaming?: boolean
   childSessionIds?: Record<string, string>
   models?: ProviderModel[]
+  /** Hide edit/fork actions (busy run or subagent session). */
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   openSubtask: [childSessionId: string]
+  edit: [messageId: string, text: string]
+  fork: [messageId: string]
 }>()
 
 const blocks = computed(() => buildRenderBlocks(props.message.parts))
@@ -97,16 +109,128 @@ function isCompactionOpen(partId: string): boolean {
 function setCompactionOpen(partId: string, open: boolean): void {
   compactionOpen.value = { ...compactionOpen.value, [partId]: open }
 }
+
+/** Inline edit state for user messages (OpenCode session.revert parity). */
+const editing = ref(false)
+const editDraft = ref('')
+
+/** Local optimistic ids (`local-user-*`) have no backend row to edit/fork. */
+const isEditableMessage = computed(
+  () =>
+    props.message.role === 'user' &&
+    !props.disabled &&
+    !props.message.id.startsWith('local-user-'),
+)
+
+watch(
+  () => props.message.content,
+  () => {
+    if (!editing.value) editDraft.value = props.message.content
+  },
+)
+
+function startEdit(): void {
+  editDraft.value = props.message.content
+  editing.value = true
+}
+
+function cancelEdit(): void {
+  editing.value = false
+  editDraft.value = props.message.content
+}
+
+function saveEdit(): void {
+  const text = editDraft.value.trim()
+  if (!text || text === props.message.content) {
+    editing.value = false
+    return
+  }
+  editing.value = false
+  emit('edit', props.message.id, text)
+}
+
+function forkFromHere(): void {
+  emit('fork', props.message.id)
+}
 </script>
 
 <template>
   <!-- User message -->
-  <div v-if="message.role === 'user'" class="flex items-start gap-3 justify-end">
+  <div v-if="message.role === 'user'" class="group flex items-start gap-3 justify-end">
     <div class="min-w-0 max-w-3xl">
       <div
+        v-if="!editing"
         class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-4 py-3 text-sm break-words"
       >
         <HarnessMarkdown :text="message.content" compact />
+      </div>
+      <div v-else class="flex flex-col gap-2">
+        <Textarea
+          v-model="editDraft"
+          class="min-h-20 text-sm"
+          data-testid="message-edit-input"
+          @keydown.escape="cancelEdit"
+          @keydown.enter.exact.prevent="saveEdit"
+        />
+        <div class="flex items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-testid="message-edit-cancel"
+            @click="cancelEdit"
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            data-testid="message-edit-save"
+            :disabled="!editDraft.trim() || editDraft.trim() === message.content"
+            @click="saveEdit"
+          >
+            Save
+          </Button>
+        </div>
+      </div>
+      <div
+        v-if="isEditableMessage && !editing"
+        class="mt-1 flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+      >
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                class="h-7 w-7 text-muted-foreground hover:text-foreground"
+                data-testid="message-edit"
+                aria-label="Edit message and rerun"
+                @click="startEdit"
+              >
+                <Pencil :size="13" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top"> Edit &amp; rerun </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                class="h-7 w-7 text-muted-foreground hover:text-foreground"
+                data-testid="message-fork"
+                aria-label="Fork session from here"
+                @click="forkFromHere"
+              >
+                <GitFork :size="13" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top"> Fork from here </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
     </div>
     <div class="flex items-center justify-center w-8 h-8 rounded-full bg-primary/10 text-primary shrink-0">

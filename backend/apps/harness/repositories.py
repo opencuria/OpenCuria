@@ -250,6 +250,35 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def create_fork(
+        *,
+        workspace_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        title: str = "",
+        mode: str = "build",
+        agent_name: str = "build",
+        model: str = "",
+        reasoning_effort: str = "",
+        skill_ids: list[str] | None = None,
+    ) -> HarnessSession:
+        """Create a root fork session (parent always None, fresh usage)."""
+        return HarnessSession.objects.create(
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            title=title or "",
+            mode=mode,
+            agent_name=agent_name,
+            model=model or "",
+            reasoning_effort=reasoning_effort or "",
+            parent_id=None,
+            skill_ids=list(skill_ids or []),
+            cost=0.0,
+            tokens={},
+            last_read_at=None,
+            manual_unread_at=None,
+        )
+
+    @staticmethod
     def get_by_id(session_id: uuid.UUID) -> HarnessSession | None:
         """Fetch a session by ID."""
         return HarnessSession.objects.filter(id=session_id).first()
@@ -486,6 +515,118 @@ class HarnessMessageRepository:
         return list(
             HarnessMessage.objects.filter(session_id=session_id).order_by("created_at")
         )
+
+    @staticmethod
+    def list_ids_for_session(session_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return message IDs of a session in creation order."""
+        return list(
+            HarnessMessage.objects.filter(session_id=session_id)
+            .order_by("created_at", "id")
+            .values_list("id", flat=True)
+        )
+
+    @staticmethod
+    def delete_from(
+        session_id: uuid.UUID, from_message_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """Delete messages from *from_message_id* onward (inclusive).
+
+        Ordering is ``created_at`` (ties broken by ``id``). Related
+        parts are removed via CASCADE. Returns deleted message IDs.
+        """
+        ordered = list(
+            HarnessMessage.objects.filter(session_id=session_id).order_by(
+                "created_at", "id"
+            )
+        )
+        index = next(
+            (pos for pos, row in enumerate(ordered) if row.id == from_message_id),
+            None,
+        )
+        if index is None:
+            raise ValueError(f"Message '{from_message_id}' not in session")
+        suffix = ordered[index:]
+        deleted_ids = [row.id for row in suffix]
+        if deleted_ids:
+            HarnessMessage.objects.filter(
+                session_id=session_id, id__in=deleted_ids
+            ).delete()
+        return deleted_ids
+
+    @staticmethod
+    def copy_prefix(
+        src_session_id: uuid.UUID,
+        dst_session_id: uuid.UUID,
+        cutoff_message_id: uuid.UUID | None,
+    ) -> dict[uuid.UUID, uuid.UUID]:
+        """Copy message prefix to *dst_session_id* (cutoff exclusive).
+
+        When *cutoff_message_id* is None or not found, the whole
+        history is copied. New UUIDs are generated; parts are copied
+        per message with ``meta.tail_start_id`` remapped via the id
+        map (dropped when outside the prefix) and subtask
+        ``child_session_id`` cleared. Returns the message id map.
+        """
+        ordered = list(
+            HarnessMessage.objects.filter(session_id=src_session_id).order_by(
+                "created_at", "id"
+            )
+        )
+        if cutoff_message_id is not None:
+            index = next(
+                (pos for pos, row in enumerate(ordered) if row.id == cutoff_message_id),
+                None,
+            )
+            if index is not None:
+                ordered = ordered[:index]
+        id_map: dict[uuid.UUID, uuid.UUID] = {}
+        for src in ordered:
+            dst = HarnessMessage.objects.create(
+                session_id=dst_session_id,
+                role=src.role,
+                content=src.content or "",
+                model=src.model or "",
+                reasoning_effort=src.reasoning_effort or "",
+                provider=src.provider or "",
+                cost=float(src.cost or 0.0),
+                tokens=dict(src.tokens or {}),
+                finish=src.finish or "",
+                error=src.error or "",
+                completed_at=src.completed_at,
+            )
+            id_map[src.id] = dst.id
+        for src in ordered:
+            dst_id = id_map[src.id]
+            parts = list(
+                HarnessPart.objects.filter(message_id=src.id).order_by(
+                    "created_at", "id"
+                )
+            )
+            for part in parts:
+                meta = dict(part.meta or {})
+                tail_raw = str(meta.get("tail_start_id", "") or "").strip()
+                if tail_raw:
+                    try:
+                        tail_uuid = uuid.UUID(tail_raw)
+                    except ValueError:
+                        tail_uuid = None
+                    if tail_uuid is not None and tail_uuid in id_map:
+                        meta["tail_start_id"] = str(id_map[tail_uuid])
+                    else:
+                        meta.pop("tail_start_id", None)
+                if part.type == "subtask":
+                    meta["child_session_id"] = ""
+                HarnessPart.objects.create(
+                    message_id=dst_id,
+                    type=part.type,
+                    state=part.state,
+                    call_id=part.call_id or "",
+                    title=part.title or "",
+                    input=dict(part.input or {}),
+                    output=part.output or "",
+                    meta=meta,
+                )
+        return id_map
 
     @staticmethod
     def latest_assistant_completed_at_by_session(
