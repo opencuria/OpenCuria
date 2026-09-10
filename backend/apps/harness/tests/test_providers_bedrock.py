@@ -736,3 +736,130 @@ def test_user_unknown_image_mime_raises() -> None:
                 )
             ]
         )
+
+
+def test_tool_image_part_becomes_bedrock_image_block() -> None:
+    """Tool image_url parts lower to typed Bedrock image blocks."""
+    import base64
+
+    raw = base64.b64encode(b"\x89PNGdata").decode()
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "t1",
+                        "name": "read",
+                        "arguments": '{"path":"cat.png"}',
+                    }
+                ],
+            ),
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "Image read successfully"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{raw}"},
+                    },
+                ],
+                tool_call_id="t1",
+            ),
+        ]
+    )
+    results = [
+        block["toolResult"]
+        for msg in messages
+        for block in msg["content"]
+        if "toolResult" in block
+    ]
+    assert results and results[0]["toolUseId"] == "t1"
+    assert results[0]["status"] == "success"
+    assert {"text": "Image read successfully"} in results[0]["content"]
+    images = [b["image"] for b in results[0]["content"] if "image" in b]
+    assert images and images[0]["format"] == "png"
+    assert images[0]["source"]["bytes"] == b"\x89PNGdata"
+
+
+def test_tool_pdf_file_part_is_skipped_without_crash() -> None:
+    """PDF file parts in tool results are skipped (text survives).
+
+    Converse ``toolResult`` blocks cannot carry ``document`` blocks, so
+    PDFs are dropped there (documents still ride on user messages).
+    """
+    import base64
+
+    raw = base64.b64encode(b"%PDF-data").decode()
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "t1",
+                        "name": "read",
+                        "arguments": '{"path":"doc.pdf"}',
+                    }
+                ],
+            ),
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "PDF read successfully"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": f"data:application/pdf;base64,{raw}",
+                        "filename": "doc.pdf",
+                    },
+                ],
+                tool_call_id="t1",
+            ),
+        ]
+    )
+    results = [
+        block["toolResult"]
+        for msg in messages
+        for block in msg["content"]
+        if "toolResult" in block
+    ]
+    assert results and results[0]["toolUseId"] == "t1"
+    assert results[0]["status"] == "success"
+    assert {"text": "PDF read successfully"} in results[0]["content"]
+    assert not [b for b in results[0]["content"] if "document" in b]
+    assert not [b for b in results[0]["content"] if "image" in b]
+
+
+def test_user_pdf_file_part_becomes_document_block() -> None:
+    """User PDF file parts still lower to document blocks (unchanged)."""
+    import base64
+
+    raw = base64.b64encode(b"%PDF-data").decode()
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": f"data:application/pdf;base64,{raw}",
+                        "filename": "doc.pdf",
+                    },
+                ],
+            )
+        ]
+    )
+    blocks = messages[0]["content"]
+    assert {"text": "see"} in blocks
+    docs = [b["document"] for b in blocks if "document" in b]
+    assert docs and docs[0]["format"] == "pdf"
+    assert docs[0]["name"] == "doc.pdf"
+    assert docs[0]["source"]["bytes"] == b"%PDF-data"

@@ -254,18 +254,59 @@ def find_previous_summary(messages: list[LLMMessage]) -> str | None:
     return None
 
 
+def _file_placeholder(part: dict[str, Any]) -> str:
+    """Return a ``[file: <filename>]`` placeholder for a file part."""
+    filename = part.get("filename", "")
+    name = str(filename) if isinstance(filename, str) and filename else "file"
+    return f"[file: {name}]"
+
+
+def _attached_file_placeholder(part: dict[str, Any]) -> str:
+    """Return a ``[Attached file: <filename>]`` placeholder."""
+    filename = part.get("filename", "")
+    name = str(filename) if isinstance(filename, str) and filename else "file"
+    return f"[Attached file: {name}]"
+
+
 def _format_user_content(content: str | list[dict[str, Any]] | None) -> str:
-    """Serialize user content for compaction (images become ``[image]``)."""
+    """Serialize user content for compaction (media becomes placeholders)."""
     if not content:
         return ""
     if isinstance(content, str):
         return content
     parts: list[str] = []
     for part in content:
-        if part.get("type") == "text":
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
             parts.append(str(part.get("text", "")))
-        elif part.get("type") == "image_url":
+        elif part.get("type") in ("image_url", "input_image"):
             parts.append("[image]")
+        elif part.get("type") == "file":
+            parts.append(_file_placeholder(part))
+    return "".join(parts)
+
+
+def _format_tool_content(content: str | list[dict[str, Any]] | None) -> str:
+    """Serialize tool content for compaction (media becomes placeholders).
+
+    Image parts become ``[image]``; canonical PDF ``file`` parts become
+    ``[file: <filename>]``. Base64 payloads are never serialized.
+    """
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
+            parts.append(str(part.get("text", "")))
+        elif part.get("type") in ("image_url", "input_image"):
+            parts.append("[image]")
+        elif part.get("type") == "file":
+            parts.append(_file_placeholder(part))
     return "".join(parts)
 
 
@@ -290,7 +331,7 @@ def serialize(message: LLMMessage) -> str:
             lines.append(f"[Assistant tool call]: {name}({args})")
         return "\n".join(lines)
     if message.role == "tool":
-        output = _truncate(str(message.content or ""))
+        output = _truncate(_format_tool_content(message.content))
         return f"[Tool result]: {output}"
     return ""
 
@@ -344,10 +385,16 @@ def _estimate_content_tokens(content: str | list[dict[str, Any]] | None) -> int:
         return max(len(content) // 4, 0)
     total = 0
     for part in content:
-        if part.get("type") == "text":
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
             total += len(str(part.get("text", ""))) // 4
-        elif part.get("type") == "image_url":
+        elif part.get("type") in ("image_url", "input_image"):
             total += IMAGE_TOKEN_ESTIMATE
+        elif part.get("type") == "file":
+            filename = part.get("filename", "")
+            name = str(filename) if isinstance(filename, str) else ""
+            total += len(name) // 4
     return total
 
 
@@ -472,18 +519,30 @@ def _last_real_user(messages: list[LLMMessage]) -> LLMMessage | None:
 
 
 def strip_media(message: LLMMessage) -> LLMMessage:
-    """Replace image parts with text placeholders for overflow replay."""
+    """Replace media parts with text placeholders for overflow replay.
+
+    Handles user and tool messages; tool image lists collapse to text
+    so the retry never carries base64. Images become
+    ``[Attached image: file]``; canonical PDF ``file`` parts become
+    ``[Attached file: <filename>]`` (base64 never leaks). The role is
+    preserved (tool stays tool) so replay keeps a valid
+    assistant/tool alternation.
+    """
     content = message.content
     if isinstance(content, list):
         parts: list[str] = []
         for part in content:
-            if part.get("type") == "image_url":
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("image_url", "input_image"):
                 parts.append("[Attached image: file]")
-            elif part.get("type") == "text":
+            elif part.get("type") == "file":
+                parts.append(_attached_file_placeholder(part))
+            elif part.get("type") in ("text", "input_text", "output_text"):
                 parts.append(str(part.get("text", "")))
         content = "".join(parts)
     return LLMMessage(
-        role="user",
+        role=message.role,
         content=content if isinstance(content, str) else str(content or ""),
         message_id=message.message_id,
     )

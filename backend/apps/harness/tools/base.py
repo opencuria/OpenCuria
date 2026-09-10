@@ -75,12 +75,25 @@ class ToolContext:
 
 @dataclass
 class ToolResult:
-    """Structured result returned by every tool."""
+    """Structured result returned by every tool.
+
+    ``attachments`` carries generic file attachments (OpenCode parity):
+    each entry is ``{"type": "file", "mime": str,
+    "url": "data:<mime>;base64,<payload>", "filename": str}``.
+    ``filename`` is the workspace basename (``""`` fallback) so
+    providers and compaction can name the file without parsing the
+    data URL. Tools that produce attachments should also mirror them
+    into ``metadata["attachments"]`` for ``HarnessPart`` persistence.
+    ``image_jpeg`` is kept for backwards compatibility (computer-use
+    screenshots). ``ToolRegistry.execute`` only clips ``output`` and
+    never truncates ``attachments``/``image_jpeg``.
+    """
 
     output: str
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     image_jpeg: bytes | None = None
+    attachments: list[dict[str, Any]] = field(default_factory=list)
 
 
 BeforeHook = Callable[[str, BaseModel, ToolContext], Awaitable[None]]

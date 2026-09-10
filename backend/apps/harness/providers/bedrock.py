@@ -249,22 +249,30 @@ def _tool_result_content(
     *,
     provider: str,
 ) -> list[dict[str, Any]]:
-    """Lower tool output to Converse ``toolResult.content`` blocks."""
+    """Lower tool output to Converse ``toolResult.content`` blocks.
+
+    Converse ``toolResult`` blocks cannot carry ``document`` blocks
+    (Bedrock API limitation, OpenCode parity: documents only ride on
+    user messages). PDF/``file`` parts in tool results are therefore
+    skipped (text output survives); image parts are kept, unknown media
+    is dropped without crashing.
+    """
     if isinstance(content, str):
         return [{"text": content}] if content else [{"text": ""}]
     blocks: list[dict[str, Any]] = []
     for part in content or []:
         if not isinstance(part, dict):
             continue
+        if part.get("type") == "file":
+            # Documents are not allowed inside toolResult — skip the
+            # part, keep the surrounding text (see docstring).
+            continue
         media = bedrock_media_block(part, provider=provider)
         if media is not None:
             # Only image media is meaningful inside tool results;
-            # a document block would be rejected there, so re-raise.
+            # a document block would be rejected there, so skip it.
             if "image" not in media:
-                raise ProviderResponseError(
-                    "Bedrock Converse only supports image media in tool results",
-                    provider=provider,
-                )
+                continue
             blocks.append(media)
             continue
         if part.get("type") in ("text", "input_text", "output_text"):

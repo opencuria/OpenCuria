@@ -557,7 +557,7 @@ def test_system_update_wrapped_as_user() -> None:
 
 
 def test_assistant_reasoning_replay_and_tool_text_join() -> None:
-    """Assistant reasoning parts replay; tool dict content joins text."""
+    """Assistant reasoning parts replay; tool dict content stays multimodal."""
     adapter = OpenRouterAdapter(api_key="k")
     payload = adapter._build_payload(
         "m",
@@ -588,6 +588,136 @@ def test_assistant_reasoning_replay_and_tool_text_join() -> None:
     assert assistant["tool_calls"][0]["function"]["arguments"] == '{"p": "a"}'
     assert payload["messages"][1] == {
         "role": "tool",
-        "content": "out",
+        "content": [
+            {"type": "text", "text": "out"},
+            {"type": "image_url", "image_url": {"url": "data:x"}},
+        ],
         "tool_call_id": "c1",
     }
+
+
+def test_tool_text_only_list_collapses_to_string() -> None:
+    """Image-less tool lists stay plain strings (backwards compatible)."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[{"type": "text", "text": "out"}],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == "out"
+
+
+def test_tool_image_only_list_keeps_image_part() -> None:
+    """Image-only tool content reaches the model without a text part."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    }
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    ]
+
+
+def test_tool_pdf_file_part_becomes_chat_file_part() -> None:
+    """Canonical PDF file parts lower to OpenAI-Chat file parts."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "PDF read successfully"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    content = payload["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert {"type": "text", "text": "PDF read successfully"} in content
+    assert {
+        "type": "file",
+        "file": {
+            "filename": "doc.pdf",
+            "file_data": "data:application/pdf;base64,BBBB",
+        },
+    } in content
+
+
+def test_tool_pdf_file_part_without_filename_defaults() -> None:
+    """PDF file parts without filename still lower (default name)."""
+    adapter = OpenRouterAdapter(api_key="k")
+    lowered = adapter._tool_content(
+        [
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": "data:application/pdf;base64,BBBB",
+            }
+        ]
+    )
+    assert lowered == [
+        {
+            "type": "file",
+            "file": {
+                "filename": "document.pdf",
+                "file_data": "data:application/pdf;base64,BBBB",
+            },
+        }
+    ]
+
+
+def test_tool_unknown_file_mime_is_dropped_without_crash() -> None:
+    """Unknown file MIMEs are dropped; text output survives."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "done"},
+                    {
+                        "type": "file",
+                        "mime": "application/zip",
+                        "url": "data:application/zip;base64,AAAA",
+                        "filename": "a.zip",
+                    },
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == "done"

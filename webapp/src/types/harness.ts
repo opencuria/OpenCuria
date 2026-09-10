@@ -205,6 +205,13 @@ export interface HarnessPartDelta {
   output?: string
   patch?: string
   compaction?: boolean
+  /** Live tool attachments on `tool_completed` (same shape as persisted meta). */
+  attachments?: Array<{
+    type?: string
+    mime?: string
+    url?: string
+    filename?: string
+  }>
 }
 
 export interface HarnessPartUpdatedEvent {

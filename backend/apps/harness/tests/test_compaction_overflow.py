@@ -164,6 +164,143 @@ def test_serialize_replaces_images_with_placeholder() -> None:
     assert "[image]" in text
 
 
+def test_serialize_tool_list_content_has_no_base64() -> None:
+    """Tool list content serializes text plus placeholder, never base64."""
+    message = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "Image read successfully"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64," + ("B" * 10_000),
+                },
+            },
+        ],
+        tool_call_id="c1",
+    )
+    text = serialize(message)
+    assert "BBBB" not in text
+    assert "Image read successfully" in text
+    assert "[image]" in text
+
+
+def test_serialize_tool_pdf_file_part_has_no_base64() -> None:
+    """Tool PDF file parts serialize as ``[file: <filename>]``, no base64."""
+    message = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "PDF read successfully"},
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": "data:application/pdf;base64," + ("C" * 10_000),
+                "filename": "doc.pdf",
+            },
+        ],
+        tool_call_id="c1",
+    )
+    text = serialize(message)
+    assert "CCCC" not in text
+    assert "PDF read successfully" in text
+    assert "[file: doc.pdf]" in text
+
+
+def test_estimate_tool_image_tokens_uses_image_estimate() -> None:
+    """Tool image parts use the constant estimate, not base64 length."""
+    from apps.harness.compaction import estimate_message_tokens
+    from apps.harness.images import IMAGE_TOKEN_ESTIMATE
+
+    messages = [
+        LLMMessage(
+            role="tool",
+            content=[
+                {"type": "text", "text": "Image read successfully"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64," + ("B" * 10_000),
+                    },
+                },
+            ],
+            tool_call_id="c1",
+        )
+    ]
+    assert estimate_message_tokens(messages) == (
+        len("Image read successfully") // 4 + IMAGE_TOKEN_ESTIMATE
+    )
+
+
+def test_strip_tool_media_preserves_role_without_base64() -> None:
+    """strip_media on tool messages keeps role=tool and drops base64."""
+    tool = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "Image read successfully"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,BBBB"},
+            },
+        ],
+        tool_call_id="c1",
+    )
+    stripped = strip_media(tool)
+    assert stripped.role == "tool"
+    assert isinstance(stripped.content, str)
+    assert "BBBB" not in stripped.content
+    assert "Image read successfully" in stripped.content
+    assert "[Attached image: file]" in stripped.content
+
+
+def test_estimate_tool_pdf_file_tokens_use_filename_only() -> None:
+    """Tool PDF file parts estimate from filename length, not base64."""
+    from apps.harness.compaction import estimate_message_tokens
+
+    payload = "C" * 10_000
+    messages = [
+        LLMMessage(
+            role="tool",
+            content=[
+                {"type": "text", "text": "PDF read successfully"},
+                {
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "url": f"data:application/pdf;base64,{payload}",
+                    "filename": "doc.pdf",
+                },
+            ],
+            tool_call_id="c1",
+        )
+    ]
+    assert estimate_message_tokens(messages) == (
+        len("PDF read successfully") // 4 + len("doc.pdf") // 4
+    )
+
+
+def test_strip_tool_pdf_file_part_keeps_filename_placeholder() -> None:
+    """strip_media keeps PDF file parts as ``[Attached file: ...]``."""
+    payload = "C" * 100
+    tool = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "PDF read successfully"},
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": f"data:application/pdf;base64,{payload}",
+                "filename": "doc.pdf",
+            },
+        ],
+        tool_call_id="c1",
+    )
+    stripped = strip_media(tool)
+    assert stripped.role == "tool"
+    assert isinstance(stripped.content, str)
+    assert payload not in stripped.content
+    assert "PDF read successfully" in stripped.content
+    assert "[Attached file: doc.pdf]" in stripped.content
+
+
 def test_build_compaction_prompt_includes_template() -> None:
     """Compaction prompt uses the structured summary template."""
     prompt = build_compaction_prompt(
@@ -504,7 +641,9 @@ async def test_compaction_never_adds_synthetic_continue_user_message() -> None:
         ),
     )
     assert seen_user_texts
-    assert not any("Continue if you have next steps" in text for text in seen_user_texts)
+    assert not any(
+        "Continue if you have next steps" in text for text in seen_user_texts
+    )
 
 
 def test_strip_media_replaces_image_parts() -> None:

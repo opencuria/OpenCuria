@@ -628,3 +628,158 @@ def test_missing_call_id_gets_best_effort_id() -> None:
         [LLMMessage(role="tool", content="ok", tool_call_id=None)]
     )
     assert items and all(item.get("call_id") for item in items)
+
+
+def test_user_image_parts_become_input_image() -> None:
+    """Hydrated image_url parts lower to Responses input_image items."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            )
+        ]
+    )
+    assert items[0]["role"] == "user"
+    assert {"type": "input_text", "text": "see"} in items[0]["content"]
+    assert {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,AAAA",
+    } in items[0]["content"]
+
+
+def test_tool_image_parts_become_multimodal_output() -> None:
+    """Tool image_url parts ride inside function_call_output."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "Image read successfully"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["type"] == "function_call_output"
+    assert items[0]["call_id"] == "call_1"
+    assert {"type": "input_text", "text": "Image read successfully"} in items[0][
+        "output"
+    ]
+    assert {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,AAAA",
+    } in items[0]["output"]
+
+
+def test_tool_text_only_stays_string_output() -> None:
+    """Image-less tool output keeps the legacy string format."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [LLMMessage(role="tool", content="ok", tool_call_id="call_1")]
+    )
+    assert items[0]["output"] == "ok"
+
+
+def test_tool_pdf_file_part_becomes_input_file_output() -> None:
+    """Tool PDF file parts ride inside function_call_output as input_file."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "PDF read successfully"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["type"] == "function_call_output"
+    assert {"type": "input_text", "text": "PDF read successfully"} in items[0][
+        "output"
+    ]
+    assert {
+        "type": "input_file",
+        "filename": "doc.pdf",
+        "file_data": "data:application/pdf;base64,BBBB",
+    } in items[0]["output"]
+
+
+def test_user_pdf_file_part_becomes_input_file() -> None:
+    """User PDF file parts lower to Responses input_file items."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+            )
+        ]
+    )
+    assert {
+        "type": "input_file",
+        "filename": "doc.pdf",
+        "file_data": "data:application/pdf;base64,BBBB",
+    } in items[0]["content"]
+
+
+def test_tool_unknown_file_mime_does_not_crash() -> None:
+    """Unknown file MIMEs are dropped; text output survives."""
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(b"data: [DONE]\n")
+    )
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "done"},
+                    {
+                        "type": "file",
+                        "mime": "application/zip",
+                        "url": "data:application/zip;base64,AAAA",
+                        "filename": "a.zip",
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["output"] == "done"

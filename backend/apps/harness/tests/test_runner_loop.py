@@ -385,9 +385,173 @@ async def test_tool_errors_include_raw_arguments() -> None:
         doom_loop=False,
         opts=RunOptions(),
     )
+    assert isinstance(outcome.message.content, str)
     assert "SNIFF-ARGS-123" in outcome.message.content
     errors = [e for e in events if e["type"] == "tool_error"]
     assert errors and "SNIFF-ARGS-123" in errors[0]["error"]
+
+
+async def test_tool_image_attachment_reaches_tool_message() -> None:
+    """Tool image attachments become multimodal tool message content."""
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.runner import _PendingToolCall
+    from apps.harness.tools.base import Tool, ToolContext, ToolResult
+
+    class ImageArgs(BaseModel):
+        """No arguments for the image probe tool."""
+
+    class ImageTool(Tool):
+        """Test tool returning an image attachment."""
+
+        name = "imageprobe"
+        description = "Returns an image"
+        args_schema = ImageArgs
+
+        async def execute(  # type: ignore[no-untyped-def]
+            self, args: BaseModel | dict[str, object], ctx
+        ) -> ToolResult:
+            return ToolResult(
+                output="Image read successfully",
+                attachments=[
+                    {
+                        "type": "file",
+                        "mime": "image/png",
+                        "url": "data:image/png;base64,AAAA",
+                    }
+                ],
+            )
+
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    registry = default_tool_registry()
+    registry.register(ImageTool())
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    outcome = await runner._dispatch_tool_call(
+        call=_PendingToolCall(
+            call_id="c-img", name="imageprobe", arguments={}, raw_arguments="{}"
+        ),
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert isinstance(outcome.message.content, list)
+    assert outcome.message.content[0] == {
+        "type": "text",
+        "text": "Image read successfully",
+    }
+    assert {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    } in outcome.message.content
+    completed = [e for e in events if e["type"] == "tool_completed"]
+    assert completed and completed[0]["attachments"] == [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": "data:image/png;base64,AAAA",
+        }
+    ]
+
+
+async def test_tool_pdf_attachment_reaches_model_as_file_part() -> None:
+    """PDF attachments become file parts in tool content (OpenCode parity)."""
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.runner import _PendingToolCall
+    from apps.harness.tools.base import Tool, ToolContext, ToolResult
+
+    class PdfArgs(BaseModel):
+        """No arguments for the PDF probe tool."""
+
+    class PdfTool(Tool):
+        """Test tool returning a PDF attachment."""
+
+        name = "pdfprobe"
+        description = "Returns a PDF"
+        args_schema = PdfArgs
+
+        async def execute(  # type: ignore[no-untyped-def]
+            self, args: BaseModel | dict[str, object], ctx
+        ) -> ToolResult:
+            return ToolResult(
+                output="PDF read successfully",
+                attachments=[
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    }
+                ],
+            )
+
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    registry = default_tool_registry()
+    registry.register(PdfTool())
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    outcome = await runner._dispatch_tool_call(
+        call=_PendingToolCall(
+            call_id="c-pdf", name="pdfprobe", arguments={}, raw_arguments="{}"
+        ),
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert isinstance(outcome.message.content, list)
+    assert {"type": "text", "text": "PDF read successfully"} in (
+        outcome.message.content
+    )
+    assert {
+        "type": "file",
+        "mime": "application/pdf",
+        "url": "data:application/pdf;base64,BBBB",
+        "filename": "doc.pdf",
+    } in outcome.message.content
+    completed = [e for e in events if e["type"] == "tool_completed"]
+    assert completed and completed[0]["attachments"] == [
+        {
+            "type": "file",
+            "mime": "application/pdf",
+            "url": "data:application/pdf;base64,BBBB",
+            "filename": "doc.pdf",
+        }
+    ]
 
 
 async def test_permission_ask_deny_skips_tool() -> None:

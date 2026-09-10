@@ -1079,6 +1079,135 @@ async def test_build_history_truncates_huge_tool_output(harness_workspace) -> No
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_build_history_rebuilds_tool_images_from_meta(
+    harness_workspace,
+) -> None:
+    """Persisted meta attachments rebuild multimodal tool messages."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="look at cat"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role="assistant",
+        content="seen",
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-img",
+        title="Read cat.png",
+        input={"tool": "read", "arguments": '{"path":"cat.png"}'},
+        output="Image read successfully",
+        meta={
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,AAAA",
+                    "filename": "cat.png",
+                }
+            ]
+        },
+    )
+    history = await service._build_history(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, list)
+    assert tool_msg.content[0] == {
+        "type": "text",
+        "text": "Image read successfully",
+    }
+    assert {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    } in tool_msg.content
+    assert part.meta.get("attachments")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_completed_event_persists_attachments_in_meta(
+    harness_workspace,
+) -> None:
+    """tool_completed attachments survive in HarnessPart.meta (no column)."""
+    import os
+
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant"
+    )
+    big = "A" * 100
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "title": "Read cat.png",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "output": "Image read successfully",
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": f"data:image/png;base64,{big}",
+                    "filename": "cat.png",
+                },
+                {"type": "file", "mime": "image/png", "url": "not-a-data-url"},
+            ],
+        },
+    )
+    parts = [
+        part
+        for part in HarnessPartRepository.list_for_session(session.id)
+        if part.type == "tool"
+    ]
+    assert len(parts) == 1
+    assert parts[0].state == "completed"
+    assert parts[0].output == "Image read successfully"
+    assert parts[0].meta.get("attachments") == [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": f"data:image/png;base64,{big}",
+            "filename": "cat.png",
+        }
+    ]
+    # tool_started meta (step) survives the completed merge (no replace).
+    assert parts[0].meta.get("step") == 1
+    completed_deltas = [
+        item.get("delta", {})
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_completed" in (item.get("delta") or {})
+    ]
+    assert completed_deltas
+    assert completed_deltas[0]["attachments"] == [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": f"data:image/png;base64,{big}",
+            "filename": "cat.png",
+        }
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_compaction_event_persists_output(harness_workspace) -> None:
     """Compaction parts store the summary via create(output=)."""
     service, _, _ = _service()
@@ -1825,7 +1954,9 @@ async def test_always_allow_resolves_sibling_pending_asks(
     ]
     assert len(resolved_events) == 2
     assert {item["request_id"] for item in resolved_events} == set(request_ids[:2])
-    assert all(item.get("root_session_id") == str(parent.id) for item in resolved_events)
+    assert all(
+        item.get("root_session_id") == str(parent.id) for item in resolved_events
+    )
 
 
 @pytest.mark.django_db(transaction=True)

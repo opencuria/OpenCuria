@@ -360,29 +360,127 @@ class OpenRouterAdapter(ProviderAdapter):
         return "\n".join(texts)
 
     @staticmethod
+    def _file_part_data(part: dict[str, Any]) -> tuple[str, str, str] | None:
+        """Return (mime, data-URL, filename) of a PDF file part, or None.
+
+        Only canonical ``{"type": "file", "mime": "application/pdf",
+        "url": data-URL}`` parts map; unknown file MIMEs return None so
+        callers keep dropping them without crashing.
+        """
+        if part.get("type") != "file":
+            return None
+        mime = part.get("mime")
+        url = part.get("url")
+        if not isinstance(mime, str) or not isinstance(url, str):
+            return None
+        if mime.strip().lower() != "application/pdf":
+            return None
+        if not url or not url.startswith("data:"):
+            return None
+        filename = part.get("filename", "")
+        if not isinstance(filename, str) or not filename:
+            filename = "document.pdf"
+        return (mime.strip().lower(), url, filename)
+
+    @staticmethod
+    def _tool_content(
+        content: str | list[dict[str, Any]] | None,
+    ) -> str | list[dict[str, Any]]:
+        """Lower tool output to the OpenAI chat wire format.
+
+        Text parts become ``{"type": "text", ...}`` and image parts pass
+        through as ``{"type": "image_url", ...}`` (openai-chat.ts parity:
+        tool-result media is inlined so the image reaches the model).
+        Canonical PDF ``file`` parts become OpenAI-Chat file parts
+        ``{"type": "file", "file": {"filename": ..., "file_data": ...}}``
+        (OpenCode parity). Unknown file MIMEs are dropped without
+        crashing; text output already carries the result.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        lowered: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    lowered.append({"type": "text", "text": text})
+                continue
+            if part_type == "image_url":
+                ref = part.get("image_url")
+                url = ref.get("url") if isinstance(ref, dict) else ref
+                if isinstance(url, str) and url:
+                    lowered.append(
+                        {"type": "image_url", "image_url": {"url": url}}
+                    )
+                continue
+            file_data = OpenRouterAdapter._file_part_data(part)
+            if file_data is not None:
+                _, url, filename = file_data
+                lowered.append(
+                    {
+                        "type": "file",
+                        "file": {"filename": filename, "file_data": url},
+                    }
+                )
+        if not lowered:
+            return OpenRouterAdapter._content_text(content)
+        if len(lowered) == 1 and lowered[0].get("type") == "text":
+            text = lowered[0].get("text")
+            return text if isinstance(text, str) else ""
+        return lowered
+
+    @staticmethod
     def _message_to_dict(message: LLMMessage) -> dict[str, Any]:
         """Convert an LLMMessage to the OpenAI wire format.
 
         Assistant messages replay ``tool_calls`` plus joined
         ``reasoning_content`` from ``reasoning`` content parts
         (openai-chat.ts ``lowerAssistantMessage`` parity). Tool results
-        join text parts so image parts never crash the lowering.
+        inline text and image parts so tool images reach the model.
         """
         if message.role == "assistant":
             return OpenRouterAdapter._assistant_to_dict(message)
         if message.role == "tool":
             data: dict[str, Any] = {
                 "role": "tool",
-                "content": OpenRouterAdapter._content_text(message.content)
-                if not isinstance(message.content, str)
-                else message.content,
+                "content": OpenRouterAdapter._tool_content(message.content),
             }
             if message.tool_call_id is not None:
                 data["tool_call_id"] = message.tool_call_id
             return data
         data = {"role": message.role}
         if message.content is not None:
-            data["content"] = message.content
+            if isinstance(message.content, list):
+                # User/assistant lists may carry canonical PDF file parts
+                # from tool-message rehydration; lower them like tool
+                # content so PDFs survive history replay (unknown MIMEs
+                # are still dropped without crashing).
+                lowered: list[dict[str, Any]] = []
+                for part in message.content:
+                    if not isinstance(part, dict):
+                        continue
+                    file_data = OpenRouterAdapter._file_part_data(part)
+                    if file_data is not None:
+                        _, url, filename = file_data
+                        lowered.append(
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": filename,
+                                    "file_data": url,
+                                },
+                            }
+                        )
+                        continue
+                    lowered.append(part)
+                data["content"] = lowered
+            else:
+                data["content"] = message.content
         if message.tool_calls:
             converted: list[dict[str, Any]] = []
             for call in message.tool_calls:

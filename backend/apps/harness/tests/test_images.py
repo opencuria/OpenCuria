@@ -86,6 +86,78 @@ def test_compaction_estimates_image_tokens_without_base64() -> None:
     )
 
 
+def test_images_helpers_map_and_cap_attachments() -> None:
+    """Image/file helpers map image_url + file parts, keep filename, cap."""
+    from apps.harness.images import (
+        TOOL_ATTACHMENT_MAX_CHARS,
+        build_tool_message_content,
+        select_persisted_tool_attachments,
+        tool_message_file_parts,
+        tool_message_image_parts,
+    )
+
+    attachments = [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": "data:image/png;base64,AAAA",
+            "filename": "cat.png",
+        },
+        {
+            "type": "file",
+            "mime": "application/pdf",
+            "url": "data:application/pdf;base64,BBBB",
+            "filename": "doc.pdf",
+        },
+    ]
+    assert tool_message_image_parts(attachments) == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    ]
+    assert tool_message_file_parts(attachments) == [
+        {
+            "type": "file",
+            "mime": "application/pdf",
+            "url": "data:application/pdf;base64,BBBB",
+            "filename": "doc.pdf",
+        }
+    ]
+    assert tool_message_file_parts([attachments[0]]) == []
+    content = build_tool_message_content("PDF read successfully", attachments[1:])
+    assert isinstance(content, list)
+    assert {"type": "text", "text": "PDF read successfully"} in content
+    assert {
+        "type": "file",
+        "mime": "application/pdf",
+        "url": "data:application/pdf;base64,BBBB",
+        "filename": "doc.pdf",
+    } in content
+    assert build_tool_message_content("nothing", []) == "nothing"
+    kept = select_persisted_tool_attachments(attachments)
+    assert [item["mime"] for item in kept] == ["image/png", "application/pdf"]
+    assert [item["filename"] for item in kept] == ["cat.png", "doc.pdf"]
+    legacy = [
+        {"type": "file", "mime": "image/png", "url": "data:image/png;base64,AAAA"}
+    ]
+    assert select_persisted_tool_attachments(legacy)[0]["filename"] == ""
+    non_string = [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": "data:image/png;base64,AAAA",
+            "filename": 123,
+        }
+    ]
+    assert select_persisted_tool_attachments(non_string)[0]["filename"] == ""
+    oversized = [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": "data:image/png;base64," + ("A" * (TOOL_ATTACHMENT_MAX_CHARS + 1)),
+        }
+    ]
+    assert select_persisted_tool_attachments(oversized) == []
+
+
 def test_compaction_prompt_replaces_images_with_placeholder() -> None:
     """Compaction serialization must not dump base64 payloads."""
     messages = [

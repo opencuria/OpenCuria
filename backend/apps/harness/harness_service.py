@@ -36,7 +36,11 @@ from common.exceptions import ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
 from .compaction import CHECKPOINT_PREFIX
-from .images import hydrate_user_messages
+from .images import (
+    build_tool_message_content,
+    hydrate_user_messages,
+    select_persisted_tool_attachments,
+)
 from .models import (
     HarnessMessage,
     HarnessPart,
@@ -63,6 +67,25 @@ from .tools.truncate import truncate_tool_output
 log = structlog.get_logger(__name__)
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+def _event_tool_attachments(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return sanitizable attachment dicts from a tool_completed event."""
+    attachments = event.get("attachments", [])
+    if not isinstance(attachments, list):
+        return []
+    return [item for item in attachments if isinstance(item, dict)]
+
+
+def _tool_part_attachments(part: HarnessPart) -> list[dict[str, Any]]:
+    """Return persisted attachment dicts from a tool ``HarnessPart``."""
+    meta = getattr(part, "meta", None) or {}
+    if not isinstance(meta, dict):
+        return []
+    attachments = meta.get("attachments", [])
+    if not isinstance(attachments, list):
+        return []
+    return [item for item in attachments if isinstance(item, dict)]
 
 FRONTEND_EVENT_PART = "harness.part_updated"
 FRONTEND_EVENT_PERMISSION = "harness.permission_required"
@@ -932,10 +955,15 @@ class HarnessService:
             )
             for part in tool_parts:
                 clipped = truncate_tool_output(part.output or "")
+                attachments = select_persisted_tool_attachments(
+                    _tool_part_attachments(part)
+                )
                 history.append(
                     LLMMessage(
                         role="tool",
-                        content=clipped.content,
+                        content=build_tool_message_content(
+                            clipped.content, attachments
+                        ),
                         tool_call_id=part.call_id,
                     )
                 )
@@ -1537,6 +1565,9 @@ class HarnessService:
                         "tool_completed": event.get("tool", ""),
                         "call_id": event.get("call_id", ""),
                         "output": event.get("output", ""),
+                        "attachments": select_persisted_tool_attachments(
+                            _event_tool_attachments(event)
+                        ),
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id) if part is not None else None,
@@ -1721,7 +1752,15 @@ class HarnessService:
     async def _finish_tool_part(
         self, assistant: HarnessMessage, event: dict[str, Any], *, state: str
     ) -> HarnessPart:
-        """Transition the matching tool part to completed/error."""
+        """Transition the matching tool part to completed/error.
+
+        ``tool_completed`` events persist sanitized attachments into
+        ``HarnessPart.meta["attachments"]`` (no DB migration): text
+        output stays in ``output`` while image/PDF bytes survive restarts
+        via ``meta`` and are rehydrated in :meth:`_build_history`.
+        ``mark_state`` merges ``meta`` (existing keys like ``step`` from
+        the ``tool_started`` part are preserved).
+        """
         call_id = str(event.get("call_id", ""))
         output = str(event.get("output", "") or event.get("error", "") or "")
         part_id = (
@@ -1748,8 +1787,15 @@ class HarnessService:
                 call_id=call_id,
                 title=str(event.get("tool", "")),
             )
+        meta: dict[str, Any] | None = None
+        if state == "completed":
+            attachments = select_persisted_tool_attachments(
+                _event_tool_attachments(event)
+            )
+            if attachments:
+                meta = {"attachments": attachments}
         await sync_to_async(self.parts.mark_state)(
-            part, state, output=output or part.output
+            part, state, output=output or part.output, meta=meta
         )
         return part
 

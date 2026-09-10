@@ -187,7 +187,14 @@ class FakeAccessor(WorkspaceAccessor):
         if path not in self.files:
             raise RunnerAccessorError(f"read_file failed: not found {path}")
         content = self.files[path]
-        return FileContent(content=content, size=len(content))
+        size = len(content)
+        truncated = max_size is not None and size > int(max_size)
+        shown = content[: int(max_size)] if truncated else content
+        return FileContent(
+            content=shown,
+            size=size,
+            truncated=truncated,
+        )
 
     async def write_file(self, path: str, content: bytes, mode=0o644) -> None:
         """Write into the in-memory file map."""
@@ -269,8 +276,7 @@ class FakeAccessor(WorkspaceAccessor):
             "workdir": workdir,
             "pid": 1234,
             "log_path": (
-                "/workspace/.opencuria/processes/"
-                f"proc-{len(self.processes) + 1}.log"
+                f"/workspace/.opencuria/processes/proc-{len(self.processes) + 1}.log"
             ),
             "status": "running",
             "exit_code": None,

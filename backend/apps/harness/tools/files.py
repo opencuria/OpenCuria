@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import difflib
 
 from pydantic import BaseModel, Field
 
-from ..access.base import sanitize_harness_path
+from ..access.base import guess_mime_type, sanitize_harness_path
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .file_locks import get_lock
@@ -29,10 +30,90 @@ _READ_FOOTER_RESERVE = 256
 # Binary detection: NUL byte in the probed prefix means "not text".
 _BINARY_PROBE_BYTES = 4096
 
+# OpenCode parity: media sniffing + ingestion cap.
+SUPPORTED_IMAGE_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+}
+SUPPORTED_PDF_MIME = "application/pdf"
+MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
+
+# Bytes probed for magic-byte sniffing (OpenCode ``SAMPLE_BYTES``).
+_MEDIA_SNIFF_BYTES = 4096
+
 
 def _is_binary(content: bytes) -> bool:
     """Return True when *content* looks like a binary file."""
     return b"\x00" in content[:_BINARY_PROBE_BYTES]
+
+
+def _starts_with(content: bytes, prefix: tuple[int, ...]) -> bool:
+    """Return True when *content* starts with the given byte prefix."""
+    if len(content) < len(prefix):
+        return False
+    return all(byte == value for byte, value in zip(content, prefix))
+
+
+def _sniff_image_mime(sample: bytes) -> str | None:
+    """Detect an image MIME from magic bytes (OpenCode ``imageMime``).
+
+    PNG/JPEG/GIF/WEBP are recognized from the first bytes, independent
+    of the file extension. Returns None when no magic matches.
+    """
+    if _starts_with(sample, (0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)):
+        return "image/png"
+    if _starts_with(sample, (0xFF, 0xD8, 0xFF)):
+        return "image/jpeg"
+    if _starts_with(sample, (0x47, 0x49, 0x46, 0x38)):
+        return "image/gif"
+    if _starts_with(sample, (0x52, 0x49, 0x46, 0x46)) and _starts_with(
+        sample[8:], (0x57, 0x45, 0x42, 0x50)
+    ):
+        return "image/webp"
+    return None
+
+
+def sniff_attachment_mime(sample: bytes, path: str, stored_mime: str = "") -> str:
+    """Return the attachment MIME for *sample* (OpenCode parity).
+
+    Magic bytes win over the stored/extension MIME so a JPEG saved as
+    ``.bin`` is still detected as ``image/jpeg``. Falls back to
+    *stored_mime* (runner ``file --mime-type``) and finally to the
+    extension guess.
+    """
+    sniffed = _sniff_image_mime(sample)
+    if sniffed is not None:
+        return sniffed
+    if _starts_with(sample, (0x25, 0x50, 0x44, 0x46)):
+        return SUPPORTED_PDF_MIME
+    if stored_mime and stored_mime != "application/octet-stream":
+        return stored_mime
+    return guess_mime_type(path)
+
+
+def is_pdf_attachment(mime: str) -> bool:
+    """Return True when *mime* denotes a PDF attachment."""
+    return mime == SUPPORTED_PDF_MIME
+
+
+def _media_attachment(
+    mime: str, content: bytes, *, filename: str = ""
+) -> dict[str, object]:
+    """Build an OpenCode-style file attachment dict.
+
+    ``filename`` is the workspace basename (e.g. ``cat.png``) so
+    providers and compaction placeholders can name the file without
+    parsing the data URL. Fallback is ``""`` when unknown.
+    """
+    encoded = base64.b64encode(content).decode("ascii")
+    return {
+        "type": "file",
+        "mime": mime,
+        "url": f"data:{mime};base64,{encoded}",
+        "filename": filename,
+    }
 
 
 def _clip_line(line: str) -> str:
@@ -86,9 +167,7 @@ async def _miss_message(safe_path: str, exc: Exception, ctx: ToolContext) -> str
     return f"{base}\nDid you mean one of these?\n{listed}"
 
 
-async def _sibling_suggestions_async(
-    safe_path: str, ctx: ToolContext
-) -> list[str]:
+async def _sibling_suggestions_async(safe_path: str, ctx: ToolContext) -> list[str]:
     """Awaitable sibling lookup (best effort, swallows errors)."""
     accessor = getattr(ctx, "accessor", None)
     list_dir = getattr(accessor, "list_dir", None)
@@ -201,7 +280,9 @@ class ReadTool(Tool):
         "(defaults: offset 0, limit 2000 lines, at most 50 KB per page). "
         "Offset and displayed line numbers are 0-based. "
         "Use offset to continue in large files. Rejects binary files. "
-        "Lines longer than 2000 characters are truncated."
+        "Lines longer than 2000 characters are truncated. "
+        "This tool can read image files and PDFs and return them "
+        "as file attachments."
     )
     args_schema: type[BaseModel] = ReadArgs
     permission_key = "read"
@@ -228,6 +309,13 @@ class ReadTool(Tool):
                 await _miss_message(safe_path, exc, ctx), tool=self.name
             ) from exc
         content = stored.content
+        mime = sniff_attachment_mime(
+            content[:_MEDIA_SNIFF_BYTES],
+            safe_path,
+            getattr(stored, "mime", ""),
+        )
+        if mime in SUPPORTED_IMAGE_MIMES or is_pdf_attachment(mime):
+            return await self._execute_media(args.path, safe_path, mime, ctx)
         if _is_binary(content):
             raise ToolError(
                 f"Refusing to read binary file: {args.path}",
@@ -248,9 +336,7 @@ class ReadTool(Tool):
                 tool=self.name,
             )
         page, more, cut = paginate_read(lines, offset=args.offset, limit=args.limit)
-        numbered = [
-            f"{args.offset + index}: {line}" for index, line in enumerate(page)
-        ]
+        numbered = [f"{args.offset + index}: {line}" for index, line in enumerate(page)]
         output = "\n".join(numbered)
         last = args.offset + len(page)
         next_offset = last
@@ -281,6 +367,51 @@ class ReadTool(Tool):
                 "offset": args.offset,
                 "next_offset": next_offset if (more or cut) else None,
             },
+        )
+
+    async def _execute_media(
+        self, display_path: str, safe_path: str, mime: str, ctx: ToolContext
+    ) -> ToolResult:
+        """Return an image/PDF file as a file attachment (OpenCode parity).
+
+        Re-reads up to ``MAX_MEDIA_INGEST_BYTES`` so media larger than
+        the text fetch budget is still fully attached. Oversized media
+        raises ``ToolError`` with an ingestion-limit message.
+        """
+        try:
+            stored = await ctx.accessor.read_file(
+                safe_path, max_size=MAX_MEDIA_INGEST_BYTES + 1
+            )
+        except RunnerAccessorError as exc:
+            raise ToolError(
+                await _miss_message(safe_path, exc, ctx), tool=self.name
+            ) from exc
+        content = stored.content
+        on_disk = stored.size or len(content)
+        if on_disk > MAX_MEDIA_INGEST_BYTES or (len(content) > MAX_MEDIA_INGEST_BYTES):
+            raise ToolError(
+                f"Media exceeds {MAX_MEDIA_INGEST_BYTES} byte ingestion "
+                f"limit: {display_path}",
+                tool=self.name,
+            )
+        output = (
+            "PDF read successfully"
+            if is_pdf_attachment(mime)
+            else "Image read successfully"
+        )
+        filename = safe_path.rsplit("/", 1)[-1] or ""
+        attachment = _media_attachment(mime, content, filename=filename)
+        metadata = {
+            "path": safe_path,
+            "mime": mime,
+            "size": on_disk,
+            "attachments": [attachment],
+        }
+        return ToolResult(
+            output=output,
+            truncated=False,
+            metadata=metadata,
+            attachments=[attachment],
         )
 
 
@@ -317,9 +448,7 @@ class WriteTool(Tool):
             except RunnerAccessorError:
                 old_text = ""
             try:
-                await ctx.accessor.write_file(
-                    safe_path, args.content.encode("utf-8")
-                )
+                await ctx.accessor.write_file(safe_path, args.content.encode("utf-8"))
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
         patch = _patch_metadata(safe_path, old_text=old_text, new_text=args.content)
