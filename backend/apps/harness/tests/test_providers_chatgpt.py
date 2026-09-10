@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -628,3 +627,27 @@ def test_missing_call_id_gets_best_effort_id() -> None:
         [LLMMessage(role="tool", content="ok", tool_call_id=None)]
     )
     assert items and all(item.get("call_id") for item in items)
+
+
+class _RaiseTransport(httpx.AsyncBaseTransport):
+    """Transport that fails immediately with a fixed exception."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise self._error
+
+
+async def test_chat_stream_read_error_is_retryable() -> None:
+    """Mid-stream httpx.ReadError maps to Connection reset by server."""
+    client = httpx.AsyncClient(transport=_RaiseTransport(httpx.ReadError("")))
+    adapter = ChatGPTAdapter(_credentials(), client=client)
+    with pytest.raises(
+        ProviderResponseError, match="Connection reset by server"
+    ) as exc_info:
+        async for _ in adapter.chat_stream(
+            "gpt-5.4", [LLMMessage(role="user", content="hi")], []
+        ):
+            pass
+    assert exc_info.value.is_retryable is True

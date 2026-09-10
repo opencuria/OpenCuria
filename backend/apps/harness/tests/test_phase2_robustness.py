@@ -84,7 +84,9 @@ def _tool_step(
 
 async def test_retry_events_emitted_with_attempt_and_delay(monkeypatch) -> None:
     """Transient failure emits retry_scheduled {attempt, delay, error}."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _a: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _a, **_kwargs: 0
+    )
     provider = ScriptProvider([[Delta(text="recovered", usage=Usage(1, 1, 2))]])
     real_stream = provider.chat_stream
     calls = {"n": 0}

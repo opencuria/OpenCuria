@@ -15,6 +15,7 @@ import httpx
 import structlog
 
 from ._lowering import project_openai_tool_schema
+from ._transport import map_httpx_error
 from .base import (
     ChatOptions,
     Delta,
@@ -141,18 +142,13 @@ class ChatGPTAdapter(ProviderAdapter):
         except ProviderResponseError:
             logger.warning("provider_response_error")
             raise
-        except httpx.TimeoutException as exc:
-            logger.warning("provider_timeout")
-            raise ProviderTimeoutError(
-                "ChatGPT request timed out",
-                provider=self.name,
-            ) from exc
         except httpx.HTTPError as exc:
-            logger.warning("provider_http_error")
-            raise ProviderResponseError(
-                f"ChatGPT request failed: {exc}",
-                provider=self.name,
-            ) from exc
+            mapped = map_httpx_error(exc, provider=self.name, label="ChatGPT")
+            if isinstance(mapped, ProviderTimeoutError):
+                logger.warning("provider_timeout")
+            else:
+                logger.warning("provider_http_error")
+            raise mapped from exc
 
     def _build_headers(self) -> dict[str, str]:
         """Build Codex request headers from stored credentials."""

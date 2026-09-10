@@ -30,6 +30,7 @@ from ._lowering import (
     is_tool_error_text,
     project_openai_tool_schema,
 )
+from ._transport import map_os_transport_error
 from .base import (
     ChatOptions,
     Delta,
@@ -449,6 +450,11 @@ class BedrockAdapter(ProviderAdapter):
             raise self._map_client_error(exc) from exc
         except Exception as exc:
             logger.warning("provider_unexpected_error")
+            mapped = map_os_transport_error(
+                exc, provider=self.name, label="Bedrock"
+            )
+            if mapped is not None:
+                raise mapped from exc
             raise ProviderResponseError(
                 f"Bedrock request failed: {exc}",
                 provider=self.name,

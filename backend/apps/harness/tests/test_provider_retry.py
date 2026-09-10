@@ -195,12 +195,33 @@ def test_status_500_and_above_retry() -> None:
     assert is_retryable_provider_error(
         ProviderResponseError("boom", status_code=500)
     )
+    assert is_retryable_provider_error(
+        ProviderResponseError("boom", status_code=500, is_retryable=False)
+    )
     assert not is_retryable_provider_error(
         ProviderAuthError("denied", status_code=401)
     )
     assert not is_retryable_provider_error(
         ProviderAuthError("forbidden", status_code=403)
     )
+
+
+def test_is_retryable_flag_true_retries_without_pattern() -> None:
+    """OpenCode isRetryable=true retries even without 5xx or message match."""
+    assert is_retryable_provider_error(
+        ProviderResponseError("oops", is_retryable=True)
+    )
+
+
+def test_should_retry_header_false_wins_over_is_retryable_flag() -> None:
+    """x-should-retry: false still blocks an is_retryable=True 5xx error."""
+    error = ProviderResponseError(
+        "upstream",
+        status_code=503,
+        response_headers={"x-should-retry": "false"},
+        is_retryable=True,
+    )
+    assert not is_retryable_provider_error(error)
 
 
 def test_error_fields_default_backward_compatible() -> None:
@@ -248,6 +269,12 @@ def test_bedrock_stream_retryable_flags_pass_through() -> None:
     assert throttling is not None
     assert getattr(throttling, "is_retryable") is True
     assert is_retryable_provider_error(throttling)
+    internal = adapter._stream_error_from_event(
+        {"internalServerException": {"message": "upstream hiccup"}}
+    )
+    assert internal is not None
+    assert getattr(internal, "is_retryable") is True
+    assert is_retryable_provider_error(internal)
     overflow = adapter._stream_error_from_event(
         {"validationException": {"message": "model_context_window_exceeded"}}
     )

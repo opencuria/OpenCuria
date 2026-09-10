@@ -205,6 +205,8 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
             if is_context_overflow_error(exc):
                 return False
             return hint
+        if exc.is_retryable is True:
+            return True
         if exc.status_code is not None and exc.status_code >= 500:
             return True
         return matches_retryable_message(text)
@@ -213,4 +215,6 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
         if overflow:
             return False
         return hint
+    if getattr(exc, "is_retryable", None) is True:
+        return True
     return matches_retryable_message(text)

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 
 from apps.harness.providers.base import (
@@ -18,8 +18,6 @@ from apps.harness.providers.base import (
     ProviderResponseError,
     ToolSchema,
 )
-from botocore import UNSIGNED
-
 from apps.harness.providers.bedrock import (
     AUTH_SETTINGS_MESSAGE,
     BedrockAdapter,
@@ -376,6 +374,16 @@ async def test_chat_stream_client_error_throttling() -> None:
     adapter, _ = _adapter(session=_MockSession(error=error))
     with pytest.raises(ProviderRateLimitError):
         await _collect(adapter)
+
+
+async def test_chat_stream_connection_reset_is_retryable() -> None:
+    """OS connection drops map to a retryable Connection reset by server."""
+    adapter, _ = _adapter(session=_MockSession(error=ConnectionResetError()))
+    with pytest.raises(
+        ProviderResponseError, match="Connection reset by server"
+    ) as exc:
+        await _collect(adapter)
+    assert exc.value.is_retryable is True
 
 
 async def test_chat_stream_validation_overflow_non_retryable() -> None:

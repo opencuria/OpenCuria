@@ -584,7 +584,9 @@ async def test_failed_run_persists_error_without_task_exception(
     harness_workspace, monkeypatch
 ) -> None:
     """Provider failures persist error finish and do not leak task exceptions."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
 
     class TimeoutProvider(FakeProvider):
         async def chat_stream(  # type: ignore[no-untyped-def]

@@ -18,6 +18,7 @@ from apps.harness.providers.base import (
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
+    ProviderResponseError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
@@ -1068,7 +1069,9 @@ class _FlakyTimeoutProvider(FakeProvider):
 
 async def test_transient_timeout_retries_then_succeeds(monkeypatch) -> None:
     """A single timeout is retried and the run completes."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
     provider = _FlakyTimeoutProvider(1, [_text_step("recovered")])
     events: list[dict[str, Any]] = []
     runner, opts = _runner(provider, events)
@@ -1081,7 +1084,9 @@ async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None
     """Six timeouts (1 + 5 retries) surface the original error."""
     from apps.harness.provider_retry import RETRY_MAX_RETRIES
 
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
     provider = _FlakyTimeoutProvider(99, [_text_step("never")])
     events: list[dict[str, Any]] = []
     runner, opts = _runner(provider, events)
@@ -1092,7 +1097,9 @@ async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None
 
 async def test_auth_error_is_not_retried(monkeypatch) -> None:
     """Auth failures fail the step immediately."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
 
     class AuthFailProvider(FakeProvider):
         def __init__(self) -> None:
@@ -1116,6 +1123,94 @@ async def test_auth_error_is_not_retried(monkeypatch) -> None:
     with pytest.raises(ProviderAuthError):
         await runner.run("go", "build", "m", "build", opts)
     assert provider.attempts == 1
+
+
+class _FlakyTransportProvider(FakeProvider):
+    """Fail the first N stream attempts with a retryable transport drop."""
+
+    def __init__(self, failures: int, steps: list[list[Delta]]) -> None:
+        super().__init__(steps)
+        self.failures = failures
+        self.attempts = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts: ChatOptions | None = None,
+    ) -> AsyncIterator[Delta]:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderResponseError(
+                "Connection reset by server",
+                provider="fake",
+                is_retryable=True,
+            )
+        async for delta in super().chat_stream(model, messages, tools, opts):
+            yield delta
+
+
+async def test_transient_transport_error_retries_then_succeeds(monkeypatch) -> None:
+    """A single retryable ReadError-style drop is retried and completes."""
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
+    provider = _FlakyTransportProvider(1, [_text_step("recovered")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "recovered"
+    assert provider.attempts == 2
+
+
+async def test_retry_delay_receives_provider_error(monkeypatch) -> None:
+    """The runner passes the failed error into retry_delay for Retry-After."""
+    captured: dict[str, object] = {}
+
+    def fake_delay(
+        attempt: int,
+        random_value: float | None = None,
+        error: BaseException | None = None,
+    ) -> float:
+        captured["attempt"] = attempt
+        captured["error"] = error
+        return 0
+
+    monkeypatch.setattr("apps.harness.runner.retry_delay", fake_delay)
+    headers = {"retry-after": "2"}
+    error = ProviderResponseError(
+        "Connection reset by server",
+        provider="fake",
+        is_retryable=True,
+        response_headers=headers,
+    )
+
+    class OnceProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([_text_step("ok")])
+            self.attempts = 0
+
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise error
+            async for delta in super().chat_stream(model, messages, tools, opts):
+                yield delta
+
+    provider = OnceProvider()
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "ok"
+    assert captured["attempt"] == 1
+    assert captured["error"] is error
 
 
 async def _provider_calls(

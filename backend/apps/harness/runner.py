@@ -1474,7 +1474,7 @@ class HarnessRunner:
         step: int,
         chat_options: ChatOptions | None = None,
     ) -> tuple[str, list[_PendingToolCall], Usage, str]:
-        """Run one provider step, retrying transient timeouts and 5xx errors."""
+        """Run one provider step, retrying timeouts, transport drops, and 5xx."""
         attempt = 0
         while True:
             try:
@@ -1494,7 +1494,7 @@ class HarnessRunner:
                 ):
                     raise
                 attempt += 1
-                delay = retry_delay(attempt)
+                delay = retry_delay(attempt, error=exc)
                 log.warning(
                     "provider_step_retry",
                     attempt=attempt,

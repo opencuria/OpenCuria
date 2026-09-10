@@ -18,6 +18,7 @@ from ._lowering import (
     project_openai_tool_schema,
     wrap_system_update,
 )
+from ._transport import map_httpx_error
 from .base import (
     ChatOptions,
     Delta,
@@ -183,18 +184,15 @@ class OpenRouterAdapter(ProviderAdapter):
         except ProviderResponseError:
             logger.warning("provider_response_error")
             raise
-        except httpx.TimeoutException as exc:
-            logger.warning("provider_timeout")
-            raise ProviderTimeoutError(
-                "OpenRouter request timed out",
-                provider=self.name,
-            ) from exc
         except httpx.HTTPError as exc:
-            logger.warning("provider_http_error")
-            raise ProviderResponseError(
-                f"OpenRouter request failed: {exc}",
-                provider=self.name,
-            ) from exc
+            mapped = map_httpx_error(
+                exc, provider=self.name, label="OpenRouter"
+            )
+            if isinstance(mapped, ProviderTimeoutError):
+                logger.warning("provider_timeout")
+            else:
+                logger.warning("provider_http_error")
+            raise mapped from exc
 
     def _build_payload(
         self,
@@ -706,7 +704,14 @@ class OpenRouterAdapter(ProviderAdapter):
                 return Delta(usage=usage)
             return None
         choice = choices[0] if isinstance(choices[0], dict) else {}
-        finish_reason = self._map_finish_reason(choice.get("finish_reason"))
+        raw_finish = choice.get("finish_reason")
+        if raw_finish in ("network_error", "network-error"):
+            raise ProviderResponseError(
+                "Provider finish_reason: network_error",
+                provider=self.name,
+                is_retryable=True,
+            )
+        finish_reason = self._map_finish_reason(raw_finish)
         raw_delta = choice.get("delta", {})
         if not isinstance(raw_delta, dict):
             raw_delta = {}

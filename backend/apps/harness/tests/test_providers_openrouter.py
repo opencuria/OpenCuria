@@ -430,6 +430,30 @@ def test_parse_chunk_hyphenated_content_filter() -> None:
     assert delta.finish_reason == "content_filter"
 
 
+def test_parse_chunk_network_error_is_retryable() -> None:
+    """OpenCode network_error finish reasons raise a retryable stream error."""
+    adapter = OpenRouterAdapter(api_key="k")
+    with pytest.raises(ProviderResponseError, match="network_error") as exc_info:
+        adapter._parse_chunk(
+            '{"choices": [{"delta": {}, "finish_reason": "network_error"}]}'
+        )
+    assert exc_info.value.is_retryable is True
+
+
+async def test_chat_stream_read_error_is_retryable() -> None:
+    """Mid-stream httpx.ReadError maps to Connection reset by server."""
+    adapter = OpenRouterAdapter(
+        api_key="k",
+        client=_delayed_client(error=httpx.ReadError("")),
+    )
+    with pytest.raises(
+        ProviderResponseError, match="Connection reset by server"
+    ) as exc_info:
+        async for _ in adapter.chat_stream("m", [], []):
+            pass
+    assert exc_info.value.is_retryable is True
+
+
 def test_parse_chunk_error_chunk_uses_code_message_format() -> None:
     """SSE error chunks raise 'code: message' and are compaction-visible."""
     import json
