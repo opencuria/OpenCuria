@@ -86,6 +86,13 @@ describe('sidePanel store', () => {
     expect(localStorage.getItem(PANEL_WIDTH_STORAGE_KEY)).toBe('440')
   })
 
+  it('clamps the panel width to three fifths of the viewport', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1920, configurable: true })
+    const store = useSidePanelStore()
+    store.setWidth(1920)
+    expect(store.width).toBe(1152)
+  })
+
   it('resets the width to the default', () => {
     const store = useSidePanelStore()
     store.setWidth(600)

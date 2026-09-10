@@ -139,6 +139,21 @@ describe('WorkspaceSidePanel', () => {
     expect(localStorage.getItem(PANEL_WIDTH_STORAGE_KEY)).toBe('480')
   })
 
+  it('can resize the panel up to three fifths of the viewport', async () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1920, configurable: true })
+    const store = useSidePanelStore()
+    store.open('desktop')
+    const wrapper = mountPanel()
+
+    const handle = wrapper.get('[data-testid="side-panel-resize-handle"]')
+    await dispatchPointer(handle.element, 'pointerdown', { clientX: 800, pointerId: 1 })
+    await dispatchPointer(handle.element, 'pointermove', { clientX: 768, pointerId: 1 })
+    expect(store.width).toBe(1152)
+
+    await dispatchPointer(handle.element, 'pointermove', { clientX: 0, pointerId: 1 })
+    expect(store.width).toBe(1152)
+  })
+
   it('clamps the width and resets it on double-click', async () => {
     const store = useSidePanelStore()
     store.open('terminal')

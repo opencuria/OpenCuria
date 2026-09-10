@@ -1,6 +1,7 @@
 export const DEFAULT_PANEL_WIDTH = 400
 export const MIN_PANEL_WIDTH = 320
-export const MAX_PANEL_WIDTH = 720
+/** Largest share of the viewport the side panel may occupy. */
+export const MAX_PANEL_VIEWPORT_FRACTION = 3 / 5
 export const PANEL_WIDTH_STORAGE_KEY = 'opencuria-side-panel-width'
 export const PANEL_STATE_STORAGE_KEY = 'opencuria-side-panel-state'
 
@@ -10,15 +11,12 @@ export type SidePanelTab = (typeof SIDE_PANEL_TABS)[number]
 export const DEFAULT_PANEL_TAB: SidePanelTab = 'terminal'
 
 /**
- * Clamp a side-panel width to the allowed range and 60% of the viewport.
+ * Clamp a side-panel width between the minimum and 3/5 of the viewport.
  */
 export function clampPanelWidth(width: number, viewportWidth: number): number {
   if (!Number.isFinite(width)) return DEFAULT_PANEL_WIDTH
-  const viewportCap = Math.floor(Math.max(viewportWidth, 0) * 0.6)
-  const maxWidth = Math.max(
-    MIN_PANEL_WIDTH,
-    Math.min(MAX_PANEL_WIDTH, viewportCap || MAX_PANEL_WIDTH),
-  )
+  const viewportCap = Math.floor(Math.max(viewportWidth, 0) * MAX_PANEL_VIEWPORT_FRACTION)
+  const maxWidth = Math.max(MIN_PANEL_WIDTH, viewportCap)
   return Math.min(maxWidth, Math.max(MIN_PANEL_WIDTH, Math.round(width)))
 }
 

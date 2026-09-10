@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_PANEL_TAB,
   DEFAULT_PANEL_WIDTH,
-  MAX_PANEL_WIDTH,
+  MAX_PANEL_VIEWPORT_FRACTION,
   MIN_PANEL_WIDTH,
   PANEL_STATE_STORAGE_KEY,
   PANEL_WIDTH_STORAGE_KEY,
@@ -28,15 +28,19 @@ describe('sidePanel', () => {
     expect(clampPanelWidth(100, 1280)).toBe(MIN_PANEL_WIDTH)
   })
 
-  it('clamps to the maximum width', () => {
-    expect(clampPanelWidth(900, 2000)).toBe(MAX_PANEL_WIDTH)
+  it('clamps to three fifths of the viewport', () => {
+    expect(clampPanelWidth(2000, 2000)).toBe(Math.floor(2000 * MAX_PANEL_VIEWPORT_FRACTION))
   })
 
-  it('caps width at 60 percent of the viewport', () => {
+  it('allows the panel to reach three fifths of a large viewport', () => {
+    expect(clampPanelWidth(1152, 1920)).toBe(1152)
+  })
+
+  it('caps width at three fifths of a smaller viewport', () => {
     expect(clampPanelWidth(720, 800)).toBe(480)
   })
 
-  it('keeps the minimum when 60 percent is smaller', () => {
+  it('keeps the minimum when three fifths is smaller', () => {
     expect(clampPanelWidth(200, 400)).toBe(MIN_PANEL_WIDTH)
   })
 
