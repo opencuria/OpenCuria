@@ -797,19 +797,11 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="get_git_state",
-        description="Get the git snapshot for all repos under /workspace (status, branches, history).",
+        description="List light git repo summaries under /workspace (id, name, path, branch, head).",
         inputSchema={
             "type": "object",
             "properties": {
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "history_limit": {
-                    "type": "integer",
-                    "description": "History commits per repo (1-500, default 200).",
-                },
-                "history_skip": {
-                    "type": "integer",
-                    "description": "History commits to skip (default 0).",
-                },
             },
             "required": ["workspace_id"],
             "additionalProperties": False,
@@ -876,6 +868,7 @@ _TOOLS: list[Tool] = [
                         "sync",
                         "checkout_branch",
                         "checkout_commit",
+                        "checkout_remote_branch",
                         "create_branch",
                         "rename_branch",
                         "delete_branch",
@@ -890,7 +883,7 @@ _TOOLS: list[Tool] = [
                 },
                 "repo_path": {
                     "type": "string",
-                    "description": "Absolute repo path under /workspace (not needed for snapshot).",
+                    "description": "Absolute repo path under /workspace (not needed for list_repos).",
                 },
                 "paths": {
                     "type": "array",
@@ -928,6 +921,14 @@ _TOOLS: list[Tool] = [
                 "remote": {
                     "type": "string",
                     "description": "Remote name for fetch/pull/push (optional).",
+                },
+                "remote_ref": {
+                    "type": "string",
+                    "description": "Remote tracking ref (checkout_remote_branch, e.g. origin/feature/x).",
+                },
+                "local_name": {
+                    "type": "string",
+                    "description": "Local branch name (checkout_remote_branch, optional: derived from remote_ref).",
                 },
                 "checkout": {
                     "type": "boolean",
@@ -2827,7 +2828,9 @@ def _call_mark_harness_session_unread(api_key, org_id, args: dict) -> list[TextC
 #: ``git_operation`` *tool schema* intentionally exposes only
 #: ``_GIT_MUTATION_OPERATIONS`` — dedicated ``get_git_*`` tools cover reads.
 _GIT_OPERATIONS: tuple[str, ...] = (
-    "snapshot",
+    "list_repos",
+    "repo_snapshot",
+    "repo_history",
     "working_diff",
     "commit_details",
     "stage",
@@ -2840,6 +2843,7 @@ _GIT_OPERATIONS: tuple[str, ...] = (
     "sync",
     "checkout_branch",
     "checkout_commit",
+    "checkout_remote_branch",
     "create_branch",
     "rename_branch",
     "delete_branch",
@@ -2852,7 +2856,9 @@ _GIT_OPERATIONS: tuple[str, ...] = (
 #: ``workspaces:git_read`` (mutations always need ``workspaces:git_write``).
 #: Kept as defense-in-depth even though the tool schema no longer advertises
 #: reads (dedicated ``get_git_*`` tools cover them).
-_GIT_READ_OPERATIONS = frozenset({"snapshot", "working_diff", "commit_details"})
+_GIT_READ_OPERATIONS = frozenset(
+    {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
+)
 
 #: Mutation-only operations advertised by the generic ``git_operation`` tool
 #: schema. Dedicated ``get_git_state``/``get_git_diff``/``get_git_commit``
@@ -2868,7 +2874,9 @@ _GIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
 #: Mirrors ``RunnerService._GIT_ALLOWED_ARGS``; the service re-validates,
 #: so MCP and REST can never bypass the whitelist.
 _GIT_MCP_ALLOWED_ARGS: dict[str, frozenset] = {
-    "snapshot": frozenset({"history_limit", "history_skip"}),
+    "list_repos": frozenset(),
+    "repo_snapshot": frozenset(),
+    "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
     "working_diff": frozenset(),
     "commit_details": frozenset({"commit"}),
     "stage": frozenset({"paths"}),
@@ -2881,6 +2889,7 @@ _GIT_MCP_ALLOWED_ARGS: dict[str, frozenset] = {
     "sync": frozenset({"remote"}),
     "checkout_branch": frozenset({"branch"}),
     "checkout_commit": frozenset({"commit"}),
+    "checkout_remote_branch": frozenset({"remote_ref", "local_name"}),
     "create_branch": frozenset({"branch", "start_point", "checkout"}),
     "rename_branch": frozenset({"new_branch", "old_branch"}),
     "delete_branch": frozenset({"branch"}),
@@ -2979,7 +2988,9 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
                 f"Unknown argument {key!r} for git operation {operation!r}"
             )
     out: dict = {}
-    if operation == "snapshot":
+    if operation in {"list_repos", "repo_snapshot"}:
+        return {}, None
+    if operation == "repo_history":
         if args.get("history_limit") is not None:
             try:
                 limit = int(args["history_limit"])
@@ -2996,6 +3007,11 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
             if skip < 0:
                 return None, _error("history_skip must be >= 0")
             out["history_skip"] = skip
+        if args.get("branch") not in (None, ""):
+            branch = str(args["branch"]).strip()
+            if not branch or len(branch) > 255:
+                return None, _error("Invalid branch")
+            out["branch"] = branch
         return out, None
     if operation in {"stage", "unstage", "discard"}:
         raw = args.get("paths")
@@ -3058,6 +3074,19 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
         if not _GIT_HASH_RE.match(commit.lower()):
             return None, _error("Invalid commit hash (must be 4-64 hex chars)")
         out["commit"] = commit
+        return out, None
+    if operation == "checkout_remote_branch":
+        remote_ref = str(args.get("remote_ref", "") or "").strip()
+        if not remote_ref:
+            return None, _error("remote_ref is required for checkout_remote_branch")
+        if len(remote_ref) > 255:
+            return None, _error("Invalid remote_ref")
+        out["remote_ref"] = remote_ref
+        if args.get("local_name") not in (None, ""):
+            local = str(args["local_name"]).strip()
+            if not local or len(local) > 255:
+                return None, _error("Invalid local_name")
+            out["local_name"] = local
         return out, None
     if operation == "create_branch":
         branch = str(args.get("branch", "") or "").strip()
@@ -3154,19 +3183,19 @@ async def _run_git_operation_mcp(
 
 
 async def _call_get_git_state(api_key, org_id, args: dict) -> list[TextContent]:
-    """Return the git snapshot for all repos under /workspace."""
+    """List light git repo summaries under /workspace (lazy loading)."""
     workspace_id, error = _parse_git_workspace(args)
     if error is not None:
         return error
     svc_args, args_error = _git_mcp_args(
-        "snapshot",
+        "list_repos",
         {"workspace_id": args.get("workspace_id"), **args},
     )
     if args_error is not None:
         return args_error
     assert svc_args is not None
     return await _run_git_operation_mcp(
-        api_key, org_id, workspace_id, "snapshot", None, svc_args
+        api_key, org_id, workspace_id, "list_repos", None, svc_args
     )
 
 
@@ -3229,7 +3258,7 @@ async def _call_git_operation(api_key, org_id, args: dict) -> list[TextContent]:
     if perm_error is not None:
         return perm_error
     repo_path = None
-    if operation != "snapshot":
+    if operation != "list_repos":
         if not args.get("repo_path"):
             return _error(f"repo_path is required for operation {operation!r}")
         repo_path, repo_error = _validate_git_repo_path(args.get("repo_path"))

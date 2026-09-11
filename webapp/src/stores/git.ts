@@ -2,16 +2,25 @@
  * Git store — productive backend integration for the side-panel Git tab.
  *
  * All data comes from the backend git API (`src/services/git.api.ts`):
- * snapshots (`GET /git/`), lazy working-tree diffs (`GET /git/diff/`),
- * lazy commit details (`GET /git/commits/{hash}/`) and typed mutations
+ * light repo summaries (`GET /git/repos/`), lazy per-repo snapshots
+ * (`GET /git/repo/`), paged history (`GET /git/history/`), lazy
+ * working-tree diffs (`GET /git/diff/`), lazy commit details
+ * (`GET /git/commits/{hash}/`) and typed mutations
  * (`POST /git/operation/`). There is no mock fallback.
  *
  * Key behaviours:
- * - `initialize(workspaceId)` binds the store to a workspace and loads the
- *   snapshot; `refresh({silent})` reloads; `reset()` clears everything.
- * - `startPolling` / `stopPolling` drive silent snapshot refreshes
- *   (no overlap, page-visibility aware); a request generation guards
- *   against stale workspace results.
+ * - `initialize(workspaceId)` binds the store to a workspace and loads
+ *   summaries + details for the selected repo; `refresh({silent})`
+ *   reloads summaries (plus selected details unless `withDetails: false`);
+ *   `reset()` clears everything.
+ * - `repos` holds light summaries only; full data lives in `repoDetails`
+ *   (keyed by repo path) and is loaded lazily via `ensureDetails`.
+ *   `currentRepo` falls back to a shallow projection of the summary until
+ *   details arrive.
+ * - `startPolling` / `stopPolling` drive two silent timers: summaries
+ *   (4s) and selected-repo details (15s) — no overlap,
+ *   page-visibility aware; a request generation guards against stale
+ *   workspace results.
  * - Mutations are serialized through a promise chain and report through
  *   the notification store. HTTP 409 merge conflicts still carry a fresh
  *   snapshot (`ApiRequestError.data.snapshot`) which is applied.
@@ -34,6 +43,7 @@ import type {
   GitMergeState,
   GitRemoteRef,
   GitRepo,
+  GitRepoSummary,
   GitStagedKind,
   GitUnstagedKind,
 } from '@/types/git'
@@ -41,7 +51,9 @@ import { ApiRequestError } from '@/services/api'
 import {
   conflictSnapshotOf,
   getGitCommitDetails,
-  getGitSnapshot,
+  getGitHistory,
+  getGitRepo,
+  getGitRepos,
   getGitWorkingDiff,
   runGitOperation,
   type GitOperationRequest,
@@ -51,6 +63,7 @@ import {
   type RawGitCommitFile,
   type RawGitDiffHunk,
   type RawGitRepoSnapshot,
+  type RawGitRepoSummary,
 } from '@/services/git.api'
 import { useNotificationStore } from '@/stores/notifications'
 
@@ -61,10 +74,23 @@ const CDV_HEIGHT_DEFAULT = 250
 const CDV_HEIGHT_MIN = 120
 const CDV_HEIGHT_MAX = 600
 
-/** Silent snapshot polling interval (ms). */
+/** Silent summaries polling interval (ms). */
 export const GIT_POLL_INTERVAL_MS = 4000
-/** Default page size for snapshot history requests. */
-export const GIT_HISTORY_LIMIT = 200
+/** Silent selected-details polling interval (ms). */
+export const GIT_DETAILS_POLL_MS = 15000
+/** Page size for per-repo history requests. */
+export const GIT_HISTORY_LIMIT = 50
+
+export function normalizeRepoSummary(raw: RawGitRepoSummary): GitRepoSummary {
+  const path = raw.path
+  return {
+    id: raw.id || path,
+    name: raw.name || path.split('/').filter(Boolean).pop() || path,
+    path,
+    currentBranch: raw.current_branch ?? null,
+    headHash: raw.head_hash ?? null,
+  }
+}
 
 function loadCdvHeight(): number {
   try {
@@ -282,7 +308,12 @@ export const useGitStore = defineStore('git', () => {
 
   /** Workspace this store is currently bound to (null after `reset`). */
   const workspaceId = ref<string | null>(null)
-  const repos = ref<GitRepo[]>([])
+  /** Light repo summaries (no branches/commits/changes). */
+  const repos = ref<GitRepoSummary[]>([])
+  /** Full per-repo details keyed by repo path (lazy via ensureDetails). */
+  const repoDetails = ref<Record<string, GitRepo>>({})
+  /** Per-repo detail loading flags keyed by repo path (for UI spinners). */
+  const detailsLoading = ref<Record<string, boolean>>({})
   const selectedRepoId = ref<string>('')
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -364,15 +395,52 @@ export const useGitStore = defineStore('git', () => {
   let refreshPromise: Promise<boolean> | null = null
   /** Serializes mutations so backend per-repo locks never interleave. */
   let opQueue: Promise<void> = Promise.resolve()
-  let pollTimer: ReturnType<typeof setInterval> | null = null
+  let summaryTimer: ReturnType<typeof setInterval> | null = null
+  let detailsTimer: ReturnType<typeof setInterval> | null = null
   const polling = ref(false)
   let visibilityListener: (() => void) | null = null
+  /** Guards overlapping ensureDetails calls per repo path. */
+  const detailsInFlight = new Set<string>()
 
   // -- getters ------------------------------------------------------------------
 
-  const currentRepo = computed<GitRepo | null>(
-    () => repos.value.find((r) => r.id === selectedRepoId.value) ?? null,
-  )
+  function summaryForId(id: string): GitRepoSummary | null {
+    return repos.value.find((r) => r.id === id) ?? null
+  }
+
+  function selectedSummary(): GitRepoSummary | null {
+    return summaryForId(selectedRepoId.value)
+  }
+
+  /** Shallow fallback projection until details are loaded. */
+  function shallowRepo(summary: GitRepoSummary): GitRepo {
+    return {
+      id: summary.id,
+      name: summary.name,
+      path: summary.path,
+      currentBranch: summary.currentBranch,
+      headHash: summary.headHash,
+      branches: [],
+      remoteRefs: [],
+      remotes: [],
+      defaultRemote: null,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      mergeState: { merging: false, rebasing: false, cherryPicking: false },
+      commits: [],
+      hasMore: true,
+      historySkip: 0,
+      historyLimit: GIT_HISTORY_LIMIT,
+      changes: [],
+    }
+  }
+
+  const currentRepo = computed<GitRepo | null>(() => {
+    const summary = summaryForId(selectedRepoId.value)
+    if (!summary) return null
+    return repoDetails.value[summary.path] ?? shallowRepo(summary)
+  })
 
   const currentBranch = computed<GitBranch | null>(() => {
     const repo = currentRepo.value
@@ -507,12 +575,38 @@ export const useGitStore = defineStore('git', () => {
     return commitDetailsError.value[commitDetailsKey(repo.path, hash)] ?? null
   }
 
+  function isDetailsLoading(repoPath: string): boolean {
+    return detailsLoading.value[repoPath] === true
+  }
+
   // -- snapshot handling ----------------------------------------------------------
 
-  /** Replace the whole repo list (snapshot refresh), keeping the selection. */
-  function applySnapshotRepos(next: GitRepo[]): void {
-    const previous = currentRepo.value
+  /**
+   * Replace the summary list (summaries refresh), keeping the selection.
+   * Detail rows stay intact (branches/commits/changes are never
+   * overwritten); only `currentBranch`/`headHash` are merged from the
+   * summary so headers stay fresh while polling.
+   */
+  function applyRepoSummaries(next: GitRepoSummary[]): void {
+    const previous = selectedSummary()
     repos.value = next
+    for (const summary of next) {
+      const detail = repoDetails.value[summary.path]
+      if (
+        detail &&
+        (detail.currentBranch !== summary.currentBranch ||
+          detail.headHash !== summary.headHash)
+      ) {
+        repoDetails.value = {
+          ...repoDetails.value,
+          [summary.path]: {
+            ...detail,
+            currentBranch: summary.currentBranch,
+            headHash: summary.headHash,
+          },
+        }
+      }
+    }
     if (next.length === 0) {
       selectedRepoId.value = ''
       closeDiff()
@@ -521,8 +615,8 @@ export const useGitStore = defineStore('git', () => {
     }
     if (next.some((r) => r.id === selectedRepoId.value)) {
       // Selection survived — drop view selections that no longer exist.
-      const repo = next.find((r) => r.id === selectedRepoId.value) ?? null
-      if (repo) reconcileDiffSelection(repo)
+      const detail = currentRepo.value
+      if (detail) reconcileDiffSelection(detail)
       return
     }
     const byPath = previous ? next.find((r) => r.path === previous.path) : undefined
@@ -531,16 +625,27 @@ export const useGitStore = defineStore('git', () => {
     closeCommitDetails()
   }
 
-  /** Replace a single repo from a mutation snapshot, keeping the selection. */
+  /**
+   * Replace a single repo's details from a mutation/single snapshot,
+   * keeping the selection, and sync the summary entry (branch/head).
+   */
   function applyRepoSnapshot(snapshot: GitRepo): void {
+    repoDetails.value = { ...repoDetails.value, [snapshot.path]: snapshot }
     const index = repos.value.findIndex(
       (r) => r.path === snapshot.path || r.id === snapshot.id,
     )
+    const summary: GitRepoSummary = {
+      id: snapshot.id,
+      name: snapshot.name,
+      path: snapshot.path,
+      currentBranch: snapshot.currentBranch,
+      headHash: snapshot.headHash,
+    }
     if (index === -1) {
-      repos.value = [...repos.value, snapshot]
+      repos.value = [...repos.value, summary]
     } else {
       const next = [...repos.value]
-      next[index] = snapshot
+      next[index] = summary
       repos.value = next
     }
     if (selectedRepoId.value === '') {
@@ -596,7 +701,9 @@ export const useGitStore = defineStore('git', () => {
   // workspace load; its result is dropped by the `gen` / `workspaceId`
   // checks when it settles.
 
-  async function refresh(options?: { silent?: boolean }): Promise<boolean> {
+  async function refresh(
+    options?: { silent?: boolean; withDetails?: boolean },
+  ): Promise<boolean> {
     const wsId = workspaceId.value
     if (!wsId) return false
     // Workspace-safe overlap guard: an in-flight refresh is only joined when
@@ -609,7 +716,10 @@ export const useGitStore = defineStore('git', () => {
       return refreshPromise
     }
     const silent = options?.silent === true
+    const withDetails = options?.withDetails !== false
     const gen = loadGen
+    // eslint-disable-next-line prefer-const -- reassigned below after the
+    // async closure captures it for the overlap guard (`refreshPromise === task`).
     let task!: Promise<boolean>
     task = (async (): Promise<boolean> => {
       if (!silent) {
@@ -617,15 +727,17 @@ export const useGitStore = defineStore('git', () => {
         error.value = null
       }
       try {
-        const res = await getGitSnapshot(wsId, {
-          historyLimit: GIT_HISTORY_LIMIT,
-          historySkip: 0,
-        })
+        const res = await getGitRepos(wsId)
         if (gen !== loadGen || workspaceId.value !== wsId) return false
-        applySnapshotRepos((res.repos ?? []).map(normalizeRepoSnapshot))
+        applyRepoSummaries((res.repos ?? []).map(normalizeRepoSummary))
         if (!silent) {
           loading.value = false
           error.value = null
+        }
+        if (withDetails) {
+          const selected = selectedSummary()
+          if (selected) await ensureDetails(selected.path)
+          if (gen !== loadGen || workspaceId.value !== wsId) return false
         }
         return true
       } catch (e: unknown) {
@@ -654,11 +766,55 @@ export const useGitStore = defineStore('git', () => {
     return task
   }
 
+  /**
+   * Load (or reload) full details for one repo path. Results are cached in
+   * `repoDetails`; concurrent calls for the same path are joined. With
+   * `force`, working-diff/commit-detail caches are invalidated first.
+   * Never throws — failures surface via `error` only when no data exists.
+   */
+  async function ensureDetails(
+    repoPath: string,
+    options?: { force?: boolean; silent?: boolean },
+  ): Promise<boolean> {
+    const wsId = workspaceId.value
+    if (!wsId || !repoPath) return false
+    if (detailsInFlight.has(repoPath)) return false
+    if (!options?.force && repoDetails.value[repoPath]) return true
+    const gen = loadGen
+    detailsInFlight.add(repoPath)
+    detailsLoading.value = { ...detailsLoading.value, [repoPath]: true }
+    try {
+      if (options?.force) invalidateRepoCaches(repoPath)
+      const res = await getGitRepo(wsId, repoPath)
+      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
+      return true
+    } catch (e: unknown) {
+      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      const message = errorMessage(e)
+      if (!options?.silent && Object.keys(repoDetails.value).length === 0) {
+        error.value = message
+        notifications.error('Failed to load git repository', message)
+      }
+      return false
+    } finally {
+      detailsInFlight.delete(repoPath)
+      if (gen === loadGen && workspaceId.value === wsId) {
+        const next = { ...detailsLoading.value }
+        delete next[repoPath]
+        detailsLoading.value = next
+      }
+    }
+  }
+
   async function initialize(id: string): Promise<void> {
     loadGen += 1
+    detailsInFlight.clear()
     workspaceId.value = id
     clearLastConflict()
     repos.value = []
+    repoDetails.value = {}
+    detailsLoading.value = {}
     selectedRepoId.value = ''
     viewingDiffPath.value = null
     viewingDiffStaged.value = null
@@ -678,9 +834,13 @@ export const useGitStore = defineStore('git', () => {
   }
 
   function stopPolling(): void {
-    if (pollTimer !== null) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    if (summaryTimer !== null) {
+      clearInterval(summaryTimer)
+      summaryTimer = null
+    }
+    if (detailsTimer !== null) {
+      clearInterval(detailsTimer)
+      detailsTimer = null
     }
     polling.value = false
     if (visibilityListener !== null && typeof document !== 'undefined') {
@@ -689,7 +849,7 @@ export const useGitStore = defineStore('git', () => {
     }
   }
 
-  /** True while a snapshot refresh for the current workspace is in flight. */
+  /** True while a summaries refresh for the current workspace is in flight. */
   function isRefreshInFlight(): boolean {
     return (
       refreshPromise !== null &&
@@ -698,31 +858,68 @@ export const useGitStore = defineStore('git', () => {
     )
   }
 
-  function startPolling(intervalMs: number = GIT_POLL_INTERVAL_MS): void {
-    if (pollTimer !== null) return
+  /** Silent summaries-only refresh: details rows are never overwritten. */
+  function pollSummaries(): void {
+    if (!workspaceId.value || isRefreshInFlight() || busyOperation.value !== null) return
+    void refresh({ silent: true, withDetails: false })
+  }
+
+  /** Silent reload of the selected repo's details (slow timer). */
+  async function pollDetails(): Promise<void> {
+    const wsId = workspaceId.value
+    if (!wsId || busyOperation.value !== null) return
+    const selected = selectedSummary()
+    if (!selected || !repoDetails.value[selected.path]) return
+    const gen = loadGen
+    const repoPath = selected.path
+    try {
+      const res = await getGitRepo(wsId, repoPath)
+      if (gen !== loadGen || workspaceId.value !== wsId) return
+      if (selectedSummary()?.path !== repoPath) return
+      // Reload the snapshot but keep diff/commit caches: an open viewer
+      // must not lose its hunks on a background refresh.
+      applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
+    } catch {
+      // Silent polling keeps existing details visible.
+    }
+  }
+
+  function tabVisible(): boolean {
+    return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+  }
+
+  function startPolling(
+    intervalMs: number = GIT_POLL_INTERVAL_MS,
+    detailsIntervalMs: number = GIT_DETAILS_POLL_MS,
+  ): void {
+    if (summaryTimer !== null || detailsTimer !== null) return
     polling.value = true
     if (typeof document !== 'undefined') {
       visibilityListener = () => {
         if (document.visibilityState === 'visible' && workspaceId.value) {
-          void refresh({ silent: true })
+          void refresh({ silent: true, withDetails: false })
         }
       }
       document.addEventListener('visibilitychange', visibilityListener)
     }
-    pollTimer = setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-        return
-      }
-      if (!workspaceId.value || isRefreshInFlight() || busyOperation.value !== null) return
-      void refresh({ silent: true })
+    summaryTimer = setInterval(() => {
+      if (!tabVisible()) return
+      pollSummaries()
     }, intervalMs)
+    detailsTimer = setInterval(() => {
+      if (!tabVisible()) return
+      pollDetails()
+    }, detailsIntervalMs)
   }
 
   function reset(): void {
     loadGen += 1
     stopPolling()
+    detailsInFlight.clear()
     workspaceId.value = null
     repos.value = []
+    repoDetails.value = {}
+    detailsLoading.value = {}
     selectedRepoId.value = ''
     loading.value = false
     error.value = null
@@ -902,7 +1099,7 @@ export const useGitStore = defineStore('git', () => {
         if (gen !== loadGen || workspaceId.value !== wsId) return false
         applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
         invalidateRepoCaches(repoPath)
-        const updated = repos.value.find((r) => r.path === repoPath) ?? null
+        const updated = currentRepo.value?.path === repoPath ? currentRepo.value : null
         if (updated) reconcileDiffSelection(updated)
         if (expandedCommitHash.value) {
           // Details were invalidated above; reload the expanded commit.
@@ -921,7 +1118,7 @@ export const useGitStore = defineStore('git', () => {
           if (snapshot) {
             applyRepoSnapshot(normalizeRepoSnapshot(snapshot))
             invalidateRepoCaches(repoPath)
-            const updated = repos.value.find((r) => r.path === repoPath) ?? null
+            const updated = currentRepo.value?.path === repoPath ? currentRepo.value : null
             if (updated) reconcileDiffSelection(updated)
             lastConflict.value = true
             notifications.warning('Merge conflict', errorMessage(e))
@@ -949,10 +1146,19 @@ export const useGitStore = defineStore('git', () => {
   // -- actions: selection & diff view -----------------------------------------
 
   function selectRepo(id: string): void {
-    if (!repos.value.some((r) => r.id === id)) return
+    const summary = summaryForId(id)
+    if (!summary || selectedRepoId.value === id) return
+    const gen = loadGen
     selectedRepoId.value = id
     closeDiff()
     closeCommitDetails()
+    // Fire-and-forget lazy details for the new selection (gen-guarded:
+    // a workspace switch/reset before settlement drops the result).
+    void ensureDetails(summary.path).then(() => {
+      if (gen !== loadGen) return
+      const detail = currentRepo.value
+      if (detail) reconcileDiffSelection(detail)
+    })
   }
 
   /**
@@ -1196,6 +1402,28 @@ export const useGitStore = defineStore('git', () => {
     )
   }
 
+  /**
+   * Track a remote branch locally (fetch + create/checkout). `localName`
+   * defaults to the short branch name (last path segment of `remoteRef`).
+   */
+  function checkoutRemoteBranch(remoteRef: string, localName?: string): Promise<boolean> {
+    const trimmed = localName?.trim() ? localName.trim() : undefined
+    const short = remoteRef.split('/').filter(Boolean).pop() ?? remoteRef
+    const local = trimmed ?? short
+    return runOperation(
+      'checkout_remote_branch',
+      () => ({
+        operation: 'checkout_remote_branch',
+        remote_ref: remoteRef,
+        ...(trimmed ? { local_name: trimmed } : {}),
+      }),
+      {
+        successTitle: `Checked out ${local}`,
+        errorTitle: 'Checkout failed',
+      },
+    )
+  }
+
   function createBranch(name: string, fromHash: string, checkout: boolean): Promise<boolean> {
     const trimmed = name.trim()
     if (!trimmed) {
@@ -1296,51 +1524,48 @@ export const useGitStore = defineStore('git', () => {
 
   /**
    * Append the next history page for the selected repo (deduplicated by
-   * hash). Only the selected repo is touched: other repos bundled in the
-   * aggregated snapshot response keep their current history (the backend
-   * paginates every repo with the same skip, so their pages would be stale
-   * windows, not usable full histories).
+   * hash) via GET /git/history/. Only the selected repo's details are
+   * touched. `branchName` optionally filters server-side to one branch.
    */
-  async function loadMoreHistory(): Promise<boolean> {
+  async function loadMoreHistory(branchName?: string): Promise<boolean> {
     const wsId = workspaceId.value
     const repo = currentRepo.value
     if (!wsId || !repo || !repo.hasMore || historyLoading.value) return false
     const repoPath = repo.path
-    const repoId = repo.id
-    const pageSize = repo.historyLimit
+    const pageSize = repo.historyLimit ?? GIT_HISTORY_LIMIT
     const skip = repo.commits.length
     const gen = loadGen
     historyLoading.value = true
     try {
-      const res = await getGitSnapshot(wsId, { historyLimit: pageSize, historySkip: skip })
+      const res = await getGitHistory(wsId, repoPath, {
+        limit: pageSize,
+        skip,
+        ...(branchName ? { branch: branchName } : {}),
+      })
       if (gen !== loadGen || workspaceId.value !== wsId) return false
-      const current = repos.value.find((r) => r.path === repoPath || r.id === repoId)
+      const current = repoDetails.value[repoPath]
       if (!current || currentRepo.value?.path !== repoPath) return false
-      const raw = (res.repos ?? []).find((r) => r.path === repoPath || r.id === repoId)
-      if (!raw) return false
-      const page = normalizeRepoSnapshot(raw)
       const seen = new Set(current.commits.map((c) => c.hash))
       const merged = [...current.commits]
-      for (const commit of page.commits) {
+      for (const raw of res.commits ?? []) {
+        const commit = normalizeCommit(raw)
         if (!seen.has(commit.hash)) {
           seen.add(commit.hash)
           merged.push(commit)
         }
       }
-      // Merge ONLY history fields into the live repo row; every other field
-      // (changes, branches, mergeState, …) stays at the selected repo's
-      // current full-snapshot values so sibling pages can't overwrite them.
-      const index = repos.value.findIndex((r) => r.path === repoPath || r.id === repoId)
-      if (index === -1) return false
-      const next = [...repos.value]
-      next[index] = {
-        ...current,
-        commits: merged,
-        hasMore: page.hasMore,
-        historySkip: page.historySkip,
-        historyLimit: page.historyLimit,
+      // Merge ONLY history fields into the live detail row; every other
+      // field (changes, branches, mergeState, …) stays untouched.
+      repoDetails.value = {
+        ...repoDetails.value,
+        [repoPath]: {
+          ...current,
+          commits: merged,
+          hasMore: res.has_more === true,
+          historySkip: res.history_skip ?? skip,
+          historyLimit: res.history_limit ?? pageSize,
+        },
       }
-      repos.value = next
       return true
     } catch (e: unknown) {
       if (gen !== loadGen || workspaceId.value !== wsId) return false
@@ -1355,6 +1580,9 @@ export const useGitStore = defineStore('git', () => {
     // state
     workspaceId,
     repos,
+    repoDetails,
+    detailsLoading,
+    isDetailsLoading,
     selectedRepoId,
     loading,
     error,
@@ -1389,6 +1617,7 @@ export const useGitStore = defineStore('git', () => {
     // lifecycle
     initialize,
     refresh,
+    ensureDetails,
     reset,
     startPolling,
     stopPolling,
@@ -1418,6 +1647,7 @@ export const useGitStore = defineStore('git', () => {
     sync,
     checkoutBranch,
     checkoutCommit,
+    checkoutRemoteBranch,
     createBranch,
     renameBranch,
     deleteBranch,

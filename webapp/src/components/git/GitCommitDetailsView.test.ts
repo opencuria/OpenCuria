@@ -10,6 +10,7 @@ import {
   makeCommitDetails,
   makeCommitFile,
   makeRepoSnapshot,
+  setupGitRepos,
 } from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
@@ -24,12 +25,16 @@ vi.mock('vue-sonner', () => ({
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 
 function stubPointerCapture(): void {
@@ -54,7 +59,7 @@ describe('GitCommitDetailsView', () => {
     vi.clearAllMocks()
     stubPointerCapture()
     localStorage.clear()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     getDetails.mockImplementation(async (_ws, repo, hash) => ({
       ok: true,
       repo_path: repo,

@@ -9,6 +9,7 @@ import { useGitStore } from '@/stores/git'
 import {
   makeRawChange,
   makeRepoSnapshot,
+  setupGitRepos,
 } from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
@@ -23,12 +24,16 @@ vi.mock('vue-sonner', () => ({
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
@@ -80,7 +85,7 @@ describe('GitPanel', () => {
     vi.clearAllMocks()
     stubPointerCapture()
     stubContainerRect()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     getDiff.mockResolvedValue({
       ok: true,
       repo_path: '/workspace/repo-app',
@@ -130,7 +135,7 @@ describe('GitPanel', () => {
   })
 
   it('shows a loading state before the snapshot resolves', async () => {
-    getSnapshot.mockReturnValue(new Promise(() => {}))
+    getRepos.mockReturnValue(new Promise(() => {}))
     const store = useGitStore()
     const wrapper = mountPanel()
     await nextTick()
@@ -144,7 +149,7 @@ describe('GitPanel', () => {
 
   it('shows an error state with retry', async () => {
     const { ApiRequestError } = await import('@/services/api')
-    getSnapshot.mockRejectedValue(new ApiRequestError(500, 'boom', 'error'))
+    getRepos.mockRejectedValue(new ApiRequestError(500, 'boom', 'error'))
     const wrapper = mountPanel()
     await flushPromises()
     await nextTick()
@@ -153,16 +158,16 @@ describe('GitPanel', () => {
     expect(wrapper.find('[data-testid="git-error"]').text()).toContain('boom')
 
     // Retry re-requests the snapshot.
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     await wrapper.find('[data-testid="git-retry"]').trigger('click')
     await flushPromises()
     await nextTick()
-    expect(getSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(getRepos.mock.calls.length).toBeGreaterThanOrEqual(2)
     wrapper.unmount()
   })
 
   it('shows an empty state with refresh', async () => {
-    getSnapshot.mockResolvedValue({ ok: true, repos: [] })
+    setupGitRepos(getRepos, getRepo, getHistory, [])
     const wrapper = mountPanel()
     await flushPromises()
     await nextTick()
@@ -170,11 +175,11 @@ describe('GitPanel', () => {
     expect(wrapper.find('[data-testid="git-empty"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-retry"]').exists()).toBe(true)
 
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     await wrapper.find('[data-testid="git-retry"]').trigger('click')
     await flushPromises()
     await nextTick()
-    expect(getSnapshot.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(getRepos.mock.calls.length).toBeGreaterThanOrEqual(2)
     wrapper.unmount()
   })
 
@@ -197,13 +202,15 @@ describe('GitPanel', () => {
         }),
       ],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot(), second] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot(), second])
     const store = useGitStore()
     const wrapper = mountPanel()
     await flushPromises()
     await nextTick()
 
     store.selectRepo('/workspace/docs')
+    await flushPromises()
+    await nextTick()
     await nextTick()
 
     expect(wrapper.find('[data-testid="git-current-branch"]').text()).toBe('main')
@@ -216,11 +223,11 @@ describe('GitPanel', () => {
     const wrapper = mountPanel()
     await flushPromises()
     await nextTick()
-    const callsBefore = getSnapshot.mock.calls.length
+    const callsBefore = getRepos.mock.calls.length
 
     await wrapper.find('[data-testid="git-refresh"]').trigger('click')
     await flushPromises()
-    expect(getSnapshot.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(getRepos.mock.calls.length).toBeGreaterThan(callsBefore)
 
     await wrapper.find('[data-testid="git-fetch"]').trigger('click')
     await flushPromises()

@@ -10,7 +10,9 @@ import {
   makeRawChange,
   makeRawCommit,
   makeRepoSnapshot,
+  makeRepoSummary,
 } from './git.fixtures'
+import type { RawGitRepoSnapshot } from '@/services/git.api'
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -27,18 +29,54 @@ vi.mock('@/services/git.api', () => ({
     return snapshot && typeof snapshot === 'object' ? snapshot : null
   }),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
 
+/** Point all three read endpoints at the given raw snapshots. */
+function setRepos(repos: RawGitRepoSnapshot[]): void {
+  getRepos.mockResolvedValue({
+    ok: true,
+    repos: repos.map((r) => ({
+      id: r.id,
+      name: r.name,
+      path: r.path,
+      current_branch: r.current_branch,
+      head_hash: r.head_hash,
+    })),
+  })
+  getRepo.mockImplementation(async (_ws, repoPath) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0]!
+    return { ok: true, snapshot: { ...found } }
+  })
+  getHistory.mockImplementation(async (_ws, repoPath, opts) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0]!
+    const skip = opts?.skip ?? 0
+    const limit = opts?.limit ?? 50
+    const commits = (found.commits ?? []).slice(skip, skip + limit)
+    return {
+      ok: true,
+      repo_path: repoPath,
+      commits,
+      has_more: (found.commits ?? []).length > skip + commits.length || found.has_more,
+      history_skip: skip,
+      history_limit: limit,
+    }
+  })
+}
+
 async function initWith(repos = [makeRepoSnapshot()]) {
-  getSnapshot.mockResolvedValue({ ok: true, repos })
+  setRepos(repos)
   const store = useGitStore()
   await store.initialize('ws-1')
   return store
@@ -53,7 +91,7 @@ describe('git store (productive)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setRepos([makeRepoSnapshot()])
     getDiff.mockResolvedValue({ ok: true, repo_path: '/workspace/repo-app', diff: { staged: [], unstaged: [] } })
     getDetails.mockImplementation(async (_ws, repo, hash) => ({
       ok: true,
@@ -68,7 +106,7 @@ describe('git store (productive)', () => {
     }) as never)
   })
 
-  it('starts empty and loads/normalizes a multi-repo snapshot', async () => {
+  it('starts empty and loads summaries then details (normalized)', async () => {
     const store = useGitStore()
     expect(store.repos).toEqual([])
     expect(store.currentRepo).toBeNull()
@@ -80,18 +118,26 @@ describe('git store (productive)', () => {
       name: 'docs',
       headHash: 'd1o2c3s',
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot(), second] })
+    setRepos([makeRepoSnapshot(), second])
     await store.initialize('ws-1')
 
-    expect(getSnapshot).toHaveBeenCalledWith('ws-1', { historyLimit: 200, historySkip: 0 })
+    expect(getRepos).toHaveBeenCalledWith('ws-1')
+    expect(getRepo).toHaveBeenCalledWith('ws-1', '/workspace/repo-app')
     expect(store.repos).toHaveLength(2)
+    expect(store.repos[0]).toMatchObject({
+      id: '/workspace/repo-app',
+      name: 'repo-app',
+      path: '/workspace/repo-app',
+      currentBranch: 'main',
+      headHash: 'f4a9c21',
+    })
     expect(store.currentRepo?.id).toBe('/workspace/repo-app')
     expect(store.currentBranch?.name).toBe('main')
     expect(store.currentBranch?.upstream).toBe('origin/main')
-    // Snake_case normalization.
-    expect(store.repos[0]?.headHash).toBe('f4a9c21')
-    expect(store.repos[0]?.branches[0]).toMatchObject({ name: 'main', tipHash: 'f4a9c21', ahead: 2 })
-    expect(store.repos[0]?.changes[0]).toMatchObject({
+    // Snake_case normalization in details.
+    expect(store.repoDetails['/workspace/repo-app']?.headHash).toBe('f4a9c21')
+    expect(store.repoDetails['/workspace/repo-app']?.branches[0]).toMatchObject({ name: 'main', tipHash: 'f4a9c21', ahead: 2 })
+    expect(store.repoDetails['/workspace/repo-app']?.changes[0]).toMatchObject({
       path: 'webapp/src/stores/git.ts',
       stagedKind: 'A',
       unstaged: null,
@@ -100,9 +146,46 @@ describe('git store (productive)', () => {
     expect(store.error).toBeNull()
   })
 
+  it('exposes a shallow currentRepo until details arrive', async () => {
+    const store = useGitStore()
+    await store.initialize('ws-1')
+    expect(store.repos).toHaveLength(1)
+    expect(store.currentRepo?.commits.length).toBeGreaterThan(0)
+
+    // Simulate a second workspace with summaries only: drop details to
+    // get the shallow projection back.
+    getRepos.mockResolvedValue({ ok: true, repos: [makeRepoSummary()] })
+    // Details never resolve for this repo.
+    getRepo.mockImplementation(() => new Promise(() => {}))
+    const before = store.currentRepo
+    expect(before).not.toBeNull()
+    store.repoDetails = {}
+    await store.refresh({ withDetails: false })
+
+    expect(store.repos).toHaveLength(1)
+    expect(store.repoDetails['/workspace/repo-app']).toBeUndefined()
+    // Shallow projection: summary branch/head, empty details, hasMore true.
+    expect(store.currentRepo).toMatchObject({
+      id: '/workspace/repo-app',
+      path: '/workspace/repo-app',
+      currentBranch: 'main',
+      headHash: 'f4a9c21',
+      commits: [],
+      changes: [],
+      hasMore: true,
+    })
+    expect(store.isDetailsLoading('/workspace/repo-app')).toBe(false)
+
+    // Once details resolve, the full repo replaces the shallow projection.
+    setRepos([makeRepoSnapshot()])
+    await store.ensureDetails('/workspace/repo-app')
+    expect(store.currentRepo?.commits.length).toBeGreaterThan(0)
+    expect(store.currentRepo?.branches.length).toBeGreaterThan(0)
+  })
+
   it('surfaces initial load failures with an error and notification', async () => {
     const { toast } = await import('vue-sonner')
-    getSnapshot.mockRejectedValue(new ApiRequestError(500, 'boom', 'error'))
+    getRepos.mockRejectedValue(new ApiRequestError(500, 'boom', 'error'))
     const store = useGitStore()
     await store.initialize('ws-1')
 
@@ -142,7 +225,7 @@ describe('git store (productive)', () => {
 
   it('handles empty repos, unborn HEAD and detached HEAD', async () => {
     const store = useGitStore()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [] })
+    setRepos([])
     await store.initialize('ws-1')
     expect(store.repos).toEqual([])
     expect(store.currentRepo).toBeNull()
@@ -156,14 +239,15 @@ describe('git store (productive)', () => {
         makeRawChange('new-file.ts', { status: 'A', staged: true, staged_kind: 'A', unstaged: null }),
       ],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [unborn] })
+    setRepos([unborn])
     await store.refresh()
     expect(store.currentRepo?.headHash).toBeNull()
     expect(store.currentRepo?.commits).toEqual([])
 
     const detached = makeRepoSnapshot({ currentBranch: null, headHash: 'e8b7d3a' })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [detached] })
+    setRepos([detached])
     await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
     expect(store.currentRepo?.currentBranch).toBeNull()
     expect(store.currentBranch).toBeNull()
   })
@@ -338,8 +422,9 @@ describe('git store (productive)', () => {
     const clean = makeRepoSnapshot({
       branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 0, behind: 0 }],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [clean] })
+    setRepos([clean])
     await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
     expect(await store.push()).toBe(true)
     expect(toast.info).toHaveBeenCalled()
     expect(runOp).not.toHaveBeenCalled()
@@ -429,6 +514,39 @@ describe('git store (productive)', () => {
     respond()
     await store.mergeAbort()
     expect(opPayload()).toMatchObject({ operation: 'merge_abort' })
+  })
+
+  it('checks out a remote branch with remote_ref and optional local_name', async () => {
+    const { toast } = await import('vue-sonner')
+    const store = await initWith()
+    runOp.mockResolvedValueOnce({
+      ok: true,
+      snapshot: makeRepoSnapshot({ currentBranch: 'feature/x' }),
+      repo_path: '/workspace/repo-app',
+    } as never)
+
+    expect(await store.checkoutRemoteBranch('origin/feature/x')).toBe(true)
+    expect(opPayload()).toEqual({
+      operation: 'checkout_remote_branch',
+      repo_path: '/workspace/repo-app',
+      remote_ref: 'origin/feature/x',
+    })
+    expect(store.currentRepo?.currentBranch).toBe('feature/x')
+    expect(vi.mocked(toast.success).mock.calls[vi.mocked(toast.success).mock.calls.length - 1]?.[0]).toBe('Checked out x')
+
+    runOp.mockResolvedValueOnce({
+      ok: true,
+      snapshot: makeRepoSnapshot({ currentBranch: 'local' }),
+      repo_path: '/workspace/repo-app',
+    } as never)
+    expect(await store.checkoutRemoteBranch('origin/feature/x', 'local')).toBe(true)
+    expect(opPayload()).toEqual({
+      operation: 'checkout_remote_branch',
+      repo_path: '/workspace/repo-app',
+      remote_ref: 'origin/feature/x',
+      local_name: 'local',
+    })
+    expect(vi.mocked(toast.success).mock.calls[vi.mocked(toast.success).mock.calls.length - 1]?.[0]).toBe('Checked out local')
   })
 
   it('publishes branches without upstream via push -u instead of up-to-date', async () => {
@@ -577,10 +695,10 @@ describe('git store (productive)', () => {
 
   it('drops stale results after workspace switches and resets cleanly', async () => {
     const store = useGitStore()
-    getSnapshot.mockImplementationOnce(
+    getRepos.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          setTimeout(() => resolve({ ok: true, repos: [makeRepoSnapshot()] }), 20)
+          setTimeout(() => resolve({ ok: true, repos: [makeRepoSummary()] }), 20)
         }),
     )
     const first = store.initialize('ws-1')
@@ -591,77 +709,138 @@ describe('git store (productive)', () => {
     store.reset()
     expect(store.workspaceId).toBeNull()
     expect(store.repos).toEqual([])
+    expect(store.repoDetails).toEqual({})
     expect(store.viewingDiffPath).toBeNull()
     expect(store.expandedCommitHash).toBeNull()
   })
 
-  it('polls silently without overlapping or toasting', async () => {
+  it('polls summaries without overlapping or toasting, keeping details intact', async () => {
     const { toast } = await import('vue-sonner')
     vi.useFakeTimers()
     try {
       const store = await initWith()
+      const commitsBefore = store.currentRepo!.commits.length
+      expect(commitsBefore).toBeGreaterThan(0)
       vi.clearAllMocks()
-      getSnapshot.mockImplementation(
-        () => new Promise((resolve) => setTimeout(() => resolve({ ok: true, repos: [makeRepoSnapshot()] }), 50)),
+      getRepos.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve({ ok: true, repos: [makeRepoSummary()] }), 50)),
       )
-      store.startPolling(1000)
-      store.startPolling(1000)
+      // Details timer parked far away so only summaries tick here.
+      store.startPolling(1000, 60_000)
+      store.startPolling(1000, 60_000)
       await vi.advanceTimersByTimeAsync(1050)
       // First silent tick issued exactly one request despite double start
       // (advanceTimers resolves the pending 50ms mock, then the tick fires).
-      expect(getSnapshot.mock.calls.length).toBeLessThanOrEqual(2)
-      const afterFirst = getSnapshot.mock.calls.length
+      expect(getRepos.mock.calls.length).toBeLessThanOrEqual(2)
+      const afterFirst = getRepos.mock.calls.length
       await vi.advanceTimersByTimeAsync(1000)
       // In-flight requests are not overlapped: at most one new request.
-      expect(getSnapshot.mock.calls.length - afterFirst).toBeLessThanOrEqual(1)
+      expect(getRepos.mock.calls.length - afterFirst).toBeLessThanOrEqual(1)
+      // Summaries-only polling never touches details or the history endpoint.
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(getHistory).not.toHaveBeenCalled()
+      expect(store.currentRepo!.commits.length).toBe(commitsBefore)
       // Drain any pending request, then verify steady polling continues.
       await vi.advanceTimersByTimeAsync(2000)
-      expect(getSnapshot.mock.calls.length).toBeGreaterThan(afterFirst)
+      expect(getRepos.mock.calls.length).toBeGreaterThan(afterFirst)
       expect(toast.error).not.toHaveBeenCalled()
 
-      getSnapshot.mockRejectedValue(new ApiRequestError(500, 'poll failed', 'error'))
+      getRepos.mockRejectedValue(new ApiRequestError(500, 'poll failed', 'error'))
       await vi.advanceTimersByTimeAsync(2000)
-      // Silent polling keeps existing repos visible: no global error, no toast.
+      // Silent polling keeps existing summaries visible: no global error, no toast.
       expect(store.error).toBeNull()
       expect(toast.error).not.toHaveBeenCalled()
 
-      // ... but with no repos, silent failures surface as a global error.
+      // ... but with no summaries, silent failures surface as a global error.
       store.repos = []
-      getSnapshot.mockRejectedValue(new ApiRequestError(500, 'poll failed', 'error'))
+      getRepos.mockRejectedValue(new ApiRequestError(500, 'poll failed', 'error'))
       await vi.advanceTimersByTimeAsync(2000)
       expect(store.error).toBe('poll failed')
       expect(toast.error).not.toHaveBeenCalled()
 
       store.stopPolling()
-      getSnapshot.mockClear()
+      getRepos.mockClear()
       await vi.advanceTimersByTimeAsync(5000)
-      expect(getSnapshot).not.toHaveBeenCalled()
+      expect(getRepos).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('appends and dedupes paginated history', async () => {
+  it('polls selected details on the slow timer, skipping while busy', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await initWith()
+      vi.clearAllMocks()
+      getRepos.mockResolvedValue({ ok: true, repos: [makeRepoSummary()] })
+      const updated = makeRepoSnapshot({ headHash: 'newhead1' })
+      getRepo.mockResolvedValue({ ok: true, snapshot: updated })
+
+      // Summaries timer parked far away; details tick every second.
+      store.startPolling(60_000, 1000)
+      await vi.advanceTimersByTimeAsync(1100)
+      expect(getRepo).toHaveBeenCalledWith('ws-1', '/workspace/repo-app')
+      expect(store.currentRepo?.headHash).toBe('newhead1')
+
+      // Busy mutations pause the details timer.
+      getRepo.mockClear()
+      store.busyOperation = 'stage'
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(getRepo).not.toHaveBeenCalled()
+      store.busyOperation = null
+      store.stopPolling()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('appends and dedupes paginated history via /history/', async () => {
     const store = await initWith([
       makeRepoSnapshot({
         hasMore: true,
         commits: [makeRawCommit('c3'), makeRawCommit('c2')],
       }),
     ])
-    const page = makeRepoSnapshot({
-      hasMore: false,
+    getHistory.mockResolvedValueOnce({
+      ok: true,
+      repo_path: '/workspace/repo-app',
       commits: [makeRawCommit('c2'), makeRawCommit('c1')],
+      has_more: false,
+      history_skip: 2,
+      history_limit: 50,
     })
-    getSnapshot.mockResolvedValueOnce({ ok: true, repos: [page] })
 
     expect(await store.loadMoreHistory()).toBe(true)
-    expect(getSnapshot).toHaveBeenCalledWith('ws-1', { historyLimit: 200, historySkip: 2 })
+    expect(getHistory).toHaveBeenCalledWith('ws-1', '/workspace/repo-app', { limit: 50, skip: 2 })
     expect(store.currentRepo?.commits.map((c) => c.hash)).toEqual(['c3', 'c2', 'c1'])
     expect(store.currentRepo?.hasMore).toBe(false)
     expect(await store.loadMoreHistory()).toBe(false)
   })
 
-  it('closes diff/commit selections gracefully on repo switches', async () => {
+  it('forwards the branch filter to /history/ when paging', async () => {
+    const store = await initWith([
+      makeRepoSnapshot({
+        hasMore: true,
+        commits: [makeRawCommit('c2')],
+      }),
+    ])
+    getHistory.mockResolvedValueOnce({
+      ok: true,
+      repo_path: '/workspace/repo-app',
+      commits: [makeRawCommit('c1')],
+      has_more: false,
+      history_skip: 1,
+      history_limit: 50,
+    })
+    expect(await store.loadMoreHistory('feature/git-panel')).toBe(true)
+    expect(getHistory).toHaveBeenCalledWith('ws-1', '/workspace/repo-app', {
+      limit: 50,
+      skip: 1,
+      branch: 'feature/git-panel',
+    })
+  })
+
+  it('closes diff/commit selections gracefully on repo switches and lazy-loads details', async () => {
     const second = makeRepoSnapshot({ id: '/workspace/other', path: '/workspace/other', name: 'other' })
     const store = await initWith([makeRepoSnapshot(), second])
     const path = store.currentRepo!.changes[0]!.path
@@ -671,6 +850,13 @@ describe('git store (productive)', () => {
     store.selectRepo('/workspace/other')
     expect(store.currentRepo?.id).toBe('/workspace/other')
     expect(store.viewingDiffChange).toBeNull()
+    // Fire-and-forget details for the new selection resolve via getGitRepo.
+    await vi.waitFor(() => {
+      expect(getRepo).toHaveBeenCalledWith('ws-1', '/workspace/other')
+    })
+    await vi.waitFor(() => {
+      expect(store.repoDetails['/workspace/other']?.changes.length).toBeGreaterThan(0)
+    })
 
     store.selectRepo('does-not-exist')
     expect(store.currentRepo?.id).toBe('/workspace/other')

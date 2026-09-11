@@ -65,6 +65,16 @@ const branchLabel = computed(
 )
 const ahead = computed(() => store.currentBranch?.ahead ?? 0)
 const behind = computed(() => store.currentBranch?.behind ?? 0)
+/** True while the selected repo's full details are still loading. */
+const detailsPending = computed(() => {
+  const path = store.currentRepo?.path
+  if (!path) return false
+  return store.detailsLoading[path] === true && !(path in store.repoDetails)
+})
+
+function repoLabel(repo: { name: string; currentBranch: string | null }): string {
+  return repo.currentBranch ? `${repo.name} (${repo.currentBranch})` : repo.name
+}
 
 // --- Vertical split between Changes and Graph ---
 
@@ -149,7 +159,7 @@ function onSplitPointerUp(event: PointerEvent): void {
               :value="repo.id"
               :data-testid="`git-repo-option-${repo.id}`"
             >
-              {{ repo.name }}
+              {{ repoLabel(repo) }}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -217,7 +227,14 @@ function onSplitPointerUp(event: PointerEvent): void {
         :style="{ height: `${splitPercent}%` }"
         data-testid="git-changes-container"
       >
-        <GitChangesSection />
+        <div
+          v-if="detailsPending"
+          class="flex h-full items-center justify-center"
+          data-testid="git-details-loading"
+        >
+          <RefreshCw :size="16" class="animate-spin text-muted-foreground" />
+        </div>
+        <GitChangesSection v-else />
       </div>
       <div
         role="separator"
@@ -237,7 +254,14 @@ function onSplitPointerUp(event: PointerEvent): void {
         />
       </div>
       <div class="min-h-0 flex-1 overflow-hidden" data-testid="git-graph-container">
-        <GitGraphSection />
+        <div
+          v-if="detailsPending"
+          class="flex h-full items-center justify-center"
+          data-testid="git-details-loading-graph"
+        >
+          <RefreshCw :size="16" class="animate-spin text-muted-foreground" />
+        </div>
+        <GitGraphSection v-else />
       </div>
     </div>
     </template>

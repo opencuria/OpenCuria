@@ -10,6 +10,7 @@ import {
   makeCommitDetails,
   makeRawCommit,
   makeRepoSnapshot,
+  setupGitRepos,
 } from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
@@ -24,7 +25,9 @@ vi.mock('vue-sonner', () => ({
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
@@ -66,7 +69,9 @@ vi.mock('@/components/ui/tooltip', () => ({
   TooltipContent: passthrough,
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
 
@@ -103,7 +108,7 @@ describe('GitGraphSection', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     getDetails.mockImplementation(async (_ws, repo, hash) => ({
       ok: true,
       repo_path: repo,
@@ -129,6 +134,9 @@ describe('GitGraphSection', () => {
     const graphSvg = wrapper.find('[data-testid="git-graph-svg"]')
     expect(graphSvg.findAll('circle')).toHaveLength(commitCount)
     expect(graphSvg.findAll('path').length).toBeGreaterThan(0)
+    // Small lists fit entirely in the window: no spacers needed.
+    expect(wrapper.find('[data-testid="git-graph-spacer-top"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="git-graph-spacer-bottom"]').exists()).toBe(false)
   })
 
   it('renders local branch tags and remote ref tags', async () => {
@@ -217,7 +225,7 @@ describe('GitGraphSection', () => {
         makeRawCommit('other', { message: 'other', parents: [] }),
       ],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [filtered] })
+    setupGitRepos(getRepos, getRepo, getHistory, [filtered])
     const store = await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -261,7 +269,7 @@ describe('GitGraphSection', () => {
       currentBranch: null,
       headHash: 'f4a9c21',
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    setupGitRepos(getRepos, getRepo, getHistory, [withFeature])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -275,10 +283,7 @@ describe('GitGraphSection', () => {
   })
 
   it('disables create-branch for unborn repos without a base commit', async () => {
-    getSnapshot.mockResolvedValue({
-      ok: true,
-      repos: [makeRepoSnapshot({ currentBranch: 'main', headHash: null, commits: [] })],
-    })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ currentBranch: 'main', headHash: null, commits: [] })])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -296,17 +301,22 @@ describe('GitGraphSection', () => {
     await nextTick()
 
     expect(wrapper.find('[data-testid="git-load-more"]').exists()).toBe(true)
+    // Sentinel fallback: present alongside the button when paging remains.
+    expect(wrapper.find('[data-testid="git-history-sentinel"]').exists()).toBe(true)
 
-    const page = makeRepoSnapshot({
-      hasMore: false,
+    getHistory.mockResolvedValueOnce({
+      ok: true,
+      repo_path: '/workspace/repo-app',
       commits: [makeRawCommit('older1', { message: 'older', parents: [] })],
+      has_more: false,
+      history_skip: 4,
+      history_limit: 50,
     })
-    getSnapshot.mockResolvedValueOnce({ ok: true, repos: [page] })
     await wrapper.find('[data-testid="git-load-more"]').trigger('click')
     await flushPromises()
     await nextTick()
 
-    expect(getSnapshot).toHaveBeenCalledWith('workspace-1', { historyLimit: 200, historySkip: 4 })
+    expect(getHistory).toHaveBeenCalledWith('workspace-1', '/workspace/repo-app', { limit: 50, skip: 4 })
     expect(store.currentRepo!.commits.map((c) => c.hash)).toContain('older1')
     expect(store.historyLoading).toBe(false)
   })
@@ -395,5 +405,98 @@ describe('GitGraphSection', () => {
     expect(mergeIndex).toBeGreaterThanOrEqual(0)
     const rows = wrapper.findAll('[data-testid="git-graph-row"]')
     expect(rows[mergeIndex]!.html()).not.toContain('opacity-50')
+  })
+
+  it('virtualizes long histories to a window with a bottom spacer', async () => {
+    const commits = Array.from(
+      { length: 120 },
+      (_, i) =>
+        makeRawCommit(`c${String(i).padStart(4, '0')}`, {
+          message: `commit ${i}`,
+          parents: i + 1 < 120 ? [`c${String(i + 1).padStart(4, '0')}`] : [],
+        }),
+    )
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ commits })])
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.length).toBeLessThan(120)
+    // Spacer rows preserve total table height for off-window commits.
+    expect(wrapper.find('[data-testid="git-graph-spacer-bottom"]').exists()).toBe(true)
+    const spacer = wrapper.find('[data-testid="git-graph-spacer-bottom"] td')
+    expect(Number.parseInt((spacer.element as HTMLElement).style.height, 10)).toBeGreaterThan(0)
+    // SVG overlay renders only the visible window's nodes.
+    const graphSvg = wrapper.find('[data-testid="git-graph-svg"]')
+    expect(graphSvg.findAll('circle').length).toBe(rows.length)
+  })
+
+  it('loads more history when the sentinel intersects, without double requests', async () => {
+    const store = await initStore()
+    store.currentRepo!.hasMore = true
+    await nextTick()
+
+    let observe: IntersectionObserverCallback | null = null
+    const observed: Element[] = []
+    const disconnect = vi.fn()
+    const IntersectionObserverMock = vi.fn((cb: IntersectionObserverCallback) => {
+      observe = cb
+      return {
+        observe: (el: Element) => void observed.push(el),
+        unobserve: vi.fn(),
+        disconnect,
+      }
+    })
+    vi.stubGlobal('IntersectionObserver', IntersectionObserverMock)
+    try {
+      const wrapper = mountSection()
+      await nextTick()
+      await flushPromises()
+
+      const sentinel = wrapper.find('[data-testid="git-history-sentinel"]')
+      expect(sentinel.exists()).toBe(true)
+      expect(observed).toContain(sentinel.element)
+      expect(observe).not.toBeNull()
+
+      getHistory.mockResolvedValue({
+        ok: true,
+        repo_path: '/workspace/repo-app',
+        commits: [],
+        has_more: false,
+        history_skip: 4,
+        history_limit: 50,
+      })
+      const loadSpy = vi.spyOn(store, 'loadMoreHistory')
+      // Fire twice while the first request is in flight — only one call.
+      observe!([{ isIntersecting: true } as IntersectionObserverEntry], null as never)
+      observe!([{ isIntersecting: true } as IntersectionObserverEntry], null as never)
+      await flushPromises()
+      await nextTick()
+
+      expect(loadSpy.mock.calls.length).toBe(1)
+      expect(getHistory).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('checks out a remote branch via its ref tag menu', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    const trigger = wrapper.find('[data-testid="git-ref-tag-origin/main"]')
+    expect(trigger.exists()).toBe(true)
+    expect(trigger.element.tagName).toBe('BUTTON')
+
+    await wrapper.find('[data-testid="git-remote-checkout-origin/main"]').trigger('click')
+    await flushPromises()
+
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'checkout_remote_branch',
+      remote_ref: 'origin/main',
+    })
   })
 })

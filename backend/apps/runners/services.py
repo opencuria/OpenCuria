@@ -131,7 +131,9 @@ class RunnerService:
     #: ``GIT_OPERATIONS`` in ``runner/src/git.py``). Only operation +
     #: typed args are ever dispatched — never free shell/env input.
     GIT_OPERATIONS: tuple[str, ...] = (
-        "snapshot",
+        "list_repos",
+        "repo_snapshot",
+        "repo_history",
         "working_diff",
         "commit_details",
         "stage",
@@ -144,6 +146,7 @@ class RunnerService:
         "sync",
         "checkout_branch",
         "checkout_commit",
+        "checkout_remote_branch",
         "create_branch",
         "rename_branch",
         "delete_branch",
@@ -153,7 +156,9 @@ class RunnerService:
     )
 
     #: Read-only operations (short timeout budget).
-    GIT_READ_OPERATIONS = frozenset({"snapshot", "working_diff", "commit_details"})
+    GIT_READ_OPERATIONS = frozenset(
+        {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
+    )
 
     #: Timeout budgets (seconds): reads are fast; network ops may take
     #: as long as a full clone/fetch round-trip.
@@ -3233,13 +3238,13 @@ class RunnerService:
     def _git_lock_key(workspace_id: uuid.UUID, repo_path: str | None) -> str:
         """Return the serialisation key for one workspace/repo pair.
 
-        The runner serialises per resolved repository root; a backend
-        snapshot over all repos under ``/workspace`` therefore takes one
-        lock per repo (see :meth:`run_git_operation`). These backend
-        process-local locks are best effort only: they serialise
-        concurrent dispatch inside this backend process, but multiple
-        backend workers still rely on the runner-side lock. ``/workspace``
-        is the discovery/snapshot aggregate key (runner lock per repo).
+        The runner serialises per resolved repository root; the
+        ``list_repos`` discovery aggregate locks per repo (see
+        :meth:`run_git_operation`). These backend process-local locks
+        are best effort only: they serialise concurrent dispatch inside
+        this backend process, but multiple backend workers still rely
+        on the runner-side lock. ``/workspace`` is the discovery
+        aggregate key (runner lock per repo).
         """
         repo = (repo_path or "").strip() or "/workspace"
         return f"{workspace_id}:{repo}"
@@ -3472,8 +3477,9 @@ class RunnerService:
                 :attr:`GIT_OPERATIONS`). Anything else raises
                 ``ValueError`` before any runner dispatch.
             repo_path: Absolute repo path under ``/workspace``
-                (omitted for ``snapshot`` discovery). Basic format check
-                only — the runner re-validates fail-closed.
+                (omitted for ``list_repos`` discovery, sent top-level
+                for all other ops). Basic format check only — the
+                runner re-validates fail-closed.
             args: Operation-specific typed args (paths, branch names,
                 messages). Unknown keys (``env``, ``author_*``,
                 ``args``/``argv``, aliases, typos) raise ``ValueError``;
@@ -3484,9 +3490,10 @@ class RunnerService:
                 repo has no git identity configured).
 
         Returns:
-            The raw runner result dict (``ok`` plus ``snapshot`` /
-            ``repos`` / ``diff`` / ``details`` payloads, or a structured
-            ``ok: False`` error with ``code``/``message``).
+            The raw runner result dict (``ok`` plus ``repos`` /
+            ``snapshot`` / ``diff`` / ``details`` / ``commits``
+            payloads, or a structured ``ok: False`` error with
+            ``code``/``message``).
 
         Raises:
             WorkspaceNotFoundError: Unknown workspace.
@@ -3584,7 +3591,9 @@ class RunnerService:
     #: ``author_*``, ``args``/``argv``, aliases, typos) raises ValueError —
     #: the service never silently drops caller input.
     _GIT_ALLOWED_ARGS: dict[str, frozenset] = {
-        "snapshot": frozenset({"history_limit", "history_skip"}),
+        "list_repos": frozenset(),
+        "repo_snapshot": frozenset(),
+        "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
         "working_diff": frozenset(),
         "commit_details": frozenset({"commit"}),
         "stage": frozenset({"paths"}),
@@ -3597,6 +3606,7 @@ class RunnerService:
         "sync": frozenset({"remote"}),
         "checkout_branch": frozenset({"branch"}),
         "checkout_commit": frozenset({"commit"}),
+        "checkout_remote_branch": frozenset({"remote_ref", "local_name"}),
         "create_branch": frozenset({"branch", "start_point", "checkout"}),
         "rename_branch": frozenset({"new_branch", "old_branch"}),
         "delete_branch": frozenset({"branch"}),
@@ -3673,7 +3683,7 @@ class RunnerService:
         """
         incoming = dict(args or {})
         cls._check_git_args_allowed(operation, incoming)
-        if operation == "snapshot":
+        if operation == "repo_history":
             out: dict = {}
             if "history_limit" in incoming:
                 try:
@@ -3693,7 +3703,11 @@ class RunnerService:
                 if skip < 0:
                     raise ValueError("history_skip must be >= 0")
                 out["history_skip"] = skip
+            if incoming.get("branch") not in (None, ""):
+                out["branch"] = cls._validate_git_branch_name(incoming["branch"])
             return out
+        if operation in {"list_repos", "repo_snapshot"}:
+            return {}
         if operation == "commit_details":
             commit = str(incoming.get("commit") or "").strip()
             if not commit:
@@ -3736,6 +3750,25 @@ class RunnerService:
             if not branch:
                 raise ValueError("branch is required for checkout_branch")
             return {"branch": cls._validate_git_branch_name(branch)}
+        if operation == "checkout_remote_branch":
+            remote_ref = str(incoming.get("remote_ref", "") or "").strip()
+            if not remote_ref:
+                raise ValueError("remote_ref is required for checkout_remote_branch")
+            out = {
+                "remote_ref": cls._validate_git_branch_name(
+                    remote_ref, field="remote_ref"
+                )
+            }
+            if incoming.get("local_name") not in (None, ""):
+                local = str(incoming["local_name"]).strip()
+                if not local:
+                    raise ValueError("Invalid local_name")
+                if len(local) > 255:
+                    raise ValueError("Invalid local_name")
+                out["local_name"] = cls._validate_git_branch_name(
+                    local, field="local_name"
+                )
+            return out
         if operation == "checkout_commit":
             commit = str(incoming.get("commit", "") or "").strip()
             if not commit:

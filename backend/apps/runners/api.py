@@ -38,8 +38,9 @@ from .schemas import (
     ErrorOut,
     GitCommitQuery,
     GitDiffQuery,
+    GitHistoryQuery,
     GitOperationIn,
-    GitSnapshotQuery,
+    GitRepoQuery,
     validate_commit_hash,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
@@ -1284,7 +1285,9 @@ async def delete_process(
 # ===========================================================================
 
 #: Read-only git operations served by the GET endpoints / typed operation.
-_GIT_READ_OPS = frozenset({"snapshot", "working_diff", "commit_details"})
+_GIT_READ_OPS = frozenset(
+    {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
+)
 
 
 def _git_error_to_response(exc: Exception):
@@ -1362,6 +1365,10 @@ def _git_operation_args(payload: GitOperationIn) -> dict:
         args["start_point"] = data["start_point"]
     if data.get("remote") is not None:
         args["remote"] = data["remote"]
+    if data.get("remote_ref") is not None:
+        args["remote_ref"] = data["remote_ref"]
+    if data.get("local_name") is not None:
+        args["local_name"] = data["local_name"]
     if data.get("checkout") is not None:
         args["checkout"] = bool(data["checkout"])
     if data.get("set_upstream") is not None:
@@ -1395,26 +1402,48 @@ git_router = Router(tags=["workspaces-git"])
 
 
 @git_router.get(
-    "/{workspace_id}/git/",
+    "/{workspace_id}/git/repos/",
     response=_GIT_RESPONSES,
-    summary="Get git snapshot (repo discovery)",
+    summary="List git repositories under /workspace",
 )
-async def git_snapshot(
+async def git_repos(
     request: HttpRequest,
     workspace_id: uuid.UUID,
-    history_limit: int = 200,
-    history_skip: int = 0,
 ):
-    """Return the git snapshot for all repos under /workspace.
+    """Return the discovered repos (id/name/path/branch/head) for a workspace."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
 
-    Query params page the per-repo commit history (1..500 / skip>=0).
-    """
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.run_git_operation(
+            workspace_id,
+            "list_repos",
+            args={},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/repo/",
+    response=_GIT_RESPONSES,
+    summary="Get per-repo git snapshot",
+)
+async def git_repo(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+):
+    """Return the full snapshot (status/branches/remotes/recent history) for one repo."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
     try:
-        query = GitSnapshotQuery(
-            history_limit=history_limit, history_skip=history_skip
-        )
+        query = GitRepoQuery(repo_path=repo_path)
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
     org_id = _get_org_id(request)
@@ -1425,11 +1454,61 @@ async def git_snapshot(
         await _get_owned_workspace_async(request, org_id, workspace_id)
         result = await service.run_git_operation(
             workspace_id,
-            "snapshot",
-            args={
-                "history_limit": query.history_limit,
-                "history_skip": query.history_skip,
-            },
+            "repo_snapshot",
+            repo_path=query.repo_path,
+            args={},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/history/",
+    response=_GIT_RESPONSES,
+    summary="Get paged commit history for one repo",
+)
+async def git_history(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+    history_limit: int = 50,
+    history_skip: int = 0,
+    branch: str | None = None,
+):
+    """Return paged commits (plus has_more cursors) for one repository.
+
+    Query params page the history (1..500 / skip>=0); ``branch``
+    optionally filters to one branch.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitHistoryQuery(
+            repo_path=repo_path,
+            history_limit=history_limit,
+            history_skip=history_skip,
+            branch=branch,
+        )
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        args: dict = {
+            "history_limit": query.history_limit,
+            "history_skip": query.history_skip,
+        }
+        if query.branch is not None:
+            args["branch"] = query.branch
+        result = await service.run_git_operation(
+            workspace_id,
+            "repo_history",
+            repo_path=query.repo_path,
+            args=args,
         )
         return _git_result_to_response(result)
     except Exception as exc:
@@ -1521,8 +1600,8 @@ async def git_operation(
 ):
     """Run one whitelisted git operation (typed fields only, no free args).
 
-    Read operations (``snapshot``/``working_diff``/``commit_details``)
-    require ``workspaces:git_read``; all mutations require
+    Read operations (``list_repos``/``repo_snapshot``/``repo_history``/
+    ``working_diff``/``commit_details``) require ``workspaces:git_read``; all mutations require
     ``workspaces:git_write``. Commit identity for ``commit`` is filled
     server-side from the authenticated account — the schema accepts no
     ``author_*`` fields.

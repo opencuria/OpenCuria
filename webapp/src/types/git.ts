@@ -113,6 +113,17 @@ export interface GitMergeState {
   cherryPicking: boolean
 }
 
+export interface GitRepoSummary {
+  id: string
+  name: string
+  /** Absolute path inside the workspace, e.g. /workspace/opencuria. */
+  path: string
+  /** Current branch name, or null when HEAD is detached. */
+  currentBranch: string | null
+  /** Resolved HEAD commit hash, null for unborn repos (no commits yet). */
+  headHash: string | null
+}
+
 export interface GitRepo {
   id: string
   name: string
