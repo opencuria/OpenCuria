@@ -3,7 +3,7 @@
  * WorkspaceSidePanel — collapsible, horizontally resizable panel docked to
  * the right of the workspace chat.
  *
- * Hosts the Git (mock data, frontend-only for now), Desktop (live
+ * Hosts the Git (productive backend integration), Desktop (live
  * preview), Terminal and Files tabs. The panel is a full-height column:
  * its tab bar spans the full panel width at the top (same bg-card surface
  * as the content), so the chat header buttons always sit left of the

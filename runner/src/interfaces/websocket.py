@@ -29,6 +29,7 @@ import socketio
 import structlog
 
 from ..config import RunnerSettings
+from ..git import GIT_OPERATIONS, git_timeout_for
 from ..service import WorkspaceService
 from .base import Interface
 
@@ -1309,9 +1310,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
-            log = logger.bind(
-                workspace_id=str(workspace_id), request_id=request_id
-            )
+            log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="process_start")
             try:
                 result = await self._service.start_background_process(
@@ -1356,9 +1355,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             try:
-                processes = await self._service.list_background_processes(
-                    workspace_id
-                )
+                processes = await self._service.list_background_processes(workspace_id)
                 await _harness_result(
                     "harness:process_list_result",
                     {
@@ -1440,11 +1437,265 @@ class WebSocketInterface(Interface):
 
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
+            if not isinstance(data, dict):
+                logger.warning("harness_cancel_invalid_payload")
+                return
             request_id = data.get("request_id", "")
+            # Empty/missing IDs must never touch task keys ("harness:"/"git:"
+            # would collide across unrelated requests).
+            if not isinstance(request_id, str) or not request_id.strip():
+                logger.warning("harness_cancel_missing_request_id")
+                return
             task = self._running_tasks.pop(f"harness:{request_id}", None)
             if task is not None and not task.done():
                 task.cancel()
                 logger.info("harness_cancelled", request_id=request_id)
+            git_task = self._running_tasks.pop(f"git:{request_id}", None)
+            if git_task is not None and not git_task.done():
+                git_task.cancel()
+                logger.info("git_operation_cancelled", request_id=request_id)
+
+        # -- git operations (productive git integration) -------------------------
+
+        @sio.on("git:operation")
+        async def on_git_operation(data: dict) -> None:
+            if not isinstance(data, dict):
+                # No request_id to correlate with: log only, as the
+                # hardened backend would drop such a reply as well.
+                logger.warning("git_operation_invalid_payload")
+                return
+            raw_workspace_id = data.get("workspace_id", "")
+            request_id = data.get("request_id", "")
+            operation = data.get("operation", "")
+            raw_args = data.get("args", {})
+            repo_path = data.get("repo_path")
+            # Echo convention: keep raw echo values verbatim for
+            # request_id/operation so the hardened backend correlation
+            # (exact string match) cannot be fooled by str() coercion.
+            # Non-string values are rejected fail-closed below.
+            has_request_id = isinstance(request_id, str) and bool(request_id.strip())
+            has_operation = isinstance(operation, str) and bool(operation.strip())
+            log = logger.bind(request_id=request_id, git_operation=operation)
+            log.info("git_operation_received")
+            task_key = f"git:{request_id}" if has_request_id else ""
+
+            # Trust boundary: request_id and operation are required
+            # non-empty strings on EVERY result path (the backend drops
+            # replies without them). A present request_id gets a
+            # structured validation error; without one there is nobody
+            # to correlate with, so log only.
+            if not has_request_id or not has_operation:
+                if has_request_id:
+                    try:
+                        workspace_echo = str(raw_workspace_id or "")
+                        uuid.UUID(workspace_echo)
+                    except (ValueError, AttributeError, TypeError):
+                        workspace_echo = str(raw_workspace_id or "")
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": workspace_echo,
+                            "request_id": request_id,
+                            "operation": operation
+                            if isinstance(operation, str)
+                            else "",
+                            "ok": False,
+                            "code": "invalid_request",
+                            "message": "request_id and operation are required non-empty strings",
+                        },
+                    )
+                    log.warning("git_operation_invalid_request")
+                else:
+                    log.warning("git_operation_missing_request_id")
+                return
+
+            # Trust boundary: args must be a dict. Non-dict values are
+            # rejected fail-closed (structured invalid_argument) rather
+            # than silently replaced with {}.
+            if raw_args is None:
+                op_args: dict = {}
+            elif isinstance(raw_args, dict):
+                op_args = raw_args
+            else:
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_argument",
+                        "message": f"Invalid args for git operation {operation!r}: must be an object",
+                    },
+                )
+                log.warning("git_operation_invalid_args")
+                return
+
+            # Trust boundary: repo_path, when present, must be a string.
+            # The service normalizer validates content fail-closed.
+            if repo_path is not None and not isinstance(repo_path, str):
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_argument",
+                        "message": f"Invalid repo_path for git operation {operation!r}: must be a string",
+                    },
+                )
+                log.warning("git_operation_invalid_repo_path")
+                return
+
+            # Duplicate in-flight request_ids would make cancel ambiguous
+            # (second task overwrites the first in _running_tasks). Reject
+            # fail-closed so the first waiter keeps its correlation.
+            existing = self._running_tasks.get(task_key)
+            if existing is not None and not existing.done():
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "conflict",
+                        "message": f"Duplicate git request_id: {request_id!r}",
+                    },
+                )
+                log.warning("git_operation_duplicate_request_id")
+                return
+
+            # Unknown operations are rejected here (structured
+            # unknown_operation) without spawning a task, instead of
+            # round-tripping through execute_git_operation.
+            if operation not in GIT_OPERATIONS:
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "unknown_operation",
+                        "message": f"Unknown git operation: {operation!r}",
+                    },
+                )
+                log.warning("git_operation_unknown_operation")
+                return
+
+            try:
+                workspace_id = uuid.UUID(str(raw_workspace_id))
+            except (ValueError, AttributeError, TypeError):
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_workspace_id",
+                        "message": f"Invalid workspace_id: {raw_workspace_id!r}",
+                    },
+                )
+                log.warning("git_operation_invalid_workspace")
+                return
+
+            async def _run() -> None:
+                try:
+                    timeout = git_timeout_for(operation) + 30.0
+                    result = await asyncio.wait_for(
+                        self._service.execute_git_operation(
+                            workspace_id,
+                            operation,
+                            repo_path,
+                            dict(op_args),
+                        ),
+                        timeout,
+                    )
+                    if not isinstance(result, dict):
+                        result = {
+                            "ok": False,
+                            "code": "git_failed",
+                            "message": "Git operation returned no result",
+                        }
+                    # Echo keys win over any service payload keys so the
+                    # hardened backend correlation can never be overridden.
+                    safe_result = {
+                        k: v
+                        for k, v in result.items()
+                        if k not in ("workspace_id", "request_id", "operation")
+                    }
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            **safe_result,
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                        },
+                    )
+                except asyncio.TimeoutError:
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                            "ok": False,
+                            "code": "timeout",
+                            "message": "Git operation timed out",
+                        },
+                    )
+                    log.warning("git_operation_timeout")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                            "ok": False,
+                            "code": "git_failed",
+                            "message": str(exc),
+                        },
+                    )
+                    log.exception("git_operation_failed")
+                finally:
+                    # Only drop our own registration: without the identity
+                    # check a duplicate request could pop the newer task
+                    # (or a cancel could race a finishing task and swallow
+                    # the cleanup of its replacement).
+                    if task_key:
+                        current = asyncio.current_task()
+                        if self._running_tasks.get(task_key) is current:
+                            self._running_tasks.pop(task_key, None)
+
+            task = asyncio.create_task(_run())
+            if task_key:
+                self._running_tasks[task_key] = task
+
+                # Consume task exceptions on the event loop: without a
+                # done-callback an unretrieved failure logs "Task exception
+                # was never retrieved". The _run() body already emits a
+                # structured git:operation_result for every failure path,
+                # so the callback only drains the exception (identity
+                # check: never pop a replacement task registered under a
+                # reused request_id after cancel/finish).
+                def _consume_git_task_result(
+                    done: asyncio.Task,  # type: ignore[type-arg]
+                    _key: str = task_key,
+                    _task: asyncio.Task = task,  # type: ignore[assignment]
+                ) -> None:
+                    if self._running_tasks.get(_key) is _task:
+                        self._running_tasks.pop(_key, None)
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        done.exception()
+
+                task.add_done_callback(_consume_git_task_result)
 
         # -- file explorer events ----------------------------------------------
 

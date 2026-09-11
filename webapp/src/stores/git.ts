@@ -1,10 +1,24 @@
 /**
- * Git store — state and actions for the side-panel Git tab.
+ * Git store — productive backend integration for the side-panel Git tab.
  *
- * Frontend-only: all actions mutate local mock data (src/mock/git.ts) so
- * the UI is fully interactive until a backend git API is wired up. Action
- * signatures are shaped like the future API calls to keep the migration
- * straightforward.
+ * All data comes from the backend git API (`src/services/git.api.ts`):
+ * snapshots (`GET /git/`), lazy working-tree diffs (`GET /git/diff/`),
+ * lazy commit details (`GET /git/commits/{hash}/`) and typed mutations
+ * (`POST /git/operation/`). There is no mock fallback.
+ *
+ * Key behaviours:
+ * - `initialize(workspaceId)` binds the store to a workspace and loads the
+ *   snapshot; `refresh({silent})` reloads; `reset()` clears everything.
+ * - `startPolling` / `stopPolling` drive silent snapshot refreshes
+ *   (no overlap, page-visibility aware); a request generation guards
+ *   against stale workspace results.
+ * - Mutations are serialized through a promise chain and report through
+ *   the notification store. HTTP 409 merge conflicts still carry a fresh
+ *   snapshot (`ApiRequestError.data.snapshot`) which is applied.
+ * - One snapshot row per path can carry BOTH a staged and an unstaged
+ *   change; conflicts surface as exactly one unresolved `U` row (never as
+ *   a committable staged change). Diff selection distinguishes the side
+ *   via `openDiff(path, staged)`.
  */
 
 import { defineStore } from 'pinia'
@@ -14,29 +28,43 @@ import type {
   GitCommit,
   GitCommitDetails,
   GitCommitFile,
+  GitCommitFileStatus,
+  GitFileChange,
+  GitFileStatus,
+  GitMergeState,
+  GitRemoteRef,
   GitRepo,
+  GitStagedKind,
+  GitUnstagedKind,
 } from '@/types/git'
-import { createMockCommitDetails, createMockRepos, getMockCommitDetails } from '@/mock/git'
+import { ApiRequestError } from '@/services/api'
+import {
+  conflictSnapshotOf,
+  getGitCommitDetails,
+  getGitSnapshot,
+  getGitWorkingDiff,
+  runGitOperation,
+  type GitOperationRequest,
+  type RawGitChange,
+  type RawGitCommit,
+  type RawGitCommitDetails,
+  type RawGitCommitFile,
+  type RawGitDiffHunk,
+  type RawGitRepoSnapshot,
+} from '@/services/git.api'
 import { useNotificationStore } from '@/stores/notifications'
 
-let commitCounter = 0
-
-/** Generate a plausible-looking unique short hash for mock commits. */
-function nextCommitHash(): string {
-  commitCounter += 1
-  return (0xabc0000 + commitCounter).toString(16)
-}
-
-export interface GitRefTag {
-  name: string
-  remote: boolean
-  current: boolean
-}
+export type { GitRefTag } from '@/types/git'
 
 const CDV_HEIGHT_KEY = 'opencuria:git:cdvHeight'
 const CDV_HEIGHT_DEFAULT = 250
 const CDV_HEIGHT_MIN = 120
 const CDV_HEIGHT_MAX = 600
+
+/** Silent snapshot polling interval (ms). */
+export const GIT_POLL_INTERVAL_MS = 4000
+/** Default page size for snapshot history requests. */
+export const GIT_HISTORY_LIMIT = 200
 
 function loadCdvHeight(): number {
   try {
@@ -57,33 +85,290 @@ function persist(key: string, value: string): void {
   }
 }
 
+function errorMessage(e: unknown): string {
+  if (e instanceof ApiRequestError) return e.message || 'Unknown error'
+  if (e instanceof Error) return e.message || 'Unknown error'
+  return typeof e === 'string' && e ? e : 'Unknown error'
+}
+
+/**
+ * Module-level working-diff request sequence. Lives outside the setup
+ * closure on purpose: Pinia setup stores expose state, but per-request
+ * invalidation tokens must never be reset/ref-counted by state resets —
+ * `closeDiff`/`reset` bump the sequence so late losers are always dropped.
+ * (Kept outside `defineStore` so HMR re-execution can't resurrect a stale
+ * closure counter either.)
+ */
+const useGitWorkingDiffSeq = (() => {
+  let seq = 0
+  return {
+    next(): number {
+      seq += 1
+      return seq
+    },
+    invalidate(): void {
+      seq += 1
+    },
+    isCurrent(req: number): boolean {
+      return req === seq
+    },
+  }
+})()
+
+// ---------------------------------------------------------------------------
+// Normalization (snake_case wire -> camelCase domain)
+// ---------------------------------------------------------------------------
+
+function asFileStatus(value: unknown): GitFileStatus {
+  return value === 'A' ||
+    value === 'D' ||
+    value === 'R' ||
+    value === 'C' ||
+    value === 'U'
+    ? value
+    : 'M'
+}
+
+function asCommitFileStatus(value: unknown): GitCommitFileStatus {
+  return value === 'A' ||
+    value === 'M' ||
+    value === 'D' ||
+    value === 'R' ||
+    value === 'C' ||
+    value === 'U'
+    ? value
+    : 'M'
+}
+
+function asStagedKind(value: unknown): GitStagedKind {
+  return value === 'M' ||
+    value === 'A' ||
+    value === 'D' ||
+    value === 'R' ||
+    value === 'C' ||
+    value === 'U'
+    ? value
+    : null
+}
+
+function asUnstagedKind(value: unknown): GitUnstagedKind {
+  return value === 'M' ||
+    value === 'D' ||
+    value === 'R' ||
+    value === 'C' ||
+    value === 'U' ||
+    value === 'untracked'
+    ? value
+    : null
+}
+
+export function normalizeDiffHunk(raw: RawGitDiffHunk): GitCommitFile['diff'][number] {
+  return {
+    header: raw.header,
+    oldStart: raw.old_start,
+    newStart: raw.new_start,
+    lines: (raw.lines ?? []).map((line) => ({ ...line })),
+  }
+}
+
+export function normalizeCommitFile(raw: RawGitCommitFile): GitCommitFile {
+  return {
+    oldPath: raw.old_path,
+    newPath: raw.new_path,
+    status: asCommitFileStatus(raw.status),
+    additions: raw.additions ?? 0,
+    deletions: raw.deletions ?? 0,
+    binary: raw.binary ?? false,
+    truncated: raw.truncated ?? false,
+    hasTextualDiff: raw.has_textual_diff ?? false,
+    diff: (raw.diff ?? []).map(normalizeDiffHunk),
+  }
+}
+
+export function normalizeChange(raw: RawGitChange): GitFileChange {
+  return {
+    path: raw.path,
+    oldPath: raw.old_path ?? null,
+    status: asFileStatus(raw.status),
+    staged: raw.staged === true,
+    stagedKind: asStagedKind(raw.staged_kind),
+    unstaged: asUnstagedKind(raw.unstaged),
+    conflict: typeof raw.conflict === 'string' && raw.conflict ? raw.conflict : null,
+    diff: (raw.diff ?? []).map(normalizeDiffHunk),
+  }
+}
+
+export function normalizeCommit(raw: RawGitCommit): GitCommit {
+  return {
+    hash: raw.hash,
+    message: raw.message ?? '',
+    body: raw.body ?? '',
+    author: raw.author ?? '',
+    email: raw.author_email ?? '',
+    authorEmail: raw.author_email ?? '',
+    timestamp: raw.timestamp || raw.author_date || '',
+    authorDate: raw.author_date ?? '',
+    committer: raw.committer ?? '',
+    committerEmail: raw.committer_email ?? '',
+    committerDate: raw.committer_date ?? '',
+    parents: [...(raw.parents ?? [])],
+  }
+}
+
+export function normalizeCommitDetails(raw: RawGitCommitDetails): GitCommitDetails {
+  return {
+    hash: raw.hash,
+    message: raw.message ?? '',
+    parents: [...(raw.parents ?? [])],
+    author: raw.author ?? '',
+    authorEmail: raw.author_email ?? '',
+    authorDate: raw.author_date ?? '',
+    committer: raw.committer ?? '',
+    committerEmail: raw.committer_email ?? '',
+    committerDate: raw.committer_date ?? '',
+    body: raw.body ?? '',
+    fileChanges: (raw.file_changes ?? []).map(normalizeCommitFile),
+  }
+}
+
+export function normalizeRepoSnapshot(raw: RawGitRepoSnapshot): GitRepo {
+  const mergeState: GitMergeState = {
+    merging: raw.merge_state?.merging === true,
+    rebasing: raw.merge_state?.rebasing === true,
+    cherryPicking: raw.merge_state?.cherry_picking === true,
+  }
+  const branches: GitBranch[] = (raw.branches ?? []).map((b) => ({
+    name: b.name,
+    tipHash: b.tip_hash,
+    upstream: b.upstream ?? null,
+    ahead: b.ahead ?? 0,
+    behind: b.behind ?? 0,
+  }))
+  const remoteRefs: GitRemoteRef[] = (raw.remote_refs ?? []).map((r) => ({
+    name: r.name,
+    tipHash: r.tip_hash,
+  }))
+  return {
+    id: raw.id || raw.path,
+    name: raw.name || raw.path.split('/').filter(Boolean).pop() || raw.path,
+    path: raw.path,
+    currentBranch: raw.current_branch ?? null,
+    headHash: raw.head_hash ?? null,
+    branches,
+    remoteRefs,
+    remotes: [...(raw.remotes ?? [])],
+    defaultRemote: raw.default_remote ?? null,
+    upstream: raw.upstream ?? null,
+    ahead: raw.ahead ?? 0,
+    behind: raw.behind ?? 0,
+    mergeState,
+    commits: (raw.commits ?? []).map(normalizeCommit),
+    hasMore: raw.has_more === true,
+    historySkip: raw.history_skip ?? 0,
+    historyLimit: raw.history_limit ?? GIT_HISTORY_LIMIT,
+    changes: (raw.changes ?? []).map(normalizeChange),
+  }
+}
+
+/** Cache key for per-repo commit details. */
+export function commitDetailsKey(repoPath: string, hash: string): string {
+  return `${repoPath}::${hash}`
+}
+
 export const useGitStore = defineStore('git', () => {
   const notifications = useNotificationStore()
 
-  // -- state ----------------------------------------------------------------
+  // -- state ------------------------------------------------------------------
 
-  const repos = ref<GitRepo[]>(createMockRepos())
-  const selectedRepoId = ref<string>(repos.value[0]?.id ?? '')
-  /** Path of the change whose diff is open in the main area, if any. */
+  /** Workspace this store is currently bound to (null after `reset`). */
+  const workspaceId = ref<string | null>(null)
+  const repos = ref<GitRepo[]>([])
+  const selectedRepoId = ref<string>('')
+  const loading = ref(false)
+  const error = ref<string | null>(null)
+  /** Label of the currently running mutation, if any. */
+  const busyOperation = ref<string | null>(null)
+  /** True while a paginated history page is loading. */
+  const historyLoading = ref(false)
+  /**
+   * True when the most recent finished mutation ended in an HTTP 409 merge
+   * conflict (snapshot already applied, warning already toasted).
+   *
+   * Lets callers distinguish "conflict — guide the user to the Changes
+   * banner" from generic failures while keeping the established boolean
+   * `merge...()` APIs untouched. Reset on every new operation start,
+   * on success and on non-conflict errors.
+   */
+  const lastConflict = ref(false)
+
+  function clearLastConflict(): void {
+    lastConflict.value = false
+  }
+
+  /** Path of the working-tree change whose diff is open, if any. */
   const viewingDiffPath = ref<string | null>(null)
-  // -- commit details (expandable commit rows) --------------------------------
+  /**
+   * Selected diff side for `viewingDiffPath`: true = staged, false =
+   * unstaged, null = legacy selection without a side (falls back to the
+   * snapshot row).
+   */
+  const viewingDiffStaged = ref<boolean | null>(null)
+  const workingDiffLoading = ref(false)
+  const workingDiffError = ref<string | null>(null)
+  /** Lazily loaded staged/unstaged file diffs keyed by repo path. */
+  const workingDiffCache = ref<
+    Record<string, { staged: GitCommitFile[]; unstaged: GitCommitFile[] }>
+  >({})
+
   /** Hash of the commit whose details row is expanded, if any. */
   const expandedCommitHash = ref<string | null>(null)
   /** newPath (or oldPath) of the commit file selected for diff, if any. */
   const expandedFilePath = ref<string | null>(null)
-  /** Details cache keyed by commit hash. */
-  const commitDetailsByHash = ref<Record<string, GitCommitDetails>>({})
+  /** Commit details cache keyed by `${repoPath}::${hash}`. */
+  const commitDetailsCache = ref<Record<string, GitCommitDetails>>({})
+  const commitDetailsLoading = ref<Record<string, boolean>>({})
+  const commitDetailsError = ref<Record<string, string | null>>({})
+
   /** Commit details view height in px (persisted). */
   const cdvHeight = ref<number>(loadCdvHeight())
 
-  // Seed the details cache with deterministic mock details.
-  for (const repo of repos.value) {
-    for (const [hash, details] of createMockCommitDetails(repo.commits)) {
-      commitDetailsByHash.value[hash] = details
+  /**
+   * Legacy projection of the details cache keyed by hash (current repo
+   * wins). New code should use `commitDetailsCache` / `expandedCommitDetails`.
+   */
+  const commitDetailsByHash = computed<Record<string, GitCommitDetails>>(() => {
+    const out: Record<string, GitCommitDetails> = {}
+    const currentPath = currentRepo.value?.path
+    const entries = Object.entries(commitDetailsCache.value)
+    entries.sort(([a], [b]) => {
+      const aCurrent = currentPath !== undefined && a.startsWith(`${currentPath}::`)
+      const bCurrent = currentPath !== undefined && b.startsWith(`${currentPath}::`)
+      return Number(bCurrent) - Number(aCurrent)
+    })
+    for (const [key, details] of entries) {
+      const hash = key.slice(key.lastIndexOf('::') + 2)
+      if (!(hash in out)) out[hash] = details
     }
-  }
+    return out
+  })
 
-  // -- getters --------------------------------------------------------------
+  // -- request bookkeeping (stale guards, serialization, polling) --------------
+
+  /** Bumped on initialize/reset; async results with an older gen are dropped. */
+  let loadGen = 0
+  /** Workspace id the in-flight `refresh` belongs to (null when idle). */
+  let refreshFor: string | null = null
+  /** Generation the in-flight `refresh` belongs to (join only on match). */
+  let refreshGen = -1
+  /** True while the current refresh promise is still pending. */
+  let refreshPromise: Promise<boolean> | null = null
+  /** Serializes mutations so backend per-repo locks never interleave. */
+  let opQueue: Promise<void> = Promise.resolve()
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  const polling = ref(false)
+  let visibilityListener: (() => void) | null = null
+
+  // -- getters ------------------------------------------------------------------
 
   const currentRepo = computed<GitRepo | null>(
     () => repos.value.find((r) => r.id === selectedRepoId.value) ?? null,
@@ -95,19 +380,38 @@ export const useGitStore = defineStore('git', () => {
     return repo.branches.find((b) => b.name === repo.currentBranch) ?? null
   })
 
+  /**
+   * Staged working-tree changes. Conflicted (`U`) rows are excluded — they
+   * are unresolved and must never look committable.
+   */
   const stagedChanges = computed(
-    () => currentRepo.value?.changes.filter((c) => c.staged) ?? [],
+    () =>
+      currentRepo.value?.changes.filter(
+        (c) => c.stagedKind !== null && c.conflict === null,
+      ) ?? [],
   )
+
+  /**
+   * Unstaged working-tree changes. A path with both sides appears here AND
+   * in `stagedChanges` (one row per side); conflicts appear exactly once,
+   * here.
+   */
   const unstagedChanges = computed(
-    () => currentRepo.value?.changes.filter((c) => !c.staged) ?? [],
+    () => currentRepo.value?.changes.filter((c) => c.unstaged !== null) ?? [],
   )
 
   /** Branch / remote-ref tags keyed by the commit hash they point at. */
-  const tagsByHash = computed<Map<string, GitRefTag[]>>(() => {
-    const map = new Map<string, GitRefTag[]>()
+  const tagsByHash = computed(() => {
+    const map = new Map<
+      string,
+      { name: string; remote: boolean; current: boolean }[]
+    >()
     const repo = currentRepo.value
     if (!repo) return map
-    const add = (hash: string, tag: GitRefTag): void => {
+    const add = (
+      hash: string,
+      tag: { name: string; remote: boolean; current: boolean },
+    ): void => {
       const list = map.get(hash) ?? []
       list.push(tag)
       map.set(hash, list)
@@ -125,42 +429,41 @@ export const useGitStore = defineStore('git', () => {
     return map
   })
 
-  const viewingDiffChange = computed(() => {
-    if (!viewingDiffPath.value) return null
+  /** Lazily loaded cache entry for the current diff selection, if any. */
+  const viewingDiffEntry = computed<GitCommitFile | null>(() => {
+    const path = viewingDiffPath.value
+    const repo = currentRepo.value
+    if (!path || !repo) return null
+    const cache = workingDiffCache.value[repo.path]
+    if (!cache) return null
+    const stagedSide = viewingDiffStaged.value ?? repo.changes.find((c) => c.path === path)?.staged ?? true
+    const list = stagedSide ? cache.staged : cache.unstaged
     return (
-      currentRepo.value?.changes.find((c) => c.path === viewingDiffPath.value) ??
-      null
+      list.find((f) => f.newPath === path || f.oldPath === path) ?? null
     )
   })
 
-  /** Details of the expanded commit, from cache with a commit-list fallback. */
+  /**
+   * Working-tree change selected for the main-area diff: snapshot metadata
+   * enriched with the lazily loaded hunks of the selected side.
+   */
+  const viewingDiffChange = computed<GitFileChange | null>(() => {
+    const path = viewingDiffPath.value
+    const repo = currentRepo.value
+    if (!path || !repo) return null
+    const row = repo.changes.find((c) => c.path === path) ?? null
+    if (!row) return null
+    const stagedSide =
+      viewingDiffStaged.value ?? row.staged
+    return { ...row, staged: stagedSide, diff: viewingDiffEntry.value?.diff ?? [] }
+  })
+
+  /** Details of the expanded commit (null until lazily loaded). */
   const expandedCommitDetails = computed<GitCommitDetails | null>(() => {
     const hash = expandedCommitHash.value
-    if (!hash) return null
-    const cached = commitDetailsByHash.value[hash]
-    if (cached) return cached
-    const commit = currentRepo.value?.commits.find((c) => c.hash === hash)
-    if (!commit) return null
-    const fallback = getMockCommitDetails(hash)
-    if (fallback) {
-      commitDetailsByHash.value[hash] = fallback
-      return fallback
-    }
-    // Last resort: synthesize empty details so expand never crashes.
-    const empty: GitCommitDetails = {
-      hash: commit.hash,
-      parents: [...commit.parents],
-      author: commit.author,
-      authorEmail: '',
-      authorDate: commit.timestamp,
-      committer: commit.author,
-      committerEmail: '',
-      committerDate: commit.timestamp,
-      body: commit.body ?? '',
-      fileChanges: [],
-    }
-    commitDetailsByHash.value[hash] = empty
-    return empty
+    const repo = currentRepo.value
+    if (!hash || !repo) return null
+    return commitDetailsCache.value[commitDetailsKey(repo.path, hash)] ?? null
   })
 
   /** File of the expanded commit selected for diff, if any. */
@@ -192,56 +495,455 @@ export const useGitStore = defineStore('git', () => {
     return expandedCommitHash.value === hash
   }
 
-  // -- helpers ---------------------------------------------------------------
-
-  function requireRepo(): GitRepo | null {
+  function isCommitDetailsLoading(hash: string): boolean {
     const repo = currentRepo.value
-    if (!repo) notifications.error('No repository selected')
-    return repo
+    if (!repo) return false
+    return commitDetailsLoading.value[commitDetailsKey(repo.path, hash)] === true
   }
 
-  function registerEmptyDetails(commit: GitCommit): void {
-    commitDetailsByHash.value[commit.hash] = {
-      hash: commit.hash,
-      parents: [...commit.parents],
-      author: commit.author,
-      authorEmail: '',
-      authorDate: commit.timestamp,
-      committer: commit.author,
-      committerEmail: '',
-      committerDate: commit.timestamp,
-      body: commit.body ?? '',
-      fileChanges: [],
+  function commitDetailsErrorFor(hash: string): string | null {
+    const repo = currentRepo.value
+    if (!repo) return null
+    return commitDetailsError.value[commitDetailsKey(repo.path, hash)] ?? null
+  }
+
+  // -- snapshot handling ----------------------------------------------------------
+
+  /** Replace the whole repo list (snapshot refresh), keeping the selection. */
+  function applySnapshotRepos(next: GitRepo[]): void {
+    const previous = currentRepo.value
+    repos.value = next
+    if (next.length === 0) {
+      selectedRepoId.value = ''
+      closeDiff()
+      closeCommitDetails()
+      return
     }
-  }
-
-  function appendCommit(
-    repo: GitRepo,
-    message: string,
-    parents: string[],
-  ): GitCommit {
-    const commit: GitCommit = {
-      hash: nextCommitHash(),
-      message,
-      author: 'You',
-      timestamp: new Date().toISOString(),
-      parents,
+    if (next.some((r) => r.id === selectedRepoId.value)) {
+      // Selection survived — drop view selections that no longer exist.
+      const repo = next.find((r) => r.id === selectedRepoId.value) ?? null
+      if (repo) reconcileDiffSelection(repo)
+      return
     }
-    repo.commits.unshift(commit)
-    // New commits carry no per-file details yet — register an empty entry
-    // so expanding them never crashes.
-    registerEmptyDetails(commit)
-    return commit
+    const byPath = previous ? next.find((r) => r.path === previous.path) : undefined
+    selectedRepoId.value = (byPath ?? next[0])!.id
+    closeDiff()
+    closeCommitDetails()
   }
 
-  function upsertRemoteRef(repo: GitRepo, branch: string, tipHash: string): void {
-    const name = `origin/${branch}`
-    const existing = repo.remoteRefs.find((r) => r.name === name)
-    if (existing) {
-      existing.tipHash = tipHash
+  /** Replace a single repo from a mutation snapshot, keeping the selection. */
+  function applyRepoSnapshot(snapshot: GitRepo): void {
+    const index = repos.value.findIndex(
+      (r) => r.path === snapshot.path || r.id === snapshot.id,
+    )
+    if (index === -1) {
+      repos.value = [...repos.value, snapshot]
     } else {
-      repo.remoteRefs.push({ name, tipHash })
+      const next = [...repos.value]
+      next[index] = snapshot
+      repos.value = next
     }
+    if (selectedRepoId.value === '') {
+      selectedRepoId.value = snapshot.id
+    } else {
+      const selected = repos.value.find((r) => r.id === selectedRepoId.value) ?? null
+      if (!selected) {
+        const byPath = repos.value.find((r) => r.path === snapshot.path) ?? null
+        selectedRepoId.value = byPath?.id ?? snapshot.id
+      }
+    }
+    const repo = currentRepo.value
+    if (repo) reconcileDiffSelection(repo)
+  }
+
+  /** Keep the working-diff selection valid after fresh snapshot data. */
+  function reconcileDiffSelection(repo: GitRepo): void {
+    const path = viewingDiffPath.value
+    if (!path) return
+    const row = repo.changes.find((c) => c.path === path)
+    if (!row) {
+      closeDiff()
+      return
+    }
+    if (viewingDiffStaged.value === true && row.stagedKind === null) {
+      viewingDiffStaged.value = row.unstaged !== null ? false : null
+    } else if (viewingDiffStaged.value === false && row.unstaged === null) {
+      viewingDiffStaged.value = row.stagedKind !== null ? true : null
+    }
+  }
+
+  function invalidateRepoCaches(repoPath: string): void {
+    delete workingDiffCache.value[repoPath]
+    if (workingDiffError.value !== null && currentRepo.value?.path === repoPath) {
+      workingDiffError.value = null
+    }
+    for (const key of Object.keys(commitDetailsCache.value)) {
+      if (key.startsWith(`${repoPath}::`)) delete commitDetailsCache.value[key]
+    }
+    for (const key of Object.keys(commitDetailsLoading.value)) {
+      if (key.startsWith(`${repoPath}::`)) delete commitDetailsLoading.value[key]
+    }
+    for (const key of Object.keys(commitDetailsError.value)) {
+      if (key.startsWith(`${repoPath}::`)) delete commitDetailsError.value[key]
+    }
+  }
+
+  // -- lifecycle: initialize / refresh / reset / polling ----------------------------
+  //
+  // NOTE: `initialize` deliberately does NOT await a previous workspace's
+  // in-flight refresh. The overlap guard only joins same-workspace +
+  // same-generation requests, so a slow old request can never block a new
+  // workspace load; its result is dropped by the `gen` / `workspaceId`
+  // checks when it settles.
+
+  async function refresh(options?: { silent?: boolean }): Promise<boolean> {
+    const wsId = workspaceId.value
+    if (!wsId) return false
+    // Workspace-safe overlap guard: an in-flight refresh is only joined when
+    // it belongs to the same workspace AND generation. A newer `initialize`
+    // bumps `loadGen`, so parallel old requests never block a fresh
+    // workspace load — the stale task drops its result via the gen check and
+    // never clears our bookkeeping (`refreshPromise !== task` in its
+    // `finally`), letting us safely overwrite it below.
+    if (refreshPromise && refreshFor === wsId && refreshGen === loadGen) {
+      return refreshPromise
+    }
+    const silent = options?.silent === true
+    const gen = loadGen
+    let task!: Promise<boolean>
+    task = (async (): Promise<boolean> => {
+      if (!silent) {
+        loading.value = true
+        error.value = null
+      }
+      try {
+        const res = await getGitSnapshot(wsId, {
+          historyLimit: GIT_HISTORY_LIMIT,
+          historySkip: 0,
+        })
+        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        applySnapshotRepos((res.repos ?? []).map(normalizeRepoSnapshot))
+        if (!silent) {
+          loading.value = false
+          error.value = null
+        }
+        return true
+      } catch (e: unknown) {
+        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        const message = errorMessage(e)
+        if (silent) {
+          // Silent polling must never turn the whole tab into a global
+          // error while existing repos are still shown.
+          if (repos.value.length === 0) error.value = message
+        } else {
+          loading.value = false
+          error.value = message
+          notifications.error('Failed to load git repositories', message)
+        }
+        return false
+      } finally {
+        if (refreshPromise === task) {
+          refreshPromise = null
+          refreshFor = null
+        }
+      }
+    })()
+    refreshPromise = task
+    refreshFor = wsId
+    refreshGen = gen
+    return task
+  }
+
+  async function initialize(id: string): Promise<void> {
+    loadGen += 1
+    workspaceId.value = id
+    clearLastConflict()
+    repos.value = []
+    selectedRepoId.value = ''
+    viewingDiffPath.value = null
+    viewingDiffStaged.value = null
+    expandedCommitHash.value = null
+    expandedFilePath.value = null
+    commitDetailsCache.value = {}
+    commitDetailsLoading.value = {}
+    commitDetailsError.value = {}
+    workingDiffCache.value = {}
+    workingDiffLoading.value = false
+    workingDiffError.value = null
+    useGitWorkingDiffSeq.invalidate()
+    historyLoading.value = false
+    busyOperation.value = null
+    error.value = null
+    await refresh()
+  }
+
+  function stopPolling(): void {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+    polling.value = false
+    if (visibilityListener !== null && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', visibilityListener)
+      visibilityListener = null
+    }
+  }
+
+  /** True while a snapshot refresh for the current workspace is in flight. */
+  function isRefreshInFlight(): boolean {
+    return (
+      refreshPromise !== null &&
+      refreshFor === workspaceId.value &&
+      refreshGen === loadGen
+    )
+  }
+
+  function startPolling(intervalMs: number = GIT_POLL_INTERVAL_MS): void {
+    if (pollTimer !== null) return
+    polling.value = true
+    if (typeof document !== 'undefined') {
+      visibilityListener = () => {
+        if (document.visibilityState === 'visible' && workspaceId.value) {
+          void refresh({ silent: true })
+        }
+      }
+      document.addEventListener('visibilitychange', visibilityListener)
+    }
+    pollTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return
+      }
+      if (!workspaceId.value || isRefreshInFlight() || busyOperation.value !== null) return
+      void refresh({ silent: true })
+    }, intervalMs)
+  }
+
+  function reset(): void {
+    loadGen += 1
+    stopPolling()
+    workspaceId.value = null
+    repos.value = []
+    selectedRepoId.value = ''
+    loading.value = false
+    error.value = null
+    busyOperation.value = null
+    historyLoading.value = false
+    clearLastConflict()
+    // Drop the bookkeeping for any in-flight snapshot; its gen-guarded
+    // result is ignored when it settles. The op queue is replaced (not
+    // awaited) so queued pre-reset mutations can no longer clear state:
+    // every queued task re-checks the generation before touching state.
+    refreshPromise = null
+    refreshFor = null
+    refreshGen = -1
+    opQueue = Promise.resolve()
+    viewingDiffPath.value = null
+    viewingDiffStaged.value = null
+    useGitWorkingDiffSeq.invalidate()
+    workingDiffLoading.value = false
+    workingDiffError.value = null
+    workingDiffCache.value = {}
+    expandedCommitHash.value = null
+    expandedFilePath.value = null
+    commitDetailsCache.value = {}
+    commitDetailsLoading.value = {}
+    commitDetailsError.value = {}
+  }
+
+  // -- lazy loaders -------------------------------------------------------------------
+
+  /** Load staged/unstaged file diffs for the current repo (cached per repo). */
+  async function loadWorkingDiffForCurrentRepo(options?: {
+    force?: boolean
+  }): Promise<void> {
+    const wsId = workspaceId.value
+    const repo = currentRepo.value
+    if (!wsId || !repo) return
+    const repoPath = repo.path
+    if (!options?.force && workingDiffCache.value[repoPath]) return
+    const gen = loadGen
+    const req = useGitWorkingDiffSeq.next()
+    workingDiffLoading.value = true
+    workingDiffError.value = null
+    try {
+      const res = await getGitWorkingDiff(wsId, repoPath)
+      // Repo-/request-safe: drop results when the workspace changed, the
+      // selection moved to another repo, the diff was closed meanwhile, or a
+      // newer diff request superseded this one.
+      if (
+        !useGitWorkingDiffSeq.isCurrent(req) ||
+        gen !== loadGen ||
+        workspaceId.value !== wsId ||
+        currentRepo.value?.path !== repoPath ||
+        viewingDiffPath.value === null
+      ) {
+        return
+      }
+      workingDiffCache.value[repoPath] = {
+        staged: (res.diff?.staged ?? []).map(normalizeCommitFile),
+        unstaged: (res.diff?.unstaged ?? []).map(normalizeCommitFile),
+      }
+    } catch (e: unknown) {
+      if (
+        !useGitWorkingDiffSeq.isCurrent(req) ||
+        gen !== loadGen ||
+        workspaceId.value !== wsId ||
+        currentRepo.value?.path !== repoPath ||
+        viewingDiffPath.value === null
+      ) {
+        return
+      }
+      workingDiffError.value = errorMessage(e)
+    } finally {
+      // Only the latest request for the current selection may clear the
+      // loading flag — a stale loser must never flip loading false.
+      if (
+        useGitWorkingDiffSeq.isCurrent(req) &&
+        gen === loadGen &&
+        workspaceId.value === wsId &&
+        currentRepo.value?.path === repoPath &&
+        viewingDiffPath.value !== null
+      ) {
+        workingDiffLoading.value = false
+      }
+    }
+  }
+
+  /**
+   * Retry the working diff after an error (bypasses the per-repo cache so a
+   * failed load actually re-requests).
+   */
+  function retryWorkingDiff(): Promise<void> {
+    const repo = currentRepo.value
+    if (repo) delete workingDiffCache.value[repo.path]
+    return loadWorkingDiffForCurrentRepo({ force: true })
+  }
+
+  /** Load commit details for the current repo+hash (cached per repo+hash). */
+  async function ensureCommitDetails(hash: string): Promise<void> {
+    const wsId = workspaceId.value
+    const repo = currentRepo.value
+    if (!wsId || !repo) return
+    const key = commitDetailsKey(repo.path, hash)
+    if (commitDetailsCache.value[key]) return
+    const gen = loadGen
+    commitDetailsLoading.value[key] = true
+    commitDetailsError.value[key] = null
+    try {
+      const res = await getGitCommitDetails(wsId, repo.path, hash)
+      if (gen !== loadGen || workspaceId.value !== wsId) return
+      commitDetailsCache.value[key] = normalizeCommitDetails(res.details)
+    } catch (e: unknown) {
+      if (gen !== loadGen || workspaceId.value !== wsId) return
+      commitDetailsError.value[key] = errorMessage(e)
+    } finally {
+      if (gen === loadGen && workspaceId.value === wsId) {
+        commitDetailsLoading.value[key] = false
+      }
+    }
+  }
+
+  // -- typed mutation helper ---------------------------------------------------------------
+
+  interface OperationCallbacks {
+    successTitle?: string
+    successMessage?: string
+    errorTitle?: string
+  }
+
+  /**
+   * Run one typed mutation against the selected repo: serialized, with
+   * busy state, snapshot application (including 409 conflict snapshots)
+   * and notifications. Never throws — returns true on success.
+   *
+   * Only a true merge conflict sets `lastConflict`: HTTP 409 with
+   * `code === 'conflict'` AND a single-repo snapshot in the payload
+   * (`conflictSnapshotOf(e.data)`). Then the fresh snapshot is applied,
+   * a conflict warning is toasted and `lastConflict` is set (false is
+   * still returned, so the boolean contract is unchanged — callers check
+   * `lastConflict`). Every other 409 (runner_offline, workspace_conflict,
+   * generic conflict without snapshot, …) is a normal error: no snapshot
+   * is applied, `lastConflict` stays false and an error toast is shown.
+   */
+  async function runOperation(
+    label: string,
+    build: (repo: GitRepo) => GitOperationRequest,
+    callbacks?: OperationCallbacks,
+  ): Promise<boolean> {
+    const wsId = workspaceId.value
+    const repo = currentRepo.value
+    if (!wsId || !repo) {
+      notifications.error('No repository selected')
+      return false
+    }
+    const repoPath = repo.path
+    let payload: GitOperationRequest
+    try {
+      payload = build(repo)
+    } catch (e: unknown) {
+      notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
+      return false
+    }
+    // Capture the generation: `reset()` bumps `loadGen` and replaces the
+    // queue, so a task queued before a reset must not touch post-reset
+    // state (including clearing a newer operation's busy label).
+    const gen = loadGen
+    const task = opQueue.then(async (): Promise<boolean> => {
+      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      const current = repos.value.find((r) => r.path === repoPath) ?? null
+      if (!current) {
+        notifications.error('No repository selected')
+        return false
+      }
+      clearLastConflict()
+      busyOperation.value = label
+      try {
+        const res = await runGitOperation(wsId, { ...payload, repo_path: repoPath })
+        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
+        invalidateRepoCaches(repoPath)
+        const updated = repos.value.find((r) => r.path === repoPath) ?? null
+        if (updated) reconcileDiffSelection(updated)
+        if (expandedCommitHash.value) {
+          // Details were invalidated above; reload the expanded commit.
+          void ensureCommitDetails(expandedCommitHash.value)
+        } else if (viewingDiffPath.value) {
+          void loadWorkingDiffForCurrentRepo()
+        }
+        if (callbacks?.successTitle) {
+          notifications.success(callbacks.successTitle, callbacks.successMessage)
+        }
+        return true
+      } catch (e: unknown) {
+        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        if (e instanceof ApiRequestError && e.status === 409 && e.code === 'conflict') {
+          const snapshot = conflictSnapshotOf(e.data)
+          if (snapshot) {
+            applyRepoSnapshot(normalizeRepoSnapshot(snapshot))
+            invalidateRepoCaches(repoPath)
+            const updated = repos.value.find((r) => r.path === repoPath) ?? null
+            if (updated) reconcileDiffSelection(updated)
+            lastConflict.value = true
+            notifications.warning('Merge conflict', errorMessage(e))
+            return false
+          }
+        }
+        notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
+        return false
+      } finally {
+        // Only the owning generation may clear the busy label: a reset (or a
+        // workspace switch that replaced the queue) must not wipe a newer
+        // operation's state via a stale `finally`.
+        if (gen === loadGen && workspaceId.value === wsId) {
+          busyOperation.value = null
+        }
+      }
+    })
+    opQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
   }
 
   // -- actions: selection & diff view -----------------------------------------
@@ -253,30 +955,30 @@ export const useGitStore = defineStore('git', () => {
     closeCommitDetails()
   }
 
-  function openDiff(path: string): void {
+  /**
+   * Open a working-tree diff. `staged` selects the side when the same path
+   * exists staged AND unstaged (omit for legacy single-side behaviour).
+   */
+  async function openDiff(path: string, staged?: boolean): Promise<void> {
     // Working-tree and commit diffs are mutually exclusive.
     expandedFilePath.value = null
     viewingDiffPath.value = path
+    viewingDiffStaged.value = staged ?? null
+    await loadWorkingDiffForCurrentRepo()
   }
 
   function closeDiff(): void {
     viewingDiffPath.value = null
+    viewingDiffStaged.value = null
+    // Invalidate any in-flight working-diff request so its late settlement
+    // can neither populate the (now cleared) selection nor flip loading.
+    useGitWorkingDiffSeq.invalidate()
+    workingDiffLoading.value = false
   }
 
   // -- actions: commit details (expandable rows) --------------------------------
 
-  function ensureDetails(hash: string): void {
-    if (commitDetailsByHash.value[hash]) return
-    const details = getMockCommitDetails(hash)
-    if (details) {
-      commitDetailsByHash.value[hash] = details
-      return
-    }
-    const commit = currentRepo.value?.commits.find((c) => c.hash === hash)
-    if (commit) registerEmptyDetails(commit)
-  }
-
-  function toggleCommitDetails(hash: string): void {
+  async function toggleCommitDetails(hash: string): Promise<void> {
     if (expandedCommitHash.value === hash) {
       closeCommitDetails()
       return
@@ -284,7 +986,7 @@ export const useGitStore = defineStore('git', () => {
     expandedCommitHash.value = hash
     // Switching commits clears the previously selected file.
     expandedFilePath.value = null
-    ensureDetails(hash)
+    await ensureCommitDetails(hash)
   }
 
   function closeCommitDetails(): void {
@@ -295,6 +997,9 @@ export const useGitStore = defineStore('git', () => {
   function selectCommitFile(path: string | null): void {
     // Commit and working-tree diffs are mutually exclusive.
     viewingDiffPath.value = null
+    viewingDiffStaged.value = null
+    useGitWorkingDiffSeq.invalidate()
+    workingDiffLoading.value = false
     expandedFilePath.value = path
   }
 
@@ -306,193 +1011,369 @@ export const useGitStore = defineStore('git', () => {
 
   // -- actions: staging --------------------------------------------------------
 
-  function stage(path: string): void {
-    const change = currentRepo.value?.changes.find((c) => c.path === path)
-    if (change) change.staged = true
+  function stage(path: string): Promise<boolean> {
+    return runOperation('stage', () => ({ operation: 'stage', paths: [path] }), {
+      errorTitle: 'Stage failed',
+    })
   }
 
-  function unstage(path: string): void {
-    const change = currentRepo.value?.changes.find((c) => c.path === path)
-    if (change) change.staged = false
+  function unstage(path: string): Promise<boolean> {
+    return runOperation('unstage', () => ({ operation: 'unstage', paths: [path] }), {
+      errorTitle: 'Unstage failed',
+    })
   }
 
-  function stageAll(): void {
-    currentRepo.value?.changes.forEach((c) => (c.staged = true))
+  function stageAll(): Promise<boolean> {
+    const paths = unstagedChanges.value
+      .filter((c) => c.conflict === null)
+      .map((c) => c.path)
+    if (paths.length === 0) return Promise.resolve(true)
+    return runOperation('stage', () => ({ operation: 'stage', paths }), {
+      errorTitle: 'Stage all failed',
+    })
   }
 
-  function unstageAll(): void {
-    currentRepo.value?.changes.forEach((c) => (c.staged = false))
+  function unstageAll(): Promise<boolean> {
+    const paths = stagedChanges.value.map((c) => c.path)
+    if (paths.length === 0) return Promise.resolve(true)
+    return runOperation('unstage', () => ({ operation: 'unstage', paths }), {
+      errorTitle: 'Unstage all failed',
+    })
   }
 
-  function discard(path: string): void {
-    const repo = requireRepo()
-    if (!repo) return
-    repo.changes = repo.changes.filter((c) => c.path !== path)
-    if (viewingDiffPath.value === path) closeDiff()
-    notifications.info('Discarded changes', path)
+  function discard(path: string): Promise<boolean> {
+    return runOperation(
+      'discard',
+      () => ({ operation: 'discard', paths: [path] }),
+      {
+        successTitle: 'Discarded changes',
+        successMessage: path,
+        errorTitle: 'Discard failed',
+      },
+    )
   }
 
   // -- actions: commit & push --------------------------------------------------
 
-  function commit(message: string, andPush = false): boolean {
-    const repo = requireRepo()
-    if (!repo) return false
+  /**
+   * Commit staged changes. When `andPush` is set, the push only runs after
+   * the commit succeeded. Returns true on success.
+   */
+  async function commit(message: string, andPush = false): Promise<boolean> {
+    const repo = currentRepo.value
+    if (!repo) {
+      notifications.error('No repository selected')
+      return false
+    }
     const trimmed = message.trim()
     if (!trimmed) {
       notifications.error('Commit message is empty')
       return false
     }
-    const staged = repo.changes.filter((c) => c.staged)
-    if (staged.length === 0) {
+    if (stagedChanges.value.length === 0) {
       notifications.error('No staged changes to commit')
       return false
     }
-
-    const created = appendCommit(repo, trimmed, [repo.headHash])
-    repo.headHash = created.hash
-    const branch = currentBranch.value
-    if (branch) {
-      branch.tipHash = created.hash
-      branch.ahead += 1
-    }
-    repo.changes = repo.changes.filter((c) => !c.staged)
-    notifications.success(
-      `Committed on ${repo.currentBranch ?? 'detached HEAD'}`,
-      created.hash,
+    const branchLabel = repo.currentBranch ?? 'detached HEAD'
+    const ok = await runOperation(
+      'commit',
+      () => ({ operation: 'commit', message: trimmed }),
+      {
+        successTitle: `Committed on ${branchLabel}`,
+        errorTitle: 'Commit failed',
+      },
     )
-    if (andPush) push()
-    return true
+    if (ok && andPush) return push()
+    return ok
   }
 
-  function push(): void {
-    const repo = requireRepo()
-    if (!repo) return
+  function push(): Promise<boolean> {
     const branch = currentBranch.value
+    if (!currentRepo.value) {
+      notifications.error('No repository selected')
+      return Promise.resolve(false)
+    }
     if (!branch) {
       notifications.error('Cannot push while HEAD is detached')
-      return
+      return Promise.resolve(false)
     }
-    if (branch.ahead === 0) {
+    // A local branch without an upstream reports ahead === 0 but still
+    // needs a first publish (`push -u`). Only a tracked branch that is
+    // not ahead is truly up to date.
+    if (branch.ahead === 0 && branch.upstream) {
       notifications.info('Everything up to date')
-      return
+      return Promise.resolve(true)
     }
-    branch.ahead = 0
-    upsertRemoteRef(repo, branch.name, branch.tipHash)
-    notifications.success(`Pushed to origin/${branch.name}`)
+    const name = branch.name
+    // First-publish remote: prefer the snapshot defaultRemote, then
+    // `origin` when configured, then the first remote; undefined when
+    // the repo has no remotes (runner falls back to `origin`).
+    const repo = currentRepo.value
+    const defaultName = repo.defaultRemote?.replace('refs/remotes/', '').split('/')[0]
+    const fallbackRemote =
+      defaultName ?? (repo.remotes.includes('origin') ? 'origin' : repo.remotes[0])
+    if (!branch.upstream) {
+      // First publish: set the upstream. The backend falls back to
+      // `origin` when no explicit remote is sent.
+      const publishRemote = fallbackRemote ?? 'origin'
+      return runOperation(
+        'push',
+        () => ({
+          operation: 'push',
+          ...(fallbackRemote ? { remote: fallbackRemote } : {}),
+          set_upstream: true,
+        }),
+        {
+          successTitle: `Published ${name} to ${publishRemote}`,
+          errorTitle: 'Push failed',
+        },
+      )
+    }
+    return runOperation(
+      'push',
+      () => ({ operation: 'push', ...(fallbackRemote ? { remote: fallbackRemote } : {}) }),
+      {
+        successTitle: `Pushed to ${fallbackRemote ?? 'origin'}/${name}`,
+        errorTitle: 'Push failed',
+      },
+    )
   }
 
-  /** Mock fetch — the data never changes, so this only reports status. */
-  function fetchRemote(): void {
-    notifications.info('Fetched origin', 'Already up to date')
+  function fetchRemote(): Promise<boolean> {
+    if (!currentRepo.value) {
+      notifications.error('No repository selected')
+      return Promise.resolve(false)
+    }
+    return runOperation('fetch', () => ({ operation: 'fetch' }), {
+      errorTitle: 'Fetch failed',
+    })
+  }
+
+  function pull(): Promise<boolean> {
+    if (!currentRepo.value) {
+      notifications.error('No repository selected')
+      return Promise.resolve(false)
+    }
+    return runOperation('pull', () => ({ operation: 'pull' }), {
+      successTitle: 'Pulled latest changes',
+      errorTitle: 'Pull failed',
+    })
+  }
+
+  function sync(): Promise<boolean> {
+    if (!currentRepo.value) {
+      notifications.error('No repository selected')
+      return Promise.resolve(false)
+    }
+    return runOperation('sync', () => ({ operation: 'sync' }), {
+      successTitle: 'Synced with remote',
+      errorTitle: 'Sync failed',
+    })
   }
 
   // -- actions: branches -------------------------------------------------------
 
-  function checkoutBranch(name: string): void {
-    const repo = requireRepo()
-    if (!repo) return
-    const branch = repo.branches.find((b) => b.name === name)
-    if (!branch) return
-    repo.currentBranch = name
-    repo.headHash = branch.tipHash
-    notifications.success(`Checked out ${name}`)
+  function checkoutBranch(name: string): Promise<boolean> {
+    return runOperation(
+      'checkout_branch',
+      () => ({ operation: 'checkout_branch', branch: name }),
+      {
+        successTitle: `Checked out ${name}`,
+        errorTitle: 'Checkout failed',
+      },
+    )
   }
 
-  function checkoutCommit(hash: string): void {
-    const repo = requireRepo()
-    if (!repo || !repo.commits.some((c) => c.hash === hash)) return
-    repo.currentBranch = null
-    repo.headHash = hash
-    notifications.info('Detached HEAD', `Checked out commit ${hash}`)
+  function checkoutCommit(hash: string): Promise<boolean> {
+    return runOperation(
+      'checkout_commit',
+      () => ({ operation: 'checkout_commit', commit: hash }),
+      {
+        successTitle: 'Detached HEAD',
+        successMessage: `Checked out commit ${hash}`,
+        errorTitle: 'Checkout failed',
+      },
+    )
   }
 
-  function createBranch(name: string, fromHash: string, checkout: boolean): boolean {
-    const repo = requireRepo()
-    if (!repo) return false
+  function createBranch(name: string, fromHash: string, checkout: boolean): Promise<boolean> {
     const trimmed = name.trim()
     if (!trimmed) {
       notifications.error('Branch name is empty')
-      return false
+      return Promise.resolve(false)
     }
-    if (repo.branches.some((b) => b.name === trimmed)) {
-      notifications.error(`Branch '${trimmed}' already exists`)
-      return false
-    }
-    repo.branches.push({ name: trimmed, tipHash: fromHash, ahead: 0, behind: 0 })
-    if (checkout) {
-      checkoutBranch(trimmed)
-    } else {
-      notifications.success(`Created branch ${trimmed}`)
-    }
-    return true
+    return runOperation(
+      'create_branch',
+      () => ({
+        operation: 'create_branch',
+        branch: trimmed,
+        ...(fromHash ? { start_point: fromHash } : {}),
+        checkout,
+      }),
+      {
+        successTitle: checkout ? `Checked out ${trimmed}` : `Created branch ${trimmed}`,
+        errorTitle: 'Create branch failed',
+      },
+    )
   }
 
-  function renameBranch(oldName: string, newName: string): boolean {
-    const repo = requireRepo()
-    if (!repo) return false
+  function renameBranch(oldName: string, newName: string): Promise<boolean> {
     const trimmed = newName.trim()
     if (!trimmed) {
       notifications.error('Branch name is empty')
-      return false
+      return Promise.resolve(false)
     }
-    if (trimmed === oldName) return true
-    if (repo.branches.some((b) => b.name === trimmed)) {
-      notifications.error(`Branch '${trimmed}' already exists`)
-      return false
-    }
-    const branch = repo.branches.find((b) => b.name === oldName)
-    if (!branch) return false
-    branch.name = trimmed
-    if (repo.currentBranch === oldName) repo.currentBranch = trimmed
-    notifications.success(`Renamed branch to ${trimmed}`)
-    return true
+    if (trimmed === oldName) return Promise.resolve(true)
+    return runOperation(
+      'rename_branch',
+      () => ({
+        operation: 'rename_branch',
+        new_branch: trimmed,
+        ...(oldName ? { old_branch: oldName } : {}),
+      }),
+      {
+        successTitle: `Renamed branch to ${trimmed}`,
+        errorTitle: 'Rename branch failed',
+      },
+    )
+  }
+
+  function deleteBranch(name: string): Promise<boolean> {
+    return runOperation(
+      'delete_branch',
+      () => ({ operation: 'delete_branch', branch: name }),
+      {
+        successTitle: `Deleted branch ${name}`,
+        errorTitle: 'Delete branch failed',
+      },
+    )
   }
 
   // -- actions: merging --------------------------------------------------------
 
   /** Merge the given branch into the currently checked out branch. */
-  function mergeIntoCurrent(branchName: string): void {
-    const repo = requireRepo()
-    const branch = currentBranch.value
-    if (!repo || !branch) return
-    const source = repo.branches.find((b) => b.name === branchName)
-    if (!source || source.name === branch.name) return
-    const created = appendCommit(
-      repo,
-      `Merge branch '${source.name}' into ${branch.name}`,
-      [branch.tipHash, source.tipHash],
+  function mergeIntoCurrent(branchName: string): Promise<boolean> {
+    return runOperation(
+      'merge_into_current',
+      (repo) => ({
+        operation: 'merge_into_current',
+        branch: branchName,
+        ...(repo.currentBranch ? { message: `Merge branch '${branchName}' into ${repo.currentBranch}` } : {}),
+      }),
+      {
+        successTitle: 'Merged successfully',
+        errorTitle: 'Merge failed',
+      },
     )
-    branch.tipHash = created.hash
-    branch.ahead += 1
-    repo.headHash = created.hash
-    notifications.success(`Merged ${source.name} into ${branch.name}`)
   }
 
   /** Merge the currently checked out branch into the given branch. */
-  function mergeCurrentInto(branchName: string): void {
-    const repo = requireRepo()
-    const branch = currentBranch.value
-    if (!repo || !branch) return
-    const target = repo.branches.find((b) => b.name === branchName)
-    if (!target || target.name === branch.name) return
-    const created = appendCommit(
-      repo,
-      `Merge branch '${branch.name}' into ${target.name}`,
-      [target.tipHash, branch.tipHash],
+  function mergeCurrentInto(branchName: string): Promise<boolean> {
+    return runOperation(
+      'merge_current_into',
+      (repo) => ({
+        operation: 'merge_current_into',
+        target: branchName,
+        ...(repo.currentBranch
+          ? { message: `Merge branch '${repo.currentBranch}' into ${branchName}` }
+          : {}),
+      }),
+      {
+        successTitle: 'Merged successfully',
+        errorTitle: 'Merge failed',
+      },
     )
-    target.tipHash = created.hash
-    target.ahead += 1
-    notifications.success(`Merged ${branch.name} into ${target.name}`)
+  }
+
+  function mergeAbort(): Promise<boolean> {
+    return runOperation('merge_abort', () => ({ operation: 'merge_abort' }), {
+      successTitle: 'Merge aborted',
+      errorTitle: 'Abort merge failed',
+    })
+  }
+
+  // -- actions: history paging ------------------------------------------------------
+
+  /**
+   * Append the next history page for the selected repo (deduplicated by
+   * hash). Only the selected repo is touched: other repos bundled in the
+   * aggregated snapshot response keep their current history (the backend
+   * paginates every repo with the same skip, so their pages would be stale
+   * windows, not usable full histories).
+   */
+  async function loadMoreHistory(): Promise<boolean> {
+    const wsId = workspaceId.value
+    const repo = currentRepo.value
+    if (!wsId || !repo || !repo.hasMore || historyLoading.value) return false
+    const repoPath = repo.path
+    const repoId = repo.id
+    const pageSize = repo.historyLimit
+    const skip = repo.commits.length
+    const gen = loadGen
+    historyLoading.value = true
+    try {
+      const res = await getGitSnapshot(wsId, { historyLimit: pageSize, historySkip: skip })
+      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      const current = repos.value.find((r) => r.path === repoPath || r.id === repoId)
+      if (!current || currentRepo.value?.path !== repoPath) return false
+      const raw = (res.repos ?? []).find((r) => r.path === repoPath || r.id === repoId)
+      if (!raw) return false
+      const page = normalizeRepoSnapshot(raw)
+      const seen = new Set(current.commits.map((c) => c.hash))
+      const merged = [...current.commits]
+      for (const commit of page.commits) {
+        if (!seen.has(commit.hash)) {
+          seen.add(commit.hash)
+          merged.push(commit)
+        }
+      }
+      // Merge ONLY history fields into the live repo row; every other field
+      // (changes, branches, mergeState, …) stays at the selected repo's
+      // current full-snapshot values so sibling pages can't overwrite them.
+      const index = repos.value.findIndex((r) => r.path === repoPath || r.id === repoId)
+      if (index === -1) return false
+      const next = [...repos.value]
+      next[index] = {
+        ...current,
+        commits: merged,
+        hasMore: page.hasMore,
+        historySkip: page.historySkip,
+        historyLimit: page.historyLimit,
+      }
+      repos.value = next
+      return true
+    } catch (e: unknown) {
+      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      notifications.error('Failed to load more history', errorMessage(e))
+      return false
+    } finally {
+      if (gen === loadGen && workspaceId.value === wsId) historyLoading.value = false
+    }
   }
 
   return {
     // state
+    workspaceId,
     repos,
     selectedRepoId,
+    loading,
+    error,
+    busyOperation,
+    historyLoading,
+    lastConflict,
+    clearLastConflict,
+    polling,
     viewingDiffPath,
+    viewingDiffStaged,
+    workingDiffLoading,
+    workingDiffError,
+    workingDiffCache,
     expandedCommitHash,
     expandedFilePath,
+    commitDetailsCache,
     commitDetailsByHash,
+    commitDetailsLoading,
+    commitDetailsError,
     cdvHeight,
     // getters
     currentRepo,
@@ -500,19 +1381,31 @@ export const useGitStore = defineStore('git', () => {
     stagedChanges,
     unstagedChanges,
     tagsByHash,
+    viewingDiffEntry,
     viewingDiffChange,
     expandedCommitDetails,
     viewingCommitFile,
     viewingCommitDiff,
+    // lifecycle
+    initialize,
+    refresh,
+    reset,
+    startPolling,
+    stopPolling,
+    loadMoreHistory,
     // actions
     selectRepo,
     openDiff,
     closeDiff,
+    loadWorkingDiffForCurrentRepo,
+    retryWorkingDiff,
     toggleCommitDetails,
     closeCommitDetails,
     selectCommitFile,
     setCdvHeight,
     isCommitExpanded,
+    isCommitDetailsLoading,
+    commitDetailsErrorFor,
     stage,
     unstage,
     stageAll,
@@ -521,11 +1414,15 @@ export const useGitStore = defineStore('git', () => {
     commit,
     push,
     fetchRemote,
+    pull,
+    sync,
     checkoutBranch,
     checkoutCommit,
     createBranch,
     renameBranch,
+    deleteBranch,
     mergeIntoCurrent,
     mergeCurrentInto,
+    mergeAbort,
   }
 })

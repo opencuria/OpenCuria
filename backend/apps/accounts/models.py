@@ -29,6 +29,10 @@ class APIKeyPermission(str, enum.Enum):
     WORKSPACES_RESUME = "workspaces:resume"
     WORKSPACES_DELETE = "workspaces:delete"
 
+    # Workspace git integration (additive; existing keys are never auto-granted these)
+    WORKSPACES_GIT_READ = "workspaces:git_read"
+    WORKSPACES_GIT_WRITE = "workspaces:git_write"
+
     # Terminal
     TERMINAL_ACCESS = "terminal:access"
 

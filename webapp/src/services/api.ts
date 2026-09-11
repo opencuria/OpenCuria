@@ -83,12 +83,15 @@ export async function tryRefreshToken(): Promise<boolean> {
 export class ApiRequestError extends Error {
   status: number
   code: string
+  /** Raw error payload (e.g. git 409 conflict with `snapshot`/`message`). */
+  data: unknown
 
-  constructor(status: number, detail: string, code: string = 'error') {
+  constructor(status: number, detail: string, code: string = 'error', data?: unknown) {
     super(detail)
     this.name = 'ApiRequestError'
     this.status = status
     this.code = code
+    this.data = data
   }
 }
 
@@ -146,8 +149,18 @@ async function request<T>(
   const data = await res.json()
 
   if (!res.ok) {
-    const err = data as ApiError
-    throw new ApiRequestError(res.status, err.detail ?? 'Unknown error', err.code)
+    const payload = (data ?? {}) as Record<string, unknown> & ApiError
+    const detail =
+      typeof payload.detail === 'string'
+        ? payload.detail
+        : typeof payload.message === 'string'
+          ? payload.message
+          : 'Unknown error'
+    const code =
+      typeof payload.code === 'string' && payload.code.length > 0
+        ? payload.code
+        : 'error'
+    throw new ApiRequestError(res.status, detail, code, data)
   }
 
   return data as T

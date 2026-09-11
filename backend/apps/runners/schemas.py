@@ -6,12 +6,14 @@ Separated into input (In) and output (Out) schemas for clarity.
 
 from __future__ import annotations
 
+import os
+import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from ninja import Schema
-from pydantic import field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .desktop import (
     DEFAULT_DESKTOP_HEIGHT,
@@ -504,3 +506,246 @@ class ImageDefinitionDuplicateIn(Schema):
     """Request schema for duplicating an image definition into the org."""
 
     name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Git schemas (productive git integration, whitelisted RPC)
+# ---------------------------------------------------------------------------
+
+#: Whitelisted git operations (mirrors GIT_OPERATIONS in runner/src/git.py).
+GitOperation = Literal[
+    "snapshot",
+    "working_diff",
+    "commit_details",
+    "stage",
+    "unstage",
+    "discard",
+    "commit",
+    "fetch",
+    "pull",
+    "push",
+    "sync",
+    "checkout_branch",
+    "checkout_commit",
+    "create_branch",
+    "rename_branch",
+    "delete_branch",
+    "merge_into_current",
+    "merge_current_into",
+    "merge_abort",
+]
+
+_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
+
+
+def _validate_repo_path(value: str | None) -> str | None:
+    """Basic backend check for absolute repo paths (runner re-validates)."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("repo_path must be a non-empty string")
+    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+        raise ValueError("Invalid repo_path")
+    normalized = os.path.normpath(cleaned)
+    if normalized != "/workspace" and not normalized.startswith("/workspace/"):
+        raise ValueError("repo_path must be under /workspace")
+    if len(cleaned) > 512:
+        raise ValueError("repo_path too long (max 512 chars)")
+    return cleaned
+
+
+def _validate_file_paths(value: list[str]) -> list[str]:
+    """Validate repo-relative file paths (runner re-validates fail-closed)."""
+    if not value:
+        raise ValueError("paths must not be empty")
+    if len(value) > 256:
+        raise ValueError("Too many paths (max 256)")
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            raise ValueError("paths must not contain empty entries")
+        if len(text) > 256:
+            raise ValueError("path too long (max 256 chars)")
+        if "\x00" in text or "\n" in text or "\r" in text:
+            raise ValueError(f"Invalid path: {item!r}")
+        cleaned.append(text)
+    return cleaned
+
+
+def _validate_branch(value: str, *, field: str = "branch") -> str:
+    """Lightweight backend branch check (runner validates strictly)."""
+    cleaned = str(value or "").strip()
+    if not cleaned or len(cleaned) > 255:
+        raise ValueError(f"Invalid {field}")
+    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+        raise ValueError(f"Invalid {field}")
+    return cleaned
+
+
+def _validate_commit_hash(value: str) -> str:
+    """Validate a hex commit hash (full or abbreviated, min 4 chars)."""
+    cleaned = str(value or "").strip().lower()
+    if not _HASH_RE.match(cleaned):
+        raise ValueError("Invalid commit hash (must be 4-64 hex chars)")
+    return cleaned
+
+
+def validate_commit_hash(value: str) -> str:
+    """Public commit-hash validator shared by REST schemas and views."""
+    return _validate_commit_hash(value)
+
+
+class GitSnapshotQuery(Schema):
+    """Query params for GET /git/ (snapshot discovery with history paging)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    history_limit: int = Field(default=200, ge=1, le=500)
+    history_skip: int = Field(default=0, ge=0)
+
+
+class GitDiffQuery(Schema):
+    """Query params for GET /git/diff (working-tree diff for one repo)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_path: str = Field(..., max_length=512)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str) -> str:
+        result = _validate_repo_path(value)
+        assert result is not None
+        return result
+
+
+class GitCommitQuery(Schema):
+    """Query params for GET /git/commits/{hash} (commit details)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_path: str = Field(..., max_length=512)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str) -> str:
+        result = _validate_repo_path(value)
+        assert result is not None
+        return result
+
+
+class GitOperationIn(Schema):
+    """Typed generic git operation request for POST /git/operation/.
+
+    ``operation`` is a strict whitelist literal; all other fields are
+    explicit and individually length-capped. Unknown keys are rejected
+    (``extra='forbid'``). In particular there is no ``args`` dict and no
+    ``env`` field — the service builds the runner payload field-by-field.
+    Commit identity (``author_*``) is never accepted from the client; the
+    API layer injects it server-side from ``request.user``. The webapp
+    sends a plain ``message`` (no ``message_b64`` public API).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: GitOperation
+    repo_path: str | None = Field(default=None, max_length=512)
+    paths: list[str] | None = Field(default=None, max_length=256)
+    message: str | None = Field(default=None, max_length=10000)
+    branch: str | None = Field(default=None, max_length=255)
+    commit: str | None = Field(default=None, max_length=64)
+    target: str | None = Field(default=None, max_length=255)
+    new_branch: str | None = Field(default=None, max_length=255)
+    old_branch: str | None = Field(default=None, max_length=255)
+    start_point: str | None = Field(default=None, max_length=255)
+    remote: str | None = Field(default=None, max_length=255)
+    checkout: bool | None = None
+    set_upstream: bool | None = None
+    history_limit: int | None = Field(default=None, ge=1, le=500)
+    history_skip: int | None = Field(default=None, ge=0)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str | None) -> str | None:
+        return _validate_repo_path(value)
+
+    @field_validator("paths")
+    @classmethod
+    def _check_paths(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return _validate_file_paths(value)
+
+    @field_validator("branch", "target", "new_branch", "old_branch", "start_point")
+    @classmethod
+    def _check_branch(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_branch(value)
+
+    @field_validator("commit")
+    @classmethod
+    def _check_commit(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_commit_hash(value)
+
+    @field_validator("message")
+    @classmethod
+    def _check_message(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) > 10000:
+            raise ValueError("message too long (max 10000 chars)")
+        return value
+
+    @field_validator("remote")
+    @classmethod
+    def _check_remote(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) > 255:
+            raise ValueError("Invalid remote")
+        if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+            raise ValueError("Invalid remote")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _check_operation_fields(self) -> "GitOperationIn":
+        """Require the fields each operation needs (fail fast, 422)."""
+        op = self.operation
+        needs_repo = op not in {"snapshot"}
+        if needs_repo and not self.repo_path:
+            raise ValueError(f"repo_path is required for operation {op!r}")
+        if op in {"stage", "unstage", "discard"} and not self.paths:
+            raise ValueError(f"paths is required for operation {op!r}")
+        if op == "commit" and not (self.message or "").strip():
+            raise ValueError("message is required for commit")
+        if op == "commit_details" and not (self.commit or "").strip():
+            raise ValueError("commit is required for commit_details")
+        if op == "checkout_branch" and not (self.branch or "").strip():
+            raise ValueError("branch is required for checkout_branch")
+        if op == "checkout_commit" and not (self.commit or "").strip():
+            raise ValueError("commit is required for checkout_commit")
+        if op == "create_branch" and not (self.branch or "").strip():
+            raise ValueError("branch is required for create_branch")
+        if op == "rename_branch" and not (self.new_branch or "").strip():
+            raise ValueError("new_branch is required for rename_branch")
+        if op == "delete_branch" and not (self.branch or "").strip():
+            raise ValueError("branch is required for delete_branch")
+        if op == "merge_into_current" and not (self.branch or "").strip():
+            raise ValueError("branch is required for merge_into_current")
+        if op == "merge_current_into" and not (self.target or "").strip():
+            raise ValueError("target is required for merge_current_into")
+        if op == "pull" and (self.branch or "").strip() and not (self.remote or "").strip():
+            raise ValueError("remote is required when branch is set for pull")
+        if (
+            op in {"merge_into_current", "merge_current_into"}
+            and self.message is not None
+            and len(self.message) > 4096
+        ):
+            raise ValueError("message too long (max 4096 chars)")
+        return self

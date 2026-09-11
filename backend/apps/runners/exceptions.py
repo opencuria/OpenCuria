@@ -21,6 +21,17 @@ class RunnerOfflineError(ConflictError):
         super().__init__(message=f"Runner '{runner_id}' is offline")
 
 
+class RunnerTimeoutError(ConflictError):
+    """Raised when a runner RPC reply does not arrive before the budget."""
+
+    def __init__(self, operation: str, timeout: float) -> None:
+        super().__init__(
+            message=f"Runner did not respond to {operation!r} within {timeout:.0f}s"
+        )
+        self.operation = operation
+        self.timeout = timeout
+
+
 class WorkspaceNotFoundError(NotFoundError):
     """Raised when a workspace is not found."""
 

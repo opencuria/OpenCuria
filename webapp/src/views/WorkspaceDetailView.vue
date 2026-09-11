@@ -297,6 +297,7 @@ onUnmounted(() => {
   fileExplorerStore.reset()
   workspaceImageStore.reset()
   harnessStore.reset()
+  gitStore.reset()
   workspaceStore.activeWorkspace = null
 })
 
@@ -314,6 +315,9 @@ watch(workspaceId, (newId, oldId) => {
     processesOpen.value = false
     fileExplorerStore.reset()
     harnessStore.reset()
+    // GitPanel owns initialize/polling (key remount re-initializes); reset
+    // here so the next workspace never flashes stale repos/diffs.
+    gitStore.reset()
     workspaceStore.fetchWorkspaceDetail(newId)
     void processesStore.fetchProcesses(newId)
     setupSocketListeners()

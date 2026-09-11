@@ -3,8 +3,9 @@
  * GitBranchDialog — create or rename a branch in the Git tab graph.
  *
  * Create mode shows the base commit and a "check out" checkbox; rename
- * mode prefills the current name. All operations run against the mock git
- * store.
+ * mode prefills the current name. Operations run against the productive
+ * git store (async); the dialog only closes after success and a local
+ * `submitting` flag prevents double submits.
  */
 import { computed, ref, watch } from 'vue'
 import { useGitStore } from '@/stores/git'
@@ -39,6 +40,7 @@ const store = useGitStore()
 
 const name = ref('')
 const checkout = ref(true)
+const submitting = ref(false)
 
 watch(
   () => props.open,
@@ -46,13 +48,18 @@ watch(
     if (!open) return
     name.value = props.mode === 'rename' ? (props.branchName ?? '') : ''
     checkout.value = true
+    submitting.value = false
   },
 )
 
 const title = computed(() =>
   props.mode === 'create' ? 'Create branch' : 'Rename branch',
 )
+const isBusy = computed(() => store.busyOperation !== null)
 const isValid = computed(() => name.value.trim().length > 0)
+const canSubmit = computed(
+  () => isValid.value && !isBusy.value && !submitting.value,
+)
 
 const baseLabel = computed(() => {
   if (!props.fromHash) return ''
@@ -61,22 +68,32 @@ const baseLabel = computed(() => {
   return branch ? branch.name : props.fromHash.slice(0, 7)
 })
 
-function handleSubmit(): void {
-  if (!isValid.value) return
-  const ok =
-    props.mode === 'create'
-      ? store.createBranch(
-          name.value,
-          props.fromHash ?? store.currentRepo?.headHash ?? '',
-          checkout.value,
-        )
-      : store.renameBranch(props.branchName ?? '', name.value)
-  if (ok) emit('update:open', false)
+function requestClose(): void {
+  if (submitting.value) return
+  emit('update:open', false)
+}
+
+async function handleSubmit(): Promise<void> {
+  if (!canSubmit.value) return
+  submitting.value = true
+  try {
+    const ok =
+      props.mode === 'create'
+        ? await store.createBranch(
+            name.value,
+            props.fromHash ?? store.currentRepo?.headHash ?? '',
+            checkout.value,
+          )
+        : await store.renameBranch(props.branchName ?? '', name.value)
+    if (ok) emit('update:open', false)
+  } finally {
+    submitting.value = false
+  }
 }
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(v) => emit('update:open', v)">
+  <Dialog :open="open" @update:open="(v) => !v && requestClose()">
     <DialogContent data-testid="git-branch-dialog">
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
@@ -95,7 +112,7 @@ function handleSubmit(): void {
         <form
           id="git-branch-form"
           class="flex flex-col gap-4"
-          @submit.prevent="handleSubmit"
+          @submit.prevent="void handleSubmit()"
         >
           <div>
             <Label for="git-branch-name" class="mb-1.5 block text-sm font-medium">
@@ -105,6 +122,7 @@ function handleSubmit(): void {
               id="git-branch-name"
               v-model="name"
               placeholder="e.g. feature/my-work"
+              :disabled="submitting || isBusy"
               data-testid="git-branch-name"
             />
           </div>
@@ -112,6 +130,7 @@ function handleSubmit(): void {
             <Checkbox
               id="git-branch-checkout"
               v-model:checked="checkout"
+              :disabled="submitting || isBusy"
               data-testid="git-branch-checkout"
             />
             <Label for="git-branch-checkout" class="text-sm font-normal">
@@ -121,16 +140,21 @@ function handleSubmit(): void {
         </form>
       </DialogBody>
       <DialogFooter>
-        <Button variant="outline" @click="emit('update:open', false)">
+        <Button
+          variant="outline"
+          :disabled="submitting"
+          data-testid="git-branch-cancel"
+          @click="requestClose"
+        >
           Cancel
         </Button>
         <Button
           type="submit"
           form="git-branch-form"
-          :disabled="!isValid"
+          :disabled="!canSubmit"
           data-testid="git-branch-submit"
         >
-          {{ mode === 'create' ? 'Create' : 'Rename' }}
+          {{ submitting ? (mode === 'create' ? 'Creating…' : 'Renaming…') : mode === 'create' ? 'Create' : 'Rename' }}
         </Button>
       </DialogFooter>
     </DialogContent>

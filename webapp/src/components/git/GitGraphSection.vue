@@ -1,19 +1,15 @@
 <script setup lang="ts">
 /**
- * GitGraphSection — compact commit graph for the Git tab.
+ * Git graph section — async commit expansion now lazy-loads details.
  *
- * Three columns (Graph | Description | Date) with an SVG lane graph
- * overlaid on the graph column. Clicking a commit expands inline details
- * below it; the graph stretches for the details height. The details panel
- * starts at the Description column so lane lines never cover the text.
- *
- * Right-clicking a commit opens a context menu (checkout, create branch,
- * copy hash); clicking a branch tag opens branch actions (checkout,
- * rename, merge).
+ * Header offers a branch filter and a create-branch action (disabled for
+ * unborn repos without a base commit). Local branch tags open a dropdown
+ * with checkout / rename / delete / merge actions; remote refs render as
+ * plain tags. A "Load more" button paginates history when `hasMore`.
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { CSSProperties } from 'vue'
-import type { GitRefTag } from '@/stores/git'
+import type { GitRefTag } from '@/types/git'
 import {
   GIT_GRAPH_COLORS,
   GIT_GRAPH_GRID_Y,
@@ -24,7 +20,7 @@ import {
   vertexPixel,
 } from '@/lib/gitGraph'
 import { useGitStore } from '@/stores/git'
-import { useNotificationStore } from '@/stores/notifications'
+import { copyToClipboard } from '@/lib/clipboard'
 import { formatRelativeTime } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import {
@@ -41,6 +37,12 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Check,
@@ -50,14 +52,16 @@ import {
   GitBranchPlus,
   GitCommitHorizontal,
   GitMerge,
+  Loader2,
   Pencil,
+  Trash2,
 } from '@lucide/vue'
 import GitBranchDialog from './GitBranchDialog.vue'
 import GitCommitDetailsView from './GitCommitDetailsView.vue'
+import GitDeleteBranchDialog from './GitDeleteBranchDialog.vue'
 import GitMergeDialog from './GitMergeDialog.vue'
 
 const store = useGitStore()
-const notifications = useNotificationStore()
 
 /** Fixed table header height in px; the graph SVG starts below it. */
 const HEADER_HEIGHT = 29
@@ -129,6 +133,11 @@ const graphSvgWidth = computed(() => layout.value.contentWidth)
 const graphSvgHeight = computed(() => layout.value.height)
 
 const isDetached = computed(() => repo.value?.currentBranch === null)
+/** No commits yet (unborn repo): there is no base commit to branch from. */
+const isUnborn = computed(
+  () => (repo.value?.commits.length ?? 0) === 0 || repo.value?.headHash === null,
+)
+const isBusy = computed(() => store.busyOperation !== null)
 const hoveredHash = ref<string | null>(null)
 
 function isHead(hash: string): boolean {
@@ -148,13 +157,13 @@ function rowStyle(index: number): CSSProperties {
 function onRowClick(hash: string, event: MouseEvent): void {
   const target = event.target as HTMLElement | null
   if (target?.closest('button, a, input')) return
-  store.toggleCommitDetails(hash)
+  void store.toggleCommitDetails(hash)
 }
 
 function onRowKeydown(hash: string, event: KeyboardEvent): void {
   if (event.key !== 'Enter' && event.key !== ' ') return
   event.preventDefault()
-  store.toggleCommitDetails(hash)
+  void store.toggleCommitDetails(hash)
 }
 
 function onEscape(event: KeyboardEvent): void {
@@ -229,9 +238,23 @@ function openMerge(direction: 'into-current' | 'current-into', branch: string): 
   mergeDialogOpen.value = true
 }
 
+const deleteDialogOpen = ref(false)
+const deleteBranchName = ref('')
+
+function openDeleteBranch(name: string): void {
+  // The current branch can never be deleted (backend would reject).
+  if (name === store.currentRepo?.currentBranch) return
+  deleteBranchName.value = name
+  deleteDialogOpen.value = true
+}
+
 function copyHash(hash: string): void {
-  navigator.clipboard.writeText(hash)
-  notifications.info('Copied commit hash', hash)
+  void copyToClipboard(hash, 'commit hash')
+}
+
+async function loadMore(): Promise<void> {
+  if (store.historyLoading || store.busyOperation !== null) return
+  await store.loadMoreHistory()
 }
 </script>
 
@@ -278,16 +301,28 @@ function copyHash(hash: string): void {
         </DropdownMenuContent>
       </DropdownMenu>
       <span class="flex-1" />
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        class="h-6 w-6"
-        title="Create branch"
-        data-testid="git-create-branch"
-        @click="openCreateBranch(store.currentRepo?.headHash ?? '')"
-      >
-        <GitBranchPlus :size="13" />
-      </Button>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <span class="inline-flex">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="h-6 w-6"
+                :disabled="isUnborn"
+                title="Create branch"
+                data-testid="git-create-branch"
+                @click="openCreateBranch(store.currentRepo?.headHash ?? '')"
+              >
+                <GitBranchPlus :size="13" />
+              </Button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent v-if="isUnborn" side="bottom">
+            No commits yet — no base commit to branch from
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </div>
 
     <ScrollArea class="min-h-0 flex-1">
@@ -337,7 +372,7 @@ function copyHash(hash: string): void {
             :data-testid="`git-graph-node-${node.hash}`"
             @mouseenter="hoveredHash = node.hash"
             @mouseleave="hoveredHash = null"
-            @click.stop="store.toggleCommitDetails(node.hash)"
+            @click.stop="void store.toggleCommitDetails(node.hash)"
           />
         </svg>
 
@@ -406,7 +441,7 @@ function copyHash(hash: string): void {
                               <DropdownMenuItem
                                 :disabled="tag.current"
                                 :data-testid="`git-tag-checkout-${tag.name}`"
-                                @click="store.checkoutBranch(tag.name)"
+                                @click="void store.checkoutBranch(tag.name)"
                               >
                                 <Check :size="13" />
                                 Checkout
@@ -417,6 +452,14 @@ function copyHash(hash: string): void {
                               >
                                 <Pencil :size="13" />
                                 Rename Branch
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                :disabled="tag.current || isBusy"
+                                :data-testid="`git-tag-delete-${tag.name}`"
+                                @click="openDeleteBranch(tag.name)"
+                              >
+                                <Trash2 :size="13" />
+                                Delete Branch
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
@@ -469,12 +512,13 @@ function copyHash(hash: string): void {
                 <ContextMenuContent>
                   <ContextMenuItem
                     :data-testid="`git-commit-checkout-${commit.hash}`"
-                    @click="store.checkoutCommit(commit.hash)"
+                    @click="void store.checkoutCommit(commit.hash)"
                   >
                     <GitCommitHorizontal :size="13" />
                     Checkout Commit
                   </ContextMenuItem>
                   <ContextMenuItem
+                    :disabled="isUnborn"
                     :data-testid="`git-commit-create-branch-${commit.hash}`"
                     @click="openCreateBranch(commit.hash)"
                   >
@@ -484,7 +528,7 @@ function copyHash(hash: string): void {
                   <ContextMenuSeparator />
                   <ContextMenuItem
                     :data-testid="`git-commit-copy-${commit.hash}`"
-                    @click="copyHash(commit.hash)"
+                    @click="void copyHash(commit.hash)"
                   >
                     <Copy :size="13" />
                     Copy Commit Hash
@@ -507,12 +551,29 @@ function copyHash(hash: string): void {
             </template>
           </tbody>
         </table>
+        <div
+          v-if="store.currentRepo?.hasMore"
+          class="flex justify-center px-2 py-2"
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 text-xs"
+            :disabled="store.historyLoading || isBusy"
+            data-testid="git-load-more"
+            @click="void loadMore()"
+          >
+            <Loader2 v-if="store.historyLoading" :size="12" class="animate-spin" />
+            {{ store.historyLoading ? 'Loading…' : 'Load more' }}
+          </Button>
+        </div>
       </div>
       <p
         v-else
         class="px-3 py-4 text-center text-xs text-muted-foreground"
+        data-testid="git-graph-empty"
       >
-        No commits yet
+        {{ isUnborn ? 'No commits yet — commit something to start the history' : 'No commits to show' }}
       </p>
     </ScrollArea>
 
@@ -521,6 +582,10 @@ function copyHash(hash: string): void {
       :mode="branchDialogMode"
       :branch-name="branchDialogBranch"
       :from-hash="branchDialogFromHash"
+    />
+    <GitDeleteBranchDialog
+      v-model:open="deleteDialogOpen"
+      :branch="deleteBranchName"
     />
     <GitMergeDialog
       v-model:open="mergeDialogOpen"
