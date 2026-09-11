@@ -24,13 +24,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SidebarTrigger } from '@/components/ui/sidebar'
+import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import {
   Camera,
   Check,
   Container,
   Ellipsis,
   Loader2,
-  PanelRight,
   Pencil,
   Play,
   Plus,
@@ -296,15 +296,7 @@ watch(
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        :title="sidePanelOpen ? 'Close side panel' : 'Open side panel'"
-        data-testid="workspace-chat-header-toggle-side-panel"
-        @click="emit('toggle-side-panel')"
-      >
-        <PanelRight :size="16" :class="sidePanelOpen ? 'text-primary' : ''" />
-      </Button>
+      <SidePanelToggle :open="sidePanelOpen" @toggle="emit('toggle-side-panel')" />
     </div>
   </header>
 </template>

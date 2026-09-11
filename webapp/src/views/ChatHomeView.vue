@@ -3,7 +3,8 @@
  * ChatHomeView — zentrierter Home-Screen (Route `/`, name `home`).
  *
  * OpenWebUI-Placeholder-Layout: Greeting + WorkspacePicker-Pill +
- * wiederverwendeter HarnessChatInput + Suggestion-Chips.
+ * wiederverwendeter HarnessChatInput + Suggestion-Chips. Oben rechts
+ * nur der Side-Panel-Toggle (kein New Chat / Processes / Overflow).
  * Kein Polling: ChatSidebar übernimmt Live-Updates; hier reicht ein
  * einmaliges fetchWorkspaces()/fetchSkills() beim Mount.
  */
@@ -12,13 +13,16 @@ import { useRouter } from 'vue-router'
 import { Container, Plus } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
+import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
+import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import { Button } from '@/components/ui/button'
 import type { HarnessSessionMode } from '@/types/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessStore } from '@/stores/harness'
+import { useSidePanelStore } from '@/stores/sidePanel'
 import { useSkillStore } from '@/stores/skills'
 import { useWorkspaceStore } from '@/stores/workspaces'
 
@@ -27,6 +31,7 @@ const LAST_WORKSPACE_KEY = 'opencuria:last-workspace'
 const router = useRouter()
 const authStore = useAuthStore()
 const harnessStore = useHarnessStore()
+const sidePanelStore = useSidePanelStore()
 const skillStore = useSkillStore()
 const workspaceStore = useWorkspaceStore()
 
@@ -104,6 +109,12 @@ const busyMessage = computed(() => {
 })
 
 const inputDisabled = computed(() => sending.value || !readyWorkspace.value)
+const canPrompt = computed(() => readyWorkspace.value !== null)
+
+function handleToggleSidePanel(): void {
+  if (!canPrompt.value) return
+  sidePanelStore.toggle()
+}
 
 function pickInitialWorkspace(): void {
   const workspaces = workspaceStore.workspaces
@@ -195,87 +206,105 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
-    <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
-      <div class="mb-4 flex justify-center">
-        <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
-      </div>
-
-      <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
-        <template v-if="greetingName">Wie kann ich helfen, {{ greetingName }}?</template>
-        <template v-else>Wie kann ich helfen?</template>
-      </h1>
-
-      <div class="mt-4 flex justify-center">
-        <WorkspacePicker
-          :model-value="selectedWorkspaceId"
-          @update:model-value="handleSelectionChange"
-        />
-      </div>
-
-      <div
-        v-if="!hasWorkspaces"
-        class="mx-auto mt-6 flex max-w-md flex-col items-center gap-3 rounded-lg border border-border bg-card px-6 py-8"
-        data-testid="chat-home-empty"
+  <WorkspaceToolsSplit
+    :workspace-id="selectedWorkspaceId ?? ''"
+    :can-prompt="canPrompt"
+  >
+    <template #header>
+      <header
+        class="flex shrink-0 items-center justify-end px-1.5 pb-1 pt-2 sm:px-2.5"
+        data-testid="chat-home-header"
       >
-        <Container :size="20" class="text-muted-foreground" aria-hidden="true" />
-        <p class="text-sm text-muted-foreground">
-          Noch kein Workspace vorhanden. Erstelle einen Workspace, um zu starten.
-        </p>
-        <Button size="sm" data-testid="chat-home-create" @click="createOpen = true">
-          <Plus :size="14" aria-hidden="true" />
-          Workspace erstellen
-        </Button>
-        <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
-          <span class="hidden" aria-hidden="true" />
-        </CreateWorkspaceDialog>
-      </div>
-
-      <div v-else class="mt-6">
-        <HarnessChatInput
-          :workspace-id="selectedWorkspaceId ?? undefined"
-          :session-id="null"
-          :mode="composerMode"
-          :model="harnessStore.modelInput"
-          :effort="harnessStore.effortInput"
-          :skill-options="skillStore.skills"
-          :disabled="inputDisabled"
-          :sending="sending"
-          :busy-message="busyMessage"
-          class="text-left"
-          data-testid="chat-home-composer"
-          @update:mode="composerMode = $event"
-          @update:model="harnessStore.setComposerModel($event)"
-          @update:effort="harnessStore.setComposerEffort($event)"
-          @send="handleSend"
+        <SidePanelToggle
+          :open="sidePanelStore.isOpen"
+          :disabled="!canPrompt"
+          @toggle="handleToggleSidePanel"
         />
+      </header>
+    </template>
+
+    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
+      <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
+        <div class="mb-4 flex justify-center">
+          <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
+        </div>
+
+        <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
+          <template v-if="greetingName">Wie kann ich helfen, {{ greetingName }}?</template>
+          <template v-else>Wie kann ich helfen?</template>
+        </h1>
+
+        <div class="mt-4 flex justify-center">
+          <WorkspacePicker
+            :model-value="selectedWorkspaceId"
+            @update:model-value="handleSelectionChange"
+          />
+        </div>
 
         <div
-          class="mt-4 grid grid-cols-1 gap-2 text-left sm:grid-cols-2"
-          data-testid="chat-home-suggestions"
+          v-if="!hasWorkspaces"
+          class="mx-auto mt-6 flex max-w-md flex-col items-center gap-3 rounded-lg border border-border bg-card px-6 py-8"
+          data-testid="chat-home-empty"
         >
-          <button
-            v-for="(suggestion, idx) in suggestions"
-            :key="suggestion.title"
-            type="button"
-            :style="{ animationDelay: `${idx * 45}ms` }"
+          <Container :size="20" class="text-muted-foreground" aria-hidden="true" />
+          <p class="text-sm text-muted-foreground">
+            Noch kein Workspace vorhanden. Erstelle einen Workspace, um zu starten.
+          </p>
+          <Button size="sm" data-testid="chat-home-create" @click="createOpen = true">
+            <Plus :size="14" aria-hidden="true" />
+            Workspace erstellen
+          </Button>
+          <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
+            <span class="hidden" aria-hidden="true" />
+          </CreateWorkspaceDialog>
+        </div>
+
+        <div v-else class="mt-6">
+          <HarnessChatInput
+            :workspace-id="selectedWorkspaceId ?? undefined"
+            :session-id="null"
+            :mode="composerMode"
+            :model="harnessStore.modelInput"
+            :effort="harnessStore.effortInput"
+            :skill-options="skillStore.skills"
             :disabled="inputDisabled"
-            :aria-label="`${suggestion.title} — ${suggestion.subtitle}`"
-            data-testid="chat-home-suggestion"
-            class="animate-[harness-fade-up_0.35s_ease-out_both] rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-            @click="handleSuggestion(suggestion)"
+            :sending="sending"
+            :busy-message="busyMessage"
+            class="text-left"
+            data-testid="chat-home-composer"
+            @update:mode="composerMode = $event"
+            @update:model="harnessStore.setComposerModel($event)"
+            @update:effort="harnessStore.setComposerEffort($event)"
+            @send="handleSend"
+          />
+
+          <div
+            class="mt-4 grid grid-cols-1 gap-2 text-left sm:grid-cols-2"
+            data-testid="chat-home-suggestions"
           >
-            <span class="block truncate text-sm font-medium text-foreground">
-              {{ suggestion.title }}
-            </span>
-            <span class="block truncate text-xs text-muted-foreground">
-              {{ suggestion.subtitle }}
-            </span>
-          </button>
+            <button
+              v-for="(suggestion, idx) in suggestions"
+              :key="suggestion.title"
+              type="button"
+              :style="{ animationDelay: `${idx * 45}ms` }"
+              :disabled="inputDisabled"
+              :aria-label="`${suggestion.title} — ${suggestion.subtitle}`"
+              data-testid="chat-home-suggestion"
+              class="animate-[harness-fade-up_0.35s_ease-out_both] rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              @click="handleSuggestion(suggestion)"
+            >
+              <span class="block truncate text-sm font-medium text-foreground">
+                {{ suggestion.title }}
+              </span>
+              <span class="block truncate text-xs text-muted-foreground">
+                {{ suggestion.subtitle }}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
-  </div>
+  </WorkspaceToolsSplit>
 </template>
 
 <style scoped>

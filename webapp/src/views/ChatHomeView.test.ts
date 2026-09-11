@@ -75,6 +75,12 @@ vi.mock('@/lib/providerCatalog', () => ({
   loadProviderModelsCached: vi.fn().mockResolvedValue([]),
 }))
 
+vi.mock('@/services/socket', () => ({
+  onEvent: vi.fn(() => () => {}),
+  subscribeToWorkspace: vi.fn(),
+  unsubscribeFromWorkspace: vi.fn(),
+}))
+
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
     id: 'ws-1',
@@ -134,6 +140,14 @@ async function mountHome() {
           template:
             '<div data-testid="chat-home-composer"><textarea data-testid="composer-textarea" /></div>',
         },
+        WorkspaceSidePanel: {
+          props: ['workspaceId'],
+          template: '<div data-testid="workspace-side-panel" />',
+        },
+        DesktopSurface: { template: '<div data-testid="desktop-surface-stub" />' },
+        WorkspaceDesktop: { template: '<div />' },
+        FileViewer: { template: '<div />' },
+        GitDiffViewer: { template: '<div />' },
         DropdownMenu: { template: '<div><slot /></div>' },
         DropdownMenuTrigger: { template: '<div><slot /></div>' },
         DropdownMenuContent: { template: '<div><slot /></div>' },
@@ -148,9 +162,9 @@ async function mountHome() {
 
 describe('ChatHomeView', () => {
   beforeEach(() => {
+    localStorage.clear()
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    localStorage.clear()
     workspaceStore.workspaces = [makeWorkspace()]
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
@@ -209,5 +223,49 @@ describe('ChatHomeView', () => {
 
     expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
+  })
+
+  it('renders only the side panel toggle in the home header', async () => {
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="chat-home-header"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').exists()).toBe(
+      true,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-new-chat"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-more"]').exists()).toBe(false)
+  })
+
+  it('opens the side panel for a running workspace', async () => {
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(true)
+  })
+
+  it('disables the side panel toggle when no workspace is ready', async () => {
+    workspaceStore.workspaces = []
+    const { wrapper } = await mountHome()
+    const toggle = wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]')
+
+    expect(toggle.attributes('disabled')).toBeDefined()
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(false)
+  })
+
+  it('disables the side panel toggle when the selected workspace is stopped', async () => {
+    workspaceStore.workspaces = [makeWorkspace({ status: WorkspaceStatus.STOPPED })]
+    const { wrapper } = await mountHome()
+
+    expect(
+      wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]').attributes('disabled'),
+    ).toBeDefined()
   })
 })

@@ -3,10 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
-import { useTerminalStore } from '@/stores/terminal'
-import { useDesktopStore } from '@/stores/desktop'
 import { useProcessesStore } from '@/stores/processes'
-import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { usePolling } from '@/composables/usePolling'
 import {
@@ -18,13 +15,8 @@ import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
-import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
-import DesktopSurface from '@/components/workspaces/DesktopSurface.vue'
-import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
-import FileViewer from '@/components/files/FileViewer.vue'
-import GitDiffViewer from '@/components/git/GitDiffViewer.vue'
-import { useGitStore } from '@/stores/git'
+import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { useSidePanelStore } from '@/stores/sidePanel'
@@ -32,15 +24,11 @@ import { useSidePanelStore } from '@/stores/sidePanel'
 const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
-const terminalStore = useTerminalStore()
-const desktopStore = useDesktopStore()
 const processesStore = useProcessesStore()
 const sidePanelStore = useSidePanelStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
-const fileExplorerStore = useFileExplorerStore()
-const gitStore = useGitStore()
 const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
@@ -117,13 +105,10 @@ function toggleProcessesPanel(): void {
   }
 }
 
-const mainChatPanelHost = ref<HTMLElement | null>(null)
-
 // Socket.IO event cleanup functions
 const cleanupFns: (() => void)[] = []
 
 function setupSocketListeners(): void {
-  // Subscribe to workspace events
   subscribeToWorkspace(workspaceId.value)
 
   cleanupFns.push(
@@ -188,79 +173,6 @@ function setupSocketListeners(): void {
       }
     }),
   )
-
-  cleanupFns.push(
-    onEvent('files:list_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleListResult(data.request_id, data.path, data.entries, data.error)
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:find_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleFindResult(
-          data.request_id,
-          (data.paths ?? []).map((entry) => entry.path),
-          data.error,
-        )
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:content_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleContentResult(
-          data.request_id,
-          data.path,
-          data.content,
-          data.size,
-          data.truncated,
-          data.error,
-        )
-        // Also dispatch to image store (it ignores requests it didn't initiate)
-        workspaceImageStore.handleContentResult(
-          data.request_id,
-          data.path,
-          data.content,
-          data.error,
-          data.mime_type,
-        )
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:upload_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleUploadResult(
-          data.request_id,
-          data.path,
-          data.status,
-          workspaceId.value,
-          data.error,
-        )
-        // Also dispatch to image store so the harness composer can show upload feedback.
-        workspaceImageStore.handleUploadResult(data.request_id, data.status, data.error)
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:download_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleDownloadResult(
-          data.request_id,
-          data.content,
-          data.filename,
-          data.is_archive,
-          data.error,
-        )
-      }
-    }),
-  )
 }
 
 function cleanupSocket(): void {
@@ -291,33 +203,18 @@ onUnmounted(() => {
   stop()
   stopProcessesPolling()
   cleanupSocket()
-  desktopStore.reset()
-  terminalStore.reset()
   processesStore.reset()
-  fileExplorerStore.reset()
   workspaceImageStore.reset()
   harnessStore.reset()
-  gitStore.reset()
   workspaceStore.activeWorkspace = null
 })
 
-// Close the desktop modal when the workspace is no longer usable
-watch(canPrompt, (ok) => {
-  if (!ok) desktopStore.close()
-})
-
-// React to route changes (if user navigates between workspaces)
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
-    desktopStore.reset()
     processesStore.clearWorkspace(oldId)
     processesOpen.value = false
-    fileExplorerStore.reset()
     harnessStore.reset()
-    // GitPanel owns initialize/polling (key remount re-initializes); reset
-    // here so the next workspace never flashes stale repos/diffs.
-    gitStore.reset()
     workspaceStore.fetchWorkspaceDetail(newId)
     void processesStore.fetchProcesses(newId)
     setupSocketListeners()
@@ -351,75 +248,41 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
       <LoadingSpinner :size="24" />
     </div>
 
-    <!-- Chat column + full-height side panel -->
-    <template v-else-if="workspace">
-      <div class="flex flex-1 min-h-0">
-        <!-- Left column: chat header + chat content -->
-        <div class="flex min-w-0 flex-1 flex-col">
-          <WorkspaceChatHeader
-            :workspace="workspace"
-            :active-chat-title="activeChatTitle"
-            :transition-label="workspaceTransitionLabel"
-            :auto-stop-label="navbarStatusLabel"
-            :runner-offline="isRunnerOfflineState"
-            :side-panel-open="sidePanelStore.isOpen"
-            :processes-active="isProcessesPanelVisible"
-            :running-process-count="runningProcessCount"
-            :can-prompt="canPrompt"
-            @new-chat="handleNewHarnessChat"
-            @start-workspace="handleStartWorkspace"
-            @stop-workspace="handleStopWorkspace"
-            @save-workspace-name="handleSaveWorkspaceName"
-            @toggle-side-panel="sidePanelStore.toggle()"
-            @toggle-processes="toggleProcessesPanel"
-            @capture-image="imageArtifactDialogOpen = true"
-            @delete-workspace="handleDeleteWorkspace"
-          />
-
-          <!-- Chat content area -->
-          <div class="flex flex-1 min-h-0 flex-col">
-            <!-- Harness chat area -->
-            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
-              <GitDiffViewer
-                v-if="gitStore.viewingDiffChange || gitStore.viewingCommitDiff"
-                :workspace-id="workspaceId"
-              />
-              <FileViewer
-                v-else-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
-                :workspace-id="workspaceId"
-              />
-              <div
-                v-else
-                ref="mainChatPanelHost"
-                class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
-              ></div>
-            </div>
-          </div>
-
-          <Teleport v-if="mainChatPanelHost" :to="mainChatPanelHost">
-            <HarnessChatPanel
-              :workspace-id="workspaceId"
-              :can-prompt="canPrompt"
-              :processes-open="isProcessesPanelVisible"
-              class="min-h-0 flex-1"
-              @close-processes="processesOpen = false"
-            />
-          </Teleport>
-        </div>
-
-        <!-- Side panel (Git / Desktop / Terminal / Files), full-height column -->
-        <WorkspaceSidePanel
-          v-if="canPrompt && sidePanelStore.hasOpened"
-          v-show="sidePanelStore.isOpen"
-          :key="workspaceId"
-          :workspace-id="workspaceId"
+    <WorkspaceToolsSplit
+      v-else-if="workspace"
+      :workspace-id="workspaceId"
+      :can-prompt="canPrompt"
+    >
+      <template #header>
+        <WorkspaceChatHeader
+          :workspace="workspace"
+          :active-chat-title="activeChatTitle"
+          :transition-label="workspaceTransitionLabel"
+          :auto-stop-label="navbarStatusLabel"
+          :runner-offline="isRunnerOfflineState"
+          :side-panel-open="sidePanelStore.isOpen"
+          :processes-active="isProcessesPanelVisible"
+          :running-process-count="runningProcessCount"
+          :can-prompt="canPrompt"
+          @new-chat="handleNewHarnessChat"
+          @start-workspace="handleStartWorkspace"
+          @stop-workspace="handleStopWorkspace"
+          @save-workspace-name="handleSaveWorkspaceName"
+          @toggle-side-panel="sidePanelStore.toggle()"
+          @toggle-processes="toggleProcessesPanel"
+          @capture-image="imageArtifactDialogOpen = true"
+          @delete-workspace="handleDeleteWorkspace"
         />
-      </div>
+      </template>
 
-      <!-- Persistent desktop surface (single iframe) + desktop modal -->
-      <DesktopSurface v-if="canPrompt" :workspace-id="workspaceId" />
-      <WorkspaceDesktop :workspace-id="workspaceId" />
-    </template>
+      <HarnessChatPanel
+        :workspace-id="workspaceId"
+        :can-prompt="canPrompt"
+        :processes-open="isProcessesPanelVisible"
+        class="min-h-0 flex-1"
+        @close-processes="processesOpen = false"
+      />
+    </WorkspaceToolsSplit>
 
     <!-- Error -->
     <div

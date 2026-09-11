@@ -203,7 +203,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   }
 
   /**
-   * Called from WorkspaceDetailView when a files:content_result event arrives.
+   * Called from useWorkspaceFileEvents when a files:content_result event arrives.
    * Only processes requests initiated by this store.
    */
   function handleContentResult(
@@ -277,7 +277,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   }
 
   /**
-   * Called from WorkspaceDetailView when a files:upload_result event arrives.
+   * Called from useWorkspaceFileEvents when a files:upload_result event arrives.
    */
   function handleUploadResult(requestId: string, status: string, error?: string): void {
     const path = pendingUploadIds.value.get(requestId)
