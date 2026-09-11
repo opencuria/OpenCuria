@@ -167,10 +167,14 @@ def test_serialize_replaces_images_with_placeholder() -> None:
 def test_build_compaction_prompt_includes_template() -> None:
     """Compaction prompt uses the structured summary template."""
     prompt = build_compaction_prompt(
-        [LLMMessage(role="user", content="hello")],
+        [
+            LLMMessage(role="user", content="hello"),
+            LLMMessage(role="assistant", content="world"),
+        ],
     )
     assert "## Objective" in prompt
     assert "<conversation>" in prompt
+    assert "[User]: hello\n\n[Assistant]: world" in prompt
 
 
 def test_checkpoint_summary_round_trip() -> None:

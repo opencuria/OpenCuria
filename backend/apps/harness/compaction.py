@@ -301,9 +301,10 @@ def _build_prompt(
     context: list[str],
 ) -> str:
     """Build the compaction user prompt (OpenCode ``buildPrompt``)."""
+    joined = "\n\n".join(context)
     conversation = (
         "Here is the conversation so far:\n\n"
-        f"<conversation>\n{'\n\n'.join(context)}\n</conversation>"
+        f"<conversation>\n{joined}\n</conversation>"
     )
     if not previous_summary:
         return "\n\n".join(
