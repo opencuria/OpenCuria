@@ -108,7 +108,10 @@ const composerSheets = computed(() =>
   }),
 )
 
-const chatInputRef = ref<{ chooseMention: (candidate: MentionCandidate) => void } | null>(null)
+const chatInputRef = ref<{
+  chooseMention: (candidate: MentionCandidate) => void
+  setPrompt: (text: string) => void
+} | null>(null)
 
 function handleMentionMirror(
   open: boolean,
@@ -153,6 +156,11 @@ function handleContextMetrics(
 }
 
 const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
+
+/** No message edit/fork while a run is active or inside a subagent session. */
+const messageActionsDisabled = computed(
+  () => isSubagentSession.value || activeSession.value?.status === 'busy',
+)
 
 const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
 const inputStoppable = computed(() =>
@@ -448,6 +456,23 @@ function handleOpenSubtask(childSessionId: string): void {
     void harness.fetchSessions(props.workspaceId)
   }
 }
+
+async function handleEditMessage(messageId: string, text: string): Promise<void> {
+  if (!harness.activeSessionId || isSubagentSession.value) return
+  await harness.editMessage(harness.activeSessionId, messageId, text)
+}
+
+/**
+ * Fork the session at a user message (OpenCode session.fork parity):
+ * navigate to the new session and prefill the composer with the original
+ * text. Never auto-sends.
+ */
+async function handleForkMessage(messageId: string): Promise<void> {
+  if (!harness.activeSessionId || isSubagentSession.value) return
+  const result = await harness.forkSession(harness.activeSessionId, messageId)
+  if (!result?.prefill) return
+  chatInputRef.value?.setPrompt(result.prefill)
+}
 </script>
 
 <template>
@@ -457,8 +482,11 @@ function handleOpenSubtask(childSessionId: string): void {
       :loading="harness.loading"
       :streaming-session-id="streamingSessionId"
       :child-session-ids="childSessionIds"
+      :disabled="messageActionsDisabled"
       class="min-h-0 flex-1"
       @open-subtask="handleOpenSubtask"
+      @edit="handleEditMessage"
+      @fork="handleForkMessage"
     />
     <div
       v-if="!isSubagentSession"

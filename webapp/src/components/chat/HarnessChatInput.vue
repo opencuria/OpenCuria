@@ -326,6 +326,16 @@ function clearInput(): void {
   clearCache()
 }
 
+/**
+ * Prefill the composer without sending (OpenCode fork parity: navigate
+ * with prompt). Persists to the per-session cache so it survives remounts.
+ */
+function setPrompt(text: string): void {
+  prompt.value = text
+  saveToCache(text)
+  void nextTick(resizeTextarea)
+}
+
 const fileExplorer = useFileExplorerStore()
 const mentionOpen = ref(false)
 const mentionIndex = ref(0)
@@ -560,7 +570,7 @@ function chooseMention(candidate: MentionCandidate): void {
   })
 }
 
-defineExpose({ clearInput, chooseMention })
+defineExpose({ clearInput, chooseMention, setPrompt })
 
 function onPromptInput(): void {
   refreshComposerQuery()

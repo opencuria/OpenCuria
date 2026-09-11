@@ -75,6 +75,12 @@ def _get_org_id(request: HttpRequest) -> uuid.UUID:
         raise AuthenticationError("Invalid X-Organization-Id header")
 
 
+def _non_empty(value: str) -> str | None:
+    """Return the stripped string or None when blank (edit no-op)."""
+    stripped = (value or "").strip()
+    return stripped or None
+
+
 def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):  # type: ignore[no-untyped-def]
     """Return a workspace only for org members + owners (404 otherwise)."""
     service = _get_service()
@@ -131,6 +137,22 @@ class HarnessConversationOut(Schema):
 
 class HarnessMessageIn(Schema):
     """Request schema for a follow-up prompt on a session."""
+
+    prompt: str
+    mode: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    skill_ids: list[str] = []
+
+
+class HarnessForkIn(Schema):
+    """Request schema for forking a harness session."""
+
+    message_id: uuid.UUID | None = None
+
+
+class HarnessMessageEditIn(Schema):
+    """Request schema for editing a user message and rerunning."""
 
     prompt: str
     mode: str = ""
@@ -847,6 +869,80 @@ async def send_harness_message(
             workspace_id=str(session.workspace_id),
             user_id=request.user.id,
             skill_ids=payload.skill_ids if payload.skill_ids else None,
+        )
+        fresh = await sync_to_async(service.get_session)(session.id)
+        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/fork",
+    response={201: HarnessSessionOut, 400: dict, 403: dict, 404: dict},
+    summary="Fork a harness session (read-only, works while busy)",
+)
+async def fork_harness_session(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessForkIn
+):
+    """Fork a session, copying the message prefix (no run, no rollback)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    from asgiref.sync import sync_to_async
+
+    org_id = _get_org_id(request)
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        forked = await service.fork_session(session.id, payload.message_id)
+        out = await sync_to_async(_session_to_out_with_unread)(service, forked)
+        return 201, out
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/messages/{message_id}/edit",
+    response={202: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    summary="Edit a user message and rerun the session from there",
+)
+async def edit_harness_message(
+    request: HttpRequest,
+    session_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: HarnessMessageEditIn,
+):
+    """Edit a user message, drop the suffix, and start a rerun (409 busy)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    from asgiref.sync import sync_to_async
+
+    org_id = _get_org_id(request)
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        await service.edit_user_message(
+            session.id,
+            message_id=message_id,
+            prompt=payload.prompt,
+            mode=_non_empty(payload.mode),
+            model=_non_empty(payload.model),
+            reasoning_effort=_non_empty(payload.reasoning_effort),
+            skill_ids=payload.skill_ids if payload.skill_ids else None,
+            organization_id=org_id,
+            workspace_id=str(session.workspace_id),
+            user_id=request.user.id,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
         return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)

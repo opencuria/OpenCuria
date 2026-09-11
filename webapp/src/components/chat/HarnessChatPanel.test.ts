@@ -49,6 +49,15 @@ const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template: '<div data-testid="harness-chat-input" />',
   props: ['disabled', 'workspaceId', 'sessionId'],
+  emits: ['prefill'],
+  methods: {
+    setPrompt(prompt: string) {
+      ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
+        'prefill',
+        prompt,
+      )
+    },
+  },
 }
 
 const stubs = {
@@ -367,7 +376,9 @@ describe('HarnessChatPanel', () => {
     store.setActiveSession('session-root')
     await flushPromises()
 
-    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    wrapper
+      .findComponent({ name: 'HarnessChatContainer' })
+      .vm.$emit('open-subtask', 'session-child')
     await flushPromises()
     expect(store.activeSessionId).toBe('session-child')
   })
@@ -399,9 +410,151 @@ describe('HarnessChatPanel', () => {
     await flushPromises()
     expect(router.currentRoute.value.query.session).toBe('session-root')
 
-    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('open-subtask', 'session-child')
+    wrapper
+      .findComponent({ name: 'HarnessChatContainer' })
+      .vm.$emit('open-subtask', 'session-child')
     store.sessions = [...store.sessions]
     await wrapper.vm.$nextTick()
     expect(store.activeSessionId).toBe('session-child')
+  })
+
+  it('disables message edit/fork actions while the active session is busy', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('disabled')).toBe(true)
+  })
+
+  it('enables message edit/fork actions on idle root sessions', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('disabled')).toBe(false)
+  })
+
+  it('forwards container edit events to the store editMessage action', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    const spy = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('edit', 'user-1', 'edited')
+    await flushPromises()
+
+    expect(spy).toHaveBeenCalledWith('session-root', 'user-1', 'edited')
+  })
+
+  it('forks without auto-send and prefills the composer via setPrompt', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    const forked = makeSession({ id: 'session-fork', title: 'root (fork #1)' })
+    const spy = vi
+      .spyOn(store, 'forkSession')
+      .mockResolvedValue({ session: forked, prefill: 'original' })
+
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('fork', 'user-1')
+    await flushPromises()
+
+    expect(spy).toHaveBeenCalledWith('session-root', 'user-1')
+    // Panel must not send a follow-up prompt after forking (no auto-send).
+    const sendSpy = vi.spyOn(store, 'sendMessage')
+    expect(sendSpy).not.toHaveBeenCalled()
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.emitted('prefill')).toEqual([['original']])
+  })
+
+  it('ignores edit/fork events from subagent sessions', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'subtask',
+        agent_name: 'explore',
+      }),
+    ]
+    store.setActiveSession('session-child')
+    await flushPromises()
+    const editSpy = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
+    const forkSpy = vi.spyOn(store, 'forkSession').mockResolvedValue(null)
+
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('disabled')).toBe(true)
+    container.vm.$emit('edit', 'user-1', 'edited')
+    container.vm.$emit('fork', 'user-1')
+    await flushPromises()
+
+    expect(editSpy).not.toHaveBeenCalled()
+    expect(forkSpy).not.toHaveBeenCalled()
   })
 })

@@ -8,7 +8,9 @@
 
 import type {
   HarnessConversation,
+  HarnessForkIn,
   HarnessMessage,
+  HarnessMessageEditIn,
   HarnessMessageIn,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
@@ -144,6 +146,37 @@ export function sendHarnessMessage(
           skill_ids: data.skill_ids ?? [],
         }
   return post<HarnessSession>(`/harness/sessions/${sessionId}/message`, body)
+}
+
+/**
+ * Fork a harness session (read-only, works while busy).
+ * Mirrors `POST /harness/sessions/{id}/fork` (201 Session).
+ */
+export function forkHarnessSession(
+  sessionId: string,
+  data: HarnessForkIn = {},
+): Promise<HarnessSession> {
+  const body: Record<string, string> = {}
+  if (data.message_id) body.message_id = data.message_id
+  return post<HarnessSession>(`/harness/sessions/${sessionId}/fork`, body)
+}
+
+/**
+ * Edit a user message and rerun the session from there.
+ * Mirrors `POST /harness/sessions/{id}/messages/{messageId}/edit` (202 Session).
+ */
+export function editHarnessMessage(
+  sessionId: string,
+  messageId: string,
+  data: HarnessMessageEditIn,
+): Promise<HarnessSession> {
+  return post<HarnessSession>(`/harness/sessions/${sessionId}/messages/${messageId}/edit`, {
+    prompt: data.prompt,
+    mode: data.mode ?? '',
+    model: data.model ?? '',
+    reasoning_effort: data.reasoning_effort ?? '',
+    skill_ids: data.skill_ids ?? [],
+  })
 }
 
 export function patchHarnessSession(
