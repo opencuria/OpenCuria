@@ -332,6 +332,8 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.WORKSPACES_STOP: "Stop running workspaces",
         APIKeyPermission.WORKSPACES_RESUME: "Resume stopped workspaces",
         APIKeyPermission.WORKSPACES_DELETE: "Delete workspaces",
+        APIKeyPermission.WORKSPACES_GIT_READ: "View git status, diffs and commit details",
+        APIKeyPermission.WORKSPACES_GIT_WRITE: "Run git operations (stage, commit, branches, merge, fetch/pull/push)",
         APIKeyPermission.TERMINAL_ACCESS: "Open interactive terminal sessions",
         APIKeyPermission.WORKSPACES_PROCESSES_READ: "List and view background processes",
         APIKeyPermission.WORKSPACES_PROCESSES_RUN: "Start and stop background processes",

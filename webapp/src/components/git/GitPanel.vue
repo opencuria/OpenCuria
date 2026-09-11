@@ -2,13 +2,13 @@
 /**
  * GitPanel — Git tab content for the workspace side panel.
  *
- * Frontend-only for now: all data comes from the mock git store. Layout is
- * a repo/branch header on top, then the Changes section and the commit
- * Graph section stacked vertically (default 50/50) with a drag handle
+ * Loads the productive git snapshot for the current workspace (with
+ * polling), then shows a repo/branch header on top with the Changes and
+ * Graph sections stacked vertically (default 50/50) and a drag handle
  * between them. Each section scrolls vertically on its own; nothing
  * scrolls horizontally.
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useGitStore } from '@/stores/git'
 import {
   Select,
@@ -22,12 +22,43 @@ import { ArrowDown, ArrowUp, GitBranch, RefreshCw } from '@lucide/vue'
 import GitChangesSection from './GitChangesSection.vue'
 import GitGraphSection from './GitGraphSection.vue'
 
-// Reserved for the future backend git API; mock data is workspace-agnostic.
-defineProps<{
+const props = defineProps<{
   workspaceId: string
 }>()
 
 const store = useGitStore()
+const fetchBusy = ref(false)
+
+onMounted(() => {
+  void store.initialize(props.workspaceId)
+  store.startPolling()
+})
+
+watch(
+  () => props.workspaceId,
+  (next, prev) => {
+    if (next === prev) return
+    void store.initialize(next)
+  },
+)
+
+onUnmounted(() => {
+  store.stopPolling()
+})
+
+async function handleRefresh(): Promise<void> {
+  await store.refresh()
+}
+
+async function handleFetch(): Promise<void> {
+  if (fetchBusy.value) return
+  fetchBusy.value = true
+  try {
+    await store.fetchRemote()
+  } finally {
+    fetchBusy.value = false
+  }
+}
 
 const branchLabel = computed(
   () => store.currentRepo?.currentBranch ?? 'DETACHED HEAD',
@@ -81,6 +112,23 @@ function onSplitPointerUp(event: PointerEvent): void {
 
 <template>
   <div class="flex h-full flex-col bg-card" data-testid="side-panel-git">
+    <!-- Loading / error / empty states -->
+    <div v-if="store.loading && store.repos.length === 0" class="flex flex-1 items-center justify-center" data-testid="git-loading">
+      <RefreshCw :size="16" class="animate-spin text-muted-foreground" />
+    </div>
+    <div v-else-if="store.error && store.repos.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center" data-testid="git-error">
+      <p class="text-xs text-error">{{ store.error }}</p>
+      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRefresh()">
+        Retry
+      </Button>
+    </div>
+    <div v-else-if="store.repos.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center" data-testid="git-empty">
+      <p class="text-xs text-muted-foreground">No git repositories found in this workspace.</p>
+      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRefresh()">
+        Refresh
+      </Button>
+    </div>
+    <template v-else>
     <!-- Repo + branch header -->
     <div class="shrink-0 space-y-1.5 border-b border-border px-3 py-2">
       <div class="flex items-center gap-1.5">
@@ -111,9 +159,21 @@ function onSplitPointerUp(event: PointerEvent): void {
           class="h-7 w-7 shrink-0"
           title="Fetch"
           data-testid="git-fetch"
-          @click="store.fetchRemote()"
+          :disabled="fetchBusy || store.busyOperation !== null"
+          @click="void handleFetch()"
         >
-          <RefreshCw :size="13" />
+          <RefreshCw :size="13" :class="{ 'animate-spin': fetchBusy }" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="h-7 w-7 shrink-0"
+          title="Refresh repositories"
+          data-testid="git-refresh"
+          :disabled="store.loading"
+          @click="void handleRefresh()"
+        >
+          <RefreshCw :size="13" :class="{ 'animate-spin': store.loading }" />
         </Button>
       </div>
       <div class="flex items-center gap-1.5 text-xs">
@@ -180,5 +240,6 @@ function onSplitPointerUp(event: PointerEvent): void {
         <GitGraphSection />
       </div>
     </div>
+    </template>
   </div>
 </template>

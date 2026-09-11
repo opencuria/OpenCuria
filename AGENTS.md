@@ -97,14 +97,11 @@ opencuria/
 │   └── runner-build.yml           ← CI/CD: build backend, webapp, runner, workspace images
 │
 ├── runner/                        ← Dumb workspace executor
-│   ├── Dockerfile                 ← Workspace container image (Ubuntu 22.04)
 │   ├── Dockerfile.runner          ← Runner daemon container image
 │   ├── compose.yml                ← Standalone Docker runner deployment
 │   ├── systemd/
 │   │   ├── opencuria-runner.service ← Native Linux runner unit template (for QEMU hosts)
 │   │   └── install-runner-service.sh ← Installs the unit with the current repo path + runner/.env
-│   ├── git-wrapper.sh             ← Blocks commits/pushes to main/master
-│   ├── workspace-entrypoint.sh    ← Configures git auth inside containers
 │   ├── requirements.txt           ← Python dependencies (pip)
 │   ├── .env.example               ← Environment variable template
 │   │
@@ -122,6 +119,7 @@ opencuria/
 │       ├── config.py              ← pydantic-settings
 │       ├── models.py              ← Dataclasses (WorkspaceInfo)
 │       ├── service.py             ← Command execution (WorkspaceService)
+│       ├── git.py                 ← Whitelisted git operations (parsing, argv, auth)
 │       │
 │       ├── runtime/               ← Virtualisation abstraction
 │       │   ├── base.py            ← ABC: RuntimeBackend
@@ -258,6 +256,13 @@ and executed there. The runner exposes plain operations the harness calls via
   screenshot, xdotool input, ffmpeg session recording). One shared X11
   display per workspace with independent viewer and computer-use leases.
   The runner has no agent knowledge.
+- **Git RPC** — `git:operation` / `git:operation_result` (`src/git.py`,
+  `GIT_OPERATIONS`): reads (`snapshot` with status/branches/history,
+  `working_diff`, `commit_details`) plus mutations (stage/unstage/discard,
+  commit, branch/checkout/merge, fetch/pull/push/sync). Paths sandboxed to
+  `/workspace`, argv-only (no shell), non-interactive auth from injected
+  workspace credentials only; mutations return a fresh snapshot. Still a
+  dumb executor (no agent logic).
 - No legacy prompt path exists anymore (the harness owns all prompting).
 
 ### 4.5 Service Layer (`service.py`)
@@ -278,6 +283,9 @@ and executed there. The runner exposes plain operations the harness calls via
 - `write_terminal(terminal_id, data)` — sends stdin to PTY
 - `resize_terminal(terminal_id, cols, rows)` — resizes PTY
 - `close_terminal(terminal_id)` — closes PTY session
+- `execute_git_operation(workspace_id, operation, repo_path?, args?)` — single
+  whitelisted git entry point (`src/git.py`, `GIT_OPERATIONS`); mutations
+  return a fresh snapshot, failures are structured `{ok, code, message}`
 - `desktop_action(workspace_id, action, args)` — desktop ensure/hold/release,
   screenshot, xdotool input, ffmpeg record/stop (no agent logic). Viewer
   `task:start_desktop`/`task:stop_desktop` acquire/release a viewer lease;
@@ -303,8 +311,9 @@ Workspace images are built from `ImageDefinition` records (packages +
 Base: Ubuntu 22.04 with tooling only (no agent CLIs):
 - Node.js 22.x, GitHub CLI (`gh`)
 - Python 3, pip, venv, git, openssh-client, build-essential, common tools
-- `git-wrapper.sh` — safety wrapper that blocks commits/pushes to `main`/`master`
-- `workspace-entrypoint.sh` — lightweight entrypoint that executes the container command
+- Git runs non-interactively: auth comes only from injected workspace
+  credentials at runtime (persistent env file + throwaway askpass inside
+  the workspace); no free-env injection via the Git RPC.
 
 Desktop sessions (started on demand via `opencuria-desktop-start`, not at boot):
 - **QEMU** — XFCE + WhiteSur theme, Plank dock, wallpaper, rofi (Super+Space),
@@ -387,7 +396,7 @@ Six separate routers:
 | Prefix | Endpoints |
 |--------|----------|
 | `/api/v1/runners/` | `GET /` list, `POST /` register (returns API token), `GET /{id}/` detail |
-| `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images |
+| `/api/v1/workspaces/` | `GET /` list, `POST /` create, `GET /{id}/` detail, `DELETE /{id}/` remove, `POST /{id}/stop/`, `POST /{id}/resume/`, terminal/desktop/files/images, git (`GET /{id}/git/` snapshot, `GET /{id}/git/diff/` working diff, `GET /{id}/git/commits/{hash}/` commit details, `POST /{id}/git/operation/` typed operation) |
 | `/api/v1/` (harness) | `GET/POST /workspaces/{id}/harness/sessions/`, `PATCH/DELETE /harness/sessions/{id}`, `PATCH .../mode`, `POST .../message`, `POST .../abort`, `GET .../parts`, `GET .../todos`, `POST .../permissions/{pid}`, `POST .../questions/{qid}`, `POST .../read`, `POST .../unread`, `GET /harness/conversations/`, `GET/PUT /agent-configs/` (per-agent model/effort: `build`/`plan` primary fixed, subagents `inherit_model` + `effort_strategy`; `small_model` title/compaction helper), `GET/PUT/DELETE /provider-config/` (small model only; legacy `default_model`/`computer_use_model` aliases preserved), `GET /provider-config/models/`, `GET /provider-config/providers/`, `PUT/DELETE /provider-config/providers/{provider}/`, ChatGPT OAuth `POST .../chatgpt/oauth/start|cancel/`, `GET .../oauth/status/` |
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
@@ -406,6 +415,14 @@ Existing API keys must not automatically receive newly introduced permissions
 **MCP parity (providers):** `list_provider_connections`, `save_provider_connection`,
 `delete_provider_connection`, `chatgpt_oauth_start`, `chatgpt_oauth_status`,
 `chatgpt_oauth_cancel`.
+
+**MCP parity (git):** `get_git_state`, `get_git_diff`, `get_git_commit`,
+`git_operation` (generic tool is mutation-only; reads use the dedicated tools).
+
+**API key permissions (git, additive):** `workspaces:git_read` (snapshot/diff/
+commit details), `workspaces:git_write` (stage/unstage/discard/commit,
+branch/checkout/merge, fetch/pull/push/sync). Existing keys are never
+auto-granted these.
 
 ### 5.5 Socket.IO Server (`sio_server.py`)
 
@@ -569,9 +586,10 @@ credentials or other sensitive content visible on screen may appear in the mp4.
 - New UI primitives are added via `npx shadcn-vue@latest add <component>`.
 - Organization Settings and all future views must follow this rule for a
   consistent design system (reka-maia preset, Noto Sans, Lucide icons).
-- The Git side-panel tab (`webapp/src/components/git/`) is frontend-only:
-  all data comes from mock repos (`webapp/src/mock/git.ts`) via
-  `webapp/src/stores/git.ts` until a backend git API is wired up.
+- The Git side-panel tab (`webapp/src/components/git/`) is productive:
+  snapshots/diffs/details via `webapp/src/services/git.api.ts` + `webapp/src/stores/git.ts`
+  against Backend REST (`GET/POST /workspaces/{id}/git/…`), which dispatches Runner RPC
+  (`git:operation`/`git:operation_result`). No mock data (`webapp/src/mock/git.ts` deleted).
 
 ### 6.10 Mandatory Test Strategy (strict)
 
@@ -722,7 +740,9 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `desktop:process` | live Xvnc for proxy routing after reconnect (not a viewer acquire) |
 | Runner -> Backend | `desktop:stopped` | Xvnc process ended |
 | Runner -> Backend | `desktop:viewer_released` | viewer lease dropped, process still up (`computer_use_active`) |
-| Backend -> Runner | `harness:cancel` | `{request_id}` |
+| Backend -> Runner | `harness:cancel` | `{request_id}` (also cancels a `git:operation` with the same `request_id`) |
+| Backend -> Runner | `git:operation` | `{request_id, workspace_id, operation, repo_path?, args?}` (whitelisted `GIT_OPERATIONS`: `snapshot`/`working_diff`/`commit_details` reads plus stage/unstage/discard/commit/branch/checkout/merge/fetch/pull/push/sync mutations) |
+| Runner -> Backend | `git:operation_result` | required `request_id`/`workspace_id`/`operation` echo of the pending `git:operation` (mismatch → dropped); carries `{ok, snapshot/repos/diff/details or code/message/stderr}` |
 | Backend -> Runner | `task:stop_workspace` | `{task_id, workspace_id}` |
 | Runner -> Backend | `workspace:stopped` | `{task_id, workspace_id, credentials_present}` |
 | Backend -> Runner | `task:remove_workspace` | `{task_id, workspace_id}` |

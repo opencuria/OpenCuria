@@ -9,7 +9,7 @@
 import { computed, ref } from 'vue'
 import type { GitCommitFile } from '@/types/git'
 import { useGitStore } from '@/stores/git'
-import { useNotificationStore } from '@/stores/notifications'
+import { copyToClipboard } from '@/lib/clipboard'
 import { formatDate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -31,7 +31,6 @@ const props = defineProps<{
 }>()
 
 const store = useGitStore()
-const notifications = useNotificationStore()
 
 const details = computed(() =>
   store.expandedCommitHash === props.hash ? store.expandedCommitDetails : null,
@@ -39,6 +38,15 @@ const details = computed(() =>
 const commit = computed(
   () => store.currentRepo?.commits.find((c) => c.hash === props.hash) ?? null,
 )
+/** Commit row may be paged out (outside the initial 200 history window), so
+ * fall back to the lazily loaded details subject when the snapshot row is
+ * missing. */
+const subject = computed(
+  () => commit.value?.message ?? details.value?.message ?? '',
+)
+const isLoading = computed(() => store.isCommitDetailsLoading(props.hash))
+const loadError = computed(() => store.commitDetailsErrorFor(props.hash))
+const isFetching = computed(() => isLoading.value || (details.value === null && loadError.value === null))
 const files = computed<GitCommitFile[]>(() => details.value?.fileChanges ?? [])
 
 const totalAdditions = computed(() =>
@@ -229,7 +237,8 @@ const STATUS_LABELS: Record<GitCommitFile['status'], string> = {
   A: 'Added',
   D: 'Deleted',
   R: 'Renamed',
-  U: 'Untracked',
+  C: 'Copied',
+  U: 'Unmerged',
 }
 
 const STATUS_COLORS: Record<GitCommitFile['status'], string> = {
@@ -237,6 +246,7 @@ const STATUS_COLORS: Record<GitCommitFile['status'], string> = {
   A: 'text-success',
   D: 'text-error',
   R: 'text-purple-500',
+  C: 'text-purple-500',
   U: 'text-muted-foreground',
 }
 
@@ -255,15 +265,24 @@ function selectFile(file: GitCommitFile): void {
   }
 }
 
+function retryDetails(): void {
+  // `toggleCommitDetails` collapses when the hash is already expanded;
+  // re-expand explicitly so a retry always re-fetches.
+  store.closeCommitDetails()
+  void store.toggleCommitDetails(props.hash)
+}
+
+function openParent(hash: string): void {
+  store.closeCommitDetails()
+  void store.toggleCommitDetails(hash)
+}
+
 function copyPath(path: string): void {
-  navigator.clipboard.writeText(path)
-  notifications.info('Copied file path', path)
+  void copyToClipboard(path, 'file path')
 }
 
 function copyHash(): void {
-  const value = details.value?.hash ?? props.hash
-  navigator.clipboard.writeText(value)
-  notifications.info('Copied commit hash', value)
+  void copyToClipboard(details.value?.hash ?? props.hash, 'commit hash')
 }
 
 // --- Height resize (persisted via the store) ---
@@ -303,15 +322,39 @@ function onResizeUp(event: PointerEvent): void {
     data-testid="git-commit-details"
   >
     <div
+      v-if="isLoading"
+      class="px-1 py-2 text-[11px] text-muted-foreground"
+      data-testid="git-commit-details-loading"
+    >
+      Loading commit details…
+    </div>
+    <div
+      v-else-if="loadError"
+      class="flex flex-col items-start gap-1.5 px-1 py-2"
+      data-testid="git-commit-details-error"
+    >
+      <p class="text-[11px] text-error">{{ loadError }}</p>
+      <Button
+        variant="outline"
+        size="sm"
+        class="h-6 text-[11px]"
+        data-testid="git-cdv-retry"
+        @click="retryDetails"
+      >
+        Retry
+      </Button>
+    </div>
+    <template v-else>
+    <div
       class="min-h-0 max-h-[45%] shrink-0 overflow-auto border-b border-border p-2"
       data-testid="git-cdv-summary"
     >
       <div
-        v-if="commit?.message"
+        v-if="subject"
         class="text-xs font-medium text-foreground"
         data-testid="git-cdv-subject"
       >
-        {{ commit.message }}
+        {{ subject }}
       </div>
       <dl class="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[11px] leading-4">
         <dt class="font-medium text-muted-foreground">Commit</dt>
@@ -346,7 +389,7 @@ function onResizeUp(event: PointerEvent): void {
               class="cursor-pointer font-mono text-foreground hover:underline"
               :data-testid="`git-cdv-parent-${parent}`"
               :title="`Show commit ${parent}`"
-              @click="store.toggleCommitDetails(parent)"
+              @click="openParent(parent)"
             >
               {{ parent.slice(0, 7) }}<span v-if="index < (details?.parents.length ?? 0) - 1">, </span>
             </button>
@@ -435,7 +478,14 @@ function onResizeUp(event: PointerEvent): void {
         </Button>
       </div>
       <ScrollArea class="min-h-0 flex-1">
-        <div v-if="files.length === 0" class="px-2 py-1 text-[11px] text-muted-foreground">
+        <div
+          v-if="isFetching"
+          class="px-2 py-1 text-[11px] text-muted-foreground"
+          data-testid="git-cdv-files-loading"
+        >
+          Loading files…
+        </div>
+        <div v-else-if="files.length === 0" class="px-2 py-1 text-[11px] text-muted-foreground">
           No files changed in this commit.
         </div>
         <div v-else-if="viewType === 'tree'" class="p-1">
@@ -552,6 +602,7 @@ function onResizeUp(event: PointerEvent): void {
         </div>
       </ScrollArea>
     </div>
+    </template>
 
     <div
       role="separator"

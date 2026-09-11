@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 
 import GitGraphSection from './GitGraphSection.vue'
+import * as gitApi from '@/services/git.api'
 import { useGitStore } from '@/stores/git'
+import {
+  makeCommitDetails,
+  makeRawCommit,
+  makeRepoSnapshot,
+} from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -13,6 +19,14 @@ vi.mock('vue-sonner', () => ({
     warning: vi.fn(),
     info: vi.fn(),
   },
+}))
+
+vi.mock('@/services/git.api', () => ({
+  conflictSnapshotOf: vi.fn(() => null),
+  getGitCommitDetails: vi.fn(),
+  getGitSnapshot: vi.fn(),
+  getGitWorkingDiff: vi.fn(),
+  runGitOperation: vi.fn(),
 }))
 
 // Render menu contents inline (normally teleported and shown on demand) so
@@ -45,10 +59,25 @@ vi.mock('@/components/ui/dropdown-menu', () => ({
   DropdownMenuSeparator: { template: '<hr />' },
 }))
 
+vi.mock('@/components/ui/tooltip', () => ({
+  TooltipProvider: passthrough,
+  Tooltip: passthrough,
+  TooltipTrigger: passthrough,
+  TooltipContent: passthrough,
+}))
+
+const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getDetails = vi.mocked(gitApi.getGitCommitDetails)
+const runOp = vi.mocked(gitApi.runGitOperation)
+
 const dialogStubs = {
   GitBranchDialog: {
     props: ['open', 'mode', 'branchName', 'fromHash'],
     template: '<div v-if="open" data-testid="stub-branch-dialog" />',
+  },
+  GitDeleteBranchDialog: {
+    props: ['open', 'branch'],
+    template: '<div v-if="open" data-testid="stub-delete-dialog" :data-branch="branch" />',
   },
   GitMergeDialog: {
     props: ['open', 'direction', 'branch'],
@@ -64,100 +93,264 @@ function mountSection() {
   return mount(GitGraphSection, { global: { stubs: dialogStubs } })
 }
 
+async function initStore() {
+  const store = useGitStore()
+  await store.initialize('workspace-1')
+  return store
+}
+
 describe('GitGraphSection', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.clearAllMocks()
+    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    getDetails.mockImplementation(async (_ws, repo, hash) => ({
+      ok: true,
+      repo_path: repo,
+      details: makeCommitDetails(hash),
+    }))
+    runOp.mockImplementation(async (_ws, payload) => ({
+      ok: true,
+      snapshot: makeRepoSnapshot(),
+      repo_path: '/workspace/repo-app',
+      operation: payload.operation,
+    }) as never)
   })
 
-  it('renders one row and one node per commit', () => {
-    const store = useGitStore()
+  it('renders one row and one node per commit', async () => {
+    const store = await initStore()
     const wrapper = mountSection()
+    await nextTick()
     const commitCount = store.currentRepo!.commits.length
 
-    expect(wrapper.findAll('[data-testid="git-graph-row"]')).toHaveLength(
-      commitCount,
-    )
+    expect(commitCount).toBeGreaterThan(0)
+    expect(wrapper.findAll('[data-testid="git-graph-row"]')).toHaveLength(commitCount)
     // Scope to the graph SVG (lucide icons render circles/paths too)
     const graphSvg = wrapper.find('[data-testid="git-graph-svg"]')
     expect(graphSvg.findAll('circle')).toHaveLength(commitCount)
     expect(graphSvg.findAll('path').length).toBeGreaterThan(0)
   })
 
-  it('renders local branch tags and remote ref tags', () => {
+  it('renders local branch tags and remote ref tags', async () => {
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
 
-    expect(wrapper.find('[data-testid="git-branch-tag-main"]').exists()).toBe(
-      true,
-    )
-    expect(
-      wrapper.find('[data-testid="git-branch-tag-feature/git-panel"]').exists(),
-    ).toBe(true)
-    expect(wrapper.find('[data-testid="git-ref-tag-origin/main"]').exists()).toBe(
-      true,
-    )
+    // main sits on HEAD f4a9c21 (row 1); feature/git-panel tip g5h1k83 is not
+    // in the 3-commit history window, so only its filter entry exists.
+    expect(wrapper.find('[data-testid="git-branch-tag-main"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-ref-tag-origin/main"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-graph-filter-branch-feature/git-panel"]').exists()).toBe(true)
   })
 
-  it('checks out a commit via its context menu (detached HEAD)', async () => {
-    const store = useGitStore()
+  it('checks out a commit via its context menu with a typed payload', async () => {
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
 
-    await wrapper
-      .find('[data-testid="git-commit-checkout-3d8e5b2"]')
-      .trigger('click')
+    // Default fixture parents: 9c2f1e7 (merge) is a stable commit hash.
+    const checkedOut = makeRepoSnapshot({ currentBranch: null, headHash: '9c2f1e7' })
+    runOp.mockResolvedValueOnce({
+      ok: true,
+      snapshot: checkedOut,
+      repo_path: '/workspace/repo-app',
+    } as never)
+    await wrapper.find('[data-testid="git-commit-checkout-9c2f1e7"]').trigger('click')
+    await flushPromises()
 
-    expect(store.currentRepo!.currentBranch).toBeNull()
-    expect(store.currentRepo!.headHash).toBe('3d8e5b2')
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'checkout_commit',
+      commit: '9c2f1e7',
+    })
   })
 
-  it('checks out a branch via its tag dropdown', async () => {
-    const store = useGitStore()
+  it('checks out a branch via its tag dropdown with a typed payload', async () => {
+    // Feature tip must be reachable so its tag renders on a row: append it.
+    const withFeature = makeRepoSnapshot({
+      commits: [
+        ...makeRepoSnapshot().commits,
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
+      ],
+    })
+    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
 
-    await wrapper
-      .find('[data-testid="git-tag-checkout-feature/git-panel"]')
-      .trigger('click')
+    await wrapper.find('[data-testid="git-tag-checkout-feature/git-panel"]').trigger('click')
+    await flushPromises()
 
-    expect(store.currentRepo!.currentBranch).toBe('feature/git-panel')
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'checkout_branch',
+      branch: 'feature/git-panel',
+    })
   })
 
   it('opens the create-branch dialog from the header and from a commit', async () => {
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
 
     await wrapper.find('[data-testid="git-create-branch"]').trigger('click')
     await nextTick()
-    expect(wrapper.find('[data-testid="stub-branch-dialog"]').exists()).toBe(
-      true,
-    )
+    expect(wrapper.find('[data-testid="stub-branch-dialog"]').exists()).toBe(true)
   })
 
   it('opens the merge dialog from a branch tag', async () => {
+    // Same as checkout: feature tip must be reachable for its tag to render.
+    const withFeature = makeRepoSnapshot({
+      commits: [
+        ...makeRepoSnapshot().commits,
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
+      ],
+    })
+    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
 
-    await wrapper
-      .find('[data-testid="git-tag-merge-into-current-feature/git-panel"]')
-      .trigger('click')
+    await wrapper.find('[data-testid="git-tag-merge-into-current-feature/git-panel"]').trigger('click')
     await nextTick()
 
     expect(wrapper.find('[data-testid="stub-merge-dialog"]').exists()).toBe(true)
   })
 
   it('filters the graph to a single branch', async () => {
-    const store = useGitStore()
+    // fixture: main tip f4a9c21 has parents e8b7d3a; feature tip g5h1k83 is
+    // unreachable → filtering to feature shrinks the row count.
+    const filtered = makeRepoSnapshot({
+      branches: [
+        { name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 2, behind: 0 },
+        { name: 'feature/git-panel', tip_hash: 'g5h1k83', upstream: null, ahead: 0, behind: 0 },
+      ],
+      commits: [
+        makeRawCommit('f4a9c21', { message: 'main tip', parents: ['base'] }),
+        makeRawCommit('base', { message: 'base', parents: [] }),
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: ['other'] }),
+        makeRawCommit('other', { message: 'other', parents: [] }),
+      ],
+    })
+    getSnapshot.mockResolvedValue({ ok: true, repos: [filtered] })
+    const store = await initStore()
     const wrapper = mountSection()
+    await nextTick()
     const total = store.currentRepo!.commits.length
+    expect(total).toBe(4)
 
-    await wrapper
-      .find('[data-testid="git-graph-filter-branch-fix/auth-redirect"]')
-      .trigger('click')
+    await wrapper.find('[data-testid="git-graph-filter-branch-feature/git-panel"]').trigger('click')
     await nextTick()
 
     const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    expect(rows.length).toBe(2)
     expect(rows.length).toBeLessThan(total)
-    expect(rows.length).toBeGreaterThan(0)
   })
 
-  it('renders Graph, Description and Date columns without resize handles', () => {
+  it('opens the delete dialog from a non-current branch tag', async () => {
+    // Feature tip must be reachable so its tag renders on a row.
+    const withFeature = makeRepoSnapshot({
+      commits: [
+        ...makeRepoSnapshot().commits,
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
+      ],
+    })
+    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    await initStore()
     const wrapper = mountSection()
+    await nextTick()
+
+    await wrapper.find('[data-testid="git-tag-delete-feature/git-panel"]').trigger('click')
+    await nextTick()
+
+    const stub = wrapper.find('[data-testid="stub-delete-dialog"]')
+    expect(stub.exists()).toBe(true)
+    expect(stub.attributes('data-branch')).toBe('feature/git-panel')
+  })
+
+  it('disables delete for the current branch tag', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(
+      wrapper.find('[data-testid="git-tag-delete-main"]').attributes('disabled'),
+    ).toBeDefined()
+  })
+
+  it('disables merge actions while detached', async () => {
+    getSnapshot.mockResolvedValue({
+      ok: true,
+      repos: [makeRepoSnapshot({ currentBranch: null, headHash: 'f4a9c21' })],
+    })
+    const withFeature = makeRepoSnapshot({
+      currentBranch: null,
+      headHash: 'f4a9c21',
+      commits: [
+        ...makeRepoSnapshot().commits,
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
+      ],
+    })
+    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(
+      wrapper.find('[data-testid="git-tag-merge-into-current-feature/git-panel"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.find('[data-testid="git-tag-merge-current-into-feature/git-panel"]').attributes('disabled'),
+    ).toBeDefined()
+  })
+
+  it('disables create-branch for unborn repos without a base commit', async () => {
+    getSnapshot.mockResolvedValue({
+      ok: true,
+      repos: [makeRepoSnapshot({ currentBranch: 'main', headHash: null, commits: [] })],
+    })
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-create-branch"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="git-graph-empty"]').text()).toContain('No commits yet')
+  })
+
+  it('loads more history via the pagination button', async () => {
+    const store = await initStore()
+    // Default fixture has no more pages; flip the flag on the live repo.
+    store.currentRepo!.hasMore = true
+    await nextTick()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-load-more"]').exists()).toBe(true)
+
+    const page = makeRepoSnapshot({
+      hasMore: false,
+      commits: [makeRawCommit('older1', { message: 'older', parents: [] })],
+    })
+    getSnapshot.mockResolvedValueOnce({ ok: true, repos: [page] })
+    await wrapper.find('[data-testid="git-load-more"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(getSnapshot).toHaveBeenCalledWith('workspace-1', { historyLimit: 200, historySkip: 3 })
+    expect(store.currentRepo!.commits.map((c) => c.hash)).toContain('older1')
+    expect(store.historyLoading).toBe(false)
+  })
+
+  it('hides the pagination button when history is complete', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-load-more"]').exists()).toBe(false)
+  })
+
+  it('renders Graph, Description and Date columns without resize handles', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
 
     expect(wrapper.find('[data-testid="git-graph-header-graph"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-graph-header-description"]').exists()).toBe(true)
@@ -168,44 +361,48 @@ describe('GitGraphSection', () => {
     expect(wrapper.find('[data-testid="git-column-resize-0"]').exists()).toBe(false)
   })
 
-  it('expands a commit row on click and collapses on second click', async () => {
-    const store = useGitStore()
+  it('expands a commit row on click via lazy details and collapses on second click', async () => {
+    const store = await initStore()
     const wrapper = mountSection()
+    await nextTick()
     const hash = store.currentRepo!.commits[0]!.hash
     const rows = wrapper.findAll('[data-testid="git-graph-row"]')
 
     await rows[0]!.trigger('click')
+    await flushPromises()
     await nextTick()
     expect(store.expandedCommitHash).toBe(hash)
+    expect(getDetails).toHaveBeenCalledWith('workspace-1', '/workspace/repo-app', hash)
     expect(wrapper.find('[data-testid="git-commit-details-row"]').exists()).toBe(true)
 
     await rows[0]!.trigger('click')
+    await flushPromises()
     await nextTick()
     expect(store.expandedCommitHash).toBeNull()
     expect(wrapper.find('[data-testid="git-commit-details-row"]').exists()).toBe(false)
   })
 
   it('offsets expanded commit details past the graph column', async () => {
-    const store = useGitStore()
+    const store = await initStore()
     const wrapper = mountSection()
+    await nextTick()
     const rows = wrapper.findAll('[data-testid="git-graph-row"]')
 
     await rows[0]!.trigger('click')
+    await flushPromises()
     await nextTick()
 
     const detailsCell = wrapper.find('[data-testid="git-commit-details-row"] td')
     expect(detailsCell.exists()).toBe(true)
-    const padding = Number.parseInt(
-      (detailsCell.element as HTMLElement).style.paddingLeft,
-      10,
-    )
+    const padding = Number.parseInt((detailsCell.element as HTMLElement).style.paddingLeft, 10)
     expect(padding).toBeGreaterThan(0)
     expect(store.expandedCommitHash).toBe(store.currentRepo!.commits[0]!.hash)
   })
 
-  it('marks the HEAD node as current and colours branch tags with the lane colour', () => {
-    const store = useGitStore()
+  it('marks the HEAD node as current and colours branch tags with the lane colour', async () => {
+    const store = await initStore()
     const wrapper = mountSection()
+    await nextTick()
     const headHash = store.currentRepo!.headHash
 
     const headNode = wrapper.find(`[data-testid="git-graph-node-${headHash}"]`)
@@ -218,7 +415,9 @@ describe('GitGraphSection', () => {
       .find((row) => row.find('[data-testid="git-branch-tag-main"]').exists())
     expect(mainRow).toBeDefined()
     const colour = Number(mainRow!.attributes('data-color'))
-    expect(mainTag.attributes('style')).toContain(`var(--git-branch-${colour + 1})`)
+    // Lane colours resolve via the GIT_GRAPH_COLORS palette (CSS var).
+    const { GIT_GRAPH_COLORS } = await import('@/lib/gitGraph')
+    expect(mainTag.attributes('style')).toContain(GIT_GRAPH_COLORS[colour % GIT_GRAPH_COLORS.length]!)
 
     const mergeIndex = store.currentRepo!.commits.findIndex((c) => c.parents.length > 1)
     expect(mergeIndex).toBeGreaterThanOrEqual(0)

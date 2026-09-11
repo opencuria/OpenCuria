@@ -497,6 +497,22 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     # --- Background process replies from runner ---
 
+    @sio.on("git:operation_result")
+    async def on_git_operation_result(sid: str, data: dict):
+        """Route git operation results to the owning git waiter.
+
+        Never forwarded to the frontend event bus — replies only
+        resolve the correlated ``git:operation`` request future after
+        runner-ownership validation.
+        """
+        runner_id = await _require_runner_id(sio, sid, "git:operation_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_git_reply)(
+            "git:operation_result", data, runner_id=runner_id
+        )
+
     @sio.on("harness:process_start_result")
     async def on_harness_process_start_result(sid: str, data: dict):
         """Route process start results to the owning process waiter."""

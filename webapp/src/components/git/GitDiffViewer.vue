@@ -3,15 +3,21 @@
  * GitDiffViewer — diff view for a changed file, shown in the main content
  * area (replacing the chat) when a change is clicked in the Git tab or a
  * file is selected in an expanded commit. Mirrors the FileViewer chrome;
- * diff content comes from the mock git store until a backend git API exists.
+ * diff content comes from the productive git store (backend git API):
+ * working-tree diffs are lazy-loaded per repo/side, commit files from the
+ * commit-details cache.
  */
 import { computed } from 'vue'
 import type { GitCommitFile, GitDiffHunk, GitFileStatus } from '@/types/git'
 import { useGitStore } from '@/stores/git'
 import { Button } from '@/components/ui/button'
-import { FileCode2, FileText, X } from '@lucide/vue'
+import { FileCode2, FileText, RefreshCw, X } from '@lucide/vue'
 
-// Reserved for the future backend git API; mock data is workspace-agnostic.
+/**
+ * Workspace context only: the git store is already bound to a workspace via
+ * `GitPanel.initialize(workspaceId)` — this viewer never initializes or
+ * resets the store itself.
+ */
 defineProps<{
   workspaceId: string
 }>()
@@ -22,18 +28,40 @@ const change = computed(() => store.viewingDiffChange)
 /** Commit file selected from an expanded commit, if any (mutually exclusive). */
 const commitFile = computed(() => store.viewingCommitFile)
 const commitHash = computed(() => store.viewingCommitDiff?.hash ?? null)
+const isCommitDiff = computed(() => commitFile.value !== null)
 
 /** Unified diff target: working-tree change or commit file. */
 const activePath = computed(
   () => change.value?.path ?? commitFile.value?.newPath ?? '',
 )
+/** Lazily loaded cache entry for the working-tree selection (staged-side aware). */
+const workingEntry = computed(() => store.viewingDiffEntry)
+const activeEntry = computed<GitCommitFile | null>(
+  () => workingEntry.value ?? commitFile.value,
+)
 const activeStatus = computed<GitFileStatus | GitCommitFile['status'] | null>(
   () => change.value?.status ?? commitFile.value?.status ?? null,
 )
 const activeHunks = computed<GitDiffHunk[]>(
-  () => change.value?.diff ?? commitFile.value?.diff ?? [],
+  () => activeEntry.value?.diff ?? [],
+)
+const isBinary = computed(() => activeEntry.value?.binary === true)
+const isTruncated = computed(() => activeEntry.value?.truncated === true)
+const hasNoTextualDiff = computed(
+  () =>
+    activeEntry.value !== null &&
+    !isBinary.value &&
+    activeEntry.value.hasTextualDiff === false,
 )
 const isStaged = computed(() => change.value?.staged ?? false)
+
+/** Working-diff async state (commit files come from the details cache). */
+const isLoading = computed(
+  () => !isCommitDiff.value && store.workingDiffLoading,
+)
+const loadError = computed(() =>
+  !isCommitDiff.value ? store.workingDiffError : null,
+)
 
 const fileName = computed(() => activePath.value.split('/').pop() ?? '')
 const directoryPath = computed(() => {
@@ -58,7 +86,11 @@ const STATUS_LABELS: Record<string, string> = {
   A: 'Added',
   D: 'Deleted',
   R: 'Renamed',
-  U: 'Untracked',
+  C: 'Copied',
+  // `U` is only ever a merge conflict ("Unresolved") in the productive
+  // store — conflicts surface as exactly one `U` row, never as staged.
+  // Untracked files are `status A` + `unstaged 'untracked'`.
+  U: 'Unresolved',
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -66,6 +98,7 @@ const STATUS_COLORS: Record<string, string> = {
   A: 'border-success/40 text-success',
   D: 'border-error/40 text-error',
   R: 'border-purple-500/40 text-purple-500',
+  C: 'border-purple-500/40 text-purple-500',
   U: 'border-border text-muted-foreground',
 }
 
@@ -133,6 +166,10 @@ function rowSign(row: DiffRow): string {
   return ' '
 }
 
+function handleRetry(): void {
+  void store.retryWorkingDiff()
+}
+
 function handleClose(): void {
   if (commitFile.value) {
     store.selectCommitFile(null)
@@ -144,7 +181,8 @@ function handleClose(): void {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col" data-testid="git-diff-viewer">
-    <!-- Header (mirrors FileViewer chrome) -->
+    <!-- Header (mirrors FileViewer chrome). Visible as soon as the snapshot
+         selection exists, even while the lazy hunks are still loading. -->
     <div class="flex shrink-0 items-center gap-3 border-b border-border bg-card px-4 py-2">
       <div
         class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-xs)] border border-border bg-muted/50 text-muted-foreground"
@@ -169,6 +207,13 @@ function handleClose(): void {
         <template v-if="isStaged"> · Staged</template>
         <template v-else-if="commitHash"> · {{ commitHash.slice(0, 7) }}</template>
       </span>
+      <span
+        v-if="isStaged === false && change && !commitHash"
+        class="hidden shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline-block"
+        data-testid="git-diff-side"
+      >
+        Unstaged
+      </span>
       <Button
         variant="ghost"
         size="icon-sm"
@@ -184,42 +229,101 @@ function handleClose(): void {
     <div class="min-h-0 flex-1 overflow-auto bg-background">
       <div class="p-3">
         <div
-          v-if="rows.length > 0"
-          class="overflow-hidden rounded-[var(--radius-xs)] border border-border bg-muted/30"
-          data-testid="git-diff-code"
+          v-if="isLoading"
+          class="flex items-center gap-2 px-1 py-3 text-xs text-muted-foreground"
+          data-testid="git-diff-loading"
         >
-          <div class="overflow-x-auto py-2">
-            <div
-              v-for="row in rows"
-              :key="row.key"
-              class="flex font-mono text-xs leading-5"
-              :class="ROW_CLASSES[row.type]"
-              :data-diff-type="row.type"
-            >
-              <template v-if="row.type === 'hunk'">
-                <span class="w-full select-none px-3">{{ row.content }}</span>
-              </template>
-              <template v-else>
-                <span
-                  class="shrink-0 select-none pr-2 text-right text-muted-foreground/50"
-                  :style="{ width: `${lineNumberWidth + 1}ch` }"
-                >{{ row.oldNo ?? '' }}</span>
-                <span
-                  class="shrink-0 select-none border-r border-border/60 pr-2 text-right text-muted-foreground/50"
-                  :style="{ width: `${lineNumberWidth + 1}ch`, marginRight: '0.5rem' }"
-                >{{ row.newNo ?? '' }}</span>
-                <span
-                  class="shrink-0 select-none pr-1"
-                  :class="SIGN_CLASSES[row.type]"
-                >{{ rowSign(row) }}</span>
-                <span class="whitespace-pre">{{ row.content || ' ' }}</span>
-              </template>
-            </div>
-          </div>
+          <RefreshCw :size="13" class="animate-spin" />
+          Loading diff…
         </div>
-        <p v-else class="px-1 text-xs text-muted-foreground">
-          No textual diff available for this change.
-        </p>
+        <div
+          v-else-if="loadError"
+          class="flex flex-col items-start gap-2 px-1 py-3"
+          data-testid="git-diff-error"
+        >
+          <p class="text-xs text-error">{{ loadError }}</p>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 text-xs"
+            data-testid="git-diff-retry"
+            @click="handleRetry"
+          >
+            Retry
+          </Button>
+        </div>
+        <template v-else>
+          <div
+            v-if="isBinary"
+            class="px-1 py-3 text-xs text-muted-foreground"
+            data-testid="git-diff-binary"
+          >
+            Binary file — no textual diff available.
+          </div>
+          <template v-else-if="rows.length > 0">
+            <div
+              class="overflow-hidden rounded-[var(--radius-xs)] border border-border bg-muted/30"
+              data-testid="git-diff-code"
+            >
+              <div class="overflow-x-auto py-2">
+                <div
+                  v-for="row in rows"
+                  :key="row.key"
+                  class="flex font-mono text-xs leading-5"
+                  :class="ROW_CLASSES[row.type]"
+                  :data-diff-type="row.type"
+                >
+                  <template v-if="row.type === 'hunk'">
+                    <span class="w-full select-none px-3">{{ row.content }}</span>
+                  </template>
+                  <template v-else>
+                    <span
+                      class="shrink-0 select-none pr-2 text-right text-muted-foreground/50"
+                      :style="{ width: `${lineNumberWidth + 1}ch` }"
+                    >{{ row.oldNo ?? '' }}</span>
+                    <span
+                      class="shrink-0 select-none border-r border-border/60 pr-2 text-right text-muted-foreground/50"
+                      :style="{ width: `${lineNumberWidth + 1}ch`, marginRight: '0.5rem' }"
+                    >{{ row.newNo ?? '' }}</span>
+                    <span
+                      class="shrink-0 select-none pr-1"
+                      :class="SIGN_CLASSES[row.type]"
+                    >{{ rowSign(row) }}</span>
+                    <span class="whitespace-pre">{{ row.content || ' ' }}</span>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <p
+              v-if="isTruncated"
+              class="mt-2 px-1 text-xs text-muted-foreground"
+              data-testid="git-diff-truncated"
+            >
+              Diff truncated — showing the first part only.
+            </p>
+          </template>
+          <p
+            v-else-if="isTruncated"
+            class="px-1 text-xs text-muted-foreground"
+            data-testid="git-diff-truncated"
+          >
+            Diff truncated — no preview available for the remaining part.
+          </p>
+          <p
+            v-else-if="hasNoTextualDiff"
+            class="px-1 text-xs text-muted-foreground"
+            data-testid="git-diff-empty"
+          >
+            No textual diff available for this change.
+          </p>
+          <p
+            v-else
+            class="px-1 text-xs text-muted-foreground"
+            data-testid="git-diff-empty"
+          >
+            No textual diff available for this change.
+          </p>
+        </template>
       </div>
     </div>
   </div>

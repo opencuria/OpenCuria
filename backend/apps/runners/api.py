@@ -36,6 +36,11 @@ from .exceptions import RunnerOfflineError
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
     ErrorOut,
+    GitCommitQuery,
+    GitDiffQuery,
+    GitOperationIn,
+    GitSnapshotQuery,
+    validate_commit_hash,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
@@ -1272,6 +1277,279 @@ async def delete_process(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+# ===========================================================================
+# Git router — /api/v1/workspaces/{workspace_id}/git/ (productive integration)
+# ===========================================================================
+
+#: Read-only git operations served by the GET endpoints / typed operation.
+_GIT_READ_OPS = frozenset({"snapshot", "working_diff", "commit_details"})
+
+
+def _git_error_to_response(exc: Exception):
+    """Map git service errors to (status, ErrorOut) tuples."""
+    from .exceptions import RunnerTimeoutError, WorkspaceStateError
+
+    if isinstance(exc, NotFoundError):
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    if isinstance(exc, RunnerTimeoutError):
+        return 504, ErrorOut(detail=exc.message, code="runner_timeout")
+    if isinstance(exc, RunnerOfflineError):
+        return 409, ErrorOut(detail=str(exc), code="runner_offline")
+    if isinstance(exc, WorkspaceStateError):
+        return 409, ErrorOut(detail=str(exc), code="workspace_conflict")
+    if isinstance(exc, ConflictError):
+        return 409, ErrorOut(detail=exc.message, code=exc.code)
+    if isinstance(exc, ValueError):
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    if isinstance(exc, RuntimeError):
+        message = str(exc)
+        lowered = message.lower()
+        if any(marker in lowered for marker in ("timed out", "timeout")):
+            return 504, ErrorOut(detail=message, code="runner_timeout")
+        return 502, ErrorOut(detail=message, code="runner_call_failed")
+    return 502, ErrorOut(detail=str(exc), code="runner_call_failed")
+
+
+def _git_result_to_response(result: dict):
+    """Map a runner git result dict to (status, payload) for Ninja.
+
+    All runner payloads pass through intact as plain ``dict`` (the
+    response map uses ``dict``/union for 200/400/409/504, so Ninja never
+    re-validates/strips runner keys). Success (``ok`` truthy) → 200.
+    Runner domain failures (``ok: False``) map by code: ``conflict``
+    → 409 with the runner payload intact (incl. fresh ``snapshot``);
+    ``timeout`` → 504 with ``code``/``message`` intact; everything
+    else → 400 intact.
+    """
+    if not isinstance(result, dict):
+        return 502, ErrorOut(detail="Git operation returned no result", code="runner_call_failed")
+    if result.get("ok"):
+        return 200, result
+    code = str(result.get("code") or "")
+    if code == "conflict":
+        return 409, result
+    if code == "timeout" or "timeout" in code:
+        return 504, result
+    return 400, result
+
+
+def _git_operation_args(payload: GitOperationIn) -> dict:
+    """Build the service args dict field-by-field from the typed schema.
+
+    Never passes an ``args`` dict through — only explicitly known
+    fields per operation reach the runner. Commit identity is injected
+    server-side by the service from ``request.user``.
+    """
+    data = payload.model_dump(exclude_unset=True)
+    args: dict = {}
+    if data.get("paths") is not None:
+        args["paths"] = list(data["paths"])
+    if data.get("message") is not None:
+        args["message"] = data["message"]
+    if data.get("branch") is not None:
+        args["branch"] = data["branch"]
+    if data.get("commit") is not None:
+        args["commit"] = data["commit"]
+    if data.get("target") is not None:
+        args["target"] = data["target"]
+    if data.get("new_branch") is not None:
+        args["new_branch"] = data["new_branch"]
+    if data.get("old_branch") not in (None, ""):
+        args["old_branch"] = data["old_branch"]
+    if data.get("start_point") is not None:
+        args["start_point"] = data["start_point"]
+    if data.get("remote") is not None:
+        args["remote"] = data["remote"]
+    if data.get("checkout") is not None:
+        args["checkout"] = bool(data["checkout"])
+    if data.get("set_upstream") is not None:
+        args["set_upstream"] = bool(data["set_upstream"])
+    if data.get("history_limit") is not None:
+        args["history_limit"] = data["history_limit"]
+    if data.get("history_skip") is not None:
+        args["history_skip"] = data["history_skip"]
+    return args
+
+
+#: Shared response map for the git endpoints. Runner payloads (success
+#: and domain failures) pass through intact as plain ``dict`` so runner
+#: keys (``snapshot``/``stderr``/``code``/``message``) are never stripped
+#: by Ninja re-validation. Statuses that can carry *either* a runner
+#: dict *or* a service-shaped ``ErrorOut`` (400/409/504) use a union so
+#: both shapes validate: runner ``ok:false`` payloads stay intact while
+#: service errors (timeout/offline/busy/validation) keep ``detail``/``code``.
+_GIT_RESPONSES: dict = {
+    200: dict,
+    400: dict | ErrorOut,
+    403: ErrorOut,
+    404: ErrorOut,
+    409: dict | ErrorOut,
+    502: ErrorOut,
+    504: dict | ErrorOut,
+}
+
+
+git_router = Router(tags=["workspaces-git"])
+
+
+@git_router.get(
+    "/{workspace_id}/git/",
+    response=_GIT_RESPONSES,
+    summary="Get git snapshot (repo discovery)",
+)
+async def git_snapshot(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    history_limit: int = 200,
+    history_skip: int = 0,
+):
+    """Return the git snapshot for all repos under /workspace.
+
+    Query params page the per-repo commit history (1..500 / skip>=0).
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitSnapshotQuery(
+            history_limit=history_limit, history_skip=history_skip
+        )
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.run_git_operation(
+            workspace_id,
+            "snapshot",
+            args={
+                "history_limit": query.history_limit,
+                "history_skip": query.history_skip,
+            },
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/diff/",
+    response=_GIT_RESPONSES,
+    summary="Get working-tree diff for one repo",
+)
+async def git_diff(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+):
+    """Return staged/unstaged diff entries for one repository."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitDiffQuery(repo_path=repo_path)
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.run_git_operation(
+            workspace_id,
+            "working_diff",
+            repo_path=query.repo_path,
+            args={},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/commits/{commit_hash}/",
+    response=_GIT_RESPONSES,
+    summary="Get commit details",
+)
+async def git_commit_details(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    commit_hash: str,
+    repo_path: str,
+):
+    """Return full details (message, authors, file changes) for one commit."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitCommitQuery(repo_path=repo_path)
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    try:
+        commit = validate_commit_hash(commit_hash)
+    except ValueError as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.run_git_operation(
+            workspace_id,
+            "commit_details",
+            repo_path=query.repo_path,
+            args={"commit": commit},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.post(
+    "/{workspace_id}/git/operation/",
+    response=_GIT_RESPONSES,
+    summary="Run a typed git operation",
+)
+async def git_operation(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    payload: GitOperationIn,
+):
+    """Run one whitelisted git operation (typed fields only, no free args).
+
+    Read operations (``snapshot``/``working_diff``/``commit_details``)
+    require ``workspaces:git_read``; all mutations require
+    ``workspaces:git_write``. Commit identity for ``commit`` is filled
+    server-side from the authenticated account — the schema accepts no
+    ``author_*`` fields.
+    """
+    permission = (
+        APIKeyPermission.WORKSPACES_GIT_READ
+        if str(payload.operation) in _GIT_READ_OPS
+        else APIKeyPermission.WORKSPACES_GIT_WRITE
+    )
+    if not check_api_key_permission(request, permission):
+        return _perm_denied(permission)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.run_git_operation(
+            workspace_id,
+            str(payload.operation),
+            repo_path=payload.repo_path,
+            args=_git_operation_args(payload),
+            user=request.user,
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
 
 
 # ===========================================================================
