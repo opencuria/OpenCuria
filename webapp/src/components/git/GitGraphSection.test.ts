@@ -136,9 +136,10 @@ describe('GitGraphSection', () => {
     const wrapper = mountSection()
     await nextTick()
 
-    // main sits on HEAD f4a9c21 (row 1); feature/git-panel tip g5h1k83 is not
-    // in the 3-commit history window, so only its filter entry exists.
+    // All-branch history: main sits on HEAD f4a9c21 and the
+    // feature/git-panel tip g5h1k83 is a row of its own.
     expect(wrapper.find('[data-testid="git-branch-tag-main"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-branch-tag-feature/git-panel"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-ref-tag-origin/main"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-graph-filter-branch-feature/git-panel"]').exists()).toBe(true)
   })
@@ -165,14 +166,7 @@ describe('GitGraphSection', () => {
   })
 
   it('checks out a branch via its tag dropdown with a typed payload', async () => {
-    // Feature tip must be reachable so its tag renders on a row: append it.
-    const withFeature = makeRepoSnapshot({
-      commits: [
-        ...makeRepoSnapshot().commits,
-        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
-      ],
-    })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    // Default fixture already carries the feature tip as its own row.
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -197,14 +191,7 @@ describe('GitGraphSection', () => {
   })
 
   it('opens the merge dialog from a branch tag', async () => {
-    // Same as checkout: feature tip must be reachable for its tag to render.
-    const withFeature = makeRepoSnapshot({
-      commits: [
-        ...makeRepoSnapshot().commits,
-        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
-      ],
-    })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    // Default fixture already carries the feature tip as its own row.
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -246,14 +233,7 @@ describe('GitGraphSection', () => {
   })
 
   it('opens the delete dialog from a non-current branch tag', async () => {
-    // Feature tip must be reachable so its tag renders on a row.
-    const withFeature = makeRepoSnapshot({
-      commits: [
-        ...makeRepoSnapshot().commits,
-        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
-      ],
-    })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
+    // Default fixture already carries the feature tip as its own row.
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -277,17 +257,9 @@ describe('GitGraphSection', () => {
   })
 
   it('disables merge actions while detached', async () => {
-    getSnapshot.mockResolvedValue({
-      ok: true,
-      repos: [makeRepoSnapshot({ currentBranch: null, headHash: 'f4a9c21' })],
-    })
     const withFeature = makeRepoSnapshot({
       currentBranch: null,
       headHash: 'f4a9c21',
-      commits: [
-        ...makeRepoSnapshot().commits,
-        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
-      ],
     })
     getSnapshot.mockResolvedValue({ ok: true, repos: [withFeature] })
     await initStore()
@@ -334,7 +306,7 @@ describe('GitGraphSection', () => {
     await flushPromises()
     await nextTick()
 
-    expect(getSnapshot).toHaveBeenCalledWith('workspace-1', { historyLimit: 200, historySkip: 3 })
+    expect(getSnapshot).toHaveBeenCalledWith('workspace-1', { historyLimit: 200, historySkip: 4 })
     expect(store.currentRepo!.commits.map((c) => c.hash)).toContain('older1')
     expect(store.historyLoading).toBe(false)
   })
