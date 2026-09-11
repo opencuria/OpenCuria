@@ -2174,6 +2174,86 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(snap["has_more"])
             self.assertEqual(snap["history_skip"], 1)
 
+    async def test_snapshot_history_includes_all_branches_remotes_and_stash(self) -> None:
+        """History spans every ref (all branches incl. remotes + stash).
+
+        Regression test: the snapshot history previously listed only
+        ``HEAD`` (the current branch).  It must instead cover all refs —
+        like vscode-git-graph — while internal ``refs/notes/*`` fan-out
+        stays hidden and detached commits remain included via HEAD.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            _git_config_identity(repo)
+            subprocess.run(
+                ["git", "-C", repo, "checkout", "-b", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "feature.txt").write_text("f\n")
+            subprocess.run(["git", "-C", repo, "add", "feature.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "commit", "-m", "feature tip"],
+                check=True,
+                capture_output=True,
+            )
+            feature_tip = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", repo, "checkout", "main"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "README.md").write_text("# stashed\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-m", "stash entry"],
+                check=True,
+                capture_output=True,
+            )
+            stash_tip = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "refs/stash"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            # A remote-tracking ref must show up as well (a fetched remote
+            # branch has no local commits of its own — simulate the fetch
+            # result directly so the test stays offline and deterministic).
+            subprocess.run(
+                ["git", "-C", repo, "update-ref",
+                 "refs/remotes/origin/feature", feature_tip],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", repo, "notes", "add", "-m", "hidden note", "HEAD"],
+                check=True,
+                capture_output=True,
+            )
+            notes_tip = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "refs/notes/commits"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            service, _runtime, ws_id = _service_for(tmp)
+            result = await service.execute_git_operation(ws_id, "snapshot", None, {})
+            self.assertTrue(result["ok"])
+            snap = result["repos"][0]
+            by_hash = {c["hash"]: c for c in snap["commits"]}
+            self.assertIn(feature_tip, by_hash)
+            self.assertIn(snap["head_hash"], by_hash)
+            self.assertIn(stash_tip, by_hash)
+            self.assertTrue(
+                any(r["name"] == "origin/feature" for r in snap["remote_refs"])
+            )
+            self.assertNotIn(notes_tip, by_hash)
+
     async def test_snapshot_unborn_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_dir = os.path.join(tmp, "fresh")

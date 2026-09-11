@@ -129,12 +129,15 @@ export function makeRepoSnapshot(options: RepoFixtureOptions = {}): RawGitRepoSn
     commits:
       options.commits ??
       [
+        // All-branch history (like vscode-git-graph): the backend delivers
+        // commits across every ref, so both branch tips are present.
         makeRawCommit('f4a9c21', { message: 'Fix terminal resize flicker', parents: ['e8b7d3a'] }),
         makeRawCommit('e8b7d3a', { message: 'Polish settings sheet spacing', parents: ['9c2f1e7'] }),
         makeRawCommit('9c2f1e7', {
           message: "Merge branch 'feature/login-form'",
           parents: ['3d8e5b2', 'b7c4a19'],
         }),
+        makeRawCommit('g5h1k83', { message: 'Add git panel layout', parents: ['9c2f1e7'] }),
       ],
     has_more: options.hasMore ?? false,
     history_skip: 0,

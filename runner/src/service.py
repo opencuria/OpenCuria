@@ -4067,7 +4067,13 @@ class WorkspaceService:
         # Merge / rebase / cherry-pick state.
         merge_state = await self._git_merge_state(runtime, instance_id, repo_root, env)
 
-        # Paginated history (newest first) + has_more probe.
+        # Paginated history over ALL refs (newest first) + has_more probe.
+        # ``--all --date-order`` covers every local branch, remote-tracking
+        # ref, tag and stash entry — like vscode-git-graph — while detached
+        # HEAD commits stay included (HEAD is an implicit starting point).
+        # ``--exclude`` precedes ``--all`` (option order matters) to hide
+        # only the internal notes fan-out (refs/notes/*); stash (refs/stash)
+        # remains visible on purpose.
         log_format = (
             f"%H{us}%h{us}%P{us}%aN{us}%aE{us}%aI{us}"
             f"%cN{us}%cE{us}%cI{us}%s{us}%b{rs}"
@@ -4075,7 +4081,8 @@ class WorkspaceService:
         exit_code_l, log_out = await self._git_exec(
             runtime,
             instance_id,
-            ["git", "log", f"--format={log_format}",
+            ["git", "log", "--exclude=refs/notes/*", "--all",
+             "--date-order", f"--format={log_format}",
              f"--max-count={capped_limit + 1}", f"--skip={capped_skip}"],
             workdir=repo_root,
             env=env,
