@@ -189,7 +189,13 @@ async def test_mcp_generic_git_write_only_key_cannot_read() -> None:
     write_key.has_permission = lambda perm: getattr(
         perm, "value", perm
     ) == APIKeyPermission.WORKSPACES_GIT_WRITE.value
-    for operation in ("snapshot", "working_diff", "commit_details"):
+    for operation in (
+        "list_repos",
+        "repo_snapshot",
+        "repo_history",
+        "working_diff",
+        "commit_details",
+    ):
         error = _check_git_tool_permission(write_key, operation)
         assert error is not None
         assert APIKeyPermission.WORKSPACES_GIT_READ.value in _text(error)
@@ -204,7 +210,13 @@ async def test_mcp_generic_git_read_only_key_cannot_mutate() -> None:
     read_key.has_permission = lambda perm: getattr(
         perm, "value", perm
     ) == APIKeyPermission.WORKSPACES_GIT_READ.value
-    for operation in ("snapshot", "working_diff", "commit_details"):
+    for operation in (
+        "list_repos",
+        "repo_snapshot",
+        "repo_history",
+        "working_diff",
+        "commit_details",
+    ):
         assert _check_git_tool_permission(read_key, operation) is None
     error = _check_git_tool_permission(read_key, "stage")
     assert error is not None
@@ -243,7 +255,7 @@ async def test_mcp_git_rejects_foreign_workspace_before_service(monkeypatch) -> 
 
 @pytest.mark.django_db(transaction=True)
 async def test_mcp_get_git_state_happy_path(monkeypatch) -> None:
-    """get_git_state dispatches snapshot with history paging, no repo path."""
+    """get_git_state dispatches list_repos discovery, no repo path."""
     from asgiref.sync import sync_to_async
 
     setup = await sync_to_async(_make_git_setup)()
@@ -259,7 +271,7 @@ async def test_mcp_get_git_state_happy_path(monkeypatch) -> None:
             self, workspace_id, operation, *, repo_path=None, args=None, user=None
         ):
             calls.append((workspace_id, operation, repo_path, args, user))
-            return {"ok": True, "operation": "snapshot", "snapshot": {"repos": []}}
+            return {"ok": True, "operation": "list_repos", "repos": []}
 
     monkeypatch.setattr(
         "apps.mcp_app.server._runner_service", lambda: _FakeService()
@@ -270,15 +282,13 @@ async def test_mcp_get_git_state_happy_path(monkeypatch) -> None:
         setup["org"].id,
         {
             "workspace_id": str(setup["workspace"].id),
-            "history_limit": 50,
-            "history_skip": 10,
         },
     )
     payload = _payload(result)
     assert payload["ok"] is True
-    assert calls and calls[0][1] == "snapshot"
+    assert calls and calls[0][1] == "list_repos"
     assert calls[0][2] is None
-    assert calls[0][3] == {"history_limit": 50, "history_skip": 10}
+    assert calls[0][3] == {}
     assert calls[0][4] == setup["owner"]
 
 
@@ -633,39 +643,100 @@ def test_git_mcp_args_validates_pagination_without_clipping() -> None:
     """history_limit/skip reject out-of-range input instead of clipping."""
     workspace_id = str(uuid.uuid4())
     out, error = _git_mcp_args(
-        "snapshot",
+        "repo_history",
         {"workspace_id": workspace_id, "history_limit": 0},
     )
     assert out is None
     assert "history_limit" in _text(error)
 
     out, error = _git_mcp_args(
-        "snapshot",
+        "repo_history",
         {"workspace_id": workspace_id, "history_limit": 501},
     )
     assert out is None
     assert "history_limit" in _text(error)
 
     out, error = _git_mcp_args(
-        "snapshot",
+        "repo_history",
         {"workspace_id": workspace_id, "history_limit": "not-a-number"},
     )
     assert out is None
     assert "history_limit" in _text(error)
 
     out, error = _git_mcp_args(
-        "snapshot",
+        "repo_history",
         {"workspace_id": workspace_id, "history_skip": -1},
     )
     assert out is None
     assert "history_skip" in _text(error)
 
     out, error = _git_mcp_args(
-        "snapshot",
+        "repo_history",
         {"workspace_id": workspace_id, "history_limit": 50, "history_skip": 10},
     )
     assert error is None
     assert out == {"history_limit": 50, "history_skip": 10}
+
+    out, error = _git_mcp_args(
+        "repo_history",
+        {
+            "workspace_id": workspace_id,
+            "history_limit": 50,
+            "history_skip": 10,
+            "branch": "main",
+        },
+    )
+    assert error is None
+    assert out == {"history_limit": 50, "history_skip": 10, "branch": "main"}
+
+    out, error = _git_mcp_args(
+        "repo_history",
+        {"workspace_id": workspace_id, "branch": "   "},
+    )
+    assert out is None
+    assert "Invalid branch" in _text(error)
+
+    out, error = _git_mcp_args("list_repos", {"workspace_id": workspace_id})
+    assert error is None
+    assert out == {}
+
+    out, error = _git_mcp_args("repo_snapshot", {"workspace_id": workspace_id})
+    assert error is None
+    assert out == {}
+
+
+def test_git_mcp_args_checkout_remote_branch_requires_remote_ref() -> None:
+    """checkout_remote_branch forwards remote_ref + optional local_name."""
+    workspace_id = str(uuid.uuid4())
+    out, error = _git_mcp_args(
+        "checkout_remote_branch",
+        {"workspace_id": workspace_id, "operation": "checkout_remote_branch"},
+    )
+    assert out is None
+    assert "remote_ref is required" in _text(error)
+
+    out, error = _git_mcp_args(
+        "checkout_remote_branch",
+        {
+            "workspace_id": workspace_id,
+            "operation": "checkout_remote_branch",
+            "remote_ref": "origin/feature/x",
+        },
+    )
+    assert error is None
+    assert out == {"remote_ref": "origin/feature/x"}
+
+    out, error = _git_mcp_args(
+        "checkout_remote_branch",
+        {
+            "workspace_id": workspace_id,
+            "operation": "checkout_remote_branch",
+            "remote_ref": "origin/feature/x",
+            "local_name": "local",
+        },
+    )
+    assert error is None
+    assert out == {"remote_ref": "origin/feature/x", "local_name": "local"}
 
 
 def test_git_mcp_args_rejects_long_merge_message_without_clipping() -> None:
@@ -751,7 +822,13 @@ async def test_mcp_generic_git_operation_rejects_reads_with_tool_guidance() -> N
     api_key = SimpleNamespace(
         user=setup["owner"], has_permission=lambda permission: True
     )
-    for operation in ("snapshot", "working_diff", "commit_details"):
+    for operation in (
+        "list_repos",
+        "repo_snapshot",
+        "repo_history",
+        "working_diff",
+        "commit_details",
+    ):
         result = await _call_git_operation(
             api_key,
             setup["org"].id,

@@ -6,7 +6,7 @@
  * boundary (`vi.mock('@/services/git.api')`) — never against the real API.
  */
 
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type {
   RawGitChange,
   RawGitCommit,
@@ -14,6 +14,7 @@ import type {
   RawGitCommitFile,
   RawGitDiffHunk,
   RawGitRepoSnapshot,
+  RawGitRepoSummary,
 } from '@/services/git.api'
 
 export function makeHunk(suffix: string): RawGitDiffHunk {
@@ -141,7 +142,7 @@ export function makeRepoSnapshot(options: RepoFixtureOptions = {}): RawGitRepoSn
       ],
     has_more: options.hasMore ?? false,
     history_skip: 0,
-    history_limit: 200,
+    history_limit: 50,
     changes:
       options.changes ??
       [
@@ -183,14 +184,99 @@ export function makeCommitDetails(
 
 export const mockedGitApiPath = '@/services/git.api'
 
+export function makeRepoSummary(
+  path = '/workspace/repo-app',
+  overrides: Partial<RawGitRepoSummary> = {},
+): RawGitRepoSummary {
+  const { id, name, current_branch, head_hash, ...rest } = overrides
+  void rest
+  return {
+    id: id ?? path,
+    name: name ?? path.split('/').pop() ?? 'repo-app',
+    path,
+    current_branch: current_branch === undefined ? 'main' : current_branch,
+    head_hash: head_hash === undefined ? 'f4a9c21' : head_hash,
+  }
+}
+
 /**
- * Install the default `git.api` mock (snapshot resolves with the given
- * repos). Returns the mocked functions for per-test overrides.
+ * Wire summaries + detail snapshots + paged history for the lazy git API
+ * (replaces the old `getGitSnapshot.mockResolvedValue({ok, repos})`).
+ * Accepts raw snapshots; summaries are derived automatically and
+ * getGitHistory slices the fixture commits.
  */
-export async function mockGitApi(repos: RawGitRepoSnapshot[] = [makeRepoSnapshot()]) {
+export function setupGitRepos(
+  getRepos: Mock,
+  getRepo: Mock,
+  getHistory: Mock,
+  repos: RawGitRepoSnapshot[],
+): void {
+  getRepos.mockResolvedValue({
+    ok: true,
+    repos: repos.map(
+      (r): RawGitRepoSummary => ({
+        id: r.id,
+        name: r.name,
+        path: r.path,
+        current_branch: r.current_branch,
+        head_hash: r.head_hash,
+      }),
+    ),
+  })
+  getRepo.mockImplementation(async (_ws: string, repoPath: string) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0] ?? makeRepoSnapshot()
+    return { ok: true, snapshot: { ...found } }
+  })
+  getHistory.mockImplementation(async (_ws: string, repoPath: string, opts?: { skip?: number; limit?: number }) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0] ?? makeRepoSnapshot()
+    const skip = opts?.skip ?? 0
+    const limit = opts?.limit ?? 50
+    const commits = (found.commits ?? []).slice(skip, skip + limit)
+    return {
+      ok: true,
+      repo_path: repoPath,
+      commits,
+      has_more: (found.commits ?? []).length > skip + commits.length || found.has_more,
+      history_skip: skip,
+      history_limit: limit,
+    }
+  })
+}
+
+/**
+ * Install the default `git.api` mock (summaries + one detail snapshot).
+ * Returns the mocked functions for per-test overrides.
+ */export async function mockGitApi(repos: RawGitRepoSnapshot[] = [makeRepoSnapshot()]) {
   const mod = await import('@/services/git.api')
   const mocked = vi.mocked(mod, true)
-  mocked.getGitSnapshot.mockResolvedValue({ ok: true, repos })
+  mocked.getGitRepos.mockResolvedValue({
+    ok: true,
+    repos: repos.map((r) => ({
+      id: r.id,
+      name: r.name,
+      path: r.path,
+      current_branch: r.current_branch,
+      head_hash: r.head_hash,
+    })),
+  })
+  mocked.getGitRepo.mockImplementation(async (_ws, repoPath) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0] ?? makeRepoSnapshot()
+    return { ok: true, snapshot: { ...found } }
+  })
+  mocked.getGitHistory.mockImplementation(async (_ws, repoPath, opts) => {
+    const found = repos.find((r) => r.path === repoPath) ?? repos[0] ?? makeRepoSnapshot()
+    const skip = opts?.skip ?? 0
+    const limit = opts?.limit ?? 50
+    const commits = (found.commits ?? []).slice(skip, skip + limit)
+    return {
+      ok: true,
+      repo_path: repoPath,
+      commits,
+      has_more: (found.commits ?? []).length > skip + commits.length || found.has_more,
+      history_skip: skip,
+      history_limit: limit,
+    }
+  })
   mocked.getGitWorkingDiff.mockResolvedValue({
     ok: true,
     repo_path: repos[0]?.path ?? '/workspace/repo-app',

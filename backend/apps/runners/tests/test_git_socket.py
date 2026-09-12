@@ -83,9 +83,9 @@ async def test_git_reply_delegated_with_exact_runner_id(fresh_sio):
     data = {
         "request_id": "req-abc",
         "workspace_id": str(workspace.id),
-        "operation": "snapshot",
+        "operation": "list_repos",
         "ok": True,
-        "snapshot": {"repos": []},
+        "repos": [],
     }
 
     handler = _handler(server, "git:operation_result")

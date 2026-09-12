@@ -105,53 +105,121 @@ def _all_git_perms() -> list[str]:
 
 
 @pytest.mark.django_db
-def test_git_snapshot_happy_passes_history_args(client: Client, monkeypatch):
-    """GET snapshot returns 200 and forwards history paging to the service."""
+def test_git_repos_happy_lists_repos(client: Client, monkeypatch):
+    """GET repos/ returns 200 and dispatches list_repos without repo_path."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
     runner_result = {
         "ok": True,
-        "operation": "snapshot",
-        "snapshot": {"repos": [{"path": "/workspace/repo"}]},
+        "operation": "list_repos",
+        "repos": [{"id": "r1", "name": "repo", "path": "/workspace/repo"}],
     }
     fake = _install_fake(monkeypatch, run_return=runner_result)
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(token, str(org.id)),
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["snapshot"] == {"repos": [{"path": "/workspace/repo"}]}
+    assert body["repos"] == [{"id": "r1", "name": "repo", "path": "/workspace/repo"}]
     fake.run_git_operation.assert_awaited_once()
     call = fake.run_git_operation.call_args
     assert str(call.args[0]) == str(workspace.id)
-    assert call.args[1] == "snapshot"
-    assert call.kwargs["args"] == {"history_limit": 200, "history_skip": 0}
+    assert call.args[1] == "list_repos"
+    assert call.kwargs["args"] == {}
+    assert "repo_path" not in call.kwargs
 
 
 @pytest.mark.django_db
-def test_git_snapshot_history_paging_forwarded(client: Client, monkeypatch):
-    """Explicit history_limit/skip reach the service verbatim."""
+def test_git_repo_happy_forwards_repo_path(client: Client, monkeypatch):
+    """GET repo/ forwards the validated repo path to repo_snapshot."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_read_perms())
+    runner_result = {
+        "ok": True,
+        "operation": "repo_snapshot",
+        "snapshot": {"path": "/workspace/repo"},
+    }
+    fake = _install_fake(monkeypatch, run_return=runner_result)
+
+    response = client.get(
+        f"/api/v1/workspaces/{workspace.id}/git/repo/",
+        {"repo_path": "/workspace/repo"},
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["snapshot"] == {"path": "/workspace/repo"}
+    call = fake.run_git_operation.call_args
+    assert call.args[1] == "repo_snapshot"
+    assert call.kwargs["repo_path"] == "/workspace/repo"
+    assert call.kwargs["args"] == {}
+
+
+@pytest.mark.django_db
+def test_git_history_happy_passes_paging(client: Client, monkeypatch):
+    """GET history/ returns 200 and forwards repo path plus paging args."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_read_perms())
+    runner_result = {
+        "ok": True,
+        "operation": "repo_history",
+        "repo_path": "/workspace/repo",
+        "commits": [],
+        "has_more": False,
+    }
+    fake = _install_fake(monkeypatch, run_return=runner_result)
+
+    response = client.get(
+        f"/api/v1/workspaces/{workspace.id}/git/history/",
+        {"repo_path": "/workspace/repo"},
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["commits"] == []
+    fake.run_git_operation.assert_awaited_once()
+    call = fake.run_git_operation.call_args
+    assert str(call.args[0]) == str(workspace.id)
+    assert call.args[1] == "repo_history"
+    assert call.kwargs["repo_path"] == "/workspace/repo"
+    assert call.kwargs["args"] == {"history_limit": 50, "history_skip": 0}
+
+
+@pytest.mark.django_db
+def test_git_history_paging_and_branch_forwarded(client: Client, monkeypatch):
+    """Explicit history_limit/skip/branch reach the service verbatim."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
     fake = _install_fake(
         monkeypatch,
-        run_return={"ok": True, "snapshot": {"repos": []}},
+        run_return={"ok": True, "commits": [], "has_more": True},
     )
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
-        {"history_limit": 50, "history_skip": 10},
+        f"/api/v1/workspaces/{workspace.id}/git/history/",
+        {
+            "repo_path": "/workspace/repo",
+            "history_limit": 25,
+            "history_skip": 10,
+            "branch": "main",
+        },
         **_auth_headers(token, str(org.id)),
     )
 
     assert response.status_code == 200
     call = fake.run_git_operation.call_args
-    assert call.args[1] == "snapshot"
-    assert call.kwargs["args"] == {"history_limit": 50, "history_skip": 10}
+    assert call.args[1] == "repo_history"
+    assert call.kwargs["args"] == {
+        "history_limit": 25,
+        "history_skip": 10,
+        "branch": "main",
+    }
 
 
 @pytest.mark.django_db
@@ -204,7 +272,7 @@ def test_git_read_only_key_blocks_mutation(client: Client, monkeypatch):
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.post(
@@ -225,10 +293,10 @@ def test_git_read_only_key_blocks_mutation(client: Client, monkeypatch):
 def test_git_write_only_key_allows_mutation_but_blocks_read(
     client: Client, monkeypatch
 ):
-    """git_write may mutate but may not read via GET snapshot."""
+    """git_write may mutate but may not read via GET repos/."""
     user, org, runner, workspace = _make_context()
     write_token = _create_api_key(user=user, permissions=_write_perms())
-    _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}})
+    _install_fake(monkeypatch, run_return={"ok": True, "repos": []})
 
     staged = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
@@ -241,7 +309,7 @@ def test_git_write_only_key_allows_mutation_but_blocks_read(
     assert staged.status_code == 200
 
     read = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(write_token, str(org.id)),
     )
     assert read.status_code == 403
@@ -249,16 +317,17 @@ def test_git_write_only_key_allows_mutation_but_blocks_read(
 
 
 @pytest.mark.django_db
-def test_git_post_snapshot_read_perm_routing(client: Client, monkeypatch):
-    """POST snapshot is a read op: git_read succeeds, git_write alone 403."""
+def test_git_post_list_repos_read_perm_routing(client: Client, monkeypatch):
+    """POST list_repos is a read op: git_read succeeds, git_write alone 403."""
     user, org, runner, workspace = _make_context()
     read_token = _create_api_key(user=user, permissions=_read_perms())
     write_token = _create_api_key(user=user, permissions=_write_perms())
-    _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}})
+    fake = _install_fake(monkeypatch, run_return={"ok": True, "repos": []})
+    assert fake is not None
 
     ok = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
-        data=json.dumps({"operation": "snapshot"}),
+        data=json.dumps({"operation": "list_repos"}),
         content_type="application/json",
         **_auth_headers(read_token, str(org.id)),
     )
@@ -266,11 +335,113 @@ def test_git_post_snapshot_read_perm_routing(client: Client, monkeypatch):
 
     denied = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
-        data=json.dumps({"operation": "snapshot"}),
+        data=json.dumps({"operation": "list_repos"}),
         content_type="application/json",
         **_auth_headers(write_token, str(org.id)),
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.django_db
+def test_git_post_repo_snapshot_and_history_read_perm_routing(
+    client: Client, monkeypatch
+):
+    """POST repo_snapshot/repo_history are read ops (git_read only)."""
+    user, org, runner, workspace = _make_context()
+    read_token = _create_api_key(user=user, permissions=_read_perms())
+    write_token = _create_api_key(user=user, permissions=_write_perms())
+    _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {}})
+
+    for payload in (
+        {"operation": "repo_snapshot", "repo_path": "/workspace/repo"},
+        {
+            "operation": "repo_history",
+            "repo_path": "/workspace/repo",
+            "history_limit": 10,
+        },
+    ):
+        ok = client.post(
+            f"/api/v1/workspaces/{workspace.id}/git/operation/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **_auth_headers(read_token, str(org.id)),
+        )
+        assert ok.status_code == 200
+
+        denied = client.post(
+            f"/api/v1/workspaces/{workspace.id}/git/operation/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **_auth_headers(write_token, str(org.id)),
+        )
+        assert denied.status_code == 403
+
+
+@pytest.mark.django_db
+def test_git_post_checkout_remote_branch_write_perm_routing(
+    client: Client, monkeypatch
+):
+    """POST checkout_remote_branch is a mutation: git_write ok, git_read 403."""
+    user, org, runner, workspace = _make_context()
+    read_token = _create_api_key(user=user, permissions=_read_perms())
+    write_token = _create_api_key(user=user, permissions=_write_perms())
+    fake = _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {}})
+    payload = {
+        "operation": "checkout_remote_branch",
+        "repo_path": "/workspace/repo",
+        "remote_ref": "origin/feature",
+    }
+
+    denied = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/operation/",
+        data=json.dumps(payload),
+        content_type="application/json",
+        **_auth_headers(read_token, str(org.id)),
+    )
+    assert denied.status_code == 403
+
+    ok = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/operation/",
+        data=json.dumps(payload),
+        content_type="application/json",
+        **_auth_headers(write_token, str(org.id)),
+    )
+    assert ok.status_code == 200
+    call = fake.run_git_operation.call_args
+    assert call.args[1] == "checkout_remote_branch"
+    assert call.kwargs["repo_path"] == "/workspace/repo"
+    assert call.kwargs["args"] == {"remote_ref": "origin/feature"}
+
+
+@pytest.mark.django_db
+def test_git_checkout_remote_branch_forwards_local_name(
+    client: Client, monkeypatch
+):
+    """POST checkout_remote_branch forwards remote_ref plus local_name."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_all_git_perms())
+    fake = _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {}})
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/operation/",
+        data=json.dumps(
+            {
+                "operation": "checkout_remote_branch",
+                "repo_path": "/workspace/repo",
+                "remote_ref": "origin/feature",
+                "local_name": "feature",
+            }
+        ),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    call = fake.run_git_operation.call_args
+    assert call.kwargs["args"] == {
+        "remote_ref": "origin/feature",
+        "local_name": "feature",
+    }
 
 
 @pytest.mark.django_db
@@ -279,7 +450,7 @@ def test_git_stage_happy_forwards_typed_args(client: Client, monkeypatch):
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.post(
@@ -305,7 +476,7 @@ def test_git_commit_happy_uses_authenticated_user(client: Client, monkeypatch):
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.post(
@@ -348,7 +519,7 @@ def test_git_commit_rejects_forbidden_fields_422(
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
     payload = {
         "operation": "commit",
@@ -393,6 +564,24 @@ def test_git_commit_rejects_forbidden_fields_422(
         {"operation": "commit", "repo_path": "/workspace/repo"},
         {"operation": "stage", "repo_path": "/workspace/repo"},
         {"operation": "rm_rf_everything", "repo_path": "/workspace/repo"},
+        {"operation": "snapshot"},
+        {"operation": "snapshot", "repo_path": "/workspace/repo"},
+        {"operation": "repo_snapshot"},
+        {"operation": "repo_history", "history_limit": 10},
+        {
+            "operation": "checkout_remote_branch",
+            "repo_path": "/workspace/repo",
+        },
+        {
+            "operation": "checkout_remote_branch",
+            "repo_path": "/workspace/repo",
+            "remote_ref": "",
+        },
+        {
+            "operation": "repo_history",
+            "repo_path": "/workspace/repo",
+            "history_limit": 0,
+        },
     ],
 )
 def test_git_post_rejects_invalid_fields(client: Client, monkeypatch, payload: dict):
@@ -400,7 +589,7 @@ def test_git_post_rejects_invalid_fields(client: Client, monkeypatch, payload: d
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.post(
@@ -420,7 +609,7 @@ def test_git_pull_branch_without_remote_rejected_422(client: Client, monkeypatch
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.post(
@@ -438,11 +627,11 @@ def test_git_pull_branch_without_remote_rejected_422(client: Client, monkeypatch
 
 @pytest.mark.django_db
 def test_git_get_rejects_invalid_repo_and_hash(client: Client, monkeypatch):
-    """GET diff/commit validate repo path and hash as 400; service untouched."""
+    """GET diff/commit/repo/history validate inputs as 400; service untouched."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     bad_repo = client.get(
@@ -459,9 +648,16 @@ def test_git_get_rejects_invalid_repo_and_hash(client: Client, monkeypatch):
     )
     assert bad_hash.status_code == 400
 
+    bad_snapshot_repo = client.get(
+        f"/api/v1/workspaces/{workspace.id}/git/repo/",
+        {"repo_path": "/etc/passwd"},
+        **_auth_headers(token, str(org.id)),
+    )
+    assert bad_snapshot_repo.status_code == 400
+
     bad_history = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
-        {"history_limit": 0},
+        f"/api/v1/workspaces/{workspace.id}/git/history/",
+        {"repo_path": "/workspace/repo", "history_limit": 0},
         **_auth_headers(token, str(org.id)),
     )
     assert bad_history.status_code == 400
@@ -483,14 +679,14 @@ def test_git_owner_isolation_returns_404_without_service_call(
     )
     other_token = _create_api_key(user=other, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
-    snapshot = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+    repos = client.get(
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(other_token, str(org.id)),
     )
-    assert snapshot.status_code == 404
+    assert repos.status_code == 404
 
     mutation = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
@@ -510,11 +706,11 @@ def test_git_unknown_workspace_returns_404(client: Client, monkeypatch):
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
-        monkeypatch, run_return={"ok": True, "snapshot": {"repos": []}}
+        monkeypatch, run_return={"ok": True, "repos": []}
     )
 
     response = client.get(
-        f"/api/v1/workspaces/{uuid.uuid4()}/git/",
+        f"/api/v1/workspaces/{uuid.uuid4()}/git/repos/",
         **_auth_headers(token, str(org.id)),
     )
     assert response.status_code == 404
@@ -567,7 +763,7 @@ def test_git_runner_timeout_result_maps_to_504(client: Client, monkeypatch):
     )
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(token, str(org.id)),
     )
 
@@ -588,7 +784,7 @@ def test_git_runner_other_error_maps_to_400(client: Client, monkeypatch):
     )
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(token, str(org.id)),
     )
 
@@ -610,7 +806,7 @@ def test_git_service_timeout_error_maps_to_504(client: Client, monkeypatch):
     _install_fake(monkeypatch, run_side_effect=_timeout)
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/",
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
         **_auth_headers(token, str(org.id)),
     )
 

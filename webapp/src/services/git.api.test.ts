@@ -5,8 +5,11 @@ import {
   buildGitOperationBody,
   conflictSnapshotOf,
   getGitCommitDetails,
-  getGitSnapshot,
+  getGitHistory,
+  getGitRepo,
+  getGitRepos,
   getGitWorkingDiff,
+  GIT_HISTORY_PAGE_SIZE,
   runGitOperation,
   type RawGitRepoSnapshot,
 } from './git.api'
@@ -41,7 +44,7 @@ function makeSnapshot(overrides: Partial<RawGitRepoSnapshot> = {}): RawGitRepoSn
     commits: [],
     has_more: false,
     history_skip: 0,
-    history_limit: 200,
+    history_limit: 50,
     changes: [],
     ...overrides,
   }
@@ -52,20 +55,38 @@ describe('git.api', () => {
     vi.clearAllMocks()
   })
 
-  it('builds the snapshot URL with history paging params', async () => {
-    getMock.mockResolvedValue({ ok: true, repos: [] })
-    await getGitSnapshot('ws-1')
-    expect(getMock).toHaveBeenCalledWith(
-      '/workspaces/ws-1/git/?history_limit=200&history_skip=0',
-    )
+  it('exports a history page size of 50', () => {
+    expect(GIT_HISTORY_PAGE_SIZE).toBe(50)
   })
 
-  it('forwards custom history paging and encodes the workspace id', async () => {
+  it('lists repo summaries via /git/repos/', async () => {
     getMock.mockResolvedValue({ ok: true, repos: [] })
-    await getGitSnapshot('ws/1', { historyLimit: 50, historySkip: 10 })
+    await getGitRepos('ws-1')
+    expect(getMock).toHaveBeenCalledWith('/workspaces/ws-1/git/repos/')
+  })
+
+  it('loads a single repo snapshot via /git/repo/ with repo_path', async () => {
+    getMock.mockResolvedValue({ ok: true, snapshot: makeSnapshot() })
+    await getGitRepo('ws-1', '/workspace/my repo')
+    const url = getMock.mock.calls[0]![0] as string
+    expect(url.startsWith('/workspaces/ws-1/git/repo/?')).toBe(true)
+    expect(url).toContain('repo_path=%2Fworkspace%2Fmy+repo')
+  })
+
+  it('pages history with default limit 50 and optional branch', async () => {
+    getMock.mockResolvedValue({ ok: true, repo_path: '/workspace/repo', commits: [], has_more: false, history_skip: 0, history_limit: 50 })
+    await getGitHistory('ws-1', '/workspace/repo')
     expect(getMock).toHaveBeenCalledWith(
-      '/workspaces/ws%2F1/git/?history_limit=50&history_skip=10',
+      '/workspaces/ws-1/git/history/?repo_path=%2Fworkspace%2Frepo&history_limit=50&history_skip=0',
     )
+
+    getMock.mockClear()
+    await getGitHistory('ws/1', '/workspace/repo', { limit: 50, skip: 10, branch: 'main' })
+    const url = getMock.mock.calls[0]![0] as string
+    expect(url.startsWith('/workspaces/ws%2F1/git/history/?')).toBe(true)
+    expect(url).toContain('history_limit=50')
+    expect(url).toContain('history_skip=10')
+    expect(url).toContain('branch=main')
   })
 
   it('encodes repo_path for the working diff endpoint', async () => {
@@ -113,6 +134,33 @@ describe('git.api', () => {
       branch: 'feature/x',
       start_point: 'main',
       checkout: true,
+    })
+  })
+
+  it('builds checkout_remote_branch bodies with remote_ref and local_name', async () => {
+    postMock.mockResolvedValue({ ok: true, snapshot: makeSnapshot() })
+    await runGitOperation('ws-1', {
+      operation: 'checkout_remote_branch',
+      repo_path: '/workspace/repo',
+      remote_ref: 'origin/feature/x',
+      local_name: 'feature/x',
+    })
+    expect(postMock).toHaveBeenCalledWith('/workspaces/ws-1/git/operation/', {
+      operation: 'checkout_remote_branch',
+      repo_path: '/workspace/repo',
+      remote_ref: 'origin/feature/x',
+      local_name: 'feature/x',
+    })
+    expect(
+      buildGitOperationBody({
+        operation: 'checkout_remote_branch',
+        repo_path: '/workspace/repo',
+        remote_ref: 'origin/feature/x',
+      }),
+    ).toEqual({
+      operation: 'checkout_remote_branch',
+      repo_path: '/workspace/repo',
+      remote_ref: 'origin/feature/x',
     })
   })
 

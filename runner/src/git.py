@@ -20,7 +20,8 @@ from typing import Any
 GIT_DISCOVERY_MAX_REPOS = 64
 
 #: Max reported history commits per snapshot request.
-GIT_HISTORY_DEFAULT_LIMIT = 200
+GIT_HISTORY_PAGE_SIZE = 50
+GIT_HISTORY_DEFAULT_LIMIT = 50
 GIT_HISTORY_MAX_LIMIT = 500
 
 #: Unified diff context lines.
@@ -44,11 +45,13 @@ GIT_NETWORK_TIMEOUT_S = 120.0
 _GIT_US = "\x1f"
 _GIT_RS = "\x1e"
 
-_NET_OPS = frozenset({"fetch", "pull", "push", "sync"})
-_READ_OPS = frozenset({"snapshot", "working_diff", "commit_details"})
+_NET_OPS = frozenset({"fetch", "pull", "push", "sync", "checkout_remote_branch"})
+_READ_OPS = frozenset({"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"})
 
 GIT_OPERATIONS = (
-    "snapshot",
+    "list_repos",
+    "repo_snapshot",
+    "repo_history",
     "working_diff",
     "commit_details",
     "stage",
@@ -61,6 +64,7 @@ GIT_OPERATIONS = (
     "sync",
     "checkout_branch",
     "checkout_commit",
+    "checkout_remote_branch",
     "create_branch",
     "rename_branch",
     "delete_branch",
@@ -76,7 +80,9 @@ GIT_OPERATIONS = (
 #: the backend for ``commit`` (never accepted from an external Git client),
 #: so the runner allows them on ``commit`` only.
 GIT_ALLOWED_ARGS: dict[str, frozenset] = {
-    "snapshot": frozenset({"history_limit", "history_skip"}),
+    "list_repos": frozenset(),
+    "repo_snapshot": frozenset(),
+    "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
     "working_diff": frozenset(),
     "commit_details": frozenset({"commit"}),
     "stage": frozenset({"paths"}),
@@ -89,6 +95,7 @@ GIT_ALLOWED_ARGS: dict[str, frozenset] = {
     "sync": frozenset({"remote"}),
     "checkout_branch": frozenset({"branch"}),
     "checkout_commit": frozenset({"commit"}),
+    "checkout_remote_branch": frozenset({"remote_ref", "local_name"}),
     "create_branch": frozenset({"branch", "start_point", "checkout"}),
     "rename_branch": frozenset({"new_branch", "old_branch"}),
     "delete_branch": frozenset({"branch"}),
@@ -225,9 +232,16 @@ def git_error_payload(exc: BaseException) -> dict[str, Any]:
             "exit_code": exc.exit_code,
         }
     if isinstance(exc, (ValueError, FileNotFoundError)):
-        code = "not_a_repo" if "epository" in str(exc) or "epo" in str(exc) else (
-            "invalid_argument" if isinstance(exc, ValueError) else "not_a_repo"
-        )
+        msg = str(exc)
+        # Allow-list errors mention operation names (list_repos /
+        # repo_snapshot / repo_history contain "repo") but are always
+        # invalid_argument, never not_a_repo.
+        if msg.startswith(("Unknown argument", "Unknown git operation")):
+            code = "invalid_argument"
+        else:
+            code = "not_a_repo" if "epository" in msg or "epo" in msg else (
+                "invalid_argument" if isinstance(exc, ValueError) else "not_a_repo"
+            )
         return {
             "ok": False,
             "code": code,
@@ -361,6 +375,42 @@ def validate_commit_hash(value: str, *, field: str = "commit") -> str:
     if not _HASH_RE.match(cleaned):
         raise ValueError(f"Invalid {field}: {value!r}")
     return cleaned
+
+
+def validate_remote_ref(value: str) -> str:
+    """Validate a ``remote/branch`` tracking ref (``origin/foo`` format)."""
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > 255:
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    if cleaned.startswith("-"):
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    if cleaned.count("/") != 1:
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    remote, branch_part = cleaned.split("/", 1)
+    # Remote names are single path components (no "/").
+    validate_branch_name(remote, field="remote_ref")
+    if "/" in remote:
+        raise ValueError(f"Invalid remote_ref: {value!r}")
+    # The branch part may itself be hierarchical (``origin/feat/x`` is
+    # rejected: exactly one "/" is required, see above).
+    validate_branch_name(branch_part, field="remote_ref")
+    return cleaned
+
+
+def validate_local_branch(value: str, *, field: str = "local_name") -> str:
+    """Validate the local branch name for remote checkout."""
+    return validate_branch_name(value, field=field)
+
+
+def validate_optional_branch(value: Any, *, field: str = "branch") -> str | None:
+    """Validate an optional branch filter (None allowed)."""
+    if value is None:
+        return None
+    return validate_branch_name(str(value), field=field)
 
 
 # --- git environment / auth ---------------------------------------------------
@@ -1558,6 +1608,7 @@ __all__ = [
     "GIT_DISCOVERY_MAX_REPOS",
     "GIT_HISTORY_DEFAULT_LIMIT",
     "GIT_HISTORY_MAX_LIMIT",
+    "GIT_HISTORY_PAGE_SIZE",
     "GIT_DIFF_CONTEXT_LINES",
     "GIT_MAX_DIFF_BYTES",
     "GIT_MAX_DIFF_FILES_WITH_PATCH",
@@ -1599,4 +1650,7 @@ __all__ = [
     "validate_author_name",
     "validate_branch_name",
     "validate_commit_hash",
+    "validate_local_branch",
+    "validate_optional_branch",
+    "validate_remote_ref",
 ]

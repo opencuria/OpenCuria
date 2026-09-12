@@ -9,6 +9,7 @@ import { useGitStore } from '@/stores/git'
 import {
   makeRawChange,
   makeRepoSnapshot,
+  setupGitRepos,
 } from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
@@ -23,12 +24,16 @@ vi.mock('vue-sonner', () => ({
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
@@ -70,7 +75,7 @@ describe('GitChangesSection', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     getDiff.mockResolvedValue({
       ok: true,
       repo_path: '/workspace/repo-app',
@@ -124,7 +129,7 @@ describe('GitChangesSection', () => {
       staged_kind: 'M',
       unstaged: 'M',
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot({ changes: [both] })] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ changes: [both] })])
     const store = await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -225,7 +230,7 @@ describe('GitChangesSection', () => {
   })
 
   it('keeps commit disabled without staged changes', async () => {
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot({ changes: [] })] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ changes: [] })])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -270,7 +275,7 @@ describe('GitChangesSection', () => {
     const clean = makeRepoSnapshot({
       branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 0, behind: 0 }],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [clean] })
+    setupGitRepos(getRepos, getRepo, getHistory, [clean])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -283,7 +288,7 @@ describe('GitChangesSection', () => {
       currentBranch: 'feature/fresh',
       branches: [{ name: 'feature/fresh', tip_hash: 'f4a9c21', upstream: null, ahead: 0, behind: 0 }],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [fresh] })
+    setupGitRepos(getRepos, getRepo, getHistory, [fresh])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -334,10 +339,7 @@ describe('GitChangesSection', () => {
   })
 
   it('disables pull/sync/push while detached or busy', async () => {
-    getSnapshot.mockResolvedValue({
-      ok: true,
-      repos: [makeRepoSnapshot({ currentBranch: null, headHash: 'e8b7d3a' })],
-    })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ currentBranch: null, headHash: 'e8b7d3a' })])
     await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -394,7 +396,7 @@ describe('GitChangesSection', () => {
         }),
       ],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [merging] })
+    setupGitRepos(getRepos, getRepo, getHistory, [merging])
     const store = await initStore()
     const wrapper = mountSection()
     await nextTick()
@@ -437,7 +439,7 @@ describe('GitChangesSection', () => {
         }),
       ],
     })
-    getSnapshot.mockResolvedValue({ ok: true, repos: [merging] })
+    setupGitRepos(getRepos, getRepo, getHistory, [merging])
     await initStore()
     const wrapper = mountSection()
     await nextTick()

@@ -6,7 +6,9 @@ import { nextTick } from 'vue'
 import GitBranchDialog from './GitBranchDialog.vue'
 import * as gitApi from '@/services/git.api'
 import { useGitStore } from '@/stores/git'
-import { makeRepoSnapshot } from '@/stores/git.fixtures'
+import { makeRepoSnapshot,
+  setupGitRepos,
+} from '@/stores/git.fixtures'
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -20,12 +22,16 @@ vi.mock('vue-sonner', () => ({
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
   getGitCommitDetails: vi.fn(),
-  getGitSnapshot: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
   getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
-const getSnapshot = vi.mocked(gitApi.getGitSnapshot)
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
 const runOp = vi.mocked(gitApi.runGitOperation)
 
 function mountDialog(props: Record<string, unknown> = {}) {
@@ -59,7 +65,7 @@ describe('GitBranchDialog', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    getSnapshot.mockResolvedValue({ ok: true, repos: [makeRepoSnapshot()] })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
     runOp.mockImplementation(async (_ws, payload) => ({
       ok: true,
       snapshot: makeRepoSnapshot(),

@@ -514,7 +514,9 @@ class ImageDefinitionDuplicateIn(Schema):
 
 #: Whitelisted git operations (mirrors GIT_OPERATIONS in runner/src/git.py).
 GitOperation = Literal[
-    "snapshot",
+    "list_repos",
+    "repo_snapshot",
+    "repo_history",
     "working_diff",
     "commit_details",
     "stage",
@@ -527,6 +529,7 @@ GitOperation = Literal[
     "sync",
     "checkout_branch",
     "checkout_commit",
+    "checkout_remote_branch",
     "create_branch",
     "rename_branch",
     "delete_branch",
@@ -597,13 +600,44 @@ def validate_commit_hash(value: str) -> str:
     return _validate_commit_hash(value)
 
 
-class GitSnapshotQuery(Schema):
-    """Query params for GET /git/ (snapshot discovery with history paging)."""
+class GitRepoQuery(Schema):
+    """Query params for GET /git/repo (per-repo snapshot)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    history_limit: int = Field(default=200, ge=1, le=500)
+    repo_path: str = Field(..., max_length=512)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str) -> str:
+        result = _validate_repo_path(value)
+        assert result is not None
+        return result
+
+
+class GitHistoryQuery(Schema):
+    """Query params for GET /git/history (paged per-repo commit history)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_path: str = Field(..., max_length=512)
+    history_limit: int = Field(default=50, ge=1, le=500)
     history_skip: int = Field(default=0, ge=0)
+    branch: str | None = Field(default=None, max_length=255)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str) -> str:
+        result = _validate_repo_path(value)
+        assert result is not None
+        return result
+
+    @field_validator("branch")
+    @classmethod
+    def _check_branch(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_branch(value)
 
 
 class GitDiffQuery(Schema):
@@ -661,6 +695,8 @@ class GitOperationIn(Schema):
     old_branch: str | None = Field(default=None, max_length=255)
     start_point: str | None = Field(default=None, max_length=255)
     remote: str | None = Field(default=None, max_length=255)
+    remote_ref: str | None = Field(default=None, max_length=255)
+    local_name: str | None = Field(default=None, max_length=255)
     checkout: bool | None = None
     set_upstream: bool | None = None
     history_limit: int | None = Field(default=None, ge=1, le=500)
@@ -678,7 +714,7 @@ class GitOperationIn(Schema):
             return None
         return _validate_file_paths(value)
 
-    @field_validator("branch", "target", "new_branch", "old_branch", "start_point")
+    @field_validator("branch", "target", "new_branch", "old_branch", "start_point", "remote_ref", "local_name")
     @classmethod
     def _check_branch(cls, value: str | None) -> str | None:
         if value is None:
@@ -717,7 +753,7 @@ class GitOperationIn(Schema):
     def _check_operation_fields(self) -> "GitOperationIn":
         """Require the fields each operation needs (fail fast, 422)."""
         op = self.operation
-        needs_repo = op not in {"snapshot"}
+        needs_repo = op not in {"list_repos"}
         if needs_repo and not self.repo_path:
             raise ValueError(f"repo_path is required for operation {op!r}")
         if op in {"stage", "unstage", "discard"} and not self.paths:
@@ -730,6 +766,8 @@ class GitOperationIn(Schema):
             raise ValueError("branch is required for checkout_branch")
         if op == "checkout_commit" and not (self.commit or "").strip():
             raise ValueError("commit is required for checkout_commit")
+        if op == "checkout_remote_branch" and not (self.remote_ref or "").strip():
+            raise ValueError("remote_ref is required for checkout_remote_branch")
         if op == "create_branch" and not (self.branch or "").strip():
             raise ValueError("branch is required for create_branch")
         if op == "rename_branch" and not (self.new_branch or "").strip():

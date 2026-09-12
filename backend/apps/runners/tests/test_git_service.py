@@ -48,8 +48,8 @@ def _feed_git_reply(
     )
 
 
-def _emit_ok_snapshot(service: RunnerService, runner, workspace, payload_extra=None):
-    """Install an _emit_to_runner fake that replies with a happy snapshot."""
+def _emit_ok(service: RunnerService, runner, workspace, payload_extra=None):
+    """Install an _emit_to_runner fake that replies with a happy list_repos."""
     seen: list[dict] = []
 
     async def _emit(runner_arg, event, payload):
@@ -60,7 +60,7 @@ def _emit_ok_snapshot(service: RunnerService, runner, workspace, payload_extra=N
             "workspace_id": str(workspace.id),
             "operation": payload["operation"],
             "ok": True,
-            "snapshot": {"repos": []},
+            "repos": [],
         }
         if payload_extra:
             result.update(payload_extra)
@@ -72,31 +72,100 @@ def _emit_ok_snapshot(service: RunnerService, runner, workspace, payload_extra=N
     return seen
 
 
+# Back-compat alias for the ok-reply emit helper.
+_emit_ok_snapshot = _emit_ok
+
+
 @pytest.mark.django_db(transaction=True)
 class TestRunGitOperationHappyPath:
     @pytest.mark.asyncio
-    async def test_snapshot_dispatch_payload_and_result(
+    async def test_list_repos_dispatch_payload_and_result(
         self, service, runner, workspace
     ):
-        """Snapshot dispatches whitelisted payload and returns runner result."""
-        seen = _emit_ok_snapshot(service, runner, workspace)
+        """list_repos dispatches a whitelisted payload and returns the result."""
+        seen = _emit_ok(service, runner, workspace)
 
         result = await service.run_git_operation(
             workspace.id,
-            "snapshot",
-            args={"history_limit": 200, "history_skip": 0},
+            "list_repos",
+            args={},
         )
 
         assert result["ok"] is True
-        assert result["snapshot"] == {"repos": []}
+        assert result["repos"] == []
         assert len(seen) == 1
         payload = seen[0]
-        assert payload["operation"] == "snapshot"
+        assert payload["operation"] == "list_repos"
         assert payload["workspace_id"] == str(workspace.id)
-        assert payload["args"] == {"history_limit": 200, "history_skip": 0}
+        assert payload["args"] == {}
         assert "request_id" in payload
         assert "repo_path" not in payload
         assert "env" not in payload.get("args", {})
+
+    @pytest.mark.asyncio
+    async def test_repo_snapshot_dispatch_includes_repo_path(
+        self, service, runner, workspace
+    ):
+        """repo_snapshot forwards repo_path top-level with empty args."""
+        seen = _emit_ok(
+            service, runner, workspace, payload_extra={"snapshot": {"path": "x"}}
+        )
+
+        result = await service.run_git_operation(
+            workspace.id,
+            "repo_snapshot",
+            repo_path="/workspace/repo",
+            args={},
+        )
+
+        assert result["ok"] is True
+        payload = seen[0]
+        assert payload["operation"] == "repo_snapshot"
+        assert payload["repo_path"] == "/workspace/repo"
+        assert payload["args"] == {}
+
+    @pytest.mark.asyncio
+    async def test_repo_history_forwards_paging_and_branch(
+        self, service, runner, workspace
+    ):
+        """repo_history forwards history_limit/skip/branch verbatim."""
+        seen = _emit_ok(service, runner, workspace)
+
+        await service.run_git_operation(
+            workspace.id,
+            "repo_history",
+            repo_path="/workspace/repo",
+            args={"history_limit": 25, "history_skip": 10, "branch": "main"},
+        )
+
+        payload = seen[0]
+        assert payload["operation"] == "repo_history"
+        assert payload["repo_path"] == "/workspace/repo"
+        assert payload["args"] == {
+            "history_limit": 25,
+            "history_skip": 10,
+            "branch": "main",
+        }
+
+    @pytest.mark.asyncio
+    async def test_checkout_remote_branch_forwards_refs(
+        self, service, runner, workspace
+    ):
+        """checkout_remote_branch forwards remote_ref plus optional local_name."""
+        seen = _emit_ok(service, runner, workspace)
+
+        await service.run_git_operation(
+            workspace.id,
+            "checkout_remote_branch",
+            repo_path="/workspace/repo",
+            args={"remote_ref": "origin/feat", "local_name": "feat"},
+        )
+
+        payload = seen[0]
+        assert payload["args"] == {
+            "remote_ref": "origin/feat",
+            "local_name": "feat",
+        }
 
     @pytest.mark.asyncio
     async def test_stage_includes_repo_path(self, service, runner, workspace):
@@ -146,7 +215,7 @@ class TestRunGitOperationHappyPath:
 
     @pytest.mark.asyncio
     async def test_per_repo_serialization_keys(self, service, workspace):
-        """Lock keys are per workspace/repo; bare snapshot uses /workspace."""
+        """Lock keys are per workspace/repo; bare list_repos uses /workspace."""
         assert service._git_lock_key(workspace.id, None) == f"{workspace.id}:/workspace"
         assert service._git_lock_key(workspace.id, "/workspace/repo") == (
             f"{workspace.id}:/workspace/repo"
@@ -216,7 +285,9 @@ class TestStrictGitArgs:
     @pytest.mark.parametrize(
         "operation,args",
         [
-            ("snapshot", {"env": {"GIT_DIR": "/tmp"}}),
+            ("list_repos", {"env": {"GIT_DIR": "/tmp"}}),
+            ("repo_snapshot", {"history_limit": 5}),
+            ("repo_history", {"remote": "origin"}),
             ("stage", {"paths": ["a"], "env": {}}),
             ("commit", {"message": "x", "author_name": "Mallory"}),
             ("commit", {"message": "x", "author_email": "m@x.y"}),
@@ -232,7 +303,13 @@ class TestStrictGitArgs:
         """env/author/args/argv/aliases never reach the runner."""
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         kwargs: dict = {"args": args}
-        if operation in {"stage", "commit"}:
+        if operation in {
+            "stage",
+            "commit",
+            "repo_snapshot",
+            "repo_history",
+            "checkout_remote_branch",
+        }:
             kwargs["repo_path"] = "/workspace/repo"
         with pytest.raises(ValueError, match="Unknown argument|env|author"):
             await service.run_git_operation(workspace.id, operation, **kwargs)
@@ -248,6 +325,11 @@ class TestStrictGitArgs:
             ("commit_details", {"commit": "zzz"}),
             ("checkout_branch", {}),
             ("checkout_commit", {"commit": "nope"}),
+            ("checkout_remote_branch", {}),
+            ("checkout_remote_branch", {"remote_ref": ""}),
+            ("repo_history", {"history_limit": 0}),
+            ("repo_history", {"history_limit": 501}),
+            ("repo_history", {"history_skip": -1}),
             ("create_branch", {}),
             ("rename_branch", {}),
             ("delete_branch", {}),
@@ -328,10 +410,13 @@ class TestStrictGitArgs:
         self, service
     ):
         """Backend waits longer than runner outer budgets (60s/150s)."""
-        assert service.git_timeout_for("snapshot") == 75
+        assert service.git_timeout_for("list_repos") == 75
+        assert service.git_timeout_for("repo_snapshot") == 75
+        assert service.git_timeout_for("repo_history") == 75
         assert service.git_timeout_for("working_diff") == 75
         assert service.git_timeout_for("fetch") == 180
         assert service.git_timeout_for("pull") == 180
+        assert service.git_timeout_for("checkout_remote_branch") == 180
 
 
 @pytest.mark.django_db(transaction=True)
@@ -340,7 +425,7 @@ class TestGitDispatchGuards:
     async def test_missing_workspace(self, service):
         """Unknown workspace IDs raise NotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.run_git_operation(uuid.uuid4(), "snapshot")
+            await service.run_git_operation(uuid.uuid4(), "list_repos")
 
     @pytest.mark.asyncio
     async def test_offline_runner(self, service, offline_runner, user):
@@ -354,7 +439,7 @@ class TestGitDispatchGuards:
             created_by=user,
         )
         with pytest.raises(RunnerOfflineError):
-            await service.run_git_operation(workspace.id, "snapshot")
+            await service.run_git_operation(workspace.id, "list_repos")
 
     @pytest.mark.asyncio
     async def test_runner_without_sid_is_offline(self, service, runner, workspace):
@@ -363,13 +448,13 @@ class TestGitDispatchGuards:
         runner.save(update_fields=["sid"])
         workspace.refresh_from_db()
         with pytest.raises(RunnerOfflineError):
-            await service.run_git_operation(workspace.id, "snapshot")
+            await service.run_git_operation(workspace.id, "list_repos")
 
     @pytest.mark.asyncio
     async def test_not_running_workspace(self, service, stopped_workspace):
         """Non-running workspaces cannot run git operations."""
         with pytest.raises(WorkspaceStateError):
-            await service.run_git_operation(stopped_workspace.id, "snapshot")
+            await service.run_git_operation(stopped_workspace.id, "list_repos")
 
     @pytest.mark.asyncio
     async def test_active_operation_blocks_git(
@@ -379,7 +464,7 @@ class TestGitDispatchGuards:
         workspace.active_operation = "restarting"
         workspace.save(update_fields=["active_operation"])
         with pytest.raises(WorkspaceStateError):
-            await service.run_git_operation(workspace.id, "snapshot")
+            await service.run_git_operation(workspace.id, "list_repos")
 
     @pytest.mark.asyncio
     async def test_timeout_raises_runner_timeout_error(
@@ -389,7 +474,7 @@ class TestGitDispatchGuards:
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         monkeypatch.setattr(RunnerService, "git_timeout_for", classmethod(lambda cls, op: 0.02))
         with pytest.raises(RunnerTimeoutError):
-            await service.run_git_operation(workspace.id, "snapshot")
+            await service.run_git_operation(workspace.id, "list_repos")
 
     @pytest.mark.asyncio
     async def test_emit_failure_propagates(
@@ -402,7 +487,7 @@ class TestGitDispatchGuards:
 
         service._emit_to_runner = _boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="socket down"):
-            await service.run_git_operation(workspace.id, "snapshot")
+            await service.run_git_operation(workspace.id, "list_repos")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -428,14 +513,14 @@ class TestHandleGitReply:
     def test_missing_workspace_id_dropped(self, service, runner, workspace):
         """Authenticated replies without workspace_id are dropped."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-1"
+            service, workspace.id, "list_repos", "req-1"
         )
         try:
             service.handle_git_reply(
                 "git:operation_result",
                 {
                     "request_id": "req-1",
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -461,7 +546,7 @@ class TestHandleGitReply:
             available_runtimes=["docker"],
         )
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-2"
+            service, workspace.id, "list_repos", "req-2"
         )
         try:
             service.handle_git_reply(
@@ -469,7 +554,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-2",
                     "workspace_id": str(workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(other.id),
@@ -482,7 +567,7 @@ class TestHandleGitReply:
     def test_happy_reply_resolves_future(self, service, runner, workspace):
         """Exact workspace_id + operation match resolves the waiter."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-ok"
+            service, workspace.id, "list_repos", "req-ok"
         )
         try:
             service.handle_git_reply(
@@ -490,7 +575,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-ok",
                     "workspace_id": str(workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -499,7 +584,7 @@ class TestHandleGitReply:
             assert fut.result() == {
                 "request_id": "req-ok",
                 "workspace_id": str(workspace.id),
-                "operation": "snapshot",
+                "operation": "list_repos",
                 "ok": True,
             }
         finally:
@@ -511,7 +596,7 @@ class TestHandleGitReply:
     ):
         """Unit/internal replies (runner_id None) still require exact match."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-internal"
+            service, workspace.id, "list_repos", "req-internal"
         )
         try:
             service.handle_git_reply(
@@ -519,7 +604,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-internal",
                     "workspace_id": str(workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=None,
@@ -532,7 +617,7 @@ class TestHandleGitReply:
     def test_missing_operation_dropped(self, service, runner, workspace):
         """Socket contract requires operation; missing never resolves."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-no-op"
+            service, workspace.id, "list_repos", "req-no-op"
         )
         try:
             service.handle_git_reply(
@@ -552,7 +637,7 @@ class TestHandleGitReply:
     def test_operation_mismatch_dropped(self, service, runner, workspace):
         """Same-runner reply with the wrong operation never resolves."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-op-mismatch"
+            service, workspace.id, "list_repos", "req-op-mismatch"
         )
         try:
             service.handle_git_reply(
@@ -573,7 +658,7 @@ class TestHandleGitReply:
     def test_nonstring_operation_dropped(self, service, runner, workspace):
         """Non-string operation echoes are malformed and dropped."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-op-nonstr"
+            service, workspace.id, "list_repos", "req-op-nonstr"
         )
         try:
             service.handle_git_reply(
@@ -581,7 +666,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-op-nonstr",
                     "workspace_id": str(workspace.id),
-                    "operation": {"name": "snapshot"},
+                    "operation": {"name": "list_repos"},
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -605,7 +690,7 @@ class TestHandleGitReply:
             created_by=user,
         )
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-ws-mismatch"
+            service, workspace.id, "list_repos", "req-ws-mismatch"
         )
         try:
             service.handle_git_reply(
@@ -613,7 +698,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-ws-mismatch",
                     "workspace_id": str(other_workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -637,7 +722,7 @@ class TestHandleGitReply:
             created_by=user,
         )
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-ws-mismatch-internal"
+            service, workspace.id, "list_repos", "req-ws-mismatch-internal"
         )
         try:
             service.handle_git_reply(
@@ -645,7 +730,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-ws-mismatch-internal",
                     "workspace_id": str(other_workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=None,
@@ -658,7 +743,7 @@ class TestHandleGitReply:
     def test_invalid_workspace_uuid_dropped(self, service, runner, workspace):
         """Malformed workspace_id UUIDs are dropped without resolving."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-ws-invalid"
+            service, workspace.id, "list_repos", "req-ws-invalid"
         )
         try:
             service.handle_git_reply(
@@ -666,7 +751,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-ws-invalid",
                     "workspace_id": "not-a-uuid",
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -681,7 +766,7 @@ class TestHandleGitReply:
     ):
         """A dropped mismatch must not consume the waiter; happy retry wins."""
         loop, fut = self._register_pending(
-            service, workspace.id, "snapshot", "req-retry"
+            service, workspace.id, "list_repos", "req-retry"
         )
         try:
             service.handle_git_reply(
@@ -701,7 +786,7 @@ class TestHandleGitReply:
                 {
                     "request_id": "req-retry",
                     "workspace_id": str(workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -724,7 +809,7 @@ class TestHandleGitReply:
             await service._await_git_result(
                 request_id=request_id,
                 workspace_id=workspace.id,
-                operation="snapshot",
+                operation="list_repos",
                 payload={"request_id": request_id},
                 runner=runner,
                 timeout=0.02,
@@ -745,14 +830,14 @@ class TestHandleGitReply:
             seen["pending"] = pending
             assert isinstance(pending, _PendingGitRequest)
             assert pending.workspace_id == str(workspace.id)
-            assert pending.operation == "snapshot"
+            assert pending.operation == "list_repos"
             assert event == "git:operation"
             service.handle_git_reply(
                 "git:operation_result",
                 {
                     "request_id": payload["request_id"],
                     "workspace_id": str(workspace.id),
-                    "operation": "snapshot",
+                    "operation": "list_repos",
                     "ok": True,
                 },
                 runner_id=str(runner.id),
@@ -762,7 +847,7 @@ class TestHandleGitReply:
         result = await service._await_git_result(
             request_id="req-register-check",
             workspace_id=workspace.id,
-            operation="snapshot",
+            operation="list_repos",
             payload={"request_id": "req-register-check"},
             runner=runner,
             timeout=5.0,
@@ -770,7 +855,7 @@ class TestHandleGitReply:
         assert result["ok"] is True
         assert "req-register-check" not in service._git_pending
         assert seen["pending"].workspace_id == str(workspace.id)
-        assert seen["pending"].operation == "snapshot"
+        assert seen["pending"].operation == "list_repos"
 
     def test_unknown_event_ignored(self, service):
         """Non-git events never touch git futures."""

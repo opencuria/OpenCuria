@@ -4,7 +4,9 @@
  * Typed raw (snake_case) contracts mirroring the backend git integration
  * (`backend/apps/runners/api.py` + `runner/src/git.py` / `service.py`):
  *
- * - GET `/workspaces/{id}/git/?history_limit=..&history_skip=..`
+ * - GET `/workspaces/{id}/git/repos/` (light summaries)
+ * - GET `/workspaces/{id}/git/repo/?repo_path=..` (full single-repo snapshot)
+ * - GET `/workspaces/{id}/git/history/?repo_path=..&history_limit=..&history_skip=..&branch=..`
  * - GET `/workspaces/{id}/git/diff/?repo_path=..`
  * - GET `/workspaces/{id}/git/commits/{hash}/?repo_path=..`
  * - POST `/workspaces/{id}/git/operation/` (typed fields only)
@@ -109,9 +111,32 @@ export interface RawGitRepoSnapshot {
   changes: RawGitChange[]
 }
 
-export interface RawGitSnapshotResponse {
+/** Light per-repo summary from GET /git/repos/ (no branches/commits/changes). */
+export interface RawGitRepoSummary {
+  id: string
+  name: string
+  path: string
+  current_branch: string | null
+  head_hash: string | null
+}
+
+export interface RawGitReposResponse {
   ok: boolean
-  repos: RawGitRepoSnapshot[]
+  repos: RawGitRepoSummary[]
+}
+
+export interface RawGitRepoResponse {
+  ok: boolean
+  snapshot: RawGitRepoSnapshot
+}
+
+export interface RawGitHistoryResponse {
+  ok: boolean
+  repo_path: string
+  commits: RawGitCommit[]
+  has_more: boolean
+  history_skip: number
+  history_limit: number
 }
 
 export interface RawGitWorkingDiff {
@@ -176,7 +201,9 @@ export interface RawGitConflictPayload {
 // ---------------------------------------------------------------------------
 
 export type GitOperationName =
-  | 'snapshot'
+  | 'list_repos'
+  | 'repo_snapshot'
+  | 'repo_history'
   | 'working_diff'
   | 'commit_details'
   | 'stage'
@@ -189,6 +216,7 @@ export type GitOperationName =
   | 'sync'
   | 'checkout_branch'
   | 'checkout_commit'
+  | 'checkout_remote_branch'
   | 'create_branch'
   | 'rename_branch'
   | 'delete_branch'
@@ -198,7 +226,7 @@ export type GitOperationName =
 
 export interface GitOperationRequest {
   operation: GitOperationName
-  /** Absolute repo path under /workspace. Omitted for `snapshot`. */
+  /** Absolute repo path under /workspace. Omitted for `list_repos`. */
   repo_path?: string | null
   paths?: string[]
   message?: string
@@ -209,6 +237,8 @@ export interface GitOperationRequest {
   old_branch?: string
   start_point?: string
   remote?: string
+  remote_ref?: string
+  local_name?: string
   checkout?: boolean
   set_upstream?: boolean
   history_limit?: number
@@ -219,18 +249,38 @@ export interface GitOperationRequest {
 // API methods
 // ---------------------------------------------------------------------------
 
-export const GIT_HISTORY_DEFAULT_LIMIT = 200
-export const GIT_HISTORY_DEFAULT_SKIP = 0
+/** Default page size for paged history requests. */
+export const GIT_HISTORY_PAGE_SIZE = 50
 
-export function getGitSnapshot(
+/** List light repo summaries (no branches/commits/changes). */
+export function getGitRepos(workspaceId: string): Promise<RawGitReposResponse> {
+  return get<RawGitReposResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/git/repos/`,
+  )
+}
+
+/** Load the full single-repo snapshot (status/branches/remotes/recent history). */
+export function getGitRepo(
   workspaceId: string,
-  opts?: { historyLimit?: number; historySkip?: number },
-): Promise<RawGitSnapshotResponse> {
-  const params = new URLSearchParams()
-  params.set('history_limit', String(opts?.historyLimit ?? GIT_HISTORY_DEFAULT_LIMIT))
-  params.set('history_skip', String(opts?.historySkip ?? GIT_HISTORY_DEFAULT_SKIP))
-  return get<RawGitSnapshotResponse>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/git/?${params.toString()}`,
+  repoPath: string,
+): Promise<RawGitRepoResponse> {
+  const params = new URLSearchParams({ repo_path: repoPath })
+  return get<RawGitRepoResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/git/repo/?${params.toString()}`,
+  )
+}
+
+export function getGitHistory(
+  workspaceId: string,
+  repoPath: string,
+  opts?: { limit?: number; skip?: number; branch?: string },
+): Promise<RawGitHistoryResponse> {
+  const params = new URLSearchParams({ repo_path: repoPath })
+  params.set('history_limit', String(opts?.limit ?? GIT_HISTORY_PAGE_SIZE))
+  params.set('history_skip', String(opts?.skip ?? 0))
+  if (opts?.branch) params.set('branch', opts.branch)
+  return get<RawGitHistoryResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/git/history/?${params.toString()}`,
   )
 }
 
@@ -276,6 +326,8 @@ export function buildGitOperationBody(payload: GitOperationRequest): Record<stri
     old_branch: payload.old_branch,
     start_point: payload.start_point,
     remote: payload.remote,
+    remote_ref: payload.remote_ref,
+    local_name: payload.local_name,
     checkout: payload.checkout,
     set_upstream: payload.set_upstream,
     history_limit: payload.history_limit,

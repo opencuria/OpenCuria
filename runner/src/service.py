@@ -3930,20 +3930,68 @@ class WorkspaceService:
 
     # -- git snapshot helpers -------------------------------------------------
 
-    async def _git_repo_snapshot(
+    async def _git_list_entry(
         self,
         runtime: RuntimeBackend,
         instance_id: str,
         repo_root: str,
         env: dict[str, str],
-        *,
-        history_limit: int = git_ops.GIT_HISTORY_DEFAULT_LIMIT,
-        history_skip: int = 0,
     ) -> dict[str, Any]:
-        """Build the full snapshot dict for one repository root."""
+        """Build a lightweight list entry for one repository root.
+
+        Only ``rev-parse --abbrev-ref HEAD`` + ``rev-parse HEAD`` (no
+        status, no log, no for-each-ref).  Detached HEAD (abbrev ``HEAD``)
+        and unborn repos (no ``HEAD`` commit) map to
+        ``current_branch=None``; unborn additionally maps to
+        ``head_hash=None``.
+        """
         timeout = git_ops.GIT_READ_TIMEOUT_S
-        capped_limit = max(1, min(int(history_limit), git_ops.GIT_HISTORY_MAX_LIMIT))
-        capped_skip = max(0, int(history_skip))
+        exit_code_b, abbrev_out = await self._git_exec(
+            runtime,
+            instance_id,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            workdir=repo_root,
+            env=env,
+            timeout=timeout,
+        )
+        current_branch: str | None = None
+        if exit_code_b == 0 and abbrev_out.strip():
+            head_name = abbrev_out.strip().splitlines()[0].strip()
+            # Detached HEAD reports literally "HEAD".
+            current_branch = None if head_name in {"", "HEAD"} else head_name
+        exit_code_h, head_out = await self._git_exec(
+            runtime,
+            instance_id,
+            ["git", "rev-parse", "HEAD"],
+            workdir=repo_root,
+            env=env,
+            timeout=timeout,
+        )
+        head_hash: str | None = None
+        if exit_code_h == 0 and head_out.strip():
+            head_hash = head_out.strip().splitlines()[0].strip() or None
+        if head_hash is None:
+            # Unborn repo: no commit exists, so no branch is meaningful
+            # even when rev-parse --abbrev-ref echoed one.
+            current_branch = None
+        name = repo_root.rstrip("/").rsplit("/", 1)[-1] or "workspace"
+        return {
+            "id": repo_root,
+            "name": name,
+            "path": repo_root,
+            "current_branch": current_branch,
+            "head_hash": head_hash,
+        }
+
+    async def _git_repo_snapshot_no_log(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        repo_root: str,
+        env: dict[str, str],
+    ) -> dict[str, Any]:
+        """Build the snapshot dict for one repository root (no history)."""
+        timeout = git_ops.GIT_READ_TIMEOUT_S
 
         exit_code, status_out = await self._git_exec(
             runtime,
@@ -4067,23 +4115,84 @@ class WorkspaceService:
         # Merge / rebase / cherry-pick state.
         merge_state = await self._git_merge_state(runtime, instance_id, repo_root, env)
 
-        # Paginated history over ALL refs (newest first) + has_more probe.
+        name = repo_root.rstrip("/").rsplit("/", 1)[-1] or "workspace"
+        return {
+            "id": repo_root,
+            "name": name,
+            "path": repo_root,
+            "current_branch": branch_header.get("head"),
+            "head_hash": branch_header.get("oid"),
+            "branches": branches,
+            "remote_refs": remote_refs,
+            "remotes": remotes,
+            "default_remote": default_remote,
+            "upstream": branch_header.get("upstream"),
+            "ahead": int(branch_header.get("ahead", 0)),
+            "behind": int(branch_header.get("behind", 0)),
+            "merge_state": merge_state,
+            "changes": [
+                {
+                    "path": item["path"],
+                    "old_path": item.get("old_path"),
+                    "status": item["status"],
+                    "staged": item.get("staged") is not None,
+                    "staged_kind": item.get("staged"),
+                    "unstaged": item.get("unstaged"),
+                    "conflict": item.get("conflict"),
+                    "diff": [],
+                }
+                for item in changes
+            ],
+        }
+
+    async def _git_repo_history(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        repo_root: str,
+        env: dict[str, str],
+        *,
+        limit: int = git_ops.GIT_HISTORY_DEFAULT_LIMIT,
+        skip: int = 0,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one paginated history page for a repository root.
+
+        Only ``git log --max-count limit+1 --skip skip`` (``--all`` when
+        *branch* is None, else ``refs/heads/<branch>``).  The extra probe
+        commit yields ``has_more``.
+        """
+        timeout = git_ops.GIT_READ_TIMEOUT_S
+        capped_limit = max(1, min(int(limit), git_ops.GIT_HISTORY_MAX_LIMIT))
+        capped_skip = max(0, int(skip))
+        # Paginated history (newest first) + has_more probe.
         # ``--all --date-order`` covers every local branch, remote-tracking
         # ref, tag and stash entry — like vscode-git-graph — while detached
         # HEAD commits stay included (HEAD is an implicit starting point).
         # ``--exclude`` precedes ``--all`` (option order matters) to hide
         # only the internal notes fan-out (refs/notes/*); stash (refs/stash)
         # remains visible on purpose.
+        us = git_ops._GIT_US
+        rs = git_ops._GIT_RS
         log_format = (
             f"%H{us}%h{us}%P{us}%aN{us}%aE{us}%aI{us}"
             f"%cN{us}%cE{us}%cI{us}%s{us}%b{rs}"
         )
+        argv = [
+            "git", "log", "--exclude=refs/notes/*",
+        ]
+        if branch is not None:
+            argv.append(f"refs/heads/{branch}")
+        else:
+            argv.append("--all")
+        argv += [
+            "--date-order", f"--format={log_format}",
+            f"--max-count={capped_limit + 1}", f"--skip={capped_skip}",
+        ]
         exit_code_l, log_out = await self._git_exec(
             runtime,
             instance_id,
-            ["git", "log", "--exclude=refs/notes/*", "--all",
-             "--date-order", f"--format={log_format}",
-             f"--max-count={capped_limit + 1}", f"--skip={capped_skip}"],
+            argv,
             workdir=repo_root,
             env=env,
             timeout=timeout,
@@ -4109,41 +4218,31 @@ class WorkspaceService:
                         "parents": item.get("parents", []),
                     }
                 )
-        elif branch_header.get("oid") is None:
-            commits = []
-
-        name = repo_root.rstrip("/").rsplit("/", 1)[-1] or "workspace"
+        if exit_code_l != 0:
+            # Unborn repo: no commits exist yet — empty page, not an error.
+            exit_code_h, _ = await self._git_exec(
+                runtime, instance_id,
+                ["git", "rev-parse", "--verify", "HEAD"],
+                workdir=repo_root, env=env, timeout=timeout,
+            )
+            if exit_code_h != 0:
+                return {
+                    "commits": [],
+                    "has_more": False,
+                    "history_skip": capped_skip,
+                    "history_limit": capped_limit,
+                }
+            raise git_ops.GitError(
+                "git_failed",
+                "git log failed",
+                exit_code=exit_code_l,
+                stderr=log_out,
+            )
         return {
-            "id": repo_root,
-            "name": name,
-            "path": repo_root,
-            "current_branch": branch_header.get("head"),
-            "head_hash": branch_header.get("oid"),
-            "branches": branches,
-            "remote_refs": remote_refs,
-            "remotes": remotes,
-            "default_remote": default_remote,
-            "upstream": branch_header.get("upstream"),
-            "ahead": int(branch_header.get("ahead", 0)),
-            "behind": int(branch_header.get("behind", 0)),
-            "merge_state": merge_state,
             "commits": commits,
             "has_more": has_more,
             "history_skip": capped_skip,
             "history_limit": capped_limit,
-            "changes": [
-                {
-                    "path": item["path"],
-                    "old_path": item.get("old_path"),
-                    "status": item["status"],
-                    "staged": item.get("staged") is not None,
-                    "staged_kind": item.get("staged"),
-                    "unstaged": item.get("unstaged"),
-                    "conflict": item.get("conflict"),
-                    "diff": [],
-                }
-                for item in changes
-            ],
         }
 
     async def _git_merge_state(
@@ -4537,7 +4636,7 @@ class WorkspaceService:
             operation: Whitelisted operation name (see
                 :data:`src.git.GIT_OPERATIONS`).
             repo_path: Absolute repo path under ``/workspace``.  Omitted
-                for ``snapshot`` (discovers all repos).
+                for ``list_repos`` (discovers all repos).
             args: Operation-specific arguments (paths, branch names,
                 messages, pagination cursors).
 
@@ -4623,22 +4722,18 @@ class WorkspaceService:
             runtime, instance_id
         ) as askpass:
             env = git_ops.build_git_env(askpass_script=askpass)
-            if operation == "snapshot":
+            if operation == "list_repos":
                 repos = await self._git_discover_repos(runtime, instance_id, env)
-                history_limit = params.get("history_limit", git_ops.GIT_HISTORY_DEFAULT_LIMIT)
-                history_skip = params.get("history_skip", 0)
-                snapshots: list[dict[str, Any]] = []
+                entries: list[dict[str, Any]] = []
                 for root in repos:
                     lock = await self._git_lock(workspace_id, root)
                     async with lock:
-                        snapshots.append(
-                            await self._git_repo_snapshot(
-                                runtime, instance_id, root, env,
-                                history_limit=int(history_limit),
-                                history_skip=int(history_skip),
+                        entries.append(
+                            await self._git_list_entry(
+                                runtime, instance_id, root, env
                             )
                         )
-                return {"ok": True, "repos": snapshots}
+                return {"ok": True, "repos": entries}
 
             # All other operations require an explicit repository root.
             if not repo_path:
@@ -4646,6 +4741,53 @@ class WorkspaceService:
             repo_root = await self._git_resolve_repo_root(
                 runtime, instance_id, repo_path, env
             )
+            if operation in ("repo_snapshot", "repo_history"):
+                lock = await self._git_lock(workspace_id, repo_root)
+                async with lock:
+                    if operation == "repo_snapshot":
+                        snapshot = await self._git_repo_snapshot_no_log(
+                            runtime, instance_id, repo_root, env
+                        )
+                        history = await self._git_repo_history(
+                            runtime, instance_id, repo_root, env,
+                            limit=git_ops.GIT_HISTORY_PAGE_SIZE,
+                            skip=0,
+                        )
+                        snapshot.update(history)
+                        return {"ok": True, "snapshot": snapshot}
+                    branch = git_ops.validate_optional_branch(
+                        params.get("branch")
+                    )
+                    if branch is not None and not await self._git_verify_branch_exists(
+                        runtime, instance_id, repo_root, env, branch
+                    ):
+                        raise git_ops.GitError(
+                            "unknown_branch", f"Unknown branch: {branch}",
+                            exit_code=None, stderr="",
+                        )
+                    try:
+                        history_limit = int(
+                            params.get(
+                                "history_limit",
+                                git_ops.GIT_HISTORY_DEFAULT_LIMIT,
+                            )
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Invalid history_limit: {params.get('history_limit')!r}"
+                        ) from exc
+                    try:
+                        history_skip = int(params.get("history_skip", 0))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Invalid history_skip: {params.get('history_skip')!r}"
+                        ) from exc
+                    history = await self._git_repo_history(
+                        runtime, instance_id, repo_root, env,
+                        limit=history_limit, skip=history_skip,
+                        branch=branch,
+                    )
+                    return {"ok": True, "repo_path": repo_root, **history}
             lock = await self._git_lock(workspace_id, repo_root)
             async with lock:
                 handler = {
@@ -4661,6 +4803,7 @@ class WorkspaceService:
                     "sync": self._git_op_sync,
                     "checkout_branch": self._git_op_checkout_branch,
                     "checkout_commit": self._git_op_checkout_commit,
+                    "checkout_remote_branch": self._git_op_checkout_remote_branch,
                     "create_branch": self._git_op_create_branch,
                     "rename_branch": self._git_op_rename_branch,
                     "delete_branch": self._git_op_delete_branch,
@@ -4681,7 +4824,15 @@ class WorkspaceService:
         env: dict[str, str],
     ) -> dict[str, Any]:
         """Return a fresh single-repo snapshot after a mutation."""
-        return await self._git_repo_snapshot(runtime, instance_id, repo_root, env)
+        snapshot = await self._git_repo_snapshot_no_log(
+            runtime, instance_id, repo_root, env
+        )
+        history = await self._git_repo_history(
+            runtime, instance_id, repo_root, env,
+            limit=git_ops.GIT_HISTORY_PAGE_SIZE, skip=0,
+        )
+        snapshot.update(history)
+        return snapshot
 
     def _git_mutation_result(
         self, snapshot: dict[str, Any], **extra: Any
@@ -5108,6 +5259,66 @@ class WorkspaceService:
             if "unknown revision" in lowered or "bad revision" in lowered:
                 raise git_ops.GitError(
                     "unknown_commit", f"Unknown commit: {commit}",
+                    exit_code=exit_code, stderr=output,
+                )
+            raise git_ops.GitError(
+                "git_failed", "git checkout failed",
+                exit_code=exit_code, stderr=output,
+            )
+        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
+        return self._git_mutation_result(snapshot, repo_path=repo_root)
+
+    async def _git_op_checkout_remote_branch(
+        self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
+    ) -> dict[str, Any]:
+        """Track a remote branch locally (fetch + checkout/create)."""
+        remote_ref = git_ops.validate_remote_ref(str(params.get("remote_ref", "")))
+        remote, _, _short = remote_ref.partition("/")
+        local_raw = params.get("local_name")
+        local = (
+            git_ops.validate_local_branch(str(local_raw))
+            if local_raw not in (None, "")
+            else git_ops.validate_local_branch(remote_ref.rsplit("/", 1)[-1])
+        )
+        exit_code_f, fetch_out = await self._git_exec(
+            runtime, instance_id, ["git", "fetch", remote],
+            workdir=repo_root, env=env, timeout=git_ops.GIT_NETWORK_TIMEOUT_S,
+        )
+        if exit_code_f != 0:
+            raise git_ops.GitError(
+                "network_failed", "git fetch failed",
+                exit_code=exit_code_f, stderr=fetch_out,
+            )
+        exit_code_r, _ = await self._git_exec(
+            runtime, instance_id,
+            ["git", "show-ref", "--verify", "--quiet",
+             f"refs/remotes/{remote_ref}"],
+            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
+        )
+        if exit_code_r != 0:
+            raise git_ops.GitError(
+                "unknown_branch", f"Unknown remote branch: {remote_ref}",
+                exit_code=exit_code_r, stderr="",
+            )
+        if await self._git_verify_branch_exists(
+            runtime, instance_id, repo_root, env, local
+        ):
+            argv = ["git", "checkout", local, "--"]
+        else:
+            argv = ["git", "checkout", "-b", local, "--track", remote_ref, "--"]
+        exit_code, output = await self._git_exec(
+            runtime, instance_id, argv,
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        if exit_code != 0:
+            lowered = output.lower()
+            if (
+                "commit your changes or stash them" in lowered
+                or "overwritten by checkout" in lowered
+            ):
+                raise git_ops.GitError(
+                    "dirty_worktree",
+                    "Working tree has uncommitted changes",
                     exit_code=exit_code, stderr=output,
                 )
             raise git_ops.GitError(
