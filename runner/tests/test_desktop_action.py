@@ -411,3 +411,228 @@ async def test_unknown_action_raises(service: WorkspaceService) -> None:
 
     with pytest.raises(ValueError, match="Unknown desktop action"):
         await service.desktop_action(service._workspace_id, "bogus")
+
+
+@pytest.mark.asyncio
+async def test_screenshot_png_format(service: WorkspaceService) -> None:
+    png = b"\x89PNG\r\n\x1a\n"
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, "1920 1080"),
+        (0, base64.b64encode(png).decode()),
+    ]
+
+    result = await service.desktop_action(
+        service._workspace_id, "screenshot", {"format": "png"}
+    )
+
+    assert result["ok"] is True
+    assert result["mime"] == "image/png"
+    assert result["image_b64"] == base64.b64encode(png).decode()
+    assert result["width"] == 1920
+    assert result["height"] == 1080
+    command = _last_shell_command(service)
+    assert "-vcodec png" in command
+    assert "mjpeg" not in command
+
+
+@pytest.mark.asyncio
+async def test_screenshot_scale_reports_output_dimensions(
+    service: WorkspaceService,
+) -> None:
+    png = b"\x89PNG\r\n\x1a\n"
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, "1920 1080"),
+        (0, base64.b64encode(png).decode()),
+    ]
+
+    result = await service.desktop_action(
+        service._workspace_id,
+        "screenshot",
+        {"format": "png", "max_dimension": 2400},
+    )
+
+    # 1920x1080 already fits in 2400: dimensions unchanged, no scale filter.
+    assert result["width"] == 1920
+    assert result["height"] == 1080
+    command = _last_shell_command(service)
+    assert "scale=" not in command
+
+
+@pytest.mark.asyncio
+async def test_screenshot_scale_down_proportionally(
+    service: WorkspaceService,
+) -> None:
+    png = b"\x89PNG\r\n\x1a\n"
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, "3840 2160"),
+        (0, base64.b64encode(png).decode()),
+    ]
+
+    result = await service.desktop_action(
+        service._workspace_id,
+        "screenshot",
+        {"format": "png", "max_dimension": 2400},
+    )
+
+    assert result["width"] == 2400
+    assert result["height"] == 1350
+    command = _last_shell_command(service)
+    assert "scale=2400:1350" in command
+
+
+@pytest.mark.asyncio
+async def test_screenshot_rejects_invalid_format(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [(0, "alive"), (0, "1920 1080")]
+
+    with pytest.raises(ValueError, match="Invalid screenshot format"):
+        await service.desktop_action(
+            service._workspace_id, "screenshot", {"format": "webp"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_rejects_invalid_max_dimension(
+    service: WorkspaceService,
+) -> None:
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (0, "1920 1080"),
+        (0, "alive"),
+        (0, "1920 1080"),
+    ]
+
+    with pytest.raises(ValueError, match="Invalid screenshot max_dimension"):
+        await service.desktop_action(
+            service._workspace_id, "screenshot", {"max_dimension": 0}
+        )
+    with pytest.raises(ValueError, match="Invalid screenshot max_dimension"):
+        await service.desktop_action(
+            service._workspace_id, "screenshot", {"max_dimension": "huge"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_success_runs_python_with_desktop_env(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute runs ``python3 -c <code>`` with HOME/DISPLAY after live probe."""
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        calls.append(
+            {"command": command, "workdir": workdir, "env": env}
+        )
+        return 0, "out", "err"
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    result = await service.desktop_action(
+        service._workspace_id, "execute", {"code": "print(1)"}
+    )
+
+    assert result == {"ok": True, "exit_code": 0, "stdout": "out", "stderr": "err"}
+    assert service._runtime.exec_command_wait.await_count == 1
+    assert calls[0]["command"] == ["python3", "-c", "print(1)"]
+    assert calls[0]["env"] == {"HOME": "/root", "DISPLAY": ":1"}
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_empty_code(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty/blank code is rejected before any probe or exec."""
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+    called = False
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        return 0, "", ""
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    for code in ("", "   "):
+        with pytest.raises(ValueError, match="code must not be empty"):
+            await service.desktop_action(
+                service._workspace_id, "execute", {"code": code}
+            )
+    assert service._runtime.exec_command_wait.await_count == 0
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_oversized_code(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code above 200k chars is rejected before any probe or exec."""
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+    called = False
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        return 0, "", ""
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    with pytest.raises(ValueError, match="code exceeds 200000 characters"):
+        await service.desktop_action(
+            service._workspace_id, "execute", {"code": "x" * 200_001}
+        )
+    assert service._runtime.exec_command_wait.await_count == 0
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_execute_returns_nonzero_output(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nonzero exits are reported (not raised) with stdout/stderr."""
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        return 3, "partial", "boom"
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    result = await service.desktop_action(
+        service._workspace_id, "execute", {"code": "print(1)"}
+    )
+
+    assert result == {
+        "ok": True,
+        "exit_code": 3,
+        "stdout": "partial",
+        "stderr": "boom",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_timeout_propagates(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hanging exec surfaces ``asyncio.TimeoutError`` to the caller."""
+    import asyncio
+
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+
+    async def _hanging_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(service, "exec_harness_command", _hanging_exec)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await service.desktop_action(
+            service._workspace_id, "execute", {"code": "print(1)"}
+        )

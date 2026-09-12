@@ -73,11 +73,15 @@ export interface ProviderConnection {
   account_id?: string
   region?: string
   auth_method?: 'access_keys' | 'bearer' | ''
+  /** Manual model catalog for openai-compatible endpoints without /models. */
+  models?: string[]
 }
 
 export interface ProviderConnectionUpsertIn {
   api_key?: string
   base_url?: string
+  /** Manual model ids (openai-compatible only; explicit [] clears the list). */
+  models?: string[]
   auth_method?: string
   region?: string
   access_key_id?: string
@@ -85,6 +89,36 @@ export interface ProviderConnectionUpsertIn {
   session_token?: string
   bearer_token?: string
 }
+
+/**
+ * Org-wide Agent-S harness parameters (`GET/PUT /agent-s-config/`).
+ *
+ * `AgentConfig['computeruse']` stays the source for the Agent-S main
+ * model/effort; this row only holds harness behavior values plus the
+ * separate grounding model. `grounding_model` empty falls back to the
+ * run's main model; `model_temperature` null means provider default.
+ */
+export interface AgentSConfig {
+  grounding_model: string
+  grounding_width: number
+  grounding_height: number
+  model_temperature: number | null
+  max_steps: number
+  max_trajectory_length: number
+  enable_reflection: boolean
+  enable_code_agent: boolean
+  screenshot_max_dimension: number
+  action_pre_delay: number
+  action_post_delay: number
+  wait_delay: number
+}
+
+/**
+ * Partial Agent-S save payload. The backend merges partial payloads over
+ * stored values (or defaults when unstored), so callers send only changed
+ * fields. Unknown keys are ignored server-side.
+ */
+export type AgentSConfigIn = Partial<AgentSConfig>
 
 export interface ChatGptOAuthStart {
   user_code: string
@@ -248,9 +282,7 @@ export function getProviderConfig(): Promise<HarnessProviderConfig> {
   return get<HarnessProviderConfig>('/provider-config/')
 }
 
-export function saveProviderConfig(
-  data: HarnessProviderConfigIn,
-): Promise<HarnessProviderConfig> {
+export function saveProviderConfig(data: HarnessProviderConfigIn): Promise<HarnessProviderConfig> {
   return put<HarnessProviderConfig>('/provider-config/', {
     api_key: data.api_key ?? '',
     base_url: data.base_url ?? '',
@@ -269,6 +301,23 @@ export function deleteProviderConfig(): Promise<void> {
 
 export function listProviderConnections(): Promise<ProviderConnection[]> {
   return get<ProviderConnection[]>('/provider-config/providers/')
+}
+
+/**
+ * Load the org-wide Agent-S harness config (defaults when unstored).
+ * Mirrors `GET /agent-s-config/`.
+ */
+export function getAgentSConfig(): Promise<AgentSConfig> {
+  return get<AgentSConfig>('/agent-s-config/')
+}
+
+/**
+ * Save (upsert) the org-wide Agent-S harness config.
+ * Accepts a partial payload; the backend merges it over stored values
+ * (or defaults when unstored). Mirrors `PUT /agent-s-config/`.
+ */
+export function saveAgentSConfig(data: AgentSConfigIn): Promise<AgentSConfig> {
+  return put<AgentSConfig>('/agent-s-config/', data)
 }
 
 export function saveProviderConnection(

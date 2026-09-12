@@ -4,7 +4,9 @@ Namespaced model reference parsing for multi-provider harness runs.
 
 from __future__ import annotations
 
-KNOWN_PROVIDERS = frozenset({"openrouter", "chatgpt", "amazon-bedrock"})
+KNOWN_PROVIDERS = frozenset(
+    {"openrouter", "chatgpt", "amazon-bedrock", "openai-compatible"}
+)
 
 
 def parse_model_ref(ref: str) -> tuple[str, str]:

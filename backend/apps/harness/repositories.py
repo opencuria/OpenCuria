@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from .models import (
     AgentConfig,
+    AgentSConfig,
     HarnessMessage,
     HarnessPart,
     HarnessSession,
@@ -112,7 +113,9 @@ class AgentConfigRepository:
     @staticmethod
     def list_by_org(org_id: uuid.UUID) -> list[AgentConfig]:
         """List all agent configs for an organization."""
-        return list(AgentConfig.objects.filter(organization_id=org_id).order_by("agent"))
+        return list(
+            AgentConfig.objects.filter(organization_id=org_id).order_by("agent")
+        )
 
     @staticmethod
     def upsert(
@@ -145,6 +148,32 @@ class AgentConfigRepository:
             organization_id=org_id, agent=agent
         ).delete()
         return deleted > 0
+
+
+class AgentSConfigRepository:
+    """Data access for AgentSConfig records."""
+
+    @staticmethod
+    def get_by_org(org_id: uuid.UUID) -> AgentSConfig | None:
+        """Fetch the Agent-S config for an organization."""
+        return AgentSConfig.objects.filter(organization_id=org_id).first()
+
+    @staticmethod
+    def create(*, organization_id: uuid.UUID, **fields: object) -> AgentSConfig:
+        """Create the Agent-S config row for an organization."""
+        return AgentSConfig.objects.create(
+            organization_id=organization_id, **fields  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    def update(config: AgentSConfig, **fields: object) -> AgentSConfig:
+        """Update Agent-S config fields (only provided fields)."""
+        update_fields = ["updated_at"]
+        for name, value in fields.items():
+            setattr(config, name, value)
+            update_fields.append(name)
+        config.save(update_fields=update_fields)
+        return config
 
 
 class ProviderConnectionRepository:

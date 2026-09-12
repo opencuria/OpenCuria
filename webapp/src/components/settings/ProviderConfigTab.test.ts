@@ -55,6 +55,16 @@ const catalog: ProviderModel[] = [
     context_length: 0,
     max_output_tokens: 0,
   },
+  {
+    id: 'openai-compatible/ui-tars-1.5-7b',
+    name: 'ui-tars-1.5-7b',
+    provider: 'openai-compatible',
+    reasoning_efforts: [],
+    default_effort: '',
+    supports_tools: false,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
 ]
 
 const stubs = {
@@ -112,6 +122,12 @@ describe('ProviderConfigTab', () => {
       },
       { provider: 'chatgpt', connected: false },
       { provider: 'amazon-bedrock', connected: false },
+      {
+        provider: 'openai-compatible',
+        connected: true,
+        base_url: 'https://my-host:8000/v1',
+        models: ['ui-tars-1.5-7b'],
+      },
     ])
     saveProviderConfigMock.mockImplementation(async (data) => ({
       base_url: 'https://openrouter.ai/api/v1',
@@ -135,6 +151,7 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('[data-testid="provider-row-openrouter"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-chatgpt"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-amazon-bedrock"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-row-openai-compatible"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-small-model-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Connected')
     expect(wrapper.find('[data-testid="provider-status-chatgpt"]').exists()).toBe(false)
@@ -150,7 +167,25 @@ describe('ProviderConfigTab', () => {
 
     expect(wrapper.find('[data-testid="provider-model-count-openrouter"]').text()).toBe('1 models')
     expect(wrapper.find('[data-testid="provider-model-count-chatgpt"]').text()).toBe('1 models')
+    expect(wrapper.find('[data-testid="provider-model-count-openai-compatible"]').text()).toBe(
+      '1 models',
+    )
     expect(wrapper.find('[data-testid="provider-model-count-amazon-bedrock"]').exists()).toBe(false)
+  })
+
+  it('shows the compatible endpoint base URL and model count in the row detail', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="provider-status-openai-compatible"]').text()).toBe(
+      'Connected',
+    )
+    expect(wrapper.find('[data-testid="provider-detail-openai-compatible"]').text()).toContain(
+      'https://my-host:8000/v1',
+    )
+    expect(wrapper.find('[data-testid="provider-detail-openai-compatible"]').text()).toContain(
+      '1 model',
+    )
   })
 
   it('keeps save disabled until the small model changes, then saves with toast', async () => {
@@ -262,6 +297,7 @@ describe('ProviderConfigTab', () => {
       { provider: 'openrouter', connected: false },
       { provider: 'chatgpt', connected: false },
       { provider: 'amazon-bedrock', connected: false },
+      { provider: 'openai-compatible', connected: false },
     ])
     const wrapper = mountTab()
     await flushPromises()

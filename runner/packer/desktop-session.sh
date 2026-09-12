@@ -60,6 +60,32 @@ apt-get install -y --no-install-recommends \
     xdotool
 apt-get install -y libasound2t64 || apt-get install -y libasound2
 
+# Agent-S computer-use workspace dependencies (all 15 actions):
+# PyAutoGUI/pyperclip (click/type/...), tesseract OCR (highlight_text_span),
+# wmctrl (switch_applications), xclip/xsel (clipboard/type), sudo/iproute2
+# `ss` (SET_CELL_VALUES_CMD), LibreOffice Calc + python3-uno
+# (set_cell_values). python3-pyautogui has no Ubuntu 22.04/24.04 apt
+# package, so it falls back to a minimal pip install into the system
+# python (python3 -m pip keeps the distribution visible to apt-Python).
+# pip on 24.04 requires --break-system-packages (PEP 668); pip on 22.04
+# does not know the flag, so retry without it. python3-pyperclip from
+# apt already provides `import pyperclip` (no pip needed). No Agent-S
+# CLI is installed here. Rebuild the image after changing this block.
+apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    wmctrl \
+    xclip \
+    xsel \
+    libreoffice-calc \
+    python3-uno \
+    python3-pyperclip \
+    sudo \
+    iproute2 \
+    python3-pip
+apt-get install -y python3-pyautogui \
+    || python3 -m pip install --break-system-packages pyautogui \
+    || python3 -m pip install pyautogui
+
 # Exposé: Ubuntu 22.04 ships skippy-xd; 24.04 does not.
 if ! apt-get install -y skippy-xd; then
     echo "skippy-xd is not in apt; building from source"

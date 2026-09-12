@@ -4,12 +4,15 @@
   Primary agents (build, plan) always use a fixed model; subagents
   (general, explore, computeruse) may inherit the parent run model or
   use a fixed model, or map the parent effort via a strategy.
+  The Agent-S harness parameters below reuse the Computer Use subagent
+  row as their main model (`AgentSConfigPanel`).
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import AgentSConfigPanel from './AgentSConfigPanel.vue'
 import ProviderModelCombobox from './ProviderModelCombobox.vue'
 import SettingsSection from './SettingsSection.vue'
 import {
@@ -46,7 +49,10 @@ interface AgentState {
 }
 
 const state = ref<Record<AgentConfigId, AgentState>>(
-  Object.fromEntries(CONFIGURABLE_AGENTS.map((a) => [a, defaultState()])) as Record<AgentConfigId, AgentState>,
+  Object.fromEntries(CONFIGURABLE_AGENTS.map((a) => [a, defaultState()])) as Record<
+    AgentConfigId,
+    AgentState
+  >,
 )
 
 function defaultState(): AgentState {
@@ -135,12 +141,24 @@ async function handleSave(): Promise<void> {
       const s = agentState(agent)
       const isPrimary = (PRIMARY_AGENTS as string[]).includes(agent)
       if (isPrimary) {
-        return { agent, model: s.model.trim(), effort: s.effort.trim(), inherit_model: false, effort_strategy: 'fixed' }
+        return {
+          agent,
+          model: s.model.trim(),
+          effort: s.effort.trim(),
+          inherit_model: false,
+          effort_strategy: 'fixed',
+        }
       }
       if (s.inherit) {
         return { agent, model: '', effort: '', inherit_model: true, effort_strategy: s.strategy }
       }
-      return { agent, model: s.model.trim(), effort: s.effort.trim(), inherit_model: false, effort_strategy: 'fixed' }
+      return {
+        agent,
+        model: s.model.trim(),
+        effort: s.effort.trim(),
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      }
     })
     const saved = await saveAgentConfigs(payload)
     applyConfigs(saved)
@@ -172,7 +190,10 @@ onMounted(() => {
     </div>
 
     <template v-else>
-      <SettingsSection title="Primary agents" description="Models for new build and plan runs. A model is required.">
+      <SettingsSection
+        title="Primary agents"
+        description="Models for new build and plan runs. A model is required."
+      >
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
             v-for="agent in PRIMARY_AGENTS"
@@ -201,7 +222,10 @@ onMounted(() => {
         <p v-if="primaryMissing" class="text-xs text-muted-foreground">Select a model</p>
       </SettingsSection>
 
-      <SettingsSection title="Subagents" description="Helper agents spawned during a run. Inherit the parent run model or pick a custom model.">
+      <SettingsSection
+        title="Subagents"
+        description="Helper agents spawned during a run. Inherit the parent run model or pick a custom model."
+      >
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
             v-for="agent in SUBAGENT_IDS"
@@ -211,11 +235,19 @@ onMounted(() => {
           >
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-sm font-medium text-foreground">{{ agentDisplayName(agent) }}</span>
-                <span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">Subagent</span>
+                <span class="text-sm font-medium text-foreground">{{
+                  agentDisplayName(agent)
+                }}</span>
+                <span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                  >Subagent</span
+                >
               </div>
               <p class="text-sm text-muted-foreground">{{ agentState(agent).description }}</p>
-              <div class="flex items-center gap-4 pt-1" role="radiogroup" :aria-label="`${agentDisplayName(agent)} mode`">
+              <div
+                class="flex items-center gap-4 pt-1"
+                role="radiogroup"
+                :aria-label="`${agentDisplayName(agent)} mode`"
+              >
                 <label class="flex items-center gap-1.5 text-sm">
                   <input
                     type="radio"
@@ -239,7 +271,10 @@ onMounted(() => {
               </div>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <div :class="state[agent].inherit ? 'pointer-events-none opacity-50' : undefined" :aria-disabled="state[agent].inherit">
+              <div
+                :class="state[agent].inherit ? 'pointer-events-none opacity-50' : undefined"
+                :aria-disabled="state[agent].inherit"
+              >
                 <ProviderModelCombobox
                   :input-id="`agent-model-${agent}`"
                   v-model="state[agent].model"
@@ -254,7 +289,10 @@ onMounted(() => {
                   :data-testid="`agent-strategy-${agent}`"
                   :value="state[agent].strategy"
                   class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  @change="state[agent].strategy = (($event.target as HTMLSelectElement).value as EffortStrategy)"
+                  @change="
+                    state[agent].strategy = ($event.target as HTMLSelectElement)
+                      .value as EffortStrategy
+                  "
                 >
                   <option
                     v-for="opt in EFFORT_STRATEGIES.filter((o) => o.value !== 'fixed')"
@@ -264,7 +302,10 @@ onMounted(() => {
                     {{ opt.label }}
                   </option>
                 </select>
-                <p class="text-xs text-muted-foreground" :data-testid="`agent-strategy-hint-${agent}`">
+                <p
+                  class="text-xs text-muted-foreground"
+                  :data-testid="`agent-strategy-hint-${agent}`"
+                >
                   {{ strategyHint(agent) }}
                 </p>
               </div>
@@ -287,6 +328,8 @@ onMounted(() => {
           <span v-else>Save Agents</span>
         </Button>
       </div>
+
+      <AgentSConfigPanel />
     </template>
   </div>
 </template>

@@ -27,6 +27,12 @@ os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 TINY_JPEG = (
     b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
 )
+#: Minimal 1x1 PNG payload for ``format="png"`` screenshot RPCs.
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+    b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
 
@@ -143,11 +149,23 @@ class FakeAccessor(WorkspaceAccessor):
             path = f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
             return {"ok": True, "path": path}
         if action == "screenshot":
+            requested_format = str((args or {}).get("format") or "").strip().lower()
             crop_w = (args or {}).get("crop_w")
             crop_h = (args or {}).get("crop_h")
             width = int(crop_w) if crop_w is not None else self.desktop_width
             height = int(crop_h) if crop_h is not None else self.desktop_height
+            if requested_format == "png":
+                return {
+                    "ok": True,
+                    "image_b64": base64.b64encode(TINY_PNG).decode("ascii"),
+                    "mime": "image/png",
+                    "width": width,
+                    "height": height,
+                    "text": "",
+                }
             return desktop_screenshot_result(width=width, height=height)
+        if action == "execute":
+            return {"ok": True, "exit_code": 0, "stdout": "", "stderr": ""}
         return {"ok": True}
 
     async def exec_stream(

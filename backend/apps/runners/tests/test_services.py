@@ -2294,6 +2294,84 @@ class TestHarnessReplyRouting:
 
 
 @pytest.mark.django_db
+class TestAgentSWorkspaceDependencies:
+    """Agent-S computer-use workspace deps ship in every non-Alpine image."""
+
+    _AGENT_S_APT = (
+        "tesseract-ocr",
+        "wmctrl",
+        "xclip",
+        "xsel",
+        "libreoffice-calc",
+        "python3-uno",
+        "python3-pyperclip",
+        "sudo",
+        "iproute2",
+    )
+
+    def _definition(self, runner, user, **kw):
+        from apps.runners.models import ImageDefinition
+
+        params = {
+            "organization": runner.organization,
+            "created_by": user,
+            "name": "AgentS Deps",
+            "runtime_type": "docker",
+            "base_distro": "ubuntu:24.04",
+        }
+        params.update(kw)
+        return ImageDefinition.objects.create(**params)
+
+    def test_docker_block_pins_agent_s_packages(self, service, runner, user):
+        """Docker desktop block pins the Agent-S apt deps + pyautogui fallback."""
+        block = service._desktop_session_dockerfile_block()
+        for package in self._AGENT_S_APT:
+            assert package in block
+        assert "python3-pyautogui" in block
+        assert "python3 -m pip install --break-system-packages pyautogui" in block
+        assert "python3 -m pip install pyautogui" in block
+        # apt python3-pyperclip already provides `import pyperclip`.
+        assert "python3-pyperclip" in block
+
+    def test_qemu_init_script_pins_agent_s_packages(self, service, runner, user):
+        """QEMU init script carries the same Agent-S deps (xfce stack intact)."""
+        definition = self._definition(runner, user, runtime_type="qemu")
+        script = service._build_qemu_init_script_content(definition)
+        for package in self._AGENT_S_APT:
+            assert package in script
+        assert "python3-pyautogui" in script
+        assert "python3 -m pip install --break-system-packages pyautogui" in script
+        assert "startxfce4" in script
+
+    def test_generated_dockerfile_includes_desktop_block(self, service, runner, user):
+        """The bootstrap default flows through the auto-appended desktop block."""
+        from apps.runners.management.commands.bootstrap_local_deploy import (
+            DEFAULT_WORKSPACE_PACKAGES,
+        )
+
+        definition = self._definition(
+            runner,
+            user,
+            runtime_type="docker",
+            base_distro="ubuntu:22.04",
+            packages=list(DEFAULT_WORKSPACE_PACKAGES),
+        )
+        dockerfile = service._generate_dockerfile_content(definition)
+        for package in self._AGENT_S_APT:
+            assert package in dockerfile
+        assert "python3-pyautogui" in dockerfile
+
+    def test_alpine_images_skip_desktop_agent_s_deps(self, service, runner, user):
+        """Alpine images stay minimal (no desktop block, no Agent-S deps)."""
+        definition = self._definition(
+            runner, user, runtime_type="docker", base_distro="alpine:3.20"
+        )
+        dockerfile = service._generate_dockerfile_content(definition)
+        assert "tesseract-ocr" not in dockerfile
+        assert "python3-pyautogui" not in dockerfile
+
+
+@pytest.mark.django_db
 class TestDesktopSessionImageContent:
     """QEMU images get XFCE+WhiteSur; Docker keeps Openbox + Chrome."""
 

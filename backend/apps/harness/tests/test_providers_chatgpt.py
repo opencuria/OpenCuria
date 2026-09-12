@@ -629,6 +629,39 @@ def test_missing_call_id_gets_best_effort_id() -> None:
     assert items and all(item.get("call_id") for item in items)
 
 
+async def test_user_image_url_parts_become_input_image() -> None:
+    """Agent-S PNG data URLs reach the Responses wire as input_image."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    adapter = ChatGPTAdapter(
+        _credentials(), client=_mock_client(payload, capture=capture)
+    )
+    png_url = "data:image/png;base64,iVBORw0KGgo="
+    async for _ in adapter.chat_stream(
+        "gpt-5.4",
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see screenshot"},
+                    {"type": "image_url", "image_url": {"url": png_url}},
+                ],
+            )
+        ],
+        [],
+    ):
+        pass
+    user_item = next(
+        item
+        for item in capture["body"]["input"]
+        if item.get("type") == "message" and item.get("role") == "user"
+    )
+    assert {"type": "input_text", "text": "see screenshot"} in user_item["content"]
+    assert {"type": "input_image", "image_url": png_url} in user_item["content"]
+
+
 class _RaiseTransport(httpx.AsyncBaseTransport):
     """Transport that fails immediately with a fixed exception."""
 

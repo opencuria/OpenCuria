@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,10 +17,11 @@ from common.utils import decrypt_value, encrypt_value
 
 from ..repositories import ProviderConnectionRepository
 from .base import ProviderAdapter
-from .bedrock import BedrockAdapter, DEFAULT_REGION, resolve_bedrock_model_id
+from .bedrock import DEFAULT_REGION, BedrockAdapter, resolve_bedrock_model_id
 from .chatgpt import ChatGPTAdapter
 from .model_ref import namespaced_model_id, parse_model_ref
-from .models_catalog import ProviderModel, get_cached_org_catalog, list_merged_provider_models
+from .models_catalog import ProviderModel, get_cached_org_catalog
+from .openai_compatible import OpenAICompatibleAdapter
 from .openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
 from .registry import ProviderRegistry, default_registry
 
@@ -144,6 +145,14 @@ class ProviderResolver:
         elif provider_id == "amazon-bedrock":
             region = str(config.get("region") or DEFAULT_REGION)
             adapter = BedrockAdapter(credentials=credentials, region=region)
+        elif provider_id == "openai-compatible":
+            base_url = str(config.get("base_url", "") or "").strip()
+            if not base_url:
+                raise ValueError(
+                    "Provider 'openai-compatible' needs base_url in config"
+                )
+            api_key = str(credentials.get("api_key", "") or "")
+            adapter = OpenAICompatibleAdapter(base_url=base_url, api_key=api_key)
         else:
             factory = self._registry.get(provider_id)
             adapter = factory(credentials=credentials, config=config)

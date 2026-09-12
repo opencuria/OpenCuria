@@ -14,7 +14,7 @@ existing keys — see ``APIKeyPermission``)::
   switch session mode, rename/delete sessions, save/delete provider config
 - ``harness:permissions`` — resolve permission and question requests
 - ``harness:providers`` — manage per-provider connections (OpenRouter,
-  ChatGPT OAuth, Amazon Bedrock)
+  ChatGPT OAuth, Amazon Bedrock, generic OpenAI-compatible)
 
 All old ``session:*`` socket events and runners REST endpoints stay
 untouched (M8 removes them).
@@ -319,6 +319,40 @@ class AgentConfigOut(Schema):
     effort_strategy: str = "fixed"
 
 
+class AgentSConfigIn(Schema):
+    """Request schema for saving the org-wide Agent-S harness config."""
+
+    grounding_model: str = ""
+    grounding_width: int = 1920
+    grounding_height: int = 1080
+    model_temperature: float | None = None
+    max_steps: int = 15
+    max_trajectory_length: int = 8
+    enable_reflection: bool = True
+    enable_code_agent: bool = True
+    screenshot_max_dimension: int = 2400
+    action_pre_delay: float = 1.0
+    action_post_delay: float = 1.0
+    wait_delay: float = 5.0
+
+
+class AgentSConfigOut(Schema):
+    """Response schema for the org-wide Agent-S harness config."""
+
+    grounding_model: str = ""
+    grounding_width: int = 1920
+    grounding_height: int = 1080
+    model_temperature: float | None = None
+    max_steps: int = 15
+    max_trajectory_length: int = 8
+    enable_reflection: bool = True
+    enable_code_agent: bool = True
+    screenshot_max_dimension: int = 2400
+    action_pre_delay: float = 1.0
+    action_post_delay: float = 1.0
+    wait_delay: float = 5.0
+
+
 class ProviderModelOut(Schema):
     """One model from the org provider catalog."""
 
@@ -342,6 +376,7 @@ class ProviderConnectionOut(Schema):
     account_id: str = ""
     region: str = ""
     auth_method: str = ""
+    models: list[str] = []
 
 
 class OpenRouterConnectionIn(Schema):
@@ -349,6 +384,14 @@ class OpenRouterConnectionIn(Schema):
 
     api_key: str = ""
     base_url: str = ""
+
+
+class OpenAICompatibleConnectionIn(Schema):
+    """Upsert payload for a generic OpenAI-compatible connection."""
+
+    api_key: str = ""
+    base_url: str = ""
+    models: list[str] = []
 
 
 class BedrockConnectionIn(Schema):
@@ -367,6 +410,7 @@ class ProviderConnectionUpsertIn(Schema):
 
     api_key: str = ""
     base_url: str = ""
+    models: list[str] = []
     auth_method: str = ""
     region: str = "us-east-1"
     access_key_id: str = ""
@@ -495,6 +539,36 @@ def _connection_to_out(
             region=str(config.get("region") or "us-east-1"),
             auth_method=auth_method,
         )
+    if provider == ProviderType.OPENAI_COMPATIBLE:
+        from apps.harness import services as harness_services
+
+        api_key = str(credentials.get("api_key", "") or "")
+        stored = config.get("models", [])
+        raw_ids = stored if isinstance(stored, list) else []
+        try:
+            normalize = (
+                harness_services.ProviderConfigService.normalize_openai_compatible_models
+            )
+            models = normalize([str(item) for item in raw_ids])
+        except ValueError:
+            # Tolerate dirty legacy rows on the read path (validation
+            # still rejects them on save): drop empty ids, dedupe, trim.
+            seen: set[str] = set()
+            models = []
+            for entry in raw_ids:
+                item = str(entry or "").strip()
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                models.append(item)
+
+        return ProviderConnectionOut(
+            provider=provider,
+            connected=True,
+            base_url=str(config.get("base_url") or ""),
+            api_key_hint=_secret_hint(api_key) if api_key.strip() else "",
+            models=models,
+        )
     return ProviderConnectionOut(provider=provider, connected=True)
 
 
@@ -617,6 +691,101 @@ def _delete_org_provider_connection(org_id: uuid.UUID, provider: str) -> None:
     from apps.harness.services import ProviderConfigService
 
     ProviderConfigService().delete_connection(org_id, provider)
+
+
+def _validate_openai_compatible_models(models: list[str]) -> list[str]:
+    """Validate and deduplicate manual model ids (deprecated shim).
+
+    Prefer :meth:`ProviderConfigService.normalize_openai_compatible_models`;
+    kept for backward-compatible imports. Empty ids after trim raise;
+    an empty total list is allowed.
+    """
+    from apps.harness.services import ProviderConfigService
+
+    return ProviderConfigService.normalize_openai_compatible_models(
+        list(models or [])
+    )
+
+
+def _validate_base_url(base_url: str) -> str:
+    """Validate an http/https base URL (deprecated shim).
+
+    Prefer :meth:`ProviderConfigService.validate_openai_compatible_base_url`;
+    kept for backward-compatible imports.
+    """
+    from apps.harness.services import ProviderConfigService
+
+    return ProviderConfigService.validate_openai_compatible_base_url(base_url)
+
+
+def _upsert_openai_compatible_connection(
+    org_id: uuid.UUID,
+    payload: OpenAICompatibleConnectionIn,
+) -> ProviderConnectionOut:
+    """Create or update the generic OpenAI-compatible connection.
+
+    ``models`` presence comes from ``payload.model_fields_set`` so an
+    omitted list keeps stored models while an explicit ``[]`` clears them.
+    """
+    from apps.harness.services import ProviderConfigService
+
+    service = ProviderConfigService()
+    models_provided = "models" in payload.model_fields_set
+    connection = service.upsert_openai_compatible_connection(
+        org_id,
+        api_key=payload.api_key or "",
+        base_url=payload.base_url or "",
+        models=list(payload.models or []) if models_provided else None,
+        models_provided=models_provided,
+    )
+    return _connection_to_out(service, connection)
+
+
+def _agent_s_config_to_out(row: dict) -> AgentSConfigOut:
+    """Map an AgentSConfigService view to AgentSConfigOut."""
+    return AgentSConfigOut(
+        grounding_model=row.get("grounding_model") or "",
+        grounding_width=int(row.get("grounding_width", 1920)),
+        grounding_height=int(row.get("grounding_height", 1080)),
+        model_temperature=row.get("model_temperature"),
+        max_steps=int(row.get("max_steps", 15)),
+        max_trajectory_length=int(row.get("max_trajectory_length", 8)),
+        enable_reflection=bool(row.get("enable_reflection", True)),
+        enable_code_agent=bool(row.get("enable_code_agent", True)),
+        screenshot_max_dimension=int(row.get("screenshot_max_dimension", 2400)),
+        action_pre_delay=float(row.get("action_pre_delay", 1.0)),
+        action_post_delay=float(row.get("action_post_delay", 1.0)),
+        wait_delay=float(row.get("wait_delay", 5.0)),
+    )
+
+
+def _fetch_org_agent_s_config(org_id: uuid.UUID) -> AgentSConfigOut:
+    """Load the org Agent-S config (defaults when unstored)."""
+    from apps.harness.services import AgentSConfigService
+
+    return _agent_s_config_to_out(AgentSConfigService().get_or_default(org_id))
+
+
+def _save_org_agent_s_config(
+    org_id: uuid.UUID, payload: AgentSConfigIn
+) -> AgentSConfigOut:
+    """Validate and upsert the org Agent-S config (partial payloads merge)."""
+    from apps.harness.services import AgentSConfigService
+
+    row = AgentSConfigService().save_config(
+        org_id, payload.model_dump(exclude_unset=True)
+    )
+    return _agent_s_config_to_out(row)
+
+
+def _save_org_agent_s_config_partial(
+    org_id: uuid.UUID, values: dict
+) -> AgentSConfigOut:
+    """Validate raw MCP args (partial dict) and upsert the Agent-S config."""
+    from apps.harness.services import AgentSConfigService
+
+    row = AgentSConfigService().save_config(org_id, dict(values or {}))
+    return _agent_s_config_to_out(row)
 
 
 def _agent_config_to_out(row: dict) -> AgentConfigOut:
@@ -1390,6 +1559,46 @@ def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
 
 
 @harness_router.get(
+    "/agent-s-config/",
+    response={200: AgentSConfigOut, 401: dict, 403: dict, 404: dict},
+    summary="Get the org-wide Agent-S harness config",
+)
+def get_org_agent_s_config(request: HttpRequest):
+    """Return the org Agent-S config (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        return 200, _fetch_org_agent_s_config(org_id)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/agent-s-config/",
+    response={200: AgentSConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (upsert) the org-wide Agent-S harness config",
+)
+def save_org_agent_s_config(request: HttpRequest, payload: AgentSConfigIn):
+    """Validate and upsert the org Agent-S config."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        return 200, _save_org_agent_s_config(org_id, payload)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.get(
     "/provider-config/",
     response={200: ProviderConfigOut, 401: dict, 403: dict, 404: dict},
     summary="Get the org-wide provider config (api key never returned)",
@@ -1484,7 +1693,7 @@ def delete_org_provider_config(request: HttpRequest):
     summary="List all provider connection statuses for the org",
 )
 def list_org_provider_connections(request: HttpRequest):
-    """Return connection status for OpenRouter, ChatGPT, and Amazon Bedrock."""
+    """Return connection status for every supported provider."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
@@ -1525,6 +1734,17 @@ def upsert_org_provider_connection(
                 base_url=payload.base_url,
             )
             return 200, _upsert_openrouter_connection(org_id, body)
+        if provider_id == ProviderType.OPENAI_COMPATIBLE:
+            compat_body = OpenAICompatibleConnectionIn(
+                api_key=payload.api_key,
+                base_url=payload.base_url,
+                **(
+                    {"models": list(payload.models or [])}
+                    if "models" in payload.model_fields_set
+                    else {}
+                ),
+            )
+            return 200, _upsert_openai_compatible_connection(org_id, compat_body)
         body = BedrockConnectionIn(
             auth_method=payload.auth_method,
             region=payload.region,

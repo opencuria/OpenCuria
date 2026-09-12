@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from .base import ToolRegistry
-from .computeruse import COMPUTER_USE_TOOL_NAMES, computeruse_tools
 from .files import EditTool, ReadTool, WriteTool
 from .process import (
     ProcessDeleteTool,
@@ -46,17 +45,24 @@ def default_tool_registry() -> ToolRegistry:
     return registry
 
 
+def agent_s_tool_registry() -> ToolRegistry:
+    """Build the tool registry for ``computeruse`` (Agent-S) children.
+
+    Agent-S plans never see OpenCuria tool schemas: the registry is
+    intentionally empty so ``HarnessRunner._filtered_schemas`` offers
+    ``tools=[]`` and the Agent-S wire uses no function calls. Hooks are
+    copied by the caller (see ``tools.subagents._child_registry``).
+    """
+    return ToolRegistry()
+
+
 def computeruse_tool_registry() -> ToolRegistry:
-    """Build a registry with only computer-use tools."""
-    registry = ToolRegistry()
-    for tool in computeruse_tools():
-        registry.register(tool)
-    return registry
+    """Backwards-compatible alias for :func:`agent_s_tool_registry`."""
+    return agent_s_tool_registry()
 
 
 __all__ = [
     "BashTool",
-    "COMPUTER_USE_TOOL_NAMES",
     "EditTool",
     "GlobTool",
     "GrepTool",
@@ -73,6 +79,7 @@ __all__ = [
     "TodoWriteTool",
     "WebfetchTool",
     "WriteTool",
+    "agent_s_tool_registry",
     "computeruse_tool_registry",
     "default_tool_registry",
 ]

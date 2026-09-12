@@ -392,6 +392,60 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event, "harness:desktop_action_result")
         self.assertEqual(payload["error"], "Desktop session is not active")
 
+    async def test_desktop_action_registers_cancellable_task(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        task = asyncio.create_task(
+            handler(
+                _payload(
+                    workspace_id,
+                    "d-reg",
+                    action="ensure",
+                    args={},
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertIn("harness:d-reg", interface._running_tasks)
+        await task
+        self.assertNotIn("harness:d-reg", interface._running_tasks)
+
+    async def test_desktop_execute_cancelled_by_harness_cancel(self) -> None:
+        started = asyncio.Event()
+
+        class BlockingService(_FakeService):
+            async def desktop_action(self, workspace_id, action, args=None):
+                self.desktop_action_calls.append((workspace_id, action, args))
+                started.set()
+                await asyncio.sleep(30)
+                return {"ok": True}  # pragma: no cover
+
+        service = BlockingService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler_task = asyncio.create_task(
+            interface._sio.handlers["/"]["harness:desktop_action"](
+                _payload(
+                    workspace_id,
+                    "d-exec",
+                    action="execute",
+                    args={"code": "import time"},
+                )
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        self.assertIn("harness:d-exec", interface._running_tasks)
+        cancel = interface._sio.handlers["/"]["harness:cancel"]
+        await cancel({"request_id": "d-exec"})
+        self.assertNotIn("harness:d-exec", interface._running_tasks)
+        await handler_task
+        emitted_events = [
+            call.args[0] for call in interface._sio.emit.await_args_list
+        ]
+        self.assertNotIn("harness:desktop_action_result", emitted_events)
+
 
 class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_file_content_rejects_traversal(self) -> None:

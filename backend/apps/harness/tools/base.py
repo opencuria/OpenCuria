@@ -70,7 +70,6 @@ class ToolContext:
     call_id: str = ""
     on_question: Callable[..., Awaitable[list[Any]]] | None = None
     question_timeout: float | None = None
-    computer_use: Any | None = None
 
 
 @dataclass

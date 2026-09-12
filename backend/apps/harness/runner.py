@@ -48,14 +48,6 @@ from .compaction import (
     is_overflow,
     select,
 )
-from .computeruse_loop import (
-    FRESH_DESKTOP_TEXT,
-    INITIAL_DESKTOP_TEXT,
-    ComputerUseLoopState,
-    append_video_to_output,
-    default_recording_path,
-    sanitize_run_id,
-)
 from .images import hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import (
@@ -154,6 +146,12 @@ class RunOptions:
     run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
+    # Optional Agent-S config port for ``computeruse`` runs (second-layer
+    # integration in ``agent_s/``). ``None`` resolves to the persisted
+    # org Agent-S config (``AgentSConfigService.to_run_config``) with
+    # controlled grounding fallback. Kept as ``Any`` here to avoid a
+    # runner<->agent_s import cycle.
+    agent_s_config: Any | None = None
     # Per-run cache of once-approved (tool, action) pairs, reset at
     # the start of every run() call. ``always`` continues to flow
     # through the allowlist/service; this set only suppresses repeat
@@ -813,7 +811,24 @@ class HarnessRunner:
         effective_model = model
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
-        max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+        if agent.name == "computeruse":
+            # Persisted AgentSConfig.max_steps is the effective budget;
+            # RunOptions.max_steps stays an optional extra cap (resolved in
+            # resolve_run_config). The static AgentDefinition steps=15 is
+            # only the default when no RunOptions cap is set.
+            explicit_cfg = getattr(options, "agent_s_config", None)
+            persisted_steps = getattr(explicit_cfg, "max_steps", None)
+            run_cap = options.max_steps
+            if persisted_steps:
+                max_steps = int(persisted_steps)
+                if run_cap:
+                    max_steps = min(max_steps, int(run_cap))
+            elif run_cap:
+                max_steps = int(run_cap)
+            else:
+                max_steps = agent.steps or DEFAULT_MAX_STEPS
+        else:
+            max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
         depth = max(0, options.depth)
         depth = max(0, options.depth)
@@ -1124,209 +1139,107 @@ class HarnessRunner:
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> RunResult:
-        """Execute the computer-use loop with recording and image compaction."""
-        schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
-        composed = await compose_system_prompt(
-            agent=agent,
-            mode=mode,
-            tools=schemas,
-            subagents=subagent_descriptions(),
-            accessor=self.accessor,
-            cwd=cwd,
-            skills=list(opts.skills or []),
+        """Execute the Agent-S computer-use loop (no OpenCuria tool loop).
+
+        Delegates to :mod:`apps.harness.agent_s.harness`: the child-visible
+        behaviour is Agent-S only — no OpenCuria system-prompt composition,
+        no ToolSchema/function calls, no 1000-grid tools. The runner stays a
+        generic executor (provider resolution, accessor, events); all
+        Agent-S logic lives in the backend ``agent_s`` layer.
+        """
+        from .agent_s.adapters import (
+            ACTION_EXECUTE_TIMEOUT_S,
+            DesktopScreenshotAdapter,
+            HarnessCompletionAdapter,
+            WorkspaceActionExecutor,
+            WorkspaceCodeExecutionAdapter,
+            WorkspaceOcrAdapter,
         )
-        user_prompt = LLMMessage(role="user", content=prompt)
-        if self.accessor is not None and isinstance(user_prompt.content, str):
-            hydrated = await hydrate_workspace_images(
-                user_prompt.content, self.accessor
-            )
-            user_prompt = LLMMessage(role="user", content=hydrated)
-        cu_state = ComputerUseLoopState(
-            base_messages=[
-                LLMMessage(role="system", content=composed.system),
-                *list(opts.history or []),
-                user_prompt,
-            ]
+        from .agent_s.harness import (
+            resolve_run_config,
+            run_agent_s_computeruse,
+            sanitize_run_id,
         )
-        ctx = ToolContext(
-            session_id=opts.session_id or "session",
-            workspace_id=opts.workspace_id or "workspace",
-            accessor=self.accessor
-            or _MissingAccessor(workspace_id=opts.workspace_id or "workspace"),
-            agent_name=agent.name,
-            directory=cwd,
-            depth=depth,
-            max_depth=max_depth,
-            model=model,
-            parent_emit=self._emit,
-            provider=self.provider,
-            model_resolver=self._resolve_model,
-            registry=self.tools,
-            evaluator=self.evaluator,
-            run_subagent=opts.run_subagent,
-            on_question=opts.on_question,
-            question_timeout=opts.question_timeout,
+
+        accessor = self.accessor or _MissingAccessor(
+            workspace_id=opts.workspace_id or "workspace"
         )
         run_id = sanitize_run_id(opts.session_id or "session")
-        total_usage = Usage()
-        total_cost = 0.0
-        recent_calls: list[str] = []
-        record_started = False
-        held = False
-        recording_path = default_recording_path(run_id)
+        # No ``display_info`` before hold here: the cold desktop is not
+        # live yet, and ``run_agent_s_computeruse`` resolves the real
+        # geometry itself right after hold (before materializer/session
+        # creation). Only the effective model/config is resolved up front.
+        config = resolve_run_config(effective_model=model, run_options=opts)
+        # ``RunOptions.max_steps`` still caps the Agent-S budget explicitly
+        # (also resolved inside resolve_run_config; the extra rebuild here
+        # keeps the pre-hold config object consistent for adapters).
+        if max_steps and int(max_steps) != int(config.max_steps):
+            from .agent_s.config import AgentSRunConfig
 
-        try:
-            await ctx.accessor.desktop_action(
-                "hold",
-                {"kind": "computeruse", "run_id": run_id},
+            config = AgentSRunConfig(
+                main_model=config.main_model,
+                grounding_model=config.grounding_model,
+                desktop_width=config.desktop_width,
+                desktop_height=config.desktop_height,
+                grounding_width=config.grounding_width,
+                grounding_height=config.grounding_height,
+                model_temperature=config.model_temperature,
+                max_steps=min(int(config.max_steps), int(max_steps)),
+                max_trajectory_length=config.max_trajectory_length,
+                enable_reflection=config.enable_reflection,
+                enable_code_agent=config.enable_code_agent,
+                screenshot_max_dimension=config.screenshot_max_dimension,
+                action_pre_delay=config.action_pre_delay,
+                action_post_delay=config.action_post_delay,
+                wait_delay=config.wait_delay,
+                extra=dict(config.extra or {}),
             )
-            held = True
-            try:
-                start = await ctx.accessor.desktop_action(
-                    "record_start", {"run_id": run_id}
-                )
-            except Exception as exc:
-                raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
-            if not start.get("ok"):
-                raise RuntimeError(f"Computer-use record_start failed: {start!r}")
-            record_started = True
-            recording_path = str(start.get("path") or default_recording_path(run_id))
-            initial = await self.tools.execute("view_screen", {}, ctx)
-            if not initial.image_jpeg:
-                raise RuntimeError(
-                    "Computer-use initial desktop screenshot did not return image data."
-                )
-            cu_state.set_screenshot(INITIAL_DESKTOP_TEXT, initial.image_jpeg)
 
-            step = 0
-            while True:
-                step += 1
-                is_last = _is_last_step(step, max_steps)
-                await self._send({"type": "step_start", "step": step})
-                request_messages, request_schemas, request_opts = (
-                    self._last_step_request(
-                        cu_state.build_provider_messages(), schemas, is_last
-                    )
-                )
-                text, calls, usage, _finish = await self._provider_step(
-                    model=model,
-                    messages=request_messages,
-                    schemas=request_schemas,
-                    step=step,
-                    chat_options=request_opts,
-                )
-                total_usage = total_usage.merge(usage)
-                total_cost = total_usage.cost
-                await self._send(
-                    {
-                        "type": "step_finish",
-                        "step": step,
-                        "tokens": {
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
-                            "total_tokens": usage.total_tokens,
-                        },
-                        "cost": usage.cost,
-                    }
-                )
-                if is_last:
-                    if calls:
-                        await self._reject_last_step_tools(calls, step)
-                    return self._computeruse_result(
-                        output=append_video_to_output(text, run_id),
-                        steps=step,
-                        usage=total_usage,
-                        cost=total_cost,
-                        finish_reason="max_steps",
-                        recording_path=recording_path,
-                    )
-                if not calls:
-                    return self._computeruse_result(
-                        output=append_video_to_output(text, run_id),
-                        steps=step,
-                        usage=total_usage,
-                        cost=total_cost,
-                        finish_reason="stop",
-                        recording_path=recording_path,
-                    )
-                if cu_state.round_messages:
-                    cu_state.flush_round_to_ledger()
-                cu_state.round_messages.append(
-                    LLMMessage(
-                        role="assistant",
-                        content=text or None,
-                        tool_calls=[
-                            {
-                                "id": call.call_id,
-                                "name": call.name,
-                                "arguments": call.raw_arguments,
-                            }
-                            for call in calls
-                        ],
-                    )
-                )
-                outcomes = await self._run_step_tools(
-                    calls=calls,
-                    recent_calls=recent_calls,
-                    ctx=ctx,
-                    agent=agent,
-                    mode=mode,
-                    step=step,
-                    depth=depth,
-                    max_depth=max_depth,
-                    opts=opts,
-                )
-                for outcome in outcomes:
-                    cu_state.round_messages.append(outcome.message)
-                    if outcome.result is not None and outcome.result.image_jpeg:
-                        cu_state.set_screenshot(
-                            FRESH_DESKTOP_TEXT, outcome.result.image_jpeg
-                        )
-        finally:
-            if record_started:
-                try:
-                    stop = await ctx.accessor.desktop_action(
-                        "record_stop", {"run_id": run_id}
-                    )
-                    if stop.get("path"):
-                        recording_path = str(stop["path"])
-                except Exception as exc:  # pragma: no cover - best effort
-                    log.warning(
-                        "computeruse_record_stop_failed",
-                        run_id=run_id,
-                        error=str(exc),
-                    )
-            if held:
-                try:
-                    await ctx.accessor.desktop_action(
-                        "release",
-                        {"kind": "computeruse", "run_id": run_id},
-                    )
-                except Exception as exc:  # pragma: no cover - best effort
-                    log.warning(
-                        "computeruse_desktop_release_failed",
-                        run_id=run_id,
-                        error=str(exc),
-                    )
+        def _chat_options_factory() -> ChatOptions:
+            return self.chat_options
 
-    @staticmethod
-    def _computeruse_result(
-        *,
-        output: str,
-        steps: int,
-        usage: Usage,
-        cost: float,
-        finish_reason: str,
-        recording_path: str,
-    ) -> RunResult:
-        """Build a :class:`RunResult` for a computer-use run."""
+        completion = HarnessCompletionAdapter(
+            self._resolve_model,
+            main_model=config.main_model,
+            grounding_model=config.grounding_model,
+            chat_options_factory=_chat_options_factory,
+            emit=self._send,
+        )
+        code_execution = WorkspaceCodeExecutionAdapter(accessor=accessor)
+        ocr = WorkspaceOcrAdapter(accessor=accessor, run_id=run_id)
+        action_executor = WorkspaceActionExecutor(
+            accessor=accessor, timeout=ACTION_EXECUTE_TIMEOUT_S
+        )
+        screenshot = DesktopScreenshotAdapter(
+            accessor=accessor,
+            max_dimension=int(config.screenshot_max_dimension),
+        )
+        try:
+            # No explicit engine params: the harness layer derives the bare
+            # resolved model id for ``Worker.use_thinking`` itself.
+            result = await run_agent_s_computeruse(
+                prompt=prompt,
+                run_id=run_id,
+                accessor=accessor,
+                completion=completion,
+                code_execution=code_execution,
+                ocr=ocr,
+                action_executor=action_executor,
+                screenshot=screenshot,
+                config=config,
+                emit=self._send,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Agent-S computer-use run failed: {exc}") from exc
         return RunResult(
-            output=output,
-            steps=steps,
-            usage=usage,
-            cost=cost,
-            finish_reason=finish_reason,
-            metadata={"recording_path": recording_path},
+            output=result.output,
+            steps=result.steps,
+            usage=result.usage,
+            cost=result.cost,
+            finish_reason=result.finish_reason,
+            metadata=result.metadata,
         )
 
     def _last_step_request(

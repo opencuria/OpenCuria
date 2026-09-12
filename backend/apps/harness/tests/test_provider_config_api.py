@@ -45,9 +45,7 @@ def provider_setup(db):
     outsider = user_model.objects.create_user(
         email=f"p-outsider-{uuid.uuid4().hex[:6]}@example.com", password="secret"
     )
-    Membership.objects.create(
-        user=owner, organization=org, role=MembershipRole.MEMBER
-    )
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
     Membership.objects.create(
         user=stranger, organization=org, role=MembershipRole.MEMBER
     )
@@ -149,9 +147,7 @@ def test_org_provider_config_crud_roundtrip(provider_setup):
     assert gone.status_code == 404
 
     assert (
-        ProviderConfig.objects.filter(
-            organization_id=provider_setup["org"].id
-        ).count()
+        ProviderConfig.objects.filter(organization_id=provider_setup["org"].id).count()
         == 0
     )
 
@@ -243,9 +239,7 @@ def test_org_provider_config_no_membership_is_404(provider_setup):
         name=f"Other {uuid.uuid4().hex[:6]}",
         slug=f"other-{uuid.uuid4().hex[:10]}",
     )
-    client = _client(
-        user=provider_setup["outsider"], org=other_org, permissions=BOTH
-    )
+    client = _client(user=provider_setup["outsider"], org=other_org, permissions=BOTH)
     response = client.get(ORG_URL)
     assert response.status_code == 404
 
@@ -330,7 +324,7 @@ def test_workspace_provider_config_foreign_workspace_is_404(provider_setup):
 def test_save_config_service_keeps_key_when_omitted(organization) -> None:
     """Service-level: update without api_key preserves the connection secret."""
     service = ProviderConfigService()
-    first = service.save_config(
+    service.save_config(
         organization_id=organization.id,
         api_key="sk-service-keep",
         default_model="m1",
@@ -424,7 +418,12 @@ def test_list_providers_returns_all_three(provider_setup):
     assert response.status_code == 200, response.content[:500]
     body = response.json()
     providers = {row["provider"]: row for row in body}
-    assert set(providers) == {"openrouter", "chatgpt", "amazon-bedrock"}
+    assert set(providers) == {
+        "openrouter",
+        "chatgpt",
+        "amazon-bedrock",
+        "openai-compatible",
+    }
     assert all(not row["connected"] for row in body)
 
     put = client.put(
@@ -470,6 +469,27 @@ def test_put_openrouter_via_providers_keeps_existing_key(provider_setup):
     body = updated.json()
     assert body["api_key_hint"] == "••••ders"
     assert body["base_url"] == "https://custom.example/v1"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_put_openai_compatible_rejects_hostless_base_url(provider_setup):
+    """Hostless base URLs (``https://``/``http:///x``) are 400, localhost ok."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
+    )
+    for bad in ("https://", "http:///x"):
+        response = client.put(
+            f"{PROVIDERS_URL}openai-compatible/",
+            data=json.dumps({"base_url": bad}),
+            content_type="application/json",
+        )
+        assert response.status_code == 400, response.content[:500]
+    ok = client.put(
+        f"{PROVIDERS_URL}openai-compatible/",
+        data=json.dumps({"base_url": "http://localhost:8080/v1"}),
+        content_type="application/json",
+    )
+    assert ok.status_code == 200, ok.content[:500]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -708,3 +728,26 @@ def test_org_provider_config_efforts_roundtrip(provider_setup):
     assert stored["default_effort"] == "high"
     assert stored["small_effort"] == "low"
     assert stored["computer_use_effort"] == "medium"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_provider_list_tolerates_dirty_openai_compatible_models(provider_setup):
+    """GET /providers/ survives dirty legacy model rows (read-path tolerant)."""
+    from apps.harness.api import _list_org_provider_connections
+
+    service = ProviderConfigService()
+    service.save_connection(
+        organization_id=provider_setup["org"].id,
+        provider="openai-compatible",
+        credentials={"api_key": "k"},
+        config={
+            "base_url": "https://example.test/v1",
+            "models": ["  good  ", "", "good", "other"],
+        },
+    )
+    rows = _list_org_provider_connections(provider_setup["org"].id)
+    compat = next(
+        row for row in rows if row.provider == "openai-compatible"
+    )
+    assert compat.connected is True
+    assert compat.models == ["good", "other"]

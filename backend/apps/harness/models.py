@@ -25,6 +25,7 @@ from .permissions.models import PermissionAllowlist, PermissionRequest
 
 __all__ = [
     "AgentConfig",
+    "AgentSConfig",
     "HarnessMessage",
     "HarnessPart",
     "HarnessSession",
@@ -185,7 +186,10 @@ class ProviderConnection(models.Model):
     provider = models.CharField(
         max_length=32,
         choices=ProviderType.choices,
-        help_text="Provider identifier (openrouter, chatgpt, amazon-bedrock).",
+        help_text=(
+            "Provider identifier "
+            "(openrouter, chatgpt, amazon-bedrock, openai-compatible)."
+        ),
     )
     credentials_encrypted = models.TextField(
         blank=True,
@@ -213,6 +217,57 @@ class ProviderConnection(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the connection."""
         return f"ProviderConnection(org={self.organization_id}, {self.provider})"
+
+
+class AgentSConfig(models.Model):
+    """Org-wide Agent-S harness parameters (no secrets).
+
+    ``AgentConfig['computeruse']`` stays the source for the Agent-S main
+    model/effort; this row only holds harness behavior values plus the
+    separate grounding model. ``grounding_model`` may be empty (stored
+    as ``""``); production falls back to the run's main model in a
+    controlled way so upgrades keep working. ``model_temperature=None``
+    means the Agent-S SDK default (provider default wiring).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_agent_s_config",
+        help_text=(
+            "Owning organization (exactly one Agent-S config per org)."
+        ),
+    )
+    grounding_model = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+        help_text=(
+            "Grounding model ref; empty falls back to the run's main model."
+        ),
+    )
+    grounding_width = models.PositiveIntegerField(default=1920)
+    grounding_height = models.PositiveIntegerField(default=1080)
+    model_temperature = models.FloatField(null=True, blank=True, default=None)
+    max_steps = models.IntegerField(default=15)
+    max_trajectory_length = models.IntegerField(default=8)
+    enable_reflection = models.BooleanField(default=True)
+    enable_code_agent = models.BooleanField(default=True)
+    screenshot_max_dimension = models.IntegerField(default=2400)
+    action_pre_delay = models.FloatField(default=1.0)
+    action_post_delay = models.FloatField(default=1.0)
+    wait_delay = models.FloatField(default=5.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_agent_s_config"
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        """Return a short representation of the config."""
+        return f"AgentSConfig(org={self.organization_id})"
 
 
 class HarnessSession(models.Model):

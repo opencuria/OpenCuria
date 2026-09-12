@@ -28,11 +28,51 @@ const catalog: ProviderModel[] = [
 ]
 
 const configs: AgentConfig[] = [
-  { agent: 'build', mode: 'primary', description: 'Build', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
-  { agent: 'plan', mode: 'primary', description: 'Plan', model: 'openrouter/model-big', effort: '', inherit_model: false, effort_strategy: 'fixed' },
-  { agent: 'general', mode: 'subagent', description: 'General', model: '', effort: '', inherit_model: true, effort_strategy: 'inherit' },
-  { agent: 'explore', mode: 'subagent', description: 'Explore', model: '', effort: '', inherit_model: true, effort_strategy: 'lowest' },
-  { agent: 'computeruse', mode: 'subagent', description: 'CU', model: 'openrouter/model-big', effort: '', inherit_model: false, effort_strategy: 'fixed' },
+  {
+    agent: 'build',
+    mode: 'primary',
+    description: 'Build',
+    model: 'openrouter/model-big',
+    effort: 'high',
+    inherit_model: false,
+    effort_strategy: 'fixed',
+  },
+  {
+    agent: 'plan',
+    mode: 'primary',
+    description: 'Plan',
+    model: 'openrouter/model-big',
+    effort: '',
+    inherit_model: false,
+    effort_strategy: 'fixed',
+  },
+  {
+    agent: 'general',
+    mode: 'subagent',
+    description: 'General',
+    model: '',
+    effort: '',
+    inherit_model: true,
+    effort_strategy: 'inherit',
+  },
+  {
+    agent: 'explore',
+    mode: 'subagent',
+    description: 'Explore',
+    model: '',
+    effort: '',
+    inherit_model: true,
+    effort_strategy: 'lowest',
+  },
+  {
+    agent: 'computeruse',
+    mode: 'subagent',
+    description: 'CU',
+    model: 'openrouter/model-big',
+    effort: '',
+    inherit_model: false,
+    effort_strategy: 'fixed',
+  },
 ]
 
 const stubs = {
@@ -49,7 +89,14 @@ const stubs = {
 
 function mountTab() {
   setActivePinia(createPinia())
-  return mount(AgentConfigTab, { global: { stubs } })
+  return mount(AgentConfigTab, {
+    global: {
+      stubs: {
+        ...stubs,
+        AgentSConfigPanel: { template: '<div data-testid="agent-s-config-panel" />' },
+      },
+    },
+  })
 }
 
 describe('AgentConfigTab', () => {
@@ -61,7 +108,15 @@ describe('AgentConfigTab', () => {
     vi.spyOn(agentConfigs, 'loadAgentConfigsCached').mockResolvedValue(configs)
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
     vi.spyOn(harnessApi, 'saveAgentConfigs').mockImplementation(async (payload) =>
-      payload.map((c, i) => ({ ...configs[i]!, ...c, mode: configs[i]!.mode, description: configs[i]!.description } as AgentConfig)),
+      payload.map(
+        (c, i) =>
+          ({
+            ...configs[i]!,
+            ...c,
+            mode: configs[i]!.mode,
+            description: configs[i]!.description,
+          }) as AgentConfig,
+      ),
     )
   })
 
@@ -108,5 +163,11 @@ describe('AgentConfigTab', () => {
       description: 'boom',
       duration: 8000,
     })
+  })
+
+  it('renders the Agent-S harness panel below the agent saves', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="agent-s-config-panel"]').exists()).toBe(true)
   })
 })

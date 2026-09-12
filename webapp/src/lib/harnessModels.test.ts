@@ -70,6 +70,7 @@ describe('harnessModels', () => {
     expect(providerDisplayName('openrouter')).toBe('OpenRouter')
     expect(providerDisplayName('chatgpt')).toBe('ChatGPT')
     expect(providerDisplayName('amazon-bedrock')).toBe('Amazon Bedrock')
+    expect(providerDisplayName('openai-compatible')).toBe('OpenAI Compatible')
     expect(providerDisplayName('custom')).toBe('custom')
   })
 

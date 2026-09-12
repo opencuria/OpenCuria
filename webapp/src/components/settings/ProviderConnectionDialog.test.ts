@@ -209,4 +209,155 @@ describe('ProviderConnectionDialog', () => {
     expect(deleteProviderConnectionMock).toHaveBeenCalledWith('openrouter')
     expect(wrapper.emitted('changed')).toHaveLength(1)
   })
+
+  it('loads an existing compatible connection without showing secrets', async () => {
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      api_key_hint: '••••abcd',
+      models: ['ui-tars-1.5-7b', 'grounding-model'],
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="connection-status"]').text()).toContain(
+      'https://my-host:8000/v1',
+    )
+    expect(wrapper.find('[data-testid="connection-status"]').text()).toContain('2 models')
+    const baseUrl = wrapper.find('#compat-base-url')
+    expect((baseUrl.element as HTMLInputElement).value).toBe('https://my-host:8000/v1')
+    const apiKey = wrapper.find('#compat-api-key')
+    expect((apiKey.element as HTMLInputElement).value).toBe('')
+    expect(apiKey.attributes('placeholder')).toContain('••••abcd')
+    const models = wrapper.find('[data-testid="compat-models"]')
+    expect((models.element as HTMLTextAreaElement).value).toBe('ui-tars-1.5-7b\ngrounding-model')
+  })
+
+  it('saves the compatible connection with trimmed/deduped models', async () => {
+    saveProviderConnectionMock.mockResolvedValue({
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      models: ['a', 'b'],
+    })
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: false,
+    })
+    await flushPromises()
+
+    await wrapper.find('#compat-base-url').setValue('https://my-host:8000/v1/')
+    await wrapper.find('#compat-api-key').setValue('secret-123')
+    await wrapper
+      .find('[data-testid="compat-models"]')
+      .setValue('  b \n\na\nb\n  \nui-tars-1.5-7b  ')
+    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
+      api_key: 'secret-123',
+      base_url: 'https://my-host:8000/v1/',
+      models: ['b', 'a', 'ui-tars-1.5-7b'],
+    })
+    expect(wrapper.emitted('changed')).toHaveLength(1)
+  })
+
+  it('saves an explicit empty model list for the compatible provider', async () => {
+    saveProviderConnectionMock.mockResolvedValue({
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      models: [],
+    })
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      models: ['old-model'],
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="compat-models"]').setValue('   \n  ')
+    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
+      api_key: '',
+      base_url: 'https://my-host:8000/v1',
+      models: [],
+    })
+    expect(wrapper.emitted('changed')).toHaveLength(1)
+  })
+
+  it('keeps the stored key when the compatible API key stays blank', async () => {
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      api_key_hint: '••••abcd',
+      models: [],
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
+      api_key: '',
+      base_url: 'https://my-host:8000/v1',
+      models: [],
+    })
+  })
+
+  it('requires a base URL for the compatible provider', async () => {
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: false,
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="compat-models"]').setValue('model-a')
+    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConnectionMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Base URL is required')
+    expect(wrapper.emitted('changed')).toBeUndefined()
+  })
+
+  it('shows backend save errors for the compatible provider', async () => {
+    saveProviderConnectionMock.mockRejectedValueOnce(new Error('bad gateway'))
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: false,
+    })
+    await flushPromises()
+
+    await wrapper.find('#compat-base-url').setValue('https://my-host:8000/v1')
+    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('bad gateway')
+    expect(wrapper.emitted('changed')).toBeUndefined()
+  })
+
+  it('disconnects the compatible provider after confirmation', async () => {
+    const wrapper = mountDialog('openai-compatible', {
+      provider: 'openai-compatible',
+      connected: true,
+      base_url: 'https://my-host:8000/v1',
+      models: ['a'],
+    })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="disconnect-openai-compatible"]').trigger('click')
+    expect(wrapper.find('[data-testid="disconnect-confirm"]').text()).toContain(
+      'Disconnect this endpoint?',
+    )
+    await wrapper.find('[data-testid="confirm-disconnect-openai-compatible"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteProviderConnectionMock).toHaveBeenCalledWith('openai-compatible')
+    expect(wrapper.emitted('changed')).toHaveLength(1)
+  })
 })

@@ -12,6 +12,15 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+# The Agent-S port keeps verbatim upstream texts (prompt constants, action
+# docstrings, snippet constants) byte-identical to the pinned commit, so
+# reformatting them would destroy parity. Only these two files carry a
+# file-local `# ruff: noqa` for the purely cosmetic rules; every other
+# agent_s core/test file is linted and formatted normally.
+[tool.ruff.lint.per-file-ignores]
+"apps/harness/agent_s/prompts.py" = ["E501", "W291", "W293", "I001"]
+"apps/harness/agent_s/actions.py" = ["E501", "UP006", "UP035", "UP045", "I001"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["config", "apps", "common"]
 

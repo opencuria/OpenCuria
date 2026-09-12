@@ -2,7 +2,7 @@
  * Multi-provider catalog helpers for the composer model/effort picker.
  */
 
-export type ProviderId = 'openrouter' | 'chatgpt' | 'amazon-bedrock'
+export type ProviderId = 'openrouter' | 'chatgpt' | 'amazon-bedrock' | 'openai-compatible'
 
 export interface ProviderModel {
   id: string
@@ -19,6 +19,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openrouter: 'OpenRouter',
   chatgpt: 'ChatGPT',
   'amazon-bedrock': 'Amazon Bedrock',
+  'openai-compatible': 'OpenAI Compatible',
 }
 
 /** Human-readable provider label for catalog rows and tooltips. */
