@@ -3081,6 +3081,9 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
             return None, _error("remote_ref is required for checkout_remote_branch")
         if len(remote_ref) > 255:
             return None, _error("Invalid remote_ref")
+        remote, sep, branch_part = remote_ref.partition("/")
+        if not sep or not remote or not branch_part:
+            return None, _error("Invalid remote_ref")
         out["remote_ref"] = remote_ref
         if args.get("local_name") not in (None, ""):
             local = str(args["local_name"]).strip()

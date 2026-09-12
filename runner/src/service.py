@@ -5273,15 +5273,17 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Track a remote branch locally (fetch + checkout/create)."""
         remote_ref = git_ops.validate_remote_ref(str(params.get("remote_ref", "")))
-        remote, _, _short = remote_ref.partition("/")
+        # Default local branch: strip only the remote prefix
+        # ("origin/feat/x" -> "feat/x", like `git switch <remote_ref>`).
+        _remote, _, _short = remote_ref.partition("/")
         local_raw = params.get("local_name")
         local = (
             git_ops.validate_local_branch(str(local_raw))
             if local_raw not in (None, "")
-            else git_ops.validate_local_branch(remote_ref.rsplit("/", 1)[-1])
+            else git_ops.validate_local_branch(_short)
         )
         exit_code_f, fetch_out = await self._git_exec(
-            runtime, instance_id, ["git", "fetch", remote],
+            runtime, instance_id, ["git", "fetch", _remote],
             workdir=repo_root, env=env, timeout=git_ops.GIT_NETWORK_TIMEOUT_S,
         )
         if exit_code_f != 0:

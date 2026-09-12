@@ -378,7 +378,11 @@ def validate_commit_hash(value: str, *, field: str = "commit") -> str:
 
 
 def validate_remote_ref(value: str) -> str:
-    """Validate a ``remote/branch`` tracking ref (``origin/foo`` format)."""
+    """Validate a ``remote/branch`` tracking ref (``origin/foo`` format).
+
+    The remote name is the first path segment; the branch part may itself
+    be hierarchical (``origin/feat/x``).
+    """
     if not isinstance(value, str):
         raise ValueError(f"Invalid remote_ref: {value!r}")
     cleaned = value.strip()
@@ -386,17 +390,16 @@ def validate_remote_ref(value: str) -> str:
         raise ValueError(f"Invalid remote_ref: {value!r}")
     if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
         raise ValueError(f"Invalid remote_ref: {value!r}")
-    if cleaned.startswith("-"):
+    if cleaned.startswith("-") or "/" not in cleaned:
         raise ValueError(f"Invalid remote_ref: {value!r}")
-    if cleaned.count("/") != 1:
+    remote, _, branch_part = cleaned.partition("/")
+    if not remote or not branch_part:
         raise ValueError(f"Invalid remote_ref: {value!r}")
-    remote, branch_part = cleaned.split("/", 1)
     # Remote names are single path components (no "/").
     validate_branch_name(remote, field="remote_ref")
     if "/" in remote:
         raise ValueError(f"Invalid remote_ref: {value!r}")
-    # The branch part may itself be hierarchical (``origin/feat/x`` is
-    # rejected: exactly one "/" is required, see above).
+    # The branch part may be hierarchical (``feat/x``).
     validate_branch_name(branch_part, field="remote_ref")
     return cleaned
 

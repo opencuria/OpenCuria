@@ -718,10 +718,10 @@ export const useGitStore = defineStore('git', () => {
     const silent = options?.silent === true
     const withDetails = options?.withDetails !== false
     const gen = loadGen
-    // eslint-disable-next-line prefer-const -- reassigned below after the
-    // async closure captures it for the overlap guard (`refreshPromise === task`).
-    let task!: Promise<boolean>
-    task = (async (): Promise<boolean> => {
+    // Deferred assignment avoids the TDZ self-reference (`refreshPromise ===
+    // task` in `finally`) that `vue-tsc --build` flags for `const`.
+    const taskHolder: { task?: Promise<boolean> } = {}
+    const task: Promise<boolean> = (async (): Promise<boolean> => {
       if (!silent) {
         loading.value = true
         error.value = null
@@ -754,12 +754,13 @@ export const useGitStore = defineStore('git', () => {
         }
         return false
       } finally {
-        if (refreshPromise === task) {
+        if (refreshPromise === taskHolder.task) {
           refreshPromise = null
           refreshFor = null
         }
       }
     })()
+    taskHolder.task = task
     refreshPromise = task
     refreshFor = wsId
     refreshGen = gen
@@ -1408,8 +1409,11 @@ export const useGitStore = defineStore('git', () => {
    */
   function checkoutRemoteBranch(remoteRef: string, localName?: string): Promise<boolean> {
     const trimmed = localName?.trim() ? localName.trim() : undefined
-    const short = remoteRef.split('/').filter(Boolean).pop() ?? remoteRef
-    const local = trimmed ?? short
+    // Default local name: strip only the remote prefix ("origin/feat/x" -> "feat/x").
+    const withoutRemote = remoteRef.includes('/')
+      ? remoteRef.slice(remoteRef.indexOf('/') + 1)
+      : remoteRef
+    const local = trimmed ?? withoutRemote
     return runOperation(
       'checkout_remote_branch',
       () => ({

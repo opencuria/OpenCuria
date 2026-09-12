@@ -3754,11 +3754,17 @@ class RunnerService:
             remote_ref = str(incoming.get("remote_ref", "") or "").strip()
             if not remote_ref:
                 raise ValueError("remote_ref is required for checkout_remote_branch")
-            out = {
-                "remote_ref": cls._validate_git_branch_name(
-                    remote_ref, field="remote_ref"
-                )
-            }
+            if (
+                len(remote_ref) > 255
+                or "\x00" in remote_ref
+                or "\n" in remote_ref
+                or "\r" in remote_ref
+            ):
+                raise ValueError("Invalid remote_ref")
+            remote, sep, branch_part = remote_ref.partition("/")
+            if not sep or not remote or not branch_part:
+                raise ValueError("Invalid remote_ref")
+            out = {"remote_ref": remote_ref}
             if incoming.get("local_name") not in (None, ""):
                 local = str(incoming["local_name"]).strip()
                 if not local:
