@@ -329,14 +329,14 @@ class TestDesktopStateCleanup:
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
-    async def test_desktop_process_records_proxy_without_frontend_event(
+    async def test_desktop_process_records_proxy_and_forwards_started(
         self,
         service,
         runner,
         workspace,
         monkeypatch,
     ):
-        """Reconnect process announcements must not look like a viewer acquire."""
+        """Harness hold/ensure announcements fill the same cache the proxy uses."""
         emit = AsyncMock()
         monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
 
@@ -350,8 +350,344 @@ class TestDesktopStateCleanup:
             computer_use=True,
         )
 
+        assert service.get_desktop_info(str(workspace.id)) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+            "viewer": False,
+            "computer_use": True,
+        }
+        emit.assert_awaited_once()
+        assert emit.await_args.args[0] == "desktop:started"
+        payload = emit.await_args.args[1]
+        assert payload["workspace_id"] == str(workspace.id)
+        assert payload["proxy_url"] == f"/ws/desktop/{workspace.id}/"
+        assert payload["computer_use_active"] is True
+
+        # Duplicate announcements are idempotent: same state, same forward.
+        emit.reset_mock()
+        await service.handle_desktop_process(
+            str(workspace.id),
+            port=6901,
+            container_ip="172.19.0.3",
+            network_name="workspace-net",
+            runner_id=str(runner.id),
+            viewer=False,
+            computer_use=True,
+        )
         assert service.get_desktop_info(str(workspace.id))["computer_use"] is True
+        emit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_process_rejects_foreign_runner_with_empty_cache(
+        self,
+        service,
+        runner,
+        organization,
+        user,
+        monkeypatch,
+    ):
+        """A foreign runner must not plant state when the cache is empty.
+
+        Regression: cache-only ownership checks accept any runner when
+        ``_desktop_workspace_runner`` has no entry. The real workspace
+        owner (``Workspace.runner_id``) is authoritative.
+        """
+        from apps.runners.enums import RunnerStatus, WorkspaceStatus
+        from apps.runners.models import Runner, Workspace
+
+        foreign_runner = Runner.objects.create(
+            name="foreign-runner",
+            api_token_hash="foreign-hash",
+            status=RunnerStatus.ONLINE,
+            organization=organization,
+            available_runtimes=["docker"],
+        )
+        foreign_workspace = Workspace.objects.create(
+            runner=foreign_runner,
+            name="Foreign Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        foreign_ws_id = str(foreign_workspace.id)
+        assert foreign_ws_id not in service._desktop_workspace_runner
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_process(
+            foreign_ws_id,
+            port=6901,
+            container_ip="10.0.0.9",
+            network_name="evil-net",
+            runner_id=str(runner.id),
+            viewer=False,
+            computer_use=True,
+        )
+
+        assert service.get_desktop_info(foreign_ws_id) is None
+        assert foreign_ws_id not in service._desktop_workspace_runner
         emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_process_rejects_missing_workspace(
+        self,
+        service,
+        runner,
+        monkeypatch,
+    ):
+        """Events for unknown workspaces plant no cache and emit nothing."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        missing_ws_id = str(uuid.uuid4())
+
+        await service.handle_desktop_process(
+            missing_ws_id,
+            port=6901,
+            container_ip="10.0.0.9",
+            network_name="evil-net",
+            runner_id=str(runner.id),
+            viewer=False,
+            computer_use=True,
+        )
+
+        assert service.get_desktop_info(missing_ws_id) is None
+        assert missing_ws_id not in service._desktop_workspace_runner
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_stopped_foreign_runner_cannot_clear_with_empty_cache(
+        self,
+        service,
+        runner,
+        organization,
+        user,
+        monkeypatch,
+    ):
+        """A foreign stop must not clear the owner's cached desktop state."""
+        from apps.runners.enums import RunnerStatus, WorkspaceStatus
+        from apps.runners.models import Runner, Workspace
+
+        foreign_runner = Runner.objects.create(
+            name="foreign-runner-stop",
+            api_token_hash="foreign-stop-hash",
+            status=RunnerStatus.ONLINE,
+            organization=organization,
+            available_runtimes=["docker"],
+        )
+        foreign_workspace = Workspace.objects.create(
+            runner=foreign_runner,
+            name="Foreign Stop Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        foreign_ws_id = str(foreign_workspace.id)
+        service._record_active_desktop(
+            foreign_ws_id,
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": False,
+                "computer_use": True,
+            },
+            runner_id=str(foreign_runner.id),
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+
+        await service.handle_desktop_stopped(
+            None,
+            foreign_ws_id,
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(foreign_ws_id) == {
+            "port": 6901,
+            "container_ip": "172.19.0.3",
+            "network_name": "workspace-net",
+            "viewer": False,
+            "computer_use": True,
+        }
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_stopped_owner_accepted_with_empty_runner_cache(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """The real owner clears state even without a cached runner entry."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        ws_id = str(workspace.id)
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": False,
+                "computer_use": True,
+            },
+        )
+        assert ws_id not in service._desktop_workspace_runner
+
+        await service.handle_desktop_stopped(
+            None,
+            ws_id,
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(ws_id) is None
+        emit.assert_awaited_once()
+        assert emit.await_args.args[0] == "desktop:stopped"
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_process_rejects_foreign_runner(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """A stray runner must not hijack another runner's desktop cache."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        service._record_active_desktop(
+            str(workspace.id),
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": True,
+                "computer_use": False,
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_process(
+            str(workspace.id),
+            port=6901,
+            container_ip="10.0.0.9",
+            network_name="evil-net",
+            runner_id="00000000-0000-0000-0000-000000000000",
+            viewer=False,
+            computer_use=True,
+        )
+
+        assert service.get_desktop_info(str(workspace.id))["container_ip"] == (
+            "172.19.0.3"
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_event_owner_check_needs_no_async_unsafe(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Ownership helper must not call sync ORM on the event loop."""
+        import os
+
+        from django.core.exceptions import SynchronousOnlyOperation
+
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+        try:
+            owned = await service._desktop_event_owned_by_runner(
+                str(workspace.id), str(runner.id)
+            )
+        except SynchronousOnlyOperation:
+            pytest.fail(
+                "_desktop_event_owned_by_runner called Django ORM "
+                "from an async context"
+            )
+        finally:
+            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+        assert owned is True
+
+        # Cache mismatch still rejects synchronously (no DB hit needed).
+        service._record_active_desktop(
+            str(workspace.id),
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": True,
+                "computer_use": False,
+            },
+            runner_id=str(runner.id),
+        )
+        monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+        try:
+            assert (
+                await service._desktop_event_owned_by_runner(
+                    str(workspace.id),
+                    "00000000-0000-0000-0000-000000000000",
+                )
+                is False
+            )
+            assert (
+                await service._desktop_event_owned_by_runner(
+                    str(uuid.uuid4()), str(runner.id)
+                )
+                is False
+            )
+            assert (
+                await service._desktop_event_owned_by_runner(
+                    str(workspace.id), None
+                )
+                is False
+            )
+        except SynchronousOnlyOperation:
+            pytest.fail("cache-mismatch path called Django ORM")
+        finally:
+            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_desktop_stopped_without_task_id_clears_and_forwards(
+        self,
+        service,
+        runner,
+        workspace,
+        monkeypatch,
+    ):
+        """Harness releases announce stops without a viewer task to complete."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        service._record_active_desktop(
+            str(workspace.id),
+            {
+                "port": 6901,
+                "container_ip": "172.19.0.3",
+                "network_name": "workspace-net",
+                "viewer": False,
+                "computer_use": True,
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_stopped(
+            None,
+            str(workspace.id),
+            runner_id=str(runner.id),
+        )
+
+        assert service.get_desktop_info(str(workspace.id)) is None
+        emit.assert_awaited_once()
+        assert emit.await_args.args[0] == "desktop:stopped"
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)

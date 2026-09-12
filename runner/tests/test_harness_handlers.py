@@ -31,6 +31,7 @@ class _FakeService:
         self.desktop_action_calls: list[tuple[object, str, object]] = []
         self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
+        self._desktop_sessions: dict = {}
 
     async def exec_harness_command(
         self, workspace_id, command, workdir="/workspace", env=None
@@ -116,11 +117,87 @@ class _FakeService:
         self.desktop_action_calls.append((workspace_id, action, args))
         if action == "ensure":
             return {"ok": True, "display": ":1", "port": 6901}
+        if action == "hold":
+            # Hold installs a *new* session object (fresh Xvnc incarnation).
+            # Tests asserting the idempotent hold path pre-seed the sentinel
+            # and override desktop_action to skip this replacement.
+            from unittest.mock import MagicMock
+
+            fresh = MagicMock()
+            fresh.port = 6901
+            fresh.viewer_held = False
+            fresh.computeruse_run_ids = {"run-1"}
+            fresh.generation = getattr(
+                self._desktop_sessions.get(workspace_id), "generation", 0
+            ) + 1
+            self._desktop_sessions[workspace_id] = fresh
+            return {
+                "ok": True,
+                "display": ":1",
+                "port": 6901,
+                "viewer": False,
+                "computer_use": True,
+            }
+        if action == "release":
+            return {
+                "ok": True,
+                "stopped": False,
+                "process_alive": True,
+                "viewer_held": False,
+                "computer_use_active": True,
+            }
         if action == "screenshot" and args and args.get("fail"):
             raise RuntimeError("Desktop session is not active")
         if action == "record_start" and args and args.get("path") == "/etc/passwd":
             raise ValueError("Path must be under /workspace")
         return {"ok": True, "action": action}
+
+    def get_desktop_state_payload(self, workspace_id):
+        return {
+            "workspace_id": str(workspace_id),
+            "port": 6901,
+            "container_ip": "172.22.0.2",
+            "network_name": f"opencuria-ws-{workspace_id}",
+            "viewer": False,
+            "computer_use": True,
+            "generation": 1,
+        }
+
+    def get_desktop_session(self, workspace_id):
+        # Sessions as plain sentinels: identity comparison detects restarts.
+        return self._desktop_sessions.get(workspace_id)
+
+    async def start_desktop(self, workspace_id, width=None, height=None):
+        if workspace_id in self._desktop_sessions:
+            # Idempotent path: reuse the pre-seeded session object untouched
+            # so tests can pin "same object → no tunnel close".
+            return self._desktop_sessions[workspace_id]
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.port = 6901
+        session.viewer_held = True
+        session.computeruse_run_ids = set()
+        session.generation = 1
+        # Fresh start installs a new object.
+        self._desktop_sessions[workspace_id] = session
+        return session
+
+    async def stop_desktop(self, workspace_id):
+        from unittest.mock import MagicMock
+
+        return MagicMock(
+            stopped=False,
+            process_alive=True,
+            viewer_held=False,
+            computer_use_active=True,
+        )
+
+    def get_desktop_container_ip(self, workspace_id):
+        return "172.22.0.2"
+
+    def get_desktop_network_name(self, workspace_id):
+        return f"opencuria-ws-{workspace_id}"
 
 
 def _interface(service: _FakeService) -> WebSocketInterface:
@@ -360,7 +437,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
                 args={},
             )
         )
-        interface._sio.emit.assert_awaited_with(
+        interface._sio.emit.assert_any_await(
             "harness:desktop_action_result",
             {
                 "workspace_id": str(workspace_id),
@@ -391,6 +468,296 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         event, payload = interface._sio.emit.await_args.args
         self.assertEqual(event, "harness:desktop_action_result")
         self.assertEqual(payload["error"], "Desktop session is not active")
+
+    async def test_hold_emits_process_before_action_result(self) -> None:
+        """Backend must cache proxy state before the child shows a viewer."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d-hold",
+                action="hold",
+                args={"kind": "computeruse", "run_id": "run-1"},
+            )
+        )
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:process", events)
+        self.assertIn("harness:desktop_action_result", events)
+        self.assertLess(
+            events.index("desktop:process"),
+            events.index("harness:desktop_action_result"),
+        )
+        process_payload = next(
+            call.args[1]
+            for call in interface._sio.emit.await_args_list
+            if call.args[0] == "desktop:process"
+        )
+        self.assertEqual(process_payload["container_ip"], "172.22.0.2")
+        self.assertEqual(
+            process_payload["network_name"], f"opencuria-ws-{workspace_id}"
+        )
+
+    async def test_idempotent_hold_keeps_tunnels(self) -> None:
+        """Same session object (no restart) must not close healthy tunnels."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        sentinel = object()
+        service._desktop_sessions[workspace_id] = sentinel
+
+        async def _idempotent_hold(ws_id, action, args=None):
+            service.desktop_action_calls.append((ws_id, action, args))
+            return {
+                "ok": True,
+                "display": ":1",
+                "port": 6901,
+                "viewer": False,
+                "computer_use": True,
+            }
+
+        service.desktop_action = _idempotent_hold  # type: ignore[method-assign]
+        closed: list = []
+
+        async def _fake_close(ws_id):
+            closed.append(ws_id)
+
+        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d-hold-idem",
+                action="hold",
+                args={"kind": "computeruse", "run_id": "run-1"},
+            )
+        )
+        self.assertEqual(closed, [])
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:process", events)
+        self.assertIn("harness:desktop_action_result", events)
+        self.assertLess(
+            events.index("desktop:process"),
+            events.index("harness:desktop_action_result"),
+        )
+
+    async def test_hold_restart_closes_tunnels_before_process(self) -> None:
+        """Fresh Xvnc incarnation closes stale tunnels before desktop:process."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        sentinel = object()
+        service._desktop_sessions[workspace_id] = sentinel
+        close_order: list = []
+        closed: list = []
+        orig_emit = interface._sio.emit
+
+        async def _fake_close(ws_id):
+            closed.append(ws_id)
+            close_order.append("close")
+
+        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+
+        async def _spy_emit(event, payload=None, *args, **kwargs):
+            if event == "desktop:process":
+                close_order.append("process")
+            return await orig_emit(event, payload, *args, **kwargs)
+
+        interface._sio.emit = _spy_emit  # type: ignore[method-assign]
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d-hold-restart",
+                action="hold",
+                args={"kind": "computeruse", "run_id": "run-1"},
+            )
+        )
+        self.assertEqual(closed, [workspace_id])
+        # The default fake replaces the session object, so a restart is
+        # detected and the close precedes the lifecycle event.
+        self.assertLess(
+            close_order.index("close"),
+            close_order.index("process"),
+        )
+        self.assertIsNot(service._desktop_sessions[workspace_id], sentinel)
+        # Other workspaces are untouched: scoping is per-workspace.
+        self.assertNotIn(other_id, closed)
+
+    async def test_release_kept_emits_process_release_stopped_closes_tunnels(
+        self,
+    ) -> None:
+        """Kept releases announce process; final releases stop + close tunnels."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        await handler(
+            _payload(
+                workspace_id,
+                "d-kept",
+                action="release",
+                args={"kind": "computeruse", "run_id": "run-1"},
+            )
+        )
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:process", events)
+        self.assertNotIn("desktop:stopped", events)
+
+        class StoppingService(_FakeService):
+            async def desktop_action(self, workspace_id, action, args=None):
+                self.desktop_action_calls.append((workspace_id, action, args))
+                return {
+                    "ok": True,
+                    "stopped": True,
+                    "process_alive": False,
+                    "viewer_held": False,
+                    "computer_use_active": False,
+                }
+
+        service2 = StoppingService()
+        interface2 = _interface(service2)
+        interface2._desktop_proxy_tunnels["t1"] = object()
+        closed: list = []
+
+        async def _fake_close(ws_id):
+            closed.append(ws_id)
+
+        interface2._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        await interface2._sio.handlers["/"]["harness:desktop_action"](
+            _payload(
+                workspace_id,
+                "d-stop",
+                action="release",
+                args={"kind": "computeruse", "run_id": "run-1"},
+            )
+        )
+        events2 = [
+            call.args[0] for call in interface2._sio.emit.await_args_list
+        ]
+        self.assertIn("desktop:stopped", events2)
+        # Lifecycle stop is announced before the action result so the
+        # backend clears proxy routing before the child tears down its
+        # mini viewer.
+        self.assertLess(
+            events2.index("desktop:stopped"),
+            events2.index("harness:desktop_action_result"),
+        )
+        self.assertEqual(closed, [workspace_id])
+
+    async def test_screenshot_emits_no_lifecycle_event(self) -> None:
+        """Normal I/O actions must not announce desktop lifecycle events."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handler = interface._sio.handlers["/"]["harness:desktop_action"]
+        service.desktop_action_calls.clear()
+        await handler(
+            _payload(
+                workspace_id,
+                "d-shot",
+                action="screenshot",
+                args={},
+            )
+        )
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("harness:desktop_action_result", events)
+        self.assertNotIn("desktop:process", events)
+        self.assertNotIn("desktop:stopped", events)
+
+    async def test_start_desktop_does_not_close_healthy_tunnels(self) -> None:
+        """Idempotent viewer acquires must keep concurrent viewers attached."""
+        from unittest.mock import MagicMock
+
+        service = _FakeService()
+        interface = _interface(service)
+        interface._desktop_proxy_tunnels["t1"] = object()
+        closed: list = []
+
+        async def _fake_close(ws_id):
+            closed.append(ws_id)
+
+        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        workspace_id = uuid.uuid4()
+        session = MagicMock()
+        session.port = 6901
+        session.viewer_held = True
+        session.computeruse_run_ids = set()
+        session.generation = 1
+        service._desktop_sessions[workspace_id] = session
+        # Idempotent path: start_desktop reuses the pre-seeded session, so
+        # before/after identity matches and no tunnel is closed.
+        await interface._sio.handlers["/"]["task:start_desktop"](
+            {"task_id": "task-1", "workspace_id": str(workspace_id)}
+        )
+        self.assertEqual(closed, [])
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:started", events)
+
+    async def test_start_desktop_restart_closes_only_target_workspace(
+        self,
+    ) -> None:
+        """Stale restart closes target tunnels before desktop:started."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        other_id = uuid.uuid4()
+        sentinel = object()
+        service._desktop_sessions[workspace_id] = sentinel
+        service._desktop_sessions[other_id] = object()
+        close_order: list = []
+        closed: list = []
+        orig_emit = interface._sio.emit
+
+        async def _fake_close(ws_id):
+            closed.append(ws_id)
+            close_order.append("close")
+
+        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+
+        async def _spy_emit(event, payload=None, *args, **kwargs):
+            if event == "desktop:started":
+                close_order.append("started")
+            return await orig_emit(event, payload, *args, **kwargs)
+
+        interface._sio.emit = _spy_emit  # type: ignore[method-assign]
+
+        async def _restarting_start(ws_id, width=None, height=None):
+            from unittest.mock import MagicMock
+
+            fresh = MagicMock()
+            fresh.port = 6901
+            fresh.viewer_held = True
+            fresh.computeruse_run_ids = set()
+            fresh.generation = 2
+            service._desktop_sessions[ws_id] = fresh
+            return fresh
+
+        service.start_desktop = _restarting_start  # type: ignore[method-assign]
+        await interface._sio.handlers["/"]["task:start_desktop"](
+            {"task_id": "task-2", "workspace_id": str(workspace_id)}
+        )
+        self.assertEqual(closed, [workspace_id])
+        self.assertLess(
+            close_order.index("close"),
+            close_order.index("started"),
+        )
+        self.assertIsNot(service._desktop_sessions[workspace_id], sentinel)
+
+    async def test_stop_desktop_kept_emits_viewer_released(self) -> None:
+        """Viewer release with computer-use hold keeps the process cached."""
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        await interface._sio.handlers["/"]["task:stop_desktop"](
+            {"task_id": "task-2", "workspace_id": str(workspace_id)}
+        )
+        events = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:viewer_released", events)
+        self.assertNotIn("desktop:stopped", events)
 
     async def test_desktop_action_registers_cancellable_task(self) -> None:
         service = _FakeService()

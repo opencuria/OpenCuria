@@ -42,6 +42,23 @@ export const useDesktopStore = defineStore('desktop', () => {
     computerUseRuns.value = active ? new Set(['active']) : new Set()
   }
 
+  /**
+   * Drop the viewer lease while keeping the running session mounted.
+   *
+   * Used when the runner releases the viewer lease but computer-use still
+   * holds the desktop process: the iframe stays visible read-only instead
+   * of being unmounted. Callers pass the current proxy URL (or null when
+   * unknown); an existing mounted URL is never cleared by this path.
+   */
+  function setViewerReleased(wsId: string, url: string | null): void {
+    workspaceId.value = wsId
+    if (url) proxyUrl.value = url
+    // Viewer lease dropped but the process still runs: keep the mounted
+    // iframe connected and read-only instead of tearing down the client.
+    isConnected.value = true
+    isConnecting.value = false
+  }
+
   function markComputerUseStarted(runId: string): void {
     const next = new Set(computerUseRuns.value)
     next.add(runId)
@@ -82,6 +99,7 @@ export const useDesktopStore = defineStore('desktop', () => {
     setConnecting,
     setConnected,
     setComputerUseActive,
+    setViewerReleased,
     markComputerUseStarted,
     markComputerUseFinished,
     setDisconnected,

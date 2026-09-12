@@ -2145,7 +2145,20 @@ class RunnerService:
         viewer: bool = False,
         computer_use: bool = False,
     ) -> None:
-        """Record live desktop process routing without a viewer acquire."""
+        """Record live desktop process routing without a viewer acquire.
+
+        Harness-induced hold/ensure announcements reuse the same cache path
+        as reconnect announcements, but must also refresh the frontend proxy
+        state immediately: without this, the viewer keeps a stale lease view
+        until the next heartbeat. Ownership is validated against the real
+        workspace owner (not just the in-memory cache) so a stray runner
+        cannot hijack another runner's desktop even with an empty cache.
+        """
+        from .sio_server import emit_to_frontend
+
+        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+            return
+
         self._record_active_desktop(
             workspace_id,
             {
@@ -2163,6 +2176,15 @@ class RunnerService:
             viewer,
             computer_use,
         )
+        await emit_to_frontend(
+            "desktop:started",
+            {
+                "workspace_id": workspace_id,
+                "proxy_url": f"/ws/desktop/{workspace_id}/",
+                "computer_use_active": computer_use,
+            },
+            workspace_id,
+        )
 
     async def handle_desktop_viewer_released(
         self,
@@ -2172,20 +2194,16 @@ class RunnerService:
         *,
         computer_use_active: bool = False,
     ) -> None:
-        """Handle viewer lease release while the desktop process stays up."""
+        """Handle viewer lease release while the desktop process stays up.
+
+        Ownership is validated against the real workspace owner (not just
+        the in-memory cache) so a foreign runner can never clear another
+        runner's desktop state, even with an empty cache.
+        """
         from .sio_server import emit_to_frontend
 
-        if runner_id:
-            cached = self._desktop_workspace_runner.get(workspace_id)
-            if cached is not None and cached != runner_id:
-                logger.warning(
-                    "desktop:viewer_released rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
-                )
-                return
+        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+            return
 
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
@@ -2221,30 +2239,38 @@ class RunnerService:
 
     async def handle_desktop_stopped(
         self,
-        task_id: str,
+        task_id: str | None,
         workspace_id: str,
         runner_id: str | None = None,
     ) -> None:
-        """Handle desktop:stopped event from a runner."""
+        """Handle desktop:stopped event from a runner.
+
+        ``task_id`` is optional: harness-induced releases announce the stop
+        without a viewer task, while manual stops still complete theirs.
+        Ownership is validated against the real workspace owner (not just
+        the in-memory cache) so a foreign runner can never clear another
+        runner's desktop state, even with an empty cache.
+        """
         from .sio_server import emit_to_frontend
 
-        if runner_id:
-            cached = self._desktop_workspace_runner.get(workspace_id)
-            if cached is not None and cached != runner_id:
+        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+            return
+
+        task = None
+        if task_id:
+            try:
+                task_uuid = uuid.UUID(str(task_id))
+            except (ValueError, TypeError, AttributeError):
                 logger.warning(
-                    "desktop:stopped rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
+                    "desktop:stopped rejected: invalid task_id %s",
+                    task_id,
                 )
                 return
-
-        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
-        if task:
-            if not self._validate_task_runner(task, runner_id):
-                return
-            await sync_to_async(self.tasks.complete)(task)
+            task = await sync_to_async(self.tasks.get_by_id)(task_uuid)
+            if task:
+                if not self._validate_task_runner(task, runner_id):
+                    return
+                await sync_to_async(self.tasks.complete)(task)
 
         desktop_info = self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
@@ -2322,6 +2348,67 @@ class RunnerService:
         """Remove in-memory desktop state for a workspace."""
         self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
+
+    async def _desktop_event_owned_by_runner(
+        self, workspace_id: str, runner_id: str | None
+    ) -> bool:
+        """Return True when *runner_id* owns the desktop *workspace_id*.
+
+        Async helper: the cache fast-path rejects a known mismatch
+        synchronously, while first matching/empty cache entries validate
+        the real ``Workspace.runner_id`` via ``sync_to_async`` — Django
+        ORM must never run on the Socket.IO event loop. Missing workspaces
+        and missing/invalid ids are rejected. No
+        ``DJANGO_ALLOW_ASYNC_UNSAFE`` dependency.
+        """
+        if not runner_id or not workspace_id:
+            logger.warning(
+                "desktop event rejected: missing workspace_id or runner_id",
+            )
+            return False
+        try:
+            workspace_uuid = uuid.UUID(str(workspace_id))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "desktop event rejected: invalid workspace_id %s",
+                workspace_id,
+            )
+            return False
+        try:
+            claimed_runner_id = uuid.UUID(str(runner_id))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "desktop event rejected: invalid runner_id %s",
+                runner_id,
+            )
+            return False
+        cached = self._desktop_workspace_runner.get(workspace_id)
+        if cached is not None and cached != runner_id:
+            logger.warning(
+                "desktop event rejected: workspace %s is owned by "
+                "runner %s, not %s",
+                workspace_id,
+                cached,
+                runner_id,
+            )
+            return False
+        owner_id = await sync_to_async(self.workspaces.get_runner_id)(
+            workspace_uuid
+        )
+        if owner_id is None:
+            logger.warning(
+                "desktop event rejected: workspace %s not found",
+                workspace_id,
+            )
+            return False
+        if owner_id != claimed_runner_id:
+            logger.warning(
+                "desktop event rejected: workspace %s not owned by %s",
+                workspace_id,
+                runner_id,
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Background processes (workspace-bound, no auto-restart)
@@ -4611,7 +4698,7 @@ RUN mkdir -p /root/.vnc \\
     && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
 
 # Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry "$GEOMETRY" -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -SendCutText -AcceptCutText -AcceptSetDesktopSize=0 >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ]; then\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
+RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /root/.vnc/.xstartup-started\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry "$GEOMETRY" -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -SendCutText -AcceptCutText -AcceptSetDesktopSize=0 >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ] && [ ! -f /root/.vnc/.xstartup-started ]; then\\n    touch /root/.vnc/.xstartup-started\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n  fi\\n  if [ -e /tmp/.X11-unix/X1 ] && (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
     && printf '#!/bin/bash\\nfor pid in $(pgrep -f "^(/usr/bin/)?Xvnc :1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
     && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 """

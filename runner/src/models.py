@@ -34,6 +34,11 @@ class DesktopSession:
     The Xvnc process is shared. Independent leases decide whether it
     stays up: a viewer hold (manual VNC) and zero or more computer-use
     ``run_id`` holds. The process is stopped only when both are empty.
+
+    ``generation`` identifies the Xvnc process incarnation: it is 0 for
+    unknown/recovered legacy sessions and increments on every fresh Xvnc
+    start. Callers compare it by identity to detect stale restarts
+    (recovery/cold start) versus idempotent reuse of the same process.
     """
 
     workspace_id: uuid.UUID
@@ -43,6 +48,7 @@ class DesktopSession:
     viewer_held: bool = False
     computeruse_run_ids: set[str] = field(default_factory=set)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    generation: int = 0
 
 
 @dataclass

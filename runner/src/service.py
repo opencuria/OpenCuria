@@ -316,6 +316,18 @@ class WorkspaceService:
         # snapshot + mutation requests cannot interleave mid-sequence.
         self._git_locks: dict[tuple[uuid.UUID, str], asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
+        # Desktop lifecycle: serialised per workspace so a concurrent
+        # viewer start and a computer-use hold cannot stop/start the
+        # shared Xvnc :1 process twice, and a release racing a start
+        # cannot stop the freshly started process. Entries are kept for
+        # the lifetime of the runner process (bounded by ever-seen
+        # workspaces, cleared on restart) and never dropped: removing an
+        # entry after release is not safe without waiter knowledge —
+        # release wakes the first waiter before it re-acquires, so a
+        # drop in that window hands a third caller a different lock
+        # object and lifecycle operations run in parallel.
+        self._desktop_locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._desktop_locks_guard = asyncio.Lock()
 
     # -- background processes --------------------------------------------------
 
@@ -1540,16 +1552,54 @@ class WorkspaceService:
         info.status = "running"
 
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Remove a workspace and clean up resources."""
+        """Remove a workspace and clean up resources.
+
+        The per-workspace desktop lock is acquired first and held across
+        the entire desktop-state/cache transition (recording interrupt
+        while the cache is still available, then cache pop plus
+        session/recording clear with no lock release in between). A
+        concurrent ensure/start holding the lock therefore completes
+        first; remove only pops the cache afterwards. A queued start/hold
+        acquiring the same retained lock afterwards finds no cache entry
+        and fails cleanly instead of resurrecting a session. The lock
+        object itself is kept for the process lifetime (never dropped) so
+        queued waiters and later callers always share one serialising
+        lock. Runtime removal runs after the lock is released: it must
+        never block behind a stuck Xvnc start while holding the desktop
+        lock. ``_interrupt_desktop_recordings``/``_exec_desktop_shell``
+        take no desktop lock and are awaited while holding it;
+        correctness wins over head-of-line blocking (runtime commands
+        have their own limits). Recording-interrupt errors still clear
+        state and attempt runtime removal.
+        """
         log = logger.bind(workspace_id=str(workspace_id))
         await self._kill_all_background_processes(workspace_id, reason="remove")
-        info = self._cache.pop(workspace_id, None)
-        self._desktop_sessions.pop(workspace_id, None)
-        self._desktop_recordings = {
-            key: value
-            for key, value in self._desktop_recordings.items()
-            if key[0] != workspace_id
-        }
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            # Interrupt while the cache is still available:
+            # _exec_desktop_shell needs _get_cached, so popping first
+            # would turn every interrupt into a "not found" failure.
+            # _interrupt_desktop_recordings already swallows per-command
+            # errors and clears the recordings dict; the outer guard only
+            # covers unexpected failures so state clear + runtime remove
+            # still run.
+            try:
+                await self._interrupt_desktop_recordings(workspace_id)
+            except Exception:
+                logger.exception(
+                    "desktop_recording_interrupt_failed",
+                    workspace_id=str(workspace_id),
+                )
+            info = self._cache.pop(workspace_id, None)
+            self._desktop_sessions.pop(workspace_id, None)
+            # Final sweep for entries added during the interrupt awaits
+            # (record_start is lock-free); still under the same hold, so
+            # no waiter could publish a session in between.
+            self._desktop_recordings = {
+                key: value
+                for key, value in self._desktop_recordings.items()
+                if key[0] != workspace_id
+            }
 
         if info and info.instance_id:
             runtime = self._runtimes.get(info.runtime_type)
@@ -1563,13 +1613,38 @@ class WorkspaceService:
 
         Returns ``True`` when a cached runtime instance was found and cleanup
         was attempted. Returns ``False`` when the workspace was already absent.
+
+        Same atomicity as :meth:`remove_workspace`: the desktop lock is
+        held across recording interrupt (cache still available), cache pop
+        (plus unreachable-timer pop), and session/recording clear, with no
+        release in between. The lock object is retained afterwards (never
+        dropped) so queued waiters keep sharing one lock object.
         """
         log = logger.bind(workspace_id=str(workspace_id))
         await self._kill_all_background_processes(
             workspace_id, reason="cleanup_unknown"
         )
-        info = self._cache.pop(workspace_id, None)
-        self._unreachable_since.pop(workspace_id, None)
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            # Same ordering as remove_workspace: interrupt while the cache
+            # is still available (per-command errors are swallowed inside
+            # the helper; the guard only covers unexpected failures), then
+            # pop and sweep with no lock release in between.
+            try:
+                await self._interrupt_desktop_recordings(workspace_id)
+            except Exception:
+                logger.exception(
+                    "desktop_recording_interrupt_failed",
+                    workspace_id=str(workspace_id),
+                )
+            info = self._cache.pop(workspace_id, None)
+            self._unreachable_since.pop(workspace_id, None)
+            self._desktop_sessions.pop(workspace_id, None)
+            self._desktop_recordings = {
+                key: value
+                for key, value in self._desktop_recordings.items()
+                if key[0] != workspace_id
+            }
 
         if info is None:
             log.info("unknown_workspace_already_absent")
@@ -1886,6 +1961,27 @@ class WorkspaceService:
 
         return metrics
 
+    async def _desktop_lock(self, workspace_id: uuid.UUID) -> asyncio.Lock:
+        """Return the serialising lock for one workspace desktop lifecycle.
+
+        The entry is created once and retained for the lifetime of the
+        runner process (bounded by ever-seen workspaces; cleared on
+        restart). It is never dropped: dropping after release cannot
+        observe queued waiters via the public ``asyncio.Lock`` API —
+        ``release()`` only schedules the first waiter's wakeup, and the
+        waiter sets its locked state later — so a drop in that window
+        hands a third caller a different lock object while the woken
+        waiter still references the old one, silently breaking
+        serialisation. One small in-memory ``asyncio.Lock`` per workspace
+        is the accepted trade-off for correctness.
+        """
+        async with self._desktop_locks_guard:
+            lock = self._desktop_locks.get(workspace_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._desktop_locks[workspace_id] = lock
+            return lock
+
     # -- interactive terminal --------------------------------------------------
 
     async def start_terminal(
@@ -2066,6 +2162,15 @@ class WorkspaceService:
         Must not call ``opencuria-desktop-stop``. That script uses
         ``pgrep -f 'Xvnc.*:1'``, which matches this ``bash -lc`` argv and
         would kill the start process before Xvnc is launched.
+
+        Readiness requires the X11 socket *and* the Kasm websocket port
+        6901 (dependency-free ``/dev/tcp`` poll): ``xstartup`` launches
+        exactly once as soon as the X11 socket exists, and the loop only
+        returns once 6901 is additionally reachable so ensure never
+        reports a half-ready Xvnc. The ``.xstartup-started`` marker is
+        per-start: it is cleared before Xvnc launches so every restart
+        re-runs ``xstartup`` even though the stop path never executes
+        (the stop script would match this shell's own ``Xvnc`` argv).
         """
         geometry = f"{width}x{height}"
         return (
@@ -2073,6 +2178,10 @@ class WorkspaceService:
             "export DISPLAY=:1\n"
             "export HOME=/root\n"
             "mkdir -p /root/.vnc\n"
+            # Per-start marker: clearing it here guarantees xstartup runs
+            # again after every Xvnc (re)start. It must not persist across
+            # starts, otherwise a restarted Xvnc would show an empty desktop.
+            "rm -f /root/.vnc/.xstartup-started\n"
             "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
             f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
             "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
@@ -2082,8 +2191,17 @@ class WorkspaceService:
             "-AcceptSetDesktopSize=0 "
             ">>/root/.vnc/server.log 2>&1 &\n"
             "for _ in $(seq 1 120); do\n"
-            "  if [ -e /tmp/.X11-unix/X1 ]; then\n"
+            # xstartup launches exactly once as soon as the X11 socket
+            # exists (desktop does not wait for the 6901 websocket); the
+            # loop only returns once 6901 is additionally reachable, so
+            # ensure never reports a half-ready Xvnc.
+            "  if [ -e /tmp/.X11-unix/X1 ] "
+            "&& [ ! -f /root/.vnc/.xstartup-started ]; then\n"
+            "    touch /root/.vnc/.xstartup-started\n"
             "    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\n"
+            "  fi\n"
+            "  if [ -e /tmp/.X11-unix/X1 ] "
+            "&& (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\n"
             '    echo "Desktop session started on :1 (ws port 6901)"\n'
             "    exit 0\n"
             "  fi\n"
@@ -2093,6 +2211,24 @@ class WorkspaceService:
             "tail -n 50 /root/.vnc/server.log >&2 || true\n"
             "exit 1\n"
         )
+
+    def get_desktop_state_payload(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, Any] | None:
+        """Return cache/network fields for desktop lifecycle announcements."""
+        session = self._desktop_sessions.get(workspace_id)
+        if session is None:
+            return None
+        return {
+            "workspace_id": str(workspace_id),
+            "port": session.port,
+            "container_ip": self.get_desktop_container_ip(workspace_id),
+            "network_name": self.get_desktop_network_name(workspace_id),
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+            "generation": session.generation,
+        }
 
     async def ensure_desktop_process(
         self,
@@ -2105,12 +2241,30 @@ class WorkspaceService:
 
         Idempotent: a live cached or recovered session is reused. Leases on a
         stale cache entry are copied onto the restarted session.
+
+        Serialised per workspace via :meth:`_desktop_lock` so concurrent
+        viewer and computer-use acquires single-flight one Xvnc start.
         """
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            return await self._ensure_desktop_process_locked(
+                workspace_id, width=width, height=height
+            )
+
+    async def _ensure_desktop_process_locked(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
+        """Ensure the desktop process while holding the workspace lock."""
         existing = self._desktop_sessions.get(workspace_id)
         preserved_viewer = existing.viewer_held if existing is not None else False
         preserved_runs = (
             set(existing.computeruse_run_ids) if existing is not None else set()
         )
+        preserved_generation = existing.generation if existing is not None else 0
         if existing is not None:
             if await self._is_desktop_session_live(workspace_id):
                 logger.info("desktop_already_running", workspace_id=str(workspace_id))
@@ -2127,11 +2281,13 @@ class WorkspaceService:
                 instance_id=self._get_cached(workspace_id).instance_id,
                 viewer_held=preserved_viewer,
                 computeruse_run_ids=preserved_runs,
+                generation=preserved_generation + 1,
             )
             self._desktop_sessions[workspace_id] = recovered
             logger.info(
                 "desktop_session_recovered_on_start",
                 workspace_id=str(workspace_id),
+                generation=recovered.generation,
             )
             return recovered
 
@@ -2171,9 +2327,10 @@ class WorkspaceService:
             instance_id=info.instance_id,
             viewer_held=preserved_viewer,
             computeruse_run_ids=preserved_runs,
+            generation=preserved_generation + 1,
         )
         self._desktop_sessions[workspace_id] = session
-        log.info("desktop_started", port=session.port)
+        log.info("desktop_started", port=session.port, generation=session.generation)
         return session
 
     async def acquire_desktop(
@@ -2185,26 +2342,56 @@ class WorkspaceService:
         width: int | None = None,
         height: int | None = None,
     ) -> DesktopSession:
-        """Ensure the desktop process and acquire a viewer or computer-use lease."""
+        """Ensure the desktop process and acquire a viewer or computer-use lease.
+
+        The whole ensure+lease mutation runs under the per-workspace
+        desktop lock (``async with`` serialises every holder: while one
+        task holds it, no other acquire/release can touch the cached
+        session, so the ``seen`` snapshot below is stable by construction
+        and only this holder mutates it). ``release``/``start`` ordering
+        is pinned by the same lock — see the serialisation test.
+        """
         kind = self._parse_desktop_holder(holder)
-        session = await self.ensure_desktop_process(
-            workspace_id,
-            width=width,
-            height=height,
-        )
-        if kind == DESKTOP_HOLDER_VIEWER:
-            session.viewer_held = True
-        else:
-            session.computeruse_run_ids.add(self._sanitize_run_id(str(run_id or "")))
-        logger.info(
-            "desktop_lease_acquired",
-            workspace_id=str(workspace_id),
-            holder=kind,
-            run_id=run_id,
-            viewer=session.viewer_held,
-            computer_use=bool(session.computeruse_run_ids),
-        )
-        return session
+        if kind != DESKTOP_HOLDER_VIEWER:
+            # Fail fast on invalid run ids before touching shared state.
+            self._sanitize_run_id(str(run_id or ""))
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            # ``seen`` cannot change under us: every other acquire/release
+            # path takes the same lock, which we currently hold. The merge
+            # below only matters when ensure *replaces* the cache entry
+            # with a fresh Xvnc incarnation (stale restart/recovery):
+            # leases added to the old object before the replacement are
+            # carried onto the new one so neither holder loses its lease.
+            seen = self._desktop_sessions.get(workspace_id)
+            seen_viewer = seen.viewer_held if seen is not None else False
+            seen_runs = (
+                set(seen.computeruse_run_ids) if seen is not None else set()
+            )
+            session = await self._ensure_desktop_process_locked(
+                workspace_id,
+                width=width,
+                height=height,
+            )
+            if session is not seen and seen is not None:
+                session.viewer_held = session.viewer_held or seen_viewer
+                session.computeruse_run_ids |= seen_runs
+            if kind == DESKTOP_HOLDER_VIEWER:
+                session.viewer_held = True
+            else:
+                session.computeruse_run_ids.add(
+                    self._sanitize_run_id(str(run_id or ""))
+                )
+            self._desktop_sessions[workspace_id] = session
+            logger.info(
+                "desktop_lease_acquired",
+                workspace_id=str(workspace_id),
+                holder=kind,
+                run_id=run_id,
+                viewer=session.viewer_held,
+                computer_use=bool(session.computeruse_run_ids),
+            )
+            return session
 
     async def release_desktop(
         self,
@@ -2218,57 +2405,80 @@ class WorkspaceService:
 
         ``force=True`` ignores remaining leases, interrupts recordings, and
         stops the process. Used for workspace stop/remove.
+
+        Runs under the per-workspace desktop lock. Only the session object
+        observed while holding the lock may be stopped: when the last
+        lease clears, the cached session is compared by identity before
+        stopping so a concurrent start cannot have its new process killed.
         """
-        if force:
-            session = self._desktop_sessions.get(workspace_id)
-            has_recordings = any(
-                key[0] == workspace_id for key in self._desktop_recordings
-            )
-            if session is None and not has_recordings:
-                return DesktopReleaseResult(
+        kind = self._parse_desktop_holder(holder)
+        if kind != DESKTOP_HOLDER_VIEWER:
+            self._sanitize_run_id(str(run_id or ""))
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            if force:
+                session = self._desktop_sessions.get(workspace_id)
+                has_recordings = any(
+                    key[0] == workspace_id for key in self._desktop_recordings
+                )
+                if session is None and not has_recordings:
+                    return DesktopReleaseResult(
+                        stopped=True,
+                        process_alive=False,
+                        viewer_held=False,
+                        computer_use_active=False,
+                    )
+                await self._stop_desktop_process(
+                    workspace_id, interrupt_recordings=True
+                )
+                stopped_result = DesktopReleaseResult(
                     stopped=True,
                     process_alive=False,
                     viewer_held=False,
                     computer_use_active=False,
                 )
-            await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
-            return DesktopReleaseResult(
-                stopped=True,
-                process_alive=False,
-                viewer_held=False,
-                computer_use_active=False,
-            )
+            else:
+                session = self._desktop_sessions.get(workspace_id)
+                if session is None:
+                    return self._empty_desktop_release_result()
 
-        kind = self._parse_desktop_holder(holder)
-        session = self._desktop_sessions.get(workspace_id)
-        if session is None:
-            return self._empty_desktop_release_result()
+                if kind == DESKTOP_HOLDER_VIEWER:
+                    session.viewer_held = False
+                else:
+                    session.computeruse_run_ids.discard(
+                        self._sanitize_run_id(str(run_id or ""))
+                    )
 
-        if kind == DESKTOP_HOLDER_VIEWER:
-            session.viewer_held = False
-        else:
-            session.computeruse_run_ids.discard(
-                self._sanitize_run_id(str(run_id or ""))
-            )
+                logger.info(
+                    "desktop_lease_released",
+                    workspace_id=str(workspace_id),
+                    holder=kind,
+                    run_id=run_id,
+                    viewer=session.viewer_held,
+                    computer_use=bool(session.computeruse_run_ids),
+                )
+                if session.viewer_held or session.computeruse_run_ids:
+                    return self._desktop_release_result(session, stopped=False)
 
-        logger.info(
-            "desktop_lease_released",
-            workspace_id=str(workspace_id),
-            holder=kind,
-            run_id=run_id,
-            viewer=session.viewer_held,
-            computer_use=bool(session.computeruse_run_ids),
-        )
-        if session.viewer_held or session.computeruse_run_ids:
-            return self._desktop_release_result(session, stopped=False)
-
-        await self._stop_desktop_process(workspace_id, interrupt_recordings=True)
-        return DesktopReleaseResult(
-            stopped=True,
-            process_alive=False,
-            viewer_held=False,
-            computer_use_active=False,
-        )
+                await self._stop_desktop_process(
+                    workspace_id,
+                    interrupt_recordings=True,
+                    expected_session=session,
+                )
+                if self._desktop_sessions.get(workspace_id) is session:
+                    # A concurrent start installed a fresh session while the
+                    # stop exec ran: report it instead of claiming "stopped".
+                    return self._desktop_release_result(session, stopped=False)
+                stopped_result = DesktopReleaseResult(
+                    stopped=True,
+                    process_alive=False,
+                    viewer_held=False,
+                    computer_use_active=False,
+                )
+        # No lock cleanup here: the per-workspace lock object is retained
+        # for the process lifetime so queued waiters and later callers
+        # always share one serialising lock (see _desktop_lock).
+        return stopped_result
 
     async def start_desktop(
         self,
@@ -2328,13 +2538,25 @@ class WorkspaceService:
         workspace_id: uuid.UUID,
         *,
         interrupt_recordings: bool,
+        expected_session: DesktopSession | None = None,
     ) -> None:
-        """Kill Xvnc and drop the cached desktop session."""
+        """Kill Xvnc and drop the cached desktop session.
+
+        When *expected_session* is given, only that exact session object is
+        dropped: a concurrent restart installs a new object under the same
+        key, and the stop exec must not claim or clear the fresh start.
+        """
         log = logger.bind(workspace_id=str(workspace_id))
         if interrupt_recordings:
             await self._interrupt_desktop_recordings(workspace_id)
 
-        self._desktop_sessions.pop(workspace_id, None)
+        if expected_session is not None:
+            if self._desktop_sessions.get(workspace_id) is not expected_session:
+                log.warning("desktop_stop_skipped_session_replaced")
+                return
+            self._desktop_sessions.pop(workspace_id, None)
+        else:
+            self._desktop_sessions.pop(workspace_id, None)
         try:
             runtime = self._get_runtime(workspace_id)
             info = self._get_cached(workspace_id)

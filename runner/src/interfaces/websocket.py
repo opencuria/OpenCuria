@@ -68,6 +68,7 @@ class DesktopProxyTunnel:
     session: aiohttp.ClientSession
     websocket: aiohttp.ClientWebSocketResponse
     reader_task: asyncio.Task
+    workspace_id: uuid.UUID
 
 
 class WebSocketInterface(Interface):
@@ -196,8 +197,39 @@ class WebSocketInterface(Interface):
             session=session,
             websocket=websocket,
             reader_task=reader_task,
+            workspace_id=workspace_id,
         )
         return {"ok": True, "subprotocol": chosen_protocol}
+
+    async def _close_desktop_proxy_tunnels_for_workspace(
+        self, workspace_id: uuid.UUID
+    ) -> None:
+        """Close runner-side desktop proxy tunnels for one workspace.
+
+        Called after a desktop stop/restart so stale browser WebSockets can
+        never stay attached to a recycled Xvnc process. Only tunnels of
+        *workspace_id* are touched; other workspaces keep their tunnels.
+        """
+        tunnel_ids = [
+            tunnel_id
+            for tunnel_id, tunnel in self._desktop_proxy_tunnels.items()
+            if tunnel.workspace_id == workspace_id
+        ]
+        for tunnel_id in tunnel_ids:
+            with contextlib.suppress(Exception):
+                await self._finalize_desktop_proxy_tunnel(tunnel_id)
+
+    def _desktop_lifecycle_payload(self, workspace_id: uuid.UUID) -> dict | None:
+        """Return a desktop:process payload for *workspace_id*, if any."""
+        try:
+            state = self._service.get_desktop_state_payload(workspace_id)
+        except Exception:
+            logger.exception(
+                "desktop_lifecycle_payload_failed",
+                workspace_id=str(workspace_id),
+            )
+            return None
+        return state
 
     async def _send_desktop_proxy_tunnel_message(
         self,
@@ -859,6 +891,7 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
+                before = self._service.get_desktop_session(workspace_id)
                 session = await self._service.start_desktop(
                     workspace_id,
                     width=data.get("desktop_width"),
@@ -869,6 +902,18 @@ class WebSocketInterface(Interface):
                 container_ip = self._service.get_desktop_container_ip(workspace_id)
                 network_name = self._service.get_desktop_network_name(workspace_id)
 
+                # A fresh Xvnc incarnation invalidates every tunnel bound to
+                # the old process (stale restart, recovery, or cold start
+                # with leftover tunnels). Close them *before* the
+                # desktop:started/process event so no new viewer attaches
+                # while stale sockets still reference the recycled Xvnc.
+                # Idempotent acquires reuse the identical session object
+                # (same generation): closing tunnels there would drop
+                # healthy viewers on every reconnect.
+                if session is not before:
+                    await self._close_desktop_proxy_tunnels_for_workspace(
+                        workspace_id
+                    )
                 await sio.emit(
                     "desktop:started",
                     {
@@ -901,6 +946,9 @@ class WebSocketInterface(Interface):
             try:
                 result = await self._service.stop_desktop(workspace_id)
                 if result.stopped or not result.process_alive:
+                    await self._close_desktop_proxy_tunnels_for_workspace(
+                        workspace_id
+                    )
                     await sio.emit(
                         "desktop:stopped",
                         {
@@ -1288,9 +1336,43 @@ class WebSocketInterface(Interface):
 
             async def _run() -> None:
                 try:
+                    before = self._service.get_desktop_session(workspace_id)
                     result = await self._service.desktop_action(
                         workspace_id, action, args
                     )
+                    # Lifecycle announcements are emitted *before* the
+                    # action result: the backend caches proxy state on
+                    # desktop:process, and the harness child may mount a
+                    # mini viewer as soon as it sees the result — showing
+                    # it a frame early would hit an uncached proxy target.
+                    # A fresh Xvnc incarnation (stale restart/recovery)
+                    # invalidates tunnels bound to the old process: close
+                    # them before desktop:process so the mini viewer never
+                    # attaches to a recycled Xvnc via a stale socket.
+                    if action in {"ensure", "hold"} and result.get("ok"):
+                        after = self._service.get_desktop_session(workspace_id)
+                        if after is not None and after is not before:
+                            await self._close_desktop_proxy_tunnels_for_workspace(
+                                workspace_id
+                            )
+                        state = self._desktop_lifecycle_payload(workspace_id)
+                        if state is not None:
+                            await sio.emit("desktop:process", state)
+                    elif action == "release" and result.get("ok"):
+                        if result.get("stopped") or not result.get(
+                            "process_alive", True
+                        ):
+                            await self._close_desktop_proxy_tunnels_for_workspace(
+                                workspace_id
+                            )
+                            await sio.emit(
+                                "desktop:stopped",
+                                {"workspace_id": str(workspace_id)},
+                            )
+                        else:
+                            state = self._desktop_lifecycle_payload(workspace_id)
+                            if state is not None:
+                                await sio.emit("desktop:process", state)
                     await _harness_result(
                         "harness:desktop_action_result",
                         {
