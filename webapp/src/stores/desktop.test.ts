@@ -30,6 +30,28 @@ describe('desktop store leases', () => {
     expect(store.computerUseActive).toBe(false)
   })
 
+  it('keeps the session mounted read-only when the viewer lease is released', () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    store.setViewerReleased('ws-1', store.proxyUrl)
+    store.setComputerUseActive(true)
+
+    expect(store.isConnected).toBe(true)
+    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
+    expect(store.computerUseActive).toBe(true)
+  })
+
+  it('never clears a mounted URL via setViewerReleased(null)', () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    store.setViewerReleased('ws-1', null)
+
+    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
+    expect(store.isConnected).toBe(true)
+  })
+
   it('clears computer-use state on reset but not on viewer disconnect', () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')

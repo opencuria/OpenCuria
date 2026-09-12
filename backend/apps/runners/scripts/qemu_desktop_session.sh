@@ -590,6 +590,7 @@ export DISPLAY=:1
 export HOME=/root
 /usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
 mkdir -p /root/.vnc
+rm -f /root/.vnc/.xstartup-started
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 
 # Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
@@ -612,8 +613,11 @@ GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
     >>/root/.vnc/server.log 2>&1 &
 
 for _ in $(seq 1 120); do
-    if [ -e /tmp/.X11-unix/X1 ]; then
+    if [ -e /tmp/.X11-unix/X1 ] && [ ! -f /root/.vnc/.xstartup-started ]; then
+        touch /root/.vnc/.xstartup-started
         /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
+    fi
+    if [ -e /tmp/.X11-unix/X1 ] && (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then
         echo "Desktop session started on :1 (ws port 6901)"
         exit 0
     fi

@@ -100,6 +100,13 @@ describe('WorkspaceDesktop modal', () => {
     const store = useDesktopStore()
     store.open()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const { getDesktopStatus } = await import('@/services/workspaces.api')
+    vi.mocked(getDesktopStatus).mockResolvedValue({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+    })
 
     const wrapper = mountDesktop()
     await flushPromises()

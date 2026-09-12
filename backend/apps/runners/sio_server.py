@@ -645,7 +645,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         await service.handle_desktop_stopped(
-            task_id=data["task_id"],
+            task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
         )

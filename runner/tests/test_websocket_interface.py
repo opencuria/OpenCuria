@@ -36,6 +36,10 @@ class DummyService:
         self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
         self.get_desktop_network_name = lambda workspace_id: "workspace-net"
 
+    def get_desktop_session(self, workspace_id):
+        """Stub session lookup: no cached session (cold interface path)."""
+        return
+
     async def create_workspace_from_image_artifact(self, **kwargs):
         return kwargs["new_workspace_id"], bool(
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
