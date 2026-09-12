@@ -10,6 +10,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useGitStore } from '@/stores/git'
+import { useSidePanelStore } from '@/stores/sidePanel'
 import {
   Select,
   SelectContent,
@@ -27,12 +28,41 @@ const props = defineProps<{
 }>()
 
 const store = useGitStore()
+const sidePanel = useSidePanelStore()
 const fetchBusy = ref(false)
 
+/** Throttle for tab-visibility auto-fetches (ms). */
+const AUTO_FETCH_THROTTLE_MS = 10_000
+let lastAutoFetchAt = 0
+
+function shouldAutoFetch(): boolean {
+  if (!store.currentRepo) return false
+  if (store.busyOperation !== null || fetchBusy.value) return false
+  return Date.now() - lastAutoFetchAt >= AUTO_FETCH_THROTTLE_MS
+}
+
+function autoFetchSilent(): void {
+  if (!shouldAutoFetch()) return
+  lastAutoFetchAt = Date.now()
+  void store.fetchRemote({ silent: true })
+}
+
 onMounted(() => {
-  void store.initialize(props.workspaceId)
+  void store.initialize(props.workspaceId).then(() => {
+    autoFetchSilent()
+  })
   store.startPolling()
 })
+
+// Auto-fetch when the git tab becomes visible (throttled).
+watch(
+  () => [sidePanel.activeTab, sidePanel.isOpen] as const,
+  ([tab, open], prev) => {
+    if (tab !== 'git' || !open) return
+    if (prev && prev[0] === 'git' && prev[1] === true) return
+    autoFetchSilent()
+  },
+)
 
 watch(
   () => props.workspaceId,
@@ -46,15 +76,17 @@ onUnmounted(() => {
   store.stopPolling()
 })
 
-async function handleRefresh(): Promise<void> {
+async function handleRetry(): Promise<void> {
   await store.refresh()
 }
 
-async function handleFetch(): Promise<void> {
-  if (fetchBusy.value) return
+async function handleRefreshAll(): Promise<void> {
+  if (fetchBusy.value || store.loading || store.busyOperation !== null) return
   fetchBusy.value = true
   try {
-    await store.fetchRemote()
+    // Fetch first (explicit: errors toast), then reload summaries+details.
+    if (store.currentRepo) await store.fetchRemote({ silent: false })
+    await store.refresh()
   } finally {
     fetchBusy.value = false
   }
@@ -128,13 +160,13 @@ function onSplitPointerUp(event: PointerEvent): void {
     </div>
     <div v-else-if="store.error && store.repos.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center" data-testid="git-error">
       <p class="text-xs text-error">{{ store.error }}</p>
-      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRefresh()">
+      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRetry()">
         Retry
       </Button>
     </div>
     <div v-else-if="store.repos.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center" data-testid="git-empty">
       <p class="text-xs text-muted-foreground">No git repositories found in this workspace.</p>
-      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRefresh()">
+      <Button variant="outline" size="sm" class="h-7 text-xs" data-testid="git-retry" @click="void handleRetry()">
         Refresh
       </Button>
     </div>
@@ -167,23 +199,12 @@ function onSplitPointerUp(event: PointerEvent): void {
           variant="ghost"
           size="icon-sm"
           class="h-7 w-7 shrink-0"
-          title="Fetch"
-          data-testid="git-fetch"
-          :disabled="fetchBusy || store.busyOperation !== null"
-          @click="void handleFetch()"
-        >
-          <RefreshCw :size="13" :class="{ 'animate-spin': fetchBusy }" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="h-7 w-7 shrink-0"
-          title="Refresh repositories"
+          title="Fetch + Refresh"
           data-testid="git-refresh"
-          :disabled="store.loading"
-          @click="void handleRefresh()"
+          :disabled="fetchBusy || store.loading || store.busyOperation !== null"
+          @click="void handleRefreshAll()"
         >
-          <RefreshCw :size="13" :class="{ 'animate-spin': store.loading }" />
+          <RefreshCw :size="13" :class="{ 'animate-spin': fetchBusy || store.loading || store.busyOperation === 'fetch' }" />
         </Button>
       </div>
       <div class="flex items-center gap-1.5 text-xs">

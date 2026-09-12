@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { ApiRequestError } from '@/services/api'
 import * as gitApi from '@/services/git.api'
-import { useGitStore } from './git'
+import { useGitStore, selectedRepoStorageKey } from './git'
 import {
   makeCommitDetails,
   makeCommitFile,
@@ -87,10 +87,20 @@ function opPayload() {
   return calls[calls.length - 1]?.[1]
 }
 
+/** Wait for the fire-and-forget details load after a sync `selectRepo()`. */
+async function flushDetails(): Promise<void> {
+  await vi.waitFor(() => {
+    expect(getRepo).toHaveBeenCalled()
+  })
+  await Promise.resolve()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 describe('git store (productive)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    localStorage.clear()
     setRepos([makeRepoSnapshot()])
     getDiff.mockResolvedValue({ ok: true, repo_path: '/workspace/repo-app', diff: { staged: [], unstaged: [] } })
     getDetails.mockImplementation(async (_ws, repo, hash) => ({
@@ -409,6 +419,47 @@ describe('git store (productive)', () => {
     vi.clearAllMocks()
     expect(await store.commit('Work')).toBe(false)
     expect(runOp).not.toHaveBeenCalled()
+  })
+
+  it('suggests publish/push/pull/sync/none from branch state, busy and detached', async () => {
+    const branch = (ahead: number, behind: number, upstream: string | null = 'origin/main') =>
+      makeRepoSnapshot({ branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream, ahead, behind }] })
+
+    const store = await initWith([branch(2, 0)])
+    expect(store.suggestedRemoteAction).toBe('push')
+
+    setRepos([branch(2, 3)])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    expect(store.suggestedRemoteAction).toBe('sync')
+
+    setRepos([branch(0, 1)])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    expect(store.suggestedRemoteAction).toBe('pull')
+
+    setRepos([branch(0, 0)])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    expect(store.suggestedRemoteAction).toBe('none')
+
+    setRepos([branch(0, 0, null)])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    expect(store.suggestedRemoteAction).toBe('publish')
+
+    setRepos([makeRepoSnapshot({ currentBranch: null })])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    expect(store.suggestedRemoteAction).toBe('none')
+
+    setRepos([branch(2, 0)])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    store.busyOperation = 'push'
+    expect(store.suggestedRemoteAction).toBe('none')
+    store.busyOperation = null
+    expect(store.suggestedRemoteAction).toBe('push')
   })
 
   it('rejects push while detached and reports up-to-date branches', async () => {
@@ -868,6 +919,83 @@ describe('git store (productive)', () => {
     expect(mainTags).toContainEqual({ name: 'main', remote: false, current: true })
     const originTags = store.tagsByHash.get('9c2f1e7') ?? []
     expect(originTags).toContainEqual({ name: 'origin/main', remote: true, current: false })
+  })
+
+  it('restores the last selected repo per workspace', async () => {
+    const second = makeRepoSnapshot({
+      id: '/workspace/docs',
+      path: '/workspace/docs',
+      name: 'docs',
+      headHash: 'd1o2c3s',
+    })
+    const store = await initWith([makeRepoSnapshot(), second])
+    expect(store.selectedRepoId).toBe('/workspace/repo-app')
+
+    store.selectRepo('/workspace/docs')
+    await flushDetails()
+    expect(store.selectedRepoId).toBe('/workspace/docs')
+    expect(localStorage.getItem(selectedRepoStorageKey('ws-1'))).toBe('/workspace/docs')
+
+    // Simulate a tab reload in the same workspace: fresh store instance,
+    // persisted id is restored.
+    setActivePinia(createPinia())
+    const reloaded = useGitStore()
+    await reloaded.initialize('ws-1')
+    expect(reloaded.selectedRepoId).toBe('/workspace/docs')
+
+    // A different workspace has its own key — falls back to the first repo.
+    setActivePinia(createPinia())
+    const other = useGitStore()
+    await other.initialize('ws-2')
+    expect(other.selectedRepoId).toBe('/workspace/repo-app')
+  })
+
+  it('falls back to the first repo when the persisted repo is gone', async () => {
+    localStorage.setItem(selectedRepoStorageKey('ws-1'), '/workspace/deleted')
+    const store = await initWith()
+    expect(store.selectedRepoId).toBe('/workspace/repo-app')
+  })
+
+  it('silent auto-fetch skips the error toast on failure', async () => {
+    const { toast } = await import('vue-sonner')
+    const store = await initWith()
+    runOp.mockRejectedValueOnce(new ApiRequestError(500, 'fetch failed', 'fetch_failed'))
+    const ok = await store.fetchRemote({ silent: true })
+    expect(ok).toBe(false)
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('skips fetch while a mutation is running', async () => {
+    const store = await initWith()
+    store.busyOperation = 'stage'
+    expect(await store.fetchRemote({ silent: true })).toBe(false)
+    expect(runOp).not.toHaveBeenCalled()
+    store.busyOperation = null
+  })
+
+  it('skips fetch when the repo has no remotes', async () => {
+    const store = await initWith([makeRepoSnapshot({ remotes: [], defaultRemote: null })])
+    expect(await store.fetchRemote({ silent: true })).toBe(false)
+    expect(runOp).not.toHaveBeenCalled()
+  })
+
+  it('auto-fetches after selectRepo once details land', async () => {
+    const second = makeRepoSnapshot({
+      id: '/workspace/docs',
+      path: '/workspace/docs',
+      name: 'docs',
+      headHash: 'd1o2c3s',
+    })
+    const store = await initWith([makeRepoSnapshot(), second])
+    runOp.mockClear()
+    store.selectRepo('/workspace/docs')
+    await vi.waitFor(() => {
+      expect(runOp).toHaveBeenCalled()
+    })
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'fetch',
+      repo_path: '/workspace/docs',
+    })
   })
 
   it('clamps and persists the commit details height', async () => {

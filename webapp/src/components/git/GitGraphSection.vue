@@ -13,6 +13,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
 import type { GitCommit, GitRefTag } from '@/types/git'
+import type { GitRefGroup } from '@/lib/gitRefGroups'
 import {
   GIT_GRAPH_COLORS,
   GIT_GRAPH_GRID_Y,
@@ -175,13 +176,44 @@ function onEscape(event: KeyboardEvent): void {
   }
 }
 
-/** Ref tags pointing at a commit, plus a HEAD marker when detached. */
-function tagsFor(hash: string): GitRefTag[] {
-  const tags = store.tagsByHash.get(hash) ?? []
+/** Ref groups (one badge per local branch + its same-name remotes) for a commit. */
+function groupsFor(hash: string): GitRefGroup[] {
+  const groups = store.refGroupsFor(hash)
   if (isDetached.value && isHead(hash)) {
-    return [{ name: 'HEAD', remote: false, current: true }, ...tags]
+    return [
+      { key: 'head:HEAD', local: { name: 'HEAD', current: true }, remotes: [], isHead: true },
+      ...groups,
+    ]
   }
-  return tags
+  return groups
+}
+
+/** Badge styling per group: lane colour via the local branch (remote-only falls back to muted). */
+function groupStyle(group: GitRefGroup, colour: number): CSSProperties {
+  if (!group.local) {
+    return { borderColor: 'var(--border)', color: 'var(--muted-foreground)' }
+  }
+  return tagStyle({ name: group.local.name, remote: false, current: group.local.current }, colour)
+}
+
+/** Tooltip listing the full ref names behind one badge. */
+function groupTitle(group: GitRefGroup): string {
+  if (group.isHead || !group.local) {
+    const names = group.local ? [group.local.name] : []
+    return [...names, ...group.remotes.map((r) => r.full)].join(' · ')
+  }
+  return [group.local.name, ...group.remotes.map((r) => r.full)].join(' · ')
+}
+
+/** Stable test id per badge: local name wins, else the full remote ref. */
+function groupTestId(group: GitRefGroup): string {
+  if (group.local) return `git-branch-tag-${group.local.name}`
+  return `git-ref-tag-${group.remotes[0]?.full ?? group.key}`
+}
+
+/** Label for remote-only badges (full ref name, e.g. origin/main). */
+function remoteOnlyLabel(group: GitRefGroup): string {
+  return group.remotes[0]?.full ?? group.key
 }
 
 function tagStyle(tag: GitRefTag, colour: number): CSSProperties {
@@ -695,102 +727,101 @@ function copyRefName(name: string): void {
                     <td />
                     <td class="max-w-0 px-1">
                       <span class="flex min-w-0 items-center gap-1 leading-6">
-                        <template v-for="tag in tagsFor(commit.hash)" :key="tag.name">
+                        <template v-for="group in groupsFor(commit.hash)" :key="group.key">
                           <span
-                            v-if="tag.name === 'HEAD'"
-                            class="inline-flex h-[18px] shrink-0 items-center gap-0.5 overflow-hidden rounded-md border px-1 text-[11px] leading-[16px]"
-                            :style="tagStyle(tag, colour)"
-                            :data-testid="`git-ref-tag-${tag.name}`"
+                            v-if="group.isHead"
+                            class="inline-flex h-[18px] shrink-0 items-center gap-0.5 overflow-hidden rounded-[5px] border px-1 text-[11px] leading-[16px]"
+                            :style="groupStyle(group, colour)"
+                            :data-testid="`git-ref-tag-${group.local!.name}`"
                           >
                             <GitBranch :size="10" class="shrink-0" />
-                            <span class="truncate">{{ tag.name }}</span>
+                            <span class="truncate">{{ group.local!.name }}</span>
                           </span>
-                          <DropdownMenu v-else-if="tag.remote">
-                            <DropdownMenuTrigger as-child>
-                              <button
-                                type="button"
-                                class="inline-flex h-[18px] shrink-0 cursor-pointer items-center gap-0.5 overflow-hidden rounded-md border px-1 text-[11px] leading-[16px]"
-                                :style="tagStyle(tag, colour)"
-                                :data-testid="`git-ref-tag-${tag.name}`"
-                                @click.stop
-                              >
-                                <GitBranch :size="10" class="shrink-0" />
-                                <span class="truncate">{{ tag.name }}</span>
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="start">
-                              <DropdownMenuItem
-                                :disabled="isBusy"
-                                :data-testid="`git-remote-checkout-${tag.name}`"
-                                @click="void store.checkoutRemoteBranch(tag.name)"
-                              >
-                                <Check :size="13" />
-                                Checkout
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                :data-testid="`git-remote-copy-${tag.name}`"
-                                @click="copyRefName(tag.name)"
-                              >
-                                <Copy :size="13" />
-                                Copy name
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
                           <DropdownMenu v-else>
                             <DropdownMenuTrigger as-child>
                               <button
                                 type="button"
-                                class="inline-flex h-[18px] shrink-0 cursor-pointer items-center gap-0.5 overflow-hidden rounded-md border px-1 text-[11px] leading-[16px]"
-                                :class="{ 'font-medium': tag.current }"
-                                :style="tagStyle(tag, colour)"
-                                :data-testid="`git-branch-tag-${tag.name}`"
+                                class="inline-flex h-[18px] shrink-0 cursor-pointer items-center gap-0.5 overflow-hidden rounded-[5px] border px-1 text-[11px] leading-[16px]"
+                                :class="{ 'font-medium': group.local?.current }"
+                                :style="groupStyle(group, colour)"
+                                :title="groupTitle(group)"
+                                :data-testid="groupTestId(group)"
                                 @click.stop
                               >
                                 <GitBranch :size="10" class="shrink-0" />
-                                <span class="truncate">{{ tag.name }}</span>
+                                <span v-if="group.local" class="truncate">{{ group.local.name }}</span>
+                                <span v-else class="truncate">{{ remoteOnlyLabel(group) }}</span>
+                                <span
+                                  v-for="chip in (group.local ? group.remotes : [])"
+                                  :key="chip.full"
+                                  class="inline-flex h-full shrink-0 items-center border-l border-[rgba(128,128,128,0.45)] px-1 text-[11px] italic text-muted-foreground"
+                                  :data-remote="chip.remote"
+                                  :data-testid="`git-remote-chip-${chip.full}`"
+                                  :title="chip.full"
+                                >{{ chip.remote }}</span>
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="start">
-                              <DropdownMenuItem
-                                :disabled="tag.current"
-                                :data-testid="`git-tag-checkout-${tag.name}`"
-                                @click="void store.checkoutBranch(tag.name)"
-                              >
-                                <Check :size="13" />
-                                Checkout
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                :data-testid="`git-tag-rename-${tag.name}`"
-                                @click="openRenameBranch(tag.name)"
-                              >
-                                <Pencil :size="13" />
-                                Rename Branch
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                :disabled="tag.current || isBusy"
-                                :data-testid="`git-tag-delete-${tag.name}`"
-                                @click="openDeleteBranch(tag.name)"
-                              >
-                                <Trash2 :size="13" />
-                                Delete Branch
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                :disabled="tag.current || isDetached"
-                                :data-testid="`git-tag-merge-into-current-${tag.name}`"
-                                @click="openMerge('into-current', tag.name)"
-                              >
-                                <GitMerge :size="13" />
-                                Merge into Current Branch
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                :disabled="tag.current || isDetached"
-                                :data-testid="`git-tag-merge-current-into-${tag.name}`"
-                                @click="openMerge('current-into', tag.name)"
-                              >
-                                <GitMerge :size="13" />
-                                Merge Current into '{{ tag.name }}'
-                              </DropdownMenuItem>
+                              <template v-if="group.local">
+                                <DropdownMenuItem
+                                  :disabled="group.local.current"
+                                  :data-testid="`git-tag-checkout-${group.local.name}`"
+                                  @click="void store.checkoutBranch(group.local.name)"
+                                >
+                                  <Check :size="13" />
+                                  Checkout
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  :data-testid="`git-tag-rename-${group.local.name}`"
+                                  @click="openRenameBranch(group.local.name)"
+                                >
+                                  <Pencil :size="13" />
+                                  Rename Branch
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  :disabled="group.local.current || isBusy"
+                                  :data-testid="`git-tag-delete-${group.local.name}`"
+                                  @click="openDeleteBranch(group.local.name)"
+                                >
+                                  <Trash2 :size="13" />
+                                  Delete Branch
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  :disabled="group.local.current || isDetached"
+                                  :data-testid="`git-tag-merge-into-current-${group.local.name}`"
+                                  @click="openMerge('into-current', group.local.name)"
+                                >
+                                  <GitMerge :size="13" />
+                                  Merge into Current Branch
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  :disabled="group.local.current || isDetached"
+                                  :data-testid="`git-tag-merge-current-into-${group.local.name}`"
+                                  @click="openMerge('current-into', group.local.name)"
+                                >
+                                  <GitMerge :size="13" />
+                                  Merge Current into '{{ group.local.name }}'
+                                </DropdownMenuItem>
+                              </template>
+                              <template v-for="chip in group.remotes" :key="chip.full">
+                                <DropdownMenuSeparator v-if="group.local" />
+                                <DropdownMenuItem
+                                  :disabled="isBusy"
+                                  :data-testid="`git-remote-checkout-${chip.full}`"
+                                  @click="void store.checkoutRemoteBranch(chip.full)"
+                                >
+                                  <Check :size="13" />
+                                  Checkout{{ group.local ? ` tracking '${chip.full}'` : '' }}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  :data-testid="`git-remote-copy-${chip.full}`"
+                                  @click="copyRefName(chip.full)"
+                                >
+                                  <Copy :size="13" />
+                                  Copy name
+                                </DropdownMenuItem>
+                              </template>
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </template>

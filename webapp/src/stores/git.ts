@@ -48,6 +48,7 @@ import type {
   GitUnstagedKind,
 } from '@/types/git'
 import { ApiRequestError } from '@/services/api'
+import { groupRefTags, type GitRefGroup } from '@/lib/gitRefGroups'
 import {
   conflictSnapshotOf,
   getGitCommitDetails,
@@ -81,6 +82,9 @@ export const GIT_DETAILS_POLL_MS = 15000
 /** Page size for per-repo history requests. */
 export const GIT_HISTORY_LIMIT = 50
 
+/** Suggested remote action for the changes-section primary button. */
+export type SuggestedRemoteAction = 'publish' | 'push' | 'pull' | 'sync' | 'none'
+
 export function normalizeRepoSummary(raw: RawGitRepoSummary): GitRepoSummary {
   const path = raw.path
   return {
@@ -109,6 +113,28 @@ function persist(key: string, value: string): void {
   } catch {
     // Storage may be unavailable (private mode, SSR) — UI state still works.
   }
+}
+
+const SELECTED_REPO_KEY_PREFIX = 'opencuria:git:selectedRepo:'
+
+/** Storage key for the last selected repo of a workspace (per-workspace). */
+export function selectedRepoStorageKey(workspaceId: string): string {
+  return `${SELECTED_REPO_KEY_PREFIX}${workspaceId}`
+}
+
+function loadSelectedRepoId(wsId: string | null): string | null {
+  try {
+    if (!wsId) return null
+    const raw = localStorage.getItem(selectedRepoStorageKey(wsId))
+    return raw ? raw : null
+  } catch {
+    return null
+  }
+}
+
+function saveSelectedRepoId(wsId: string | null, id: string): void {
+  if (!wsId || !id) return
+  persist(selectedRepoStorageKey(wsId), id)
 }
 
 function errorMessage(e: unknown): string {
@@ -449,6 +475,26 @@ export const useGitStore = defineStore('git', () => {
   })
 
   /**
+   * Suggested remote action for the changes-section primary button: always
+   * propose whatever makes most sense right now (publish > sync > push >
+   * pull, none when up to date / detached / busy).
+   */
+  const suggestedRemoteAction = computed<SuggestedRemoteAction>(() => {
+    if (busyOperation.value !== null) return 'none'
+    const repo = currentRepo.value
+    if (!repo || repo.currentBranch === null) return 'none'
+    const branch = currentBranch.value
+    if (!branch) return 'none'
+    if (branch.upstream == null) return 'publish'
+    const ahead = branch.ahead ?? 0
+    const behind = branch.behind ?? 0
+    if (ahead > 0 && behind > 0) return 'sync'
+    if (ahead > 0) return 'push'
+    if (behind > 0) return 'pull'
+    return 'none'
+  })
+
+  /**
    * Staged working-tree changes. Conflicted (`U`) rows are excluded — they
    * are unresolved and must never look committable.
    */
@@ -496,6 +542,26 @@ export const useGitStore = defineStore('git', () => {
     }
     return map
   })
+
+  /**
+   * Grouped local + remote ref badges keyed by commit hash (vscode-git-graph
+   * `getBranchLabels` behaviour): a remote ref at the same commit joins the
+   * local branch group with the same name. `tagsByHash` stays untouched.
+   */
+  const refGroupsByHash = computed(() => {
+    const map = new Map<string, GitRefGroup[]>()
+    const repo = currentRepo.value
+    if (!repo) return map
+    for (const [hash, tags] of tagsByHash.value) {
+      map.set(hash, groupRefTags(tags, repo.remotes))
+    }
+    return map
+  })
+
+  /** Grouped ref badges for one commit hash (HEAD pseudo-tag still added by the caller). */
+  function refGroupsFor(hash: string): GitRefGroup[] {
+    return refGroupsByHash.value.get(hash) ?? []
+  }
 
   /** Lazily loaded cache entry for the current diff selection, if any. */
   const viewingDiffEntry = computed<GitCommitFile | null>(() => {
@@ -613,14 +679,33 @@ export const useGitStore = defineStore('git', () => {
       closeCommitDetails()
       return
     }
+    // Priority 1: persisted selection (still present) — restores the last
+    // repo across sessions/tab switches. Unknown IDs fall through silently.
+    const persistedId = loadSelectedRepoId(workspaceId.value)
+    const persisted = persistedId
+      ? next.find((r) => r.id === persistedId)
+      : undefined
+    if (persisted) {
+      if (selectedRepoId.value !== persisted.id) {
+        selectedRepoId.value = persisted.id
+        closeDiff()
+        closeCommitDetails()
+      } else {
+        const detail = currentRepo.value
+        if (detail) reconcileDiffSelection(detail)
+      }
+      return
+    }
     if (next.some((r) => r.id === selectedRepoId.value)) {
       // Selection survived — drop view selections that no longer exist.
+      saveSelectedRepoId(workspaceId.value, selectedRepoId.value)
       const detail = currentRepo.value
       if (detail) reconcileDiffSelection(detail)
       return
     }
     const byPath = previous ? next.find((r) => r.path === previous.path) : undefined
     selectedRepoId.value = (byPath ?? next[0])!.id
+    saveSelectedRepoId(workspaceId.value, selectedRepoId.value)
     closeDiff()
     closeCommitDetails()
   }
@@ -650,6 +735,7 @@ export const useGitStore = defineStore('git', () => {
     }
     if (selectedRepoId.value === '') {
       selectedRepoId.value = snapshot.id
+      saveSelectedRepoId(workspaceId.value, snapshot.id)
     } else {
       const selected = repos.value.find((r) => r.id === selectedRepoId.value) ?? null
       if (!selected) {
@@ -1067,11 +1153,13 @@ export const useGitStore = defineStore('git', () => {
     label: string,
     build: (repo: GitRepo) => GitOperationRequest,
     callbacks?: OperationCallbacks,
+    options?: { silent?: boolean },
   ): Promise<boolean> {
+    const silent = options?.silent === true
     const wsId = workspaceId.value
     const repo = currentRepo.value
     if (!wsId || !repo) {
-      notifications.error('No repository selected')
+      if (!silent) notifications.error('No repository selected')
       return false
     }
     const repoPath = repo.path
@@ -1079,7 +1167,7 @@ export const useGitStore = defineStore('git', () => {
     try {
       payload = build(repo)
     } catch (e: unknown) {
-      notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
+      if (!silent) notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
       return false
     }
     // Capture the generation: `reset()` bumps `loadGen` and replaces the
@@ -1090,7 +1178,7 @@ export const useGitStore = defineStore('git', () => {
       if (gen !== loadGen || workspaceId.value !== wsId) return false
       const current = repos.value.find((r) => r.path === repoPath) ?? null
       if (!current) {
-        notifications.error('No repository selected')
+        if (!silent) notifications.error('No repository selected')
         return false
       }
       clearLastConflict()
@@ -1122,11 +1210,11 @@ export const useGitStore = defineStore('git', () => {
             const updated = currentRepo.value?.path === repoPath ? currentRepo.value : null
             if (updated) reconcileDiffSelection(updated)
             lastConflict.value = true
-            notifications.warning('Merge conflict', errorMessage(e))
+            if (!silent) notifications.warning('Merge conflict', errorMessage(e))
             return false
           }
         }
-        notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
+        if (!silent) notifications.error(callbacks?.errorTitle ?? 'Git operation failed', errorMessage(e))
         return false
       } finally {
         // Only the owning generation may clear the busy label: a reset (or a
@@ -1151,12 +1239,14 @@ export const useGitStore = defineStore('git', () => {
     if (!summary || selectedRepoId.value === id) return
     const gen = loadGen
     selectedRepoId.value = id
+    saveSelectedRepoId(workspaceId.value, id)
     closeDiff()
     closeCommitDetails()
     // Fire-and-forget lazy details for the new selection (gen-guarded:
     // a workspace switch/reset before settlement drops the result).
-    void ensureDetails(summary.path).then(() => {
+    void ensureDetails(summary.path).then((ok) => {
       if (gen !== loadGen) return
+      if (ok) void fetchRemote({ silent: true })
       const detail = currentRepo.value
       if (detail) reconcileDiffSelection(detail)
     })
@@ -1346,14 +1436,25 @@ export const useGitStore = defineStore('git', () => {
     )
   }
 
-  function fetchRemote(): Promise<boolean> {
-    if (!currentRepo.value) {
-      notifications.error('No repository selected')
+  function fetchRemote(options?: { silent?: boolean }): Promise<boolean> {
+    const silent = options?.silent === true
+    const repo = currentRepo.value
+    if (!repo) {
+      if (!silent) notifications.error('No repository selected')
       return Promise.resolve(false)
     }
-    return runOperation('fetch', () => ({ operation: 'fetch' }), {
-      errorTitle: 'Fetch failed',
-    })
+    // Guard: never fetch while a mutation is running, without a selection,
+    // or when the repo has no remotes configured.
+    if (busyOperation.value !== null) return Promise.resolve(false)
+    if (repo.remotes.length === 0) return Promise.resolve(false)
+    return runOperation(
+      'fetch',
+      () => ({ operation: 'fetch' }),
+      {
+        errorTitle: 'Fetch failed',
+      },
+      silent ? { silent: true } : undefined,
+    )
   }
 
   function pull(): Promise<boolean> {
@@ -1610,9 +1711,12 @@ export const useGitStore = defineStore('git', () => {
     // getters
     currentRepo,
     currentBranch,
+    suggestedRemoteAction,
     stagedChanges,
     unstagedChanges,
     tagsByHash,
+    refGroupsByHash,
+    refGroupsFor,
     viewingDiffEntry,
     viewingDiffChange,
     expandedCommitDetails,

@@ -152,6 +152,31 @@ describe('GitGraphSection', () => {
     expect(wrapper.find('[data-testid="git-graph-filter-branch-feature/git-panel"]').exists()).toBe(true)
   })
 
+  it('renders one combined badge when local and remote share a commit', async () => {
+    const base = makeRepoSnapshot({
+      commits: [
+        makeRawCommit('f4a9c21', { message: 'main tip', parents: [] }),
+        makeRawCommit('g5h1k83', { message: 'feature tip', parents: [] }),
+      ],
+    })
+    const combined = {
+      ...base,
+      remote_refs: [{ name: 'origin/main', tip_hash: 'f4a9c21' }],
+    }
+    setupGitRepos(getRepos, getRepo, getHistory, [combined])
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    const badge = wrapper.find('[data-testid="git-branch-tag-main"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.attributes('title')).toBe('main · origin/main')
+    // Exactly one badge for the shared commit — no separate remote badge.
+    expect(wrapper.find('[data-testid="git-ref-tag-origin/main"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="git-remote-chip-origin/main"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-remote-chip-origin/main"]').text()).toBe('origin')
+  })
+
   it('checks out a commit via its context menu with a typed payload', async () => {
     await initStore()
     const wrapper = mountSection()

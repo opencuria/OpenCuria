@@ -219,22 +219,64 @@ describe('GitPanel', () => {
     wrapper.unmount()
   })
 
-  it('refreshes via the header button and fetches the remote', async () => {
+  it('refreshes + fetches via the single header button', async () => {
     const wrapper = mountPanel()
     await flushPromises()
     await nextTick()
     const callsBefore = getRepos.mock.calls.length
+    const fetchBefore = runOp.mock.calls.length
 
     await wrapper.find('[data-testid="git-refresh"]').trigger('click')
     await flushPromises()
-    expect(getRepos.mock.calls.length).toBeGreaterThan(callsBefore)
-
-    await wrapper.find('[data-testid="git-fetch"]').trigger('click')
-    await flushPromises()
-    expect(runOp).toHaveBeenCalled()
+    await nextTick()
+    // Combined handler: fetch (runGitOperation) first, then refresh (getGitRepos).
+    expect(runOp.mock.calls.length).toBeGreaterThan(fetchBefore)
     expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
       operation: 'fetch',
     })
+    expect(getRepos.mock.calls.length).toBeGreaterThan(callsBefore)
+    wrapper.unmount()
+  })
+
+  it('fetches silently after mount (auto-fetch)', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    await vi.waitFor(() => {
+      const fetchCalls = runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')
+      expect(fetchCalls.length).toBeGreaterThan(0)
+    })
+    wrapper.unmount()
+  })
+
+  it('does not auto-fetch while a mutation is running', async () => {
+    const store = useGitStore()
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    runOp.mockClear()
+    store.busyOperation = 'stage'
+    store.selectRepo(store.selectedRepoId)
+    await flushPromises()
+    const fetchCalls = runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')
+    expect(fetchCalls).toHaveLength(0)
+    store.busyOperation = null
+    wrapper.unmount()
+  })
+
+  it('shows a silent auto-fetch failure without a toast', async () => {
+    const { ApiRequestError } = await import('@/services/api')
+    const { toast } = await import('vue-sonner')
+    // Mount-time silent auto-fetch fails: no error toast.
+    runOp.mockRejectedValueOnce(new ApiRequestError(500, 'fetch failed', 'fetch_failed'))
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    await vi.waitFor(() => {
+      expect(runOp.mock.calls.some(([, p]) => p.operation === 'fetch')).toBe(true)
+    })
+    await flushPromises()
+    expect(toast.error).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

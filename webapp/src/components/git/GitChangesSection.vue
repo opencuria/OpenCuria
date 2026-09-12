@@ -84,6 +84,40 @@ const canPush = computed(
   () => !isBusy.value && !isDetached.value && (ahead.value > 0 || !hasUpstream.value),
 )
 const needsPublish = computed(() => !isDetached.value && !hasUpstream.value)
+/** Suggested remote action driving the primary button (push/pull/sync/publish). */
+const primaryAction = computed(() => store.suggestedRemoteAction)
+/** Primary is enabled exactly when its suggested action is available:
+ *  push/publish via canPush, pull/sync via canTrackRemote; up to date
+ *  ('none') stays disabled like the old greyed-out Push. */
+const canPrimary = computed(() => {
+  switch (primaryAction.value) {
+    case 'publish':
+    case 'push':
+      return canPush.value
+    case 'pull':
+    case 'sync':
+      return canTrackRemote.value
+    default:
+      return false
+  }
+})
+const primaryTitle = computed(() => {
+  if (isBusy.value) return 'A git operation is already running'
+  if (isDetached.value) return 'Not available while HEAD is detached'
+  switch (primaryAction.value) {
+    case 'publish':
+      return 'Publish the current branch to the remote'
+    case 'push':
+      return 'Push to origin'
+    case 'pull':
+      return 'Fetch from the remote and merge into the current branch'
+    case 'sync':
+      return 'Pull then push: fetch, merge, then push local commits'
+    default:
+      // Up to date: same greyed-out hint the old Push button showed.
+      return 'Everything up to date'
+  }
+})
 const pushTitle = computed(() => {
   if (isBusy.value) return 'A git operation is already running'
   if (isDetached.value) return 'Not available while HEAD is detached'
@@ -126,6 +160,11 @@ function onMessageKeydown(event: KeyboardEvent): void {
 
 // --- Remote actions (serialized through the store, no parallel double-clicks) ---
 
+async function doPush(): Promise<void> {
+  if (!canPush.value) return
+  await store.push()
+}
+
 async function doPull(): Promise<void> {
   if (!canTrackRemote.value) return
   await store.pull()
@@ -134,6 +173,24 @@ async function doPull(): Promise<void> {
 async function doSync(): Promise<void> {
   if (!canTrackRemote.value) return
   await store.sync()
+}
+
+/** Primary click dispatches to whatever the store suggests right now. */
+async function doPrimary(): Promise<void> {
+  switch (primaryAction.value) {
+    case 'publish':
+    case 'push':
+      await doPush()
+      break
+    case 'pull':
+      await doPull()
+      break
+    case 'sync':
+      await doSync()
+      break
+    default:
+      break
+  }
 }
 
 // --- Merge abort confirmation ---
@@ -271,19 +328,32 @@ const changesOpen = ref(true)
                     variant="outline"
                     size="sm"
                     class="h-7 shrink-0 gap-1.5 rounded-r-none text-xs"
-                    :disabled="!canPush"
-                    :title="pushTitle"
-                    data-testid="git-push"
-                    @click="void store.push()"
+                    :disabled="!canPrimary"
+                    :title="primaryTitle"
+                    data-testid="git-remote-primary"
+                    :data-action="primaryAction"
+                    @click="void doPrimary()"
                   >
-                    <Upload :size="12" />
-                    {{ needsPublish ? 'Publish' : 'Push' }}
-                    <span v-if="ahead > 0" class="text-muted-foreground">{{ ahead }}</span>
+                    <RefreshCw v-if="primaryAction === 'sync'" :size="12" />
+                    <ArrowDown v-else-if="primaryAction === 'pull'" :size="12" />
+                    <Upload v-else :size="12" />
+                    {{
+                      primaryAction === 'publish'
+                        ? 'Publish'
+                        : primaryAction === 'pull'
+                          ? 'Pull'
+                          : primaryAction === 'sync'
+                            ? 'Sync'
+                            : 'Push'
+                    }}
+                    <span v-if="primaryAction === 'sync' && (ahead > 0 || behind > 0)" class="text-muted-foreground">↓{{ behind }} ↑{{ ahead }}</span>
+                    <span v-else-if="primaryAction === 'push' && ahead > 0" class="text-muted-foreground">{{ ahead }}</span>
+                    <span v-else-if="primaryAction === 'pull' && behind > 0" class="text-muted-foreground">{{ behind }}</span>
                   </Button>
                 </span>
               </TooltipTrigger>
-              <TooltipContent v-if="!canPush && pushTitle" side="bottom">
-                {{ pushTitle }}
+              <TooltipContent v-if="!canPrimary && primaryTitle" side="bottom">
+                {{ primaryTitle }}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -295,7 +365,7 @@ const changesOpen = ref(true)
                   size="sm"
                   class="h-7 w-7 shrink-0 rounded-l-none border-l-0 px-0"
                   :disabled="!canRemoteAction"
-                  title="Remote actions: pull, sync"
+                  title="Remote actions: push, pull, sync"
                   data-testid="git-remote-actions"
                 >
                   <ChevronDown :size="12" />
@@ -303,6 +373,16 @@ const changesOpen = ref(true)
               </span>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                data-testid="git-push"
+                :disabled="!canPush"
+                :title="pushTitle"
+                @click="void doPush()"
+              >
+                <Upload :size="13" />
+                {{ needsPublish ? 'Publish' : 'Push' }}
+                <span v-if="ahead > 0" class="ml-auto text-muted-foreground">{{ ahead }}</span>
+              </DropdownMenuItem>
               <DropdownMenuItem
                 data-testid="git-pull"
                 :disabled="!canTrackRemote"

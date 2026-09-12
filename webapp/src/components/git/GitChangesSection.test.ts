@@ -259,19 +259,25 @@ describe('GitChangesSection', () => {
     expect(store.currentRepo?.changes).toEqual([])
   })
 
-  it('pushes via the push button', async () => {
+  it('pushes via the primary button when ahead', async () => {
     await initStore()
+    const store = useGitStore()
     const wrapper = mountSection()
     await nextTick()
 
-    await wrapper.get('[data-testid="git-push"]').trigger('click')
+    // Default fixture: ahead 2, behind 0 → suggested push.
+    expect(store.suggestedRemoteAction).toBe('push')
+    const primary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(primary.attributes('data-action')).toBe('push')
+    expect(primary.text()).toContain('Push')
+    await primary.trigger('click')
     await flushPromises()
     expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
       operation: 'push',
     })
   })
 
-  it('disables push when up to date', async () => {
+  it('disables the primary push when up to date', async () => {
     const clean = makeRepoSnapshot({
       branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 0, behind: 0 }],
     })
@@ -280,7 +286,50 @@ describe('GitChangesSection', () => {
     const wrapper = mountSection()
     await nextTick()
 
-    expect(wrapper.get('[data-testid="git-push"]').attributes('disabled')).toBeDefined()
+    const primary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(primary.attributes('data-action')).toBe('none')
+    expect(primary.attributes('disabled')).toBeDefined()
+    expect(primary.text()).toContain('Push')
+    expect(primary.attributes('title')).toContain('Everything up to date')
+  })
+
+  it('suggests sync when ahead and behind, pull when only behind', async () => {
+    const diverged = makeRepoSnapshot({
+      branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 2, behind: 3 }],
+    })
+    setupGitRepos(getRepos, getRepo, getHistory, [diverged])
+    const store = await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(store.suggestedRemoteAction).toBe('sync')
+    const primary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(primary.attributes('data-action')).toBe('sync')
+    expect(primary.text()).toContain('Sync')
+    expect(primary.text()).toContain('↓3')
+    expect(primary.text()).toContain('↑2')
+    await primary.trigger('click')
+    await flushPromises()
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'sync',
+    })
+
+    const behindOnly = makeRepoSnapshot({
+      branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 0, behind: 1 }],
+    })
+    setupGitRepos(getRepos, getRepo, getHistory, [behindOnly])
+    await store.refresh()
+    await store.ensureDetails('/workspace/repo-app', { force: true })
+    await nextTick()
+    expect(store.suggestedRemoteAction).toBe('pull')
+    const pullPrimary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(pullPrimary.attributes('data-action')).toBe('pull')
+    expect(pullPrimary.text()).toContain('Pull')
+    await pullPrimary.trigger('click')
+    await flushPromises()
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'pull',
+    })
   })
 
   it('enables Publish for branches without upstream and publishes with set_upstream', async () => {
@@ -289,14 +338,16 @@ describe('GitChangesSection', () => {
       branches: [{ name: 'feature/fresh', tip_hash: 'f4a9c21', upstream: null, ahead: 0, behind: 0 }],
     })
     setupGitRepos(getRepos, getRepo, getHistory, [fresh])
-    await initStore()
+    const store = await initStore()
     const wrapper = mountSection()
     await nextTick()
 
-    const push = wrapper.get('[data-testid="git-push"]')
-    expect(push.attributes('disabled')).toBeUndefined()
-    expect(push.text()).toContain('Publish')
-    expect(push.attributes('title')).toContain('Publish')
+    expect(store.suggestedRemoteAction).toBe('publish')
+    const primary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(primary.attributes('data-action')).toBe('publish')
+    expect(primary.attributes('disabled')).toBeUndefined()
+    expect(primary.text()).toContain('Publish')
+    expect(primary.attributes('title')).toContain('Publish')
 
     // Without an upstream, Pull/Sync stay disabled until the branch is published.
     expect(wrapper.find('[data-testid="git-pull"]').attributes('disabled')).toBeDefined()
@@ -304,7 +355,7 @@ describe('GitChangesSection', () => {
     expect(wrapper.find('[data-testid="git-sync"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="git-sync"]').attributes('title')).toContain('Publish branch first')
 
-    await push.trigger('click')
+    await primary.trigger('click')
     await flushPromises()
     expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
       operation: 'push',
@@ -312,16 +363,24 @@ describe('GitChangesSection', () => {
     })
   })
 
-  it('shows ahead/behind and offers pull/sync remote actions', async () => {
+  it('shows ahead/behind and offers push/pull/sync remote actions', async () => {
     await initStore()
     const wrapper = mountSection()
     await nextTick()
 
     expect(wrapper.find('[data-testid="git-remote-actions"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-push"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-pull"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-sync"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="git-pull"]').attributes('title')).toContain('Fetch')
     expect(wrapper.find('[data-testid="git-sync"]').attributes('title')).toContain('Pull then push')
+
+    await wrapper.find('[data-testid="git-push"]').trigger('click')
+    await flushPromises()
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'push',
+      repo_path: '/workspace/repo-app',
+    })
 
     await wrapper.find('[data-testid="git-pull"]').trigger('click')
     await flushPromises()
@@ -338,15 +397,19 @@ describe('GitChangesSection', () => {
     })
   })
 
-  it('disables pull/sync/push while detached or busy', async () => {
+  it('disables the primary and all dropdown items while detached or busy', async () => {
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ currentBranch: null, headHash: 'e8b7d3a' })])
-    await initStore()
+    const store = await initStore()
     const wrapper = mountSection()
     await nextTick()
 
+    expect(store.suggestedRemoteAction).toBe('none')
+    const primary = wrapper.get('[data-testid="git-remote-primary"]')
+    expect(primary.attributes('data-action')).toBe('none')
+    expect(primary.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="git-push"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="git-pull"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="git-sync"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="git-push"]').attributes('disabled')).toBeDefined()
   })
 
   it('does not double-fire sync on parallel clicks (serialized)', async () => {
