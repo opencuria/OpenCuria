@@ -714,12 +714,28 @@ class GitOperationIn(Schema):
             return None
         return _validate_file_paths(value)
 
-    @field_validator("branch", "target", "new_branch", "old_branch", "start_point", "remote_ref", "local_name")
+    @field_validator("branch", "target", "new_branch", "old_branch", "start_point", "local_name")
     @classmethod
     def _check_branch(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return _validate_branch(value)
+
+    @field_validator("remote_ref")
+    @classmethod
+    def _check_remote_ref(cls, value: str | None) -> str | None:
+        """Lightweight backend check for ``remote/branch`` refs (runner validates strictly)."""
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned or len(cleaned) > 255:
+            raise ValueError("Invalid remote_ref")
+        if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+            raise ValueError("Invalid remote_ref")
+        remote, sep, branch_part = cleaned.partition("/")
+        if not sep or not remote or not branch_part:
+            raise ValueError("Invalid remote_ref")
+        return cleaned
 
     @field_validator("commit")
     @classmethod

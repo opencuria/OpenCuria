@@ -4037,6 +4037,66 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(renamed["ok"], renamed)
             self.assertEqual(renamed["snapshot"]["current_branch"], "local-copy")
 
+    async def test_checkout_remote_hierarchical_branch(self) -> None:
+        """Regression: remote refs with slashes (origin/feat/x) must check out."""
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = os.path.join(tmp, "origin")
+            subprocess.run(
+                ["git", "init", "-b", "main", origin], check=True, capture_output=True
+            )
+            _git_config_identity(origin)
+            Path(origin, "README.md").write_text("# origin\n")
+            subprocess.run(["git", "-C", origin, "add", "README.md"], check=True)
+            subprocess.run(
+                ["git", "-C", origin, "commit", "-m", "init"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", origin, "checkout", "-b", "feat/nested"],
+                check=True,
+                capture_output=True,
+            )
+            Path(origin, "n.txt").write_text("n\n")
+            subprocess.run(["git", "-C", origin, "add", "n.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", origin, "commit", "-m", "nested tip"],
+                check=True,
+                capture_output=True,
+            )
+            tip = subprocess.run(
+                ["git", "-C", origin, "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "-C", origin, "checkout", "main"],
+                check=True,
+                capture_output=True,
+            )
+            clone = os.path.join(tmp, "clone")
+            subprocess.run(
+                ["git", "clone", origin, clone], check=True, capture_output=True
+            )
+            _git_config_identity(clone)
+            service, _runtime, ws_id = _service_for(tmp)
+            result = await service.execute_git_operation(
+                ws_id,
+                "checkout_remote_branch",
+                _ws_repo(tmp, "clone"),
+                {"remote_ref": "origin/feat/nested"},
+            )
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["snapshot"]["current_branch"], "feat/nested")
+            self.assertEqual(result["snapshot"]["head_hash"], tip)
+            self.assertTrue(
+                any(
+                    b["name"] == "feat/nested"
+                    for b in result["snapshot"]["branches"]
+                )
+            )
+
     async def test_checkout_remote_unknown_and_invalid_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(os.path.join(tmp, "repo"))
@@ -4055,7 +4115,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(missing["ok"])
             self.assertEqual(missing["code"], "unknown_branch")
-            for bad in ("noslash", "a/b/c", "-origin/x", "", "origin/"):
+            for bad in ("noslash", "-origin/x", "", "origin/"):
                 before = len(runtime.calls)
                 bad_result = await service.execute_git_operation(
                     ws_id,
@@ -4120,7 +4180,11 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
     async def test_remote_ref_validators(self) -> None:
         self.assertEqual(git_ops.validate_remote_ref("origin/foo"), "origin/foo")
         self.assertEqual(git_ops.validate_remote_ref("  origin/foo  "), "origin/foo")
-        for bad in ("noslash", "a/b/c", "-origin/x", "", "origin/", "/x", "x" * 256):
+        self.assertEqual(
+            git_ops.validate_remote_ref("origin/feat/harness-bestof-hardening"),
+            "origin/feat/harness-bestof-hardening",
+        )
+        for bad in ("noslash", "-origin/x", "", "origin/", "/x", "x" * 256):
             with self.assertRaises(ValueError, msg=bad):
                 git_ops.validate_remote_ref(bad)
         self.assertIsNone(git_ops.validate_optional_branch(None))

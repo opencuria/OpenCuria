@@ -158,13 +158,13 @@ class TestRunGitOperationHappyPath:
             workspace.id,
             "checkout_remote_branch",
             repo_path="/workspace/repo",
-            args={"remote_ref": "origin/feat", "local_name": "feat"},
+            args={"remote_ref": "origin/feat/x", "local_name": "feat/x"},
         )
 
         payload = seen[0]
         assert payload["args"] == {
-            "remote_ref": "origin/feat",
-            "local_name": "feat",
+            "remote_ref": "origin/feat/x",
+            "local_name": "feat/x",
         }
 
     @pytest.mark.asyncio

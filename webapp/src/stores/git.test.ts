@@ -532,7 +532,7 @@ describe('git store (productive)', () => {
       remote_ref: 'origin/feature/x',
     })
     expect(store.currentRepo?.currentBranch).toBe('feature/x')
-    expect(vi.mocked(toast.success).mock.calls[vi.mocked(toast.success).mock.calls.length - 1]?.[0]).toBe('Checked out x')
+    expect(vi.mocked(toast.success).mock.calls[vi.mocked(toast.success).mock.calls.length - 1]?.[0]).toBe('Checked out feature/x')
 
     runOp.mockResolvedValueOnce({
       ok: true,
