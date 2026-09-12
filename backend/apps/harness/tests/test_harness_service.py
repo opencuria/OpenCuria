@@ -1598,6 +1598,41 @@ async def _db_create_child_session(harness_workspace, parent: HarnessSession):
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_agent_and_reasoning_events_persist_parts(harness_workspace) -> None:
+    """Agent-S plan/reasoning events persist agent/reasoning parts (content empty)."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "agent", "delta": {"plan": "click save"}, "step": 1},
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"reasoning": "looks good"}, "step": 1},
+    )
+    parts = HarnessPartRepository.list_for_session(session.id)
+    agent_parts = [part for part in parts if part.type == "agent"]
+    reasoning_parts = [part for part in parts if part.type == "reasoning"]
+    assert len(agent_parts) == 1
+    assert agent_parts[0].output == "click save"
+    assert len(reasoning_parts) == 1
+    assert reasoning_parts[0].output == "looks good"
+    assistant.refresh_from_db()
+    assert assistant.content == ""
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_start_run_uses_accessor_factory_for_list_tool(
     harness_workspace,
 ) -> None:

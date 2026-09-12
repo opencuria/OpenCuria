@@ -173,7 +173,14 @@ class ChatGPTAdapter(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions,
     ) -> dict[str, Any]:
-        """Build the Responses API request payload."""
+        """Build the Responses API request payload.
+
+        Note: the Codex Responses API exposes no ``temperature`` knob —
+        only ``reasoning.effort``. Agent-S ``temperature`` values
+        (worker ``None``, grounding ``0.0``, code ``1.0``) are therefore
+        no-ops on ``chatgpt/*``; temperature-sensitive runs should use
+        OpenRouter/Bedrock/OpenAI-compatible models instead.
+        """
         instructions, input_items = self._convert_messages(messages)
         payload: dict[str, Any] = {
             "model": model,
@@ -233,6 +240,45 @@ class ChatGPTAdapter(ProviderAdapter):
             return json.dumps(arguments)
         return str(arguments if isinstance(arguments, str) else "")
 
+    def _message_content_block(self, content: Any) -> list[dict[str, Any]]:
+        """Convert harness content (text + image_url parts) to input items.
+
+        Agent-S wire messages carry PNG ``image_url`` data URLs (see
+        ``HarnessCompletionAdapter._wire_to_harness``); without this the
+        run would go blind on ``chatgpt/*``. Keeps the OpenAI-Responses
+        ``input_image`` shape (``openai-responses.ts`` parity:
+        ``{type: "input_image", image_url}``).
+        """
+        if content is None:
+            return [{"type": "input_text", "text": ""}]
+        if isinstance(content, str):
+            return [{"type": "input_text", "text": content}]
+        blocks: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    blocks.append({"type": "input_text", "text": text})
+                continue
+            if part_type == "image_url":
+                ref = part.get("image_url")
+                url = ref.get("url") if isinstance(ref, dict) else ref
+                if isinstance(url, str) and url:
+                    blocks.append({"type": "input_image", "image_url": url})
+                continue
+            if part_type == "input_image":
+                ref = part.get("image_url", part.get("url", part.get("data")))
+                url = ref.get("url") if isinstance(ref, dict) else ref
+                if isinstance(url, str) and url:
+                    blocks.append({"type": "input_image", "image_url": url})
+                continue
+        if not blocks:
+            blocks.append({"type": "input_text", "text": ""})
+        return blocks
+
     def _convert_messages(
         self,
         messages: list[LLMMessage],
@@ -249,12 +295,11 @@ class ChatGPTAdapter(ProviderAdapter):
                 continue
 
             if message.role == "user":
-                text = self._message_text(message.content)
                 input_items.append(
                     {
                         "type": "message",
                         "role": "user",
-                        "content": [{"type": "input_text", "text": text}],
+                        "content": self._message_content_block(message.content),
                     }
                 )
                 continue

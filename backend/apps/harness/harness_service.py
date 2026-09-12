@@ -655,6 +655,22 @@ class HarnessService:
         if not model:
             raise ValueError("No model configured for harness run")
         config_service.provider_connected_for_model(organization_id, model)
+        if (session.agent_name or "").strip().lower() == "computeruse":
+            # Explicit grounding models must resolve to a connected
+            # provider; empty grounding falls back to the main model
+            # (validated above). No network check — connection only.
+            from .services import AgentSConfigService
+
+            grounding = str(
+                AgentSConfigService()
+                .get_or_default(organization_id)
+                .get("grounding_model")
+                or ""
+            ).strip()
+            if grounding and grounding.strip() != model.strip():
+                config_service.provider_connected_for_model(
+                    organization_id, grounding
+                )
         if not (session.reasoning_effort or "").strip():
             # Früher Fallback, damit der Assistant-Snapshot den Default trägt
             # (Altsessions ohne Effort liefen sonst mit Default, snapshotteten aber "").
@@ -1263,10 +1279,11 @@ class HarnessService:
 
     def _tools_for_session(self, session_id: str, agent_name: str = "build"):  # type: ignore[no-untyped-def]
         """Build the tool registry for a session agent."""
-        from .tools import computeruse_tool_registry, default_tool_registry
+        from .tools import agent_s_tool_registry, default_tool_registry
 
         if (agent_name or "").strip().lower() == "computeruse":
-            return computeruse_tool_registry()
+            # Agent-S children never see OpenCuria tool schemas.
+            return agent_s_tool_registry()
         registry = default_tool_registry()
         try:
             registry._tools["todowrite"] = TodoWriteTool(
@@ -1347,6 +1364,11 @@ class HarnessService:
                 session.id, assistant.id
             )
         )
+        agent_s_run_config = None
+        if (session.agent_name or "").strip().lower() == "computeruse":
+            agent_s_run_config = await sync_to_async(
+                self._resolve_agent_s_run_config
+            )(organization_id, model)
         accessor = None
         if self._accessor_factory is not None:
             accessor = await self._accessor_factory(str(session.workspace_id))
@@ -1376,6 +1398,7 @@ class HarnessService:
             workspace_id=str(session.workspace_id),
             organization_id=str(organization_id),
             small_model=small_model,
+            agent_s_config=agent_s_run_config,
             current_user_message_id=str(
                 self._runs.get(key, {}).get("user_message_id", "")
             ),
@@ -1757,6 +1780,33 @@ class HarnessService:
                 },
                 workspace_id,
             )
+        elif etype == "agent":
+            # Agent-S plan observability (child-visible chain-of-thought
+            # plan, never the final assistant answer). Persisted as an
+            # ``agent`` card part so the frontend renders it; the child
+            # run's assistant message keeps only the final status text.
+            delta = event.get("delta", {}) or {}
+            plan = str(delta.get("plan", "") or "")
+            if plan:
+                part = await sync_to_async(self.parts.create)(
+                    message_id=assistant.id,
+                    type="agent",
+                    state="completed",
+                    title="Agent plan",
+                    output=plan,
+                    meta={"step": event.get("step")},
+                )
+                await self._emit_frontend(
+                    FRONTEND_EVENT_PART,
+                    {
+                        "workspace_id": workspace_id,
+                        "session_id": session_id,
+                        "delta": {"agent": plan},
+                        "step": event.get("step"),
+                        "part_id": str(part.id),
+                    },
+                    workspace_id,
+                )
         elif etype == "subtask_started":
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
@@ -2141,6 +2191,20 @@ class HarnessService:
             log.warning("harness_title_generation_failed", session_id=str(session_id))
 
     @staticmethod
+    def _resolve_agent_s_run_config(
+        organization_id: uuid.UUID, model: str
+    ):  # type: ignore[no-untyped-def]
+        """Build the persisted Agent-S run config for a computeruse run.
+
+        Only computeruse children receive a config; other agents resolve
+        ``None`` downstream. Grounding falls back to the effective session
+        model when unconfigured (see ``AgentSConfigService.to_run_config``).
+        """
+        from .services import AgentSConfigService
+
+        return AgentSConfigService().to_run_config(organization_id, main_model=model)
+
+    @staticmethod
     def _catalog_efforts_for_model(
         organization_id: uuid.UUID, model_id: str
     ) -> list[str]:
@@ -2183,7 +2247,7 @@ class HarnessService:
         lowest/medium/highest resolve against the catalog efforts of the
         inherited model; ``inherit`` reuses the parent reasoning effort.
         """
-        from .computeruse_loop import sanitize_run_id, truncate_task_output
+        from .agent_s.harness import truncate_task_output
         from .tools.base import ToolError, ToolResult
         from .tools.subagents import TASK_OUTPUT_MAX_CHARS
 
@@ -2298,7 +2362,39 @@ class HarnessService:
                     await tracked
                 except (asyncio.CancelledError, Exception):
                     pass
-            raise
+            # Only an *independent* child cancel (take-control abort of a
+            # computer-use child; the waiting parent itself is not being
+            # cancelled) becomes a ToolError so the parent run continues.
+            # When the parent task itself is being cancelled, propagate
+            # the CancelledError — converting it would suppress the
+            # parent's cancellation. Non-computeruse independent cancels
+            # keep the previous behaviour (re-raise).
+            parent_cancelling = False
+            try:
+                current = asyncio.current_task()
+                parent_cancelling = bool(
+                    current is not None and current.cancelling() > 0
+                )
+            except Exception:  # pragma: no cover - defensive
+                parent_cancelling = False
+            if parent_cancelling or agent != "computeruse":
+                raise
+            # A cancelled computer-use child must not cancel the waiting
+            # parent (take-control semantics): report the abort as a tool
+            # error so the parent run can continue.
+            await self._on_runner_event(
+                parent,
+                parent_assistant,
+                {
+                    "type": "subtask_finished",
+                    "subtask_id": subtask_id,
+                    "child_session_id": str(child.id),
+                    "agent": agent,
+                    "status": "aborted",
+                    "summary": "subagent run aborted",
+                },
+            )
+            raise ToolError("Subagent run aborted", tool="task")
         except Exception as exc:
             await self._on_runner_event(
                 parent,
@@ -2314,9 +2410,10 @@ class HarnessService:
             )
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool="task") from exc
         if agent == "computeruse":
+            recording_path = computeruse_recording_path(output, str(child.id))
             display_output, truncated = truncate_task_output(
                 output,
-                sanitize_run_id(str(child.id)),
+                recording_path,
                 TASK_OUTPUT_MAX_CHARS,
             )
         else:
@@ -2362,6 +2459,30 @@ def _normalize_skill_ids(skill_ids: list[str] | None) -> list[str]:
         seen.add(value)
         normalized.append(value)
     return normalized
+
+
+def computeruse_recording_path(output: str, child_id: str) -> str:
+    """Resolve the canonical recording path for a computer-use child.
+
+    The child assistant content already embeds the final ``record_stop``
+    path — reuse the first ``![Computer use](...)`` target so the
+    parent card links the real file. Otherwise fall back to the
+    sanitized default ``session.mp4`` path for *child_id*. Exactly one
+    ``/workspace`` prefix is preserved either way; never rebuilt by
+    string-concatenating a default onto an already-embedded path.
+    """
+    from .agent_s.harness import default_recording_path, sanitize_run_id
+
+    fallback = default_recording_path(sanitize_run_id(str(child_id)))
+    marker_prefix = "![Computer use]("
+    marker_idx = (output or "").find(marker_prefix)
+    if marker_idx == -1:
+        return fallback
+    end_idx = (output or "").find(")", marker_idx + len(marker_prefix))
+    if end_idx == -1:
+        return fallback
+    embedded = (output or "")[marker_idx + len(marker_prefix) : end_idx].strip()
+    return embedded or fallback
 
 
 def resolve_skill_bodies(

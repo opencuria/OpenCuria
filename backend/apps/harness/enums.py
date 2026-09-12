@@ -13,3 +13,4 @@ class ProviderType(models.TextChoices):
     OPENROUTER = "openrouter", "OpenRouter"
     CHATGPT = "chatgpt", "ChatGPT"
     AMAZON_BEDROCK = "amazon-bedrock", "Amazon Bedrock"
+    OPENAI_COMPATIBLE = "openai-compatible", "OpenAI Compatible"

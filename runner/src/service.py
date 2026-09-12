@@ -91,6 +91,11 @@ MAX_DESKTOP_WIDTH = 3840
 MIN_DESKTOP_HEIGHT = 600
 MAX_DESKTOP_HEIGHT = 2160
 COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
+#: Max accepted ``desktop_action("execute")`` code payload (chars).
+#: Mirrors the backend ``ACTION_EXECUTE_MAX_CHARS`` guard.
+DESKTOP_EXECUTE_MAX_CHARS = 200_000
+#: Timeout (seconds) for one remote ``desktop_action("execute")`` snippet.
+DESKTOP_EXECUTE_TIMEOUT_S = 120.0
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_HOLDER_VIEWER = "viewer"
 DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
@@ -2458,6 +2463,17 @@ class WorkspaceService:
                 "computer_use_active": result.computer_use_active,
             }
 
+        execute_code = ""
+        if action == "execute":
+            raw_code = payload.get("code", "")
+            if not isinstance(raw_code, str) or not raw_code.strip():
+                raise ValueError("code must not be empty")
+            if len(raw_code) > DESKTOP_EXECUTE_MAX_CHARS:
+                raise ValueError(
+                    f"code exceeds {DESKTOP_EXECUTE_MAX_CHARS} characters"
+                )
+            execute_code = raw_code
+
         if action not in {"ensure", "hold", "release"}:
             await self._require_desktop_live(workspace_id)
 
@@ -2507,11 +2523,52 @@ class WorkspaceService:
                 )
                 result_width = crop_w_int
                 result_height = crop_h_int
+            image_format = str(payload.get("format") or "jpeg").strip().lower()
+            if image_format not in {"jpeg", "png"}:
+                raise ValueError(
+                    f"Invalid screenshot format: {payload.get('format')!r} "
+                    "(expected 'jpeg' or 'png')"
+                )
+            max_dimension = payload.get("max_dimension")
+            scale_filter = ""
+            if max_dimension is not None:
+                try:
+                    max_dim = int(max_dimension)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "Invalid screenshot max_dimension: "
+                        f"{max_dimension!r} (expected positive integer)"
+                    )
+                if max_dim < 1 or max_dim > 7680:
+                    raise ValueError(
+                        "Invalid screenshot max_dimension: "
+                        f"{max_dimension!r} (expected 1..7680)"
+                    )
+                if max(result_width, result_height) > max_dim:
+                    factor = max_dim / max(result_width, result_height)
+                    out_w = max(1, int(result_width * factor))
+                    out_h = max(1, int(result_height * factor))
+                    scale_filter = f"scale={out_w}:{out_h},"
+                    result_width = out_w
+                    result_height = out_h
+            if image_format == "png":
+                codec_args = "-f image2 -vcodec png pipe:1"
+                result_mime = "image/png"
+            else:
+                codec_args = "-f image2 -vcodec mjpeg pipe:1"
+                result_mime = "image/jpeg"
+            vf_filters: list[str] = []
+            if crop_filter:
+                # crop_filter is "-vf crop=... "; keep only the filter spec.
+                vf_filters.append(crop_filter.replace("-vf", "").strip())
+            if scale_filter:
+                vf_filters.append(scale_filter.rstrip(","))
+            vf_args = f"-vf {','.join(vf_filters)} " if vf_filters else ""
             ffmpeg_cmd = (
                 f"ffmpeg -y -f x11grab -video_size {width}x{height} "
                 f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -frames:v 1 "
-                f"{crop_filter}"
-                "-f image2 -vcodec mjpeg pipe:1 2>/dev/null | base64 -w0"
+                f"{vf_args}"
+                f"{codec_args} 2>/dev/null | base64 -w0"
             )
             exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
             if exit_code != 0 or not output.strip():
@@ -2520,7 +2577,7 @@ class WorkspaceService:
             return {
                 "ok": True,
                 "image_b64": output.strip(),
-                "mime": "image/jpeg",
+                "mime": result_mime,
                 "width": result_width,
                 "height": result_height,
                 "text": "",
@@ -2690,6 +2747,28 @@ class WorkspaceService:
                 raise RuntimeError(f"Failed to stop desktop recording: {output}")
             log.info("desktop_recording_stopped", run_id=run_id, pid=pid)
             return {"ok": True, "path": record_path}
+
+        if action == "execute":
+            # Generic Agent-S action execution: run exactly the passed
+            # internal code (materialized by the backend core) via
+            # ``python3 -c`` with the desktop env. No agent logic lives
+            # here; validation only guards the RPC boundary. Validation ran
+            # above; a single generic liveness probe also ran above.
+            exit_code, stdout, stderr = await asyncio.wait_for(
+                self.exec_harness_command(
+                    workspace_id,
+                    ["python3", "-c", execute_code],
+                    workdir="/workspace",
+                    env=self._desktop_env(),
+                ),
+                timeout=DESKTOP_EXECUTE_TIMEOUT_S,
+            )
+            return {
+                "ok": True,
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
 
         raise ValueError(f"Unknown desktop action: {action}")
 

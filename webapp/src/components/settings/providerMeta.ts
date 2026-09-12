@@ -3,7 +3,7 @@
  * Shared by the provider list (ProviderConfigTab) and the connection dialog.
  */
 
-import { Bot, Cloud, Globe } from '@lucide/vue'
+import { Bot, Cloud, Globe, Plug } from '@lucide/vue'
 import type { ProviderId } from '@/lib/harnessModels'
 import type { ProviderConnection } from '@/services/harness.api'
 
@@ -45,6 +45,17 @@ export const PROVIDER_META: ProviderMeta[] = [
     disconnectConfirm: 'Disconnect Amazon Bedrock? The harness will stop using these credentials.',
     icon: Cloud,
   },
+  {
+    id: 'openai-compatible',
+    name: 'OpenAI Compatible',
+    description:
+      'Custom OpenAI-compatible endpoint for self-hosted models (e.g. HuggingFace UI-TARS).',
+    dialogDescription:
+      'Connect a custom OpenAI-compatible endpoint and list its model ids manually.',
+    disconnectConfirm:
+      'Disconnect this endpoint? The harness will stop using this base URL and its models.',
+    icon: Plug,
+  },
 ]
 
 /** Look up presentation metadata for a provider id. */
@@ -68,6 +79,14 @@ export function connectionDetail(connection: ProviderConnection): string {
             ? 'Access keys'
             : ''
       return [connection.region, auth].filter(Boolean).join(' · ')
+    }
+    case 'openai-compatible': {
+      const parts: string[] = []
+      if (connection.base_url) parts.push(connection.base_url)
+      const count = connection.models?.length ?? 0
+      if (count > 0) parts.push(`${count} model${count === 1 ? '' : 's'}`)
+      else if (parts.length === 0) return 'Connected'
+      return parts.join(' · ')
     }
   }
 }

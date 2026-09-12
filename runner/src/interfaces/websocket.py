@@ -1284,26 +1284,44 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             action = data.get("action", "")
             args = data.get("args") or {}
+            task_key = f"harness:{request_id}"
+
+            async def _run() -> None:
+                try:
+                    result = await self._service.desktop_action(
+                        workspace_id, action, args
+                    )
+                    await _harness_result(
+                        "harness:desktop_action_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            **result,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    # Cancelled via harness:cancel: no result is emitted;
+                    # the backend waiter cleans up via its cancel path.
+                    raise
+                except Exception as exc:
+                    await _harness_result(
+                        "harness:desktop_action_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
+                    logger.exception("harness_desktop_action_failed")
+                finally:
+                    self._running_tasks.pop(task_key, None)
+
+            task = asyncio.create_task(_run())
+            self._running_tasks[task_key] = task
             try:
-                result = await self._service.desktop_action(workspace_id, action, args)
-                await _harness_result(
-                    "harness:desktop_action_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        **result,
-                    },
-                )
-            except Exception as exc:
-                await _harness_result(
-                    "harness:desktop_action_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("harness_desktop_action_failed")
+                await task
+            except asyncio.CancelledError:
+                pass
 
         @sio.on("harness:process_start")
         async def on_harness_process_start(data: dict) -> None:

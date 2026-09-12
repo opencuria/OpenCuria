@@ -183,6 +183,7 @@ describe('SettingsSheet', () => {
       { provider: 'openrouter', connected: true, api_key_hint: '••••cdef' },
       { provider: 'chatgpt', connected: false },
       { provider: 'amazon-bedrock', connected: false },
+      { provider: 'openai-compatible', connected: false },
     ])
   })
 
@@ -232,9 +233,7 @@ describe('SettingsSheet', () => {
     await flushPromises()
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
-      'Provider & Models',
-    )
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
     expect(wrapper.text()).toContain('Providers')
   })
 

@@ -175,11 +175,15 @@ class TaskTool(Tool):
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool=self.name)
         output = result.output or ""
         if agent == "computeruse":
-            from ..computeruse_loop import sanitize_run_id, truncate_task_output
+            from ..agent_s.harness import (
+                default_recording_path,
+                sanitize_run_id,
+                truncate_task_output,
+            )
 
             output, truncated = truncate_task_output(
                 output,
-                sanitize_run_id(child_opts.session_id),
+                default_recording_path(sanitize_run_id(child_opts.session_id)),
                 TASK_OUTPUT_MAX_CHARS,
             )
         else:
@@ -248,16 +252,15 @@ def _child_registry(registry: Any, agent_name: str = "") -> Any:
     ``task`` at the depth limit and ``TaskTool`` rejects direct calls.
     Filtering here keeps nested ``task`` and ``todowrite`` out of the
     child tool schemas entirely (OpenCode parity: subagents get no
-    todowrite). ``computeruse`` children receive the dedicated
-    computer-use registry instead of the parent tool set.
+    todowrite). ``computeruse`` (Agent-S) children receive an empty
+    registry: Agent-S plans never see OpenCuria tool schemas.
     """
-    from . import computeruse_tool_registry
+    from . import agent_s_tool_registry
     from .base import ToolRegistry
-    from .computeruse import COMPUTER_USE_TOOL_NAMES
 
     agent = (agent_name or "").strip().lower()
     if agent == "computeruse":
-        child = computeruse_tool_registry()
+        child = agent_s_tool_registry()
         for hook in getattr(registry, "before_hooks", []):
             child.add_before_hook(hook)
         for hook in getattr(registry, "after_hooks", []):
@@ -268,8 +271,6 @@ def _child_registry(registry: Any, agent_name: str = "") -> Any:
     for tool in registry.list():
         key = (tool.name or "").strip().lower()
         if key in ("task", "todowrite"):
-            continue
-        if key in COMPUTER_USE_TOOL_NAMES:
             continue
         child.register(tool)
     for hook in getattr(registry, "before_hooks", []):
@@ -294,7 +295,6 @@ def _child_evaluator(parent_evaluator: Any) -> Any:
         return None
     from ..permissions.evaluator import DENY, PermissionEvaluator
     from . import default_tool_registry
-    from .computeruse import COMPUTER_USE_TOOL_NAMES
 
     names: set[str] = set()
     perm_keys: dict[str, str] = {}
@@ -303,7 +303,6 @@ def _child_evaluator(parent_evaluator: Any) -> Any:
         perm = (tool.permission_key or tool_name).strip().lower()
         perm_keys[tool_name] = perm or tool_name
         names.add(tool_name)
-    names.update((n or "").strip().lower() for n in COMPUTER_USE_TOOL_NAMES)
     deny_rules: dict[str, Any] = {}
     for name in names:
         candidate = perm_keys.get(name, name)

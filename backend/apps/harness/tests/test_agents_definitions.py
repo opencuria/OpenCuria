@@ -29,7 +29,8 @@ def test_all_agents_defined() -> None:
     assert get_agent("general").mode == "subagent"
     assert get_agent("explore").mode == "subagent"
     assert get_agent("computeruse").mode == "subagent"
-    assert get_agent("computeruse").steps is None
+    assert get_agent("computeruse").steps == 15
+    assert get_agent("computeruse").system_prompt == ""
     assert get_agent("computeruse").permissions == {
         "*": "allow",
         "question": "deny",
@@ -195,7 +196,9 @@ def test_invalid_mode_rejected() -> None:
 def test_agent_fields_present() -> None:
     """Every agent carries name, mode, description, prompt, color."""
     for agent in AGENT_DEFINITIONS.values():
-        assert agent.name and agent.description and agent.system_prompt
+        assert agent.name and agent.description
+        assert agent.system_prompt or agent.name == "computeruse"
         assert agent.color
-        assert agent.steps is None
+        expected_steps = 15 if agent.name == "computeruse" else None
+        assert agent.steps == expected_steps
         assert agent.model_override is None or agent.model_override == "small"

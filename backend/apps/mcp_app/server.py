@@ -36,6 +36,8 @@ Tools and their required permissions
 - list_provider_connections → harness:providers
 - save_provider_connection → harness:providers
 - delete_provider_connection → harness:providers
+- get_agent_s_config → harness:read
+- save_agent_s_config → harness:run
 - chatgpt_oauth_start → harness:providers
 - chatgpt_oauth_status → harness:providers
 - chatgpt_oauth_cancel → harness:providers
@@ -415,25 +417,36 @@ _TOOLS: list[Tool] = [
         name="list_provider_connections",
         description=(
             "List connection status for all org providers "
-            "(openrouter, chatgpt, amazon-bedrock)."
+            "(openrouter, chatgpt, amazon-bedrock, openai-compatible)."
         ),
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
         name="save_provider_connection",
         description=(
-            "Upsert credentials for openrouter or amazon-bedrock. "
-            "ChatGPT uses chatgpt_oauth_start instead."
+            "Upsert credentials for openrouter, openai-compatible, or "
+            "amazon-bedrock. ChatGPT uses chatgpt_oauth_start instead."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider id: openrouter or amazon-bedrock.",
+                    "description": (
+                        "Provider id: openrouter, openai-compatible, "
+                        "or amazon-bedrock."
+                    ),
                 },
                 "api_key": {"type": "string"},
                 "base_url": {"type": "string"},
+                "models": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "OpenAI-compatible only: manual model ids for "
+                        "endpoints without /models."
+                    ),
+                },
                 "auth_method": {
                     "type": "string",
                     "description": "Bedrock only: access_keys or bearer.",
@@ -459,6 +472,32 @@ _TOOLS: list[Tool] = [
                 }
             },
             "required": ["provider"],
+        },
+    ),
+    Tool(
+        name="get_agent_s_config",
+        description="Get the org-wide Agent-S harness config (defaults when unstored).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="save_agent_s_config",
+        description="Save (upsert) the org-wide Agent-S harness config.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "grounding_model": {"type": "string"},
+                "grounding_width": {"type": "integer"},
+                "grounding_height": {"type": "integer"},
+                "model_temperature": {"type": ["number", "null"]},
+                "max_steps": {"type": "integer"},
+                "max_trajectory_length": {"type": "integer"},
+                "enable_reflection": {"type": "boolean"},
+                "enable_code_agent": {"type": "boolean"},
+                "screenshot_max_dimension": {"type": "integer"},
+                "action_pre_delay": {"type": "number"},
+                "action_post_delay": {"type": "number"},
+                "wait_delay": {"type": "number"},
+            },
         },
     ),
     Tool(
@@ -974,6 +1013,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
     "save_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "delete_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "get_agent_s_config": APIKeyPermission.HARNESS_READ,
+    "save_agent_s_config": APIKeyPermission.HARNESS_RUN,
     "chatgpt_oauth_start": APIKeyPermission.HARNESS_PROVIDERS,
     "chatgpt_oauth_status": APIKeyPermission.HARNESS_PROVIDERS,
     "chatgpt_oauth_cancel": APIKeyPermission.HARNESS_PROVIDERS,
@@ -2052,10 +2093,12 @@ def _call_list_provider_connections(api_key, org_id, args: dict) -> list[TextCon
 def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.harness.api import (
         BedrockConnectionIn,
+        OpenAICompatibleConnectionIn,
         OpenRouterConnectionIn,
         ProviderConnectionUpsertIn,
         _parse_provider_param,
         _upsert_bedrock_connection,
+        _upsert_openai_compatible_connection,
         _upsert_openrouter_connection,
     )
     from apps.harness.enums import ProviderType
@@ -2087,6 +2130,22 @@ def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextCont
                 base_url=payload.base_url,
             )
             connection = _upsert_openrouter_connection(org_id, body)
+        elif provider_id == ProviderType.OPENAI_COMPATIBLE:
+            # MCP dict args carry key presence: omitted "models" keeps
+            # stored models, explicit [] clears them (REST parity via
+            # model_fields_set is handled by the shared business helper).
+            raw = {key: value for key, value in args.items() if key != "provider"}
+            compat_kwargs: dict = {
+                "api_key": payload.api_key,
+                "base_url": payload.base_url,
+            }
+            if "models" in raw:
+                compat_kwargs["models"] = list(payload.models or [])
+                compat_body = OpenAICompatibleConnectionIn(**compat_kwargs)
+            else:
+                compat_body = OpenAICompatibleConnectionIn(**compat_kwargs)
+                compat_body.model_fields_set.discard("models")
+            connection = _upsert_openai_compatible_connection(org_id, compat_body)
         else:
             body = BedrockConnectionIn(
                 auth_method=payload.auth_method,
@@ -2101,6 +2160,31 @@ def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextCont
         return _error(str(exc))
 
     return _text(connection.model_dump(mode="json"))
+
+
+def _call_get_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _fetch_org_agent_s_config
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    return _text(_fetch_org_agent_s_config(org_id).model_dump(mode="json"))
+
+
+def _call_save_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.api import _save_org_agent_s_config_partial
+    from apps.organizations.services import OrganizationService
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    try:
+        # MCP dict args carry no "explicitly set" tracking, so the service
+        # merge treats provided keys as the partial update (never defaults).
+        return _text(
+            _save_org_agent_s_config_partial(org_id, args).model_dump(mode="json")
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        return _error(str(exc))
 
 
 def _call_delete_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3634,6 +3718,8 @@ _TOOL_HANDLERS = {
     "list_provider_connections": _call_list_provider_connections,
     "save_provider_connection": _call_save_provider_connection,
     "delete_provider_connection": _call_delete_provider_connection,
+    "get_agent_s_config": _call_get_agent_s_config,
+    "save_agent_s_config": _call_save_agent_s_config,
     "chatgpt_oauth_start": _call_chatgpt_oauth_start,
     "chatgpt_oauth_status": _call_chatgpt_oauth_status,
     "chatgpt_oauth_cancel": _call_chatgpt_oauth_cancel,

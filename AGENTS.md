@@ -529,8 +529,21 @@ chat as markdown video refs. Computer-use acquires a desktop lease for the
 run (`hold`/`release`) so closing the manual VNC viewer does not kill the
 agent. While computer-use holds the display, the viewer is observe-only;
 **Take control** aborts busy `computeruse` sessions on that workspace.
-Desktop images need `ffmpeg` and `xdotool` (rebuild image definitions after
-adding them). To add tooling to workspaces, extend the image definitions
+The `computeruse` run is Agent-S (`backend/apps/harness/agent_s/`): the core
+sends exact prompts with no ToolSchemas, uses separate main/grounding models,
+captures per-turn PNG screenshots (generic runner `screenshot` PNG/scale RPC),
+executes only core-materialized snippets remotely (generic runner `execute`
+`python3 -c` sandbox; backend never executes locally), and runs OCR
+(`tesseract <png> <base> tsv`, word-level TSV) plus code in the workspace
+sandbox. Required workspace deps (all non-Alpine desktop images, Docker +
+QEMU): PyAutoGUI/pyperclip, `tesseract-ocr`, `wmctrl`, `xclip`/`xsel`,
+`sudo`/`iproute2` (`ss`), LibreOffice Calc + `python3-uno`; `ffmpeg` and
+`xdotool` stay for recording/input. Rebuild image definitions after changing
+the desktop stack (existing images are never modified in place; runs fail
+with a rebuild hint when deps are missing). Recording stops and the lease
+releases in `finally`; cancellation propagates (`harness:cancel` also cancels
+long-running `desktop_action('execute')` via the request-scoped runner task
+registry). To add tooling to workspaces, extend the image definitions
 (packages / custom Dockerfile / init script).
 
 **Auto-compaction:** triggers when the last provider step exceeds the model's

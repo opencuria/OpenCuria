@@ -491,6 +491,35 @@ def bedrock_models(region: str) -> list[ProviderModel]:
     return models
 
 
+def openai_compatible_models(model_ids: list[str]) -> list[ProviderModel]:
+    """Return catalog entries for manually configured model ids.
+
+    Endpoints without ``/models`` are listed by hand, so no network
+    fetch happens here. Manually configured models are marked
+    ``supports_tools=False`` with zero limits.
+    """
+    models: list[ProviderModel] = []
+    seen: set[str] = set()
+    for raw in model_ids:
+        bare = str(raw or "").strip()
+        if not bare or bare in seen:
+            continue
+        seen.add(bare)
+        models.append(
+            ProviderModel(
+                id=f"openai-compatible/{bare}",
+                name=bare,
+                reasoning_efforts=(),
+                default_effort="",
+                supports_tools=False,
+                context_length=0,
+                max_output_tokens=0,
+                provider="openai-compatible",
+            )
+        )
+    return models
+
+
 def _fetch_openrouter_catalog_for_connection(
     connection: Any,
     *,
@@ -532,6 +561,10 @@ def list_merged_provider_models(
         elif connection.provider == "amazon-bedrock":
             region = str((connection.config or {}).get("region") or DEFAULT_REGION)
             merged.extend(bedrock_models(region))
+        elif connection.provider == "openai-compatible":
+            raw_models = (connection.config or {}).get("models", [])
+            ids = raw_models if isinstance(raw_models, list) else []
+            merged.extend(openai_compatible_models([str(item) for item in ids]))
 
     _catalog_cache.set(cache_key, merged)
     log.info(

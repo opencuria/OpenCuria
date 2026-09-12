@@ -1,10 +1,14 @@
 <!--
   ProviderConnectionDialog — connect/manage/disconnect a single provider.
 
-  Owns the OpenRouter form, the ChatGPT device-code OAuth flow (polling)
-  and the Bedrock credential form. Emits `changed` after save/disconnect
-  (parent refreshes and closes) and `connected` when the ChatGPT OAuth
-  flow completes (parent refreshes, dialog stays open).
+  Owns the OpenRouter form, the generic OpenAI-compatible endpoint form
+  (base URL + optional API key + manual model list, one id per line),
+  the ChatGPT device-code OAuth flow (polling) and the Bedrock credential
+  form. Secrets are never echoed back: key inputs stay blank and a blank
+  value keeps the stored secret on save. Emits `changed` after
+  save/disconnect (parent refreshes and closes) and `connected` when the
+  ChatGPT OAuth flow completes (parent refreshes, dialog stays open).
+  Backend errors surface inline via `dialogError`.
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
@@ -22,6 +26,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { connectionDetail, providerMeta } from './providerMeta'
 import type { ProviderId } from '@/lib/harnessModels'
@@ -57,6 +62,10 @@ const disconnectConfirm = ref(false)
 
 const openRouterApiKey = ref('')
 const openRouterBaseUrl = ref(DEFAULT_OPENROUTER_BASE_URL)
+
+const compatApiKey = ref('')
+const compatBaseUrl = ref('')
+const compatModelsText = ref('')
 
 const bedrockAuthMethod = ref<'access_keys' | 'bearer'>('access_keys')
 const bedrockRegion = ref(DEFAULT_BEDROCK_REGION)
@@ -94,11 +103,33 @@ const openRouterApiKeyPlaceholder = computed(() => {
   return 'sk-or-…'
 })
 
+const compatApiKeyPlaceholder = computed(() => {
+  const hint = props.connection?.api_key_hint
+  if (hint) return `Saved key (${hint})`
+  return 'Optional API key'
+})
+
+/** Trim, drop empties, dedupe (order-preserving); empty list stays empty. */
+function parseCompatModels(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const line of text.split('\n')) {
+    const item = line.trim()
+    if (!item || seen.has(item)) continue
+    seen.add(item)
+    out.push(item)
+  }
+  return out
+}
+
 function resetForms(): void {
   dialogError.value = null
   disconnectConfirm.value = false
   openRouterApiKey.value = ''
   openRouterBaseUrl.value = props.connection?.base_url || DEFAULT_OPENROUTER_BASE_URL
+  compatApiKey.value = ''
+  compatBaseUrl.value = props.connection?.base_url || ''
+  compatModelsText.value = (props.connection?.models ?? []).join('\n')
   bedrockAuthMethod.value = props.connection?.auth_method === 'bearer' ? 'bearer' : 'access_keys'
   bedrockRegion.value = props.connection?.region || DEFAULT_BEDROCK_REGION
   bedrockAccessKeyId.value = ''
@@ -200,6 +231,29 @@ async function saveOpenRouter(): Promise<void> {
     emit('changed')
   } catch (e: unknown) {
     dialogError.value = e instanceof Error ? e.message : 'Failed to save OpenRouter connection'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveCompat(): Promise<void> {
+  saving.value = true
+  dialogError.value = null
+  try {
+    const baseUrl = compatBaseUrl.value.trim()
+    if (!baseUrl) {
+      dialogError.value = 'Base URL is required.'
+      return
+    }
+    await saveProviderConnection('openai-compatible', {
+      api_key: compatApiKey.value,
+      base_url: baseUrl,
+      models: parseCompatModels(compatModelsText.value),
+    })
+    emit('changed')
+  } catch (e: unknown) {
+    dialogError.value =
+      e instanceof Error ? e.message : 'Failed to save OpenAI Compatible connection'
   } finally {
     saving.value = false
   }
@@ -381,6 +435,47 @@ onBeforeUnmount(() => {
           </template>
         </template>
 
+        <template v-else-if="provider === 'openai-compatible'">
+          <div class="space-y-2">
+            <Label for="compat-base-url">Base URL</Label>
+            <Input
+              id="compat-base-url"
+              v-model="compatBaseUrl"
+              type="url"
+              autocomplete="off"
+              placeholder="https://my-host:8000/v1"
+            />
+            <p class="text-xs text-muted-foreground">
+              OpenAI-compatible endpoint (self-hosted or HuggingFace UI-TARS). Required.
+            </p>
+          </div>
+          <div class="space-y-2">
+            <Label for="compat-api-key">API Key (optional)</Label>
+            <Input
+              id="compat-api-key"
+              v-model="compatApiKey"
+              type="password"
+              autocomplete="off"
+              :placeholder="compatApiKeyPlaceholder"
+            />
+            <p class="text-xs text-muted-foreground">Leave blank to keep the existing key.</p>
+          </div>
+          <div class="space-y-2">
+            <Label for="compat-models">Models (one per line)</Label>
+            <Textarea
+              id="compat-models"
+              v-model="compatModelsText"
+              rows="4"
+              placeholder="ui-tars-1.5-7b&#10;my-grounding-model"
+              data-testid="compat-models"
+            />
+            <p class="text-xs text-muted-foreground">
+              Endpoints without /models are listed by hand. Empty list allowed; entries are trimmed
+              and deduplicated on save.
+            </p>
+          </div>
+        </template>
+
         <template v-else-if="provider === 'amazon-bedrock'">
           <Tabs v-model="bedrockAuthMethod" class="w-full">
             <TabsList class="grid w-full grid-cols-2">
@@ -484,6 +579,16 @@ onBeforeUnmount(() => {
             :disabled="saving"
             data-testid="save-openrouter"
             @click="saveOpenRouter"
+          >
+            <LoadingSpinner v-if="saving" :size="12" />
+            <span v-else>Save</span>
+          </Button>
+          <Button
+            v-else-if="provider === 'openai-compatible'"
+            type="button"
+            :disabled="saving"
+            data-testid="save-compatible"
+            @click="saveCompat"
           >
             <LoadingSpinner v-if="saving" :size="12" />
             <span v-else>Save</span>

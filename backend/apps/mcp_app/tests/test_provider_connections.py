@@ -83,7 +83,12 @@ def test_mcp_list_provider_connections(provider_mcp_setup):
     )
     payload = _parse_text(result)
     providers = {row["provider"]: row for row in payload}
-    assert set(providers) == {"openrouter", "chatgpt", "amazon-bedrock"}
+    assert set(providers) == {
+        "openrouter",
+        "chatgpt",
+        "amazon-bedrock",
+        "openai-compatible",
+    }
     assert all(not row["connected"] for row in payload)
 
 
@@ -128,6 +133,13 @@ def test_mcp_save_provider_connection_validation_errors(provider_mcp_setup):
         {"provider": "amazon-bedrock", "auth_method": "invalid"},
     )
     assert "auth_method" in _parse_error(bedrock)
+
+    hostless = _call_save_provider_connection(
+        provider_mcp_setup["api_key"],
+        provider_mcp_setup["org"].id,
+        {"provider": "openai-compatible", "base_url": "https://"},
+    )
+    assert "base_url" in _parse_error(hostless)
 
 
 @pytest.mark.django_db(transaction=True)

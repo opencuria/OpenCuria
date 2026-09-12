@@ -4524,7 +4524,21 @@ class RunnerService:
 
     @staticmethod
     def _desktop_session_dockerfile_block() -> str:
-        """Return Dockerfile lines that install KasmVNC desktop session support."""
+        """Return Dockerfile lines that install KasmVNC desktop session support.
+
+        Includes the Agent-S computer-use workspace dependencies for all
+        non-Alpine desktop images (PyAutoGUI/pyperclip, tesseract OCR,
+        wmctrl, xclip/xsel, sudo/iproute2 ``ss``, LibreOffice Calc +
+        python3-uno). ``python3-pyautogui`` has no Ubuntu 22.04/24.04 apt
+        package, so it falls back to a minimal pip install into the system
+        python (``python3 -m pip`` keeps the distribution visible to
+        apt-Python). pip on 24.04 requires ``--break-system-packages``
+        (PEP 668); pip on 22.04 does not know the flag, so retry without
+        it. ``python3-pyperclip`` from apt already provides
+        ``import pyperclip`` (no pip needed). Existing
+        images are never modified in place: rebuild the image definition
+        after this block changes.
+        """
         return """# --- KasmVNC desktop session support ---
 RUN apt-get update && apt-get install -y \\
     xfonts-base openbox dbus-x11 x11-xserver-utils ffmpeg xdotool \\
@@ -4532,7 +4546,12 @@ RUN apt-get update && apt-get install -y \\
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
     wget ca-certificates \\
+    tesseract-ocr wmctrl xclip xsel libreoffice-calc python3-uno \\
+    python3-pyperclip sudo iproute2 python3-pip \\
     && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
+    && (apt-get install -y python3-pyautogui \\
+        || python3 -m pip install --break-system-packages pyautogui \\
+        || python3 -m pip install pyautogui) \\
     && wget -q -O /tmp/kasmvnc.deb \\
        "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb" \\
     && apt-get install -y /tmp/kasmvnc.deb || true \\
