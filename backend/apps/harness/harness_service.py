@@ -672,8 +672,8 @@ class HarnessService:
                     organization_id, grounding
                 )
         if not (session.reasoning_effort or "").strip():
-            # Früher Fallback, damit der Assistant-Snapshot den Default trägt
-            # (Altsessions ohne Effort liefen sonst mit Default, snapshotteten aber "").
+            # Legacy fallback so the assistant snapshot carries the default
+            # (old sessions without effort otherwise ran with the default but snapshotted "").
             agent_effort = (
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
             )

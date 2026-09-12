@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Schlanker Legacy-Wrapper (Schritt 5/6):
 // Die Route `/org-settings` ist im Router ein Redirect auf `/?settings=<tab>`
-// (siehe router/index.ts) und rendert diese View regulär gar nicht.
+// (see router/index.ts); this view is normally never rendered directly.
 // Falls sie doch je direkt gemountet wird (z. B. Tests), defensiv auf "/"
 // mit gemapptem `?settings=`-Tab weiterleiten und Sheet-Event feuern.
 import { onMounted } from 'vue'
@@ -23,5 +23,5 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="p-4 text-sm text-muted-foreground">Weiterleitung zu den Einstellungen …</div>
+  <div class="p-4 text-sm text-muted-foreground">Redirecting to settings…</div>
 </template>

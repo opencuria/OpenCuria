@@ -170,13 +170,14 @@ describe('ChatHomeView', () => {
     harnessStore.createSession.mockReset()
   })
 
-  it('greets with the email prefix and renders picker, composer and suggestions', async () => {
+  it('greets with the email prefix and renders picker and composer without suggestions', async () => {
     const { wrapper } = await mountHome()
 
     expect(wrapper.get('[data-testid="chat-home-greeting"]').text()).toContain('Ada')
     expect(wrapper.find('[data-testid="workspace-picker-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(true)
-    expect(wrapper.findAll('[data-testid="chat-home-suggestion"]')).toHaveLength(4)
+    expect(wrapper.find('[data-testid="chat-home-suggestions"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="chat-home-suggestion"]')).toHaveLength(0)
     expect(wrapper.get('svg[aria-label="OpenCuria"]').classes()).toContain('size-16')
   })
 
@@ -186,6 +187,29 @@ describe('ChatHomeView', () => {
       makeWorkspace({ id: 'ws-2', name: 'Beta' }),
     ]
     localStorage.setItem('opencuria:last-workspace', 'ws-2')
+
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
+  })
+
+  it('avoids a busy workspace when picking the initial workspace', async () => {
+    workspaceStore.workspaces = [
+      makeWorkspace({ id: 'ws-busy', name: 'Busy', has_active_session: true }),
+      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
+    ]
+
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
+  })
+
+  it('does not restore a stored busy workspace from localStorage', async () => {
+    workspaceStore.workspaces = [
+      makeWorkspace({ id: 'ws-busy', name: 'Busy', has_active_session: true }),
+      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
+    ]
+    localStorage.setItem('opencuria:last-workspace', 'ws-busy')
 
     const { wrapper } = await mountHome()
 

@@ -64,8 +64,8 @@ const activeIndex = ref(0)
 const actionItems: PaletteItem[] = [
   {
     id: 'action-new-chat',
-    group: 'Aktionen',
-    label: 'Neuer Chat',
+    group: 'Actions',
+    label: 'New chat',
     icon: Plus,
     run: () => {
       closeAndRun(() => {
@@ -75,8 +75,8 @@ const actionItems: PaletteItem[] = [
   },
   {
     id: 'action-workspaces',
-    group: 'Aktionen',
-    label: 'Workspaces verwalten',
+    group: 'Actions',
+    label: 'Manage workspaces',
     icon: Layers,
     run: () => {
       closeAndRun(() => {
@@ -86,8 +86,8 @@ const actionItems: PaletteItem[] = [
   },
   {
     id: 'action-settings',
-    group: 'Aktionen',
-    label: 'Einstellungen',
+    group: 'Actions',
+    label: 'Settings',
     icon: Settings,
     run: () => {
       closeAndRun(() => {
@@ -97,7 +97,7 @@ const actionItems: PaletteItem[] = [
   },
   {
     id: 'action-docs',
-    group: 'Aktionen',
+    group: 'Actions',
     label: 'Docs',
     icon: BookOpen,
     run: () => {
@@ -173,7 +173,7 @@ const items = computed<PaletteItem[]>(() => {
       ...actionItems,
       ...actionRequired.map((row) => chatItem(row, 'Action required')),
       ...active.map((row) => chatItem(row, 'Active')),
-      ...recent.map((row) => chatItem(row, 'Zuletzt verwendet')),
+      ...recent.map((row) => chatItem(row, 'Recently used')),
       ...sidebarWorkspaces.map(workspaceItem),
     ]
   }
@@ -193,7 +193,7 @@ const items = computed<PaletteItem[]>(() => {
   return [
     ...chats.map((row) => chatItem(row, 'Chats')),
     ...matchedWorkspaces.map(workspaceItem),
-    ...matchedActions.map((item) => ({ ...item, group: 'Aktionen' })),
+    ...matchedActions.map((item) => ({ ...item, group: 'Actions' })),
   ]
 })
 
@@ -274,9 +274,9 @@ function itemIndex(item: PaletteItem): number {
   <Dialog :open="props.open" @update:open="setOpen">
     <DialogContent class="max-w-xl p-0" :show-close-button="false">
       <DialogHeader class="sr-only">
-        <DialogTitle>Suchen</DialogTitle>
+        <DialogTitle>Search</DialogTitle>
         <DialogDescription>
-          Suche über Chats, Workspaces und Aktionen. Enter führt die Auswahl aus.
+          Search chats, workspaces, and actions. Press Enter to open the selection.
         </DialogDescription>
       </DialogHeader>
 
@@ -285,9 +285,9 @@ function itemIndex(item: PaletteItem): number {
         <Input
           v-model="query"
           data-testid="command-palette-input"
-          placeholder="Chats, Workspaces, Aktionen…"
+          placeholder="Chats, workspaces, actions…"
           class="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
-          aria-label="Befehlspalette durchsuchen"
+          aria-label="Search command palette"
           @keydown="handleKeydown"
         />
         <kbd
@@ -300,7 +300,7 @@ function itemIndex(item: PaletteItem): number {
       <div
         class="max-h-[50vh] overflow-y-auto p-1.5"
         role="listbox"
-        aria-label="Suchergebnisse"
+        aria-label="Search results"
         data-testid="command-palette-results"
       >
         <div v-for="group in groups" :key="group.heading" class="mb-1">
@@ -349,8 +349,8 @@ function itemIndex(item: PaletteItem): number {
           v-if="items.length === 0"
           class="flex flex-col items-center gap-1 py-8 text-muted-foreground"
         >
-          <span class="text-sm">Keine Treffer</span>
-          <span class="text-xs">Anderen Suchbegriff versuchen</span>
+          <span class="text-sm">No results</span>
+          <span class="text-xs">Try a different search term</span>
         </div>
       </div>
 
@@ -360,10 +360,10 @@ function itemIndex(item: PaletteItem): number {
         <span>
           <kbd class="rounded border border-border px-1">↑</kbd>
           <kbd class="rounded border border-border px-1">↓</kbd>
-          navigieren
+          navigate
         </span>
-        <span><kbd class="rounded border border-border px-1">↵</kbd> öffnen</span>
-        <span><kbd class="rounded border border-border px-1">esc</kbd> schließen</span>
+        <span><kbd class="rounded border border-border px-1">↵</kbd> open</span>
+        <span><kbd class="rounded border border-border px-1">esc</kbd> close</span>
       </div>
     </DialogContent>
   </Dialog>

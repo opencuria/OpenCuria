@@ -80,13 +80,13 @@ describe('ConversationRow', () => {
     })
 
     expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="Chat First chat öffnen — Question waiting"]')).toBeTruthy()
+    expect(wrapper.get('[aria-label="Open chat First chat — Question waiting"]')).toBeTruthy()
   })
 
   it('emits mark-unread from the row menu when the chat is read', async () => {
     const wrapper = mountRow({ unread: false })
 
-    const unread = wrapper.findAll('button').find((button) => button.text().includes('Als ungelesen markieren'))
+    const unread = wrapper.findAll('button').find((button) => button.text().includes('Mark as unread'))
     expect(unread).toBeTruthy()
     await unread!.trigger('click')
 
@@ -96,7 +96,7 @@ describe('ConversationRow', () => {
   it('emits mark-read from the row menu when the chat is unread', async () => {
     const wrapper = mountRow({ unread: true })
 
-    const read = wrapper.findAll('button').find((button) => button.text().includes('Als gelesen markieren'))
+    const read = wrapper.findAll('button').find((button) => button.text().includes('Mark as read'))
     expect(read).toBeTruthy()
     await read!.trigger('click')
 
@@ -114,7 +114,7 @@ describe('ConversationRow', () => {
   it('renames via the row menu and confirms with Enter', async () => {
     const wrapper = mountRow()
 
-    const rename = wrapper.findAll('button').find((button) => button.text().includes('Umbenennen'))
+    const rename = wrapper.findAll('button').find((button) => button.text().includes('Rename'))
     expect(rename).toBeTruthy()
     await rename!.trigger('click')
 
@@ -128,7 +128,7 @@ describe('ConversationRow', () => {
   it('cancels rename on Escape', async () => {
     const wrapper = mountRow()
 
-    const rename = wrapper.findAll('button').find((button) => button.text().includes('Umbenennen'))
+    const rename = wrapper.findAll('button').find((button) => button.text().includes('Rename'))
     await rename!.trigger('click')
     const input = wrapper.get('[data-testid="conversation-rename-input"]')
     await input.setValue('Nope')
@@ -141,7 +141,7 @@ describe('ConversationRow', () => {
   it('emits delete from the row menu', async () => {
     const wrapper = mountRow()
 
-    const remove = wrapper.findAll('button').find((button) => button.text().includes('Löschen'))
+    const remove = wrapper.findAll('button').find((button) => button.text().includes('Delete'))
     await remove!.trigger('click')
 
     expect(wrapper.emitted('delete')?.[0]?.[0]).toMatchObject({ session_id: 's-1' })

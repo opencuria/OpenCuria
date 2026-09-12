@@ -20,8 +20,8 @@ const emit = defineEmits<{
 }>()
 
 function statusDotClass(workspace: Workspace): string {
+  if (isOperatingWorkspace(workspace) || workspace.has_active_session) return 'bg-amber-500'
   if (isLiveWorkspace(workspace)) return 'bg-green-500'
-  if (isOperatingWorkspace(workspace)) return 'bg-amber-400'
   return 'bg-muted-foreground/40'
 }
 </script>
@@ -37,7 +37,7 @@ function statusDotClass(workspace: Workspace): string {
         size="icon-xs"
         class="ml-auto text-muted-foreground"
         data-testid="workspaces-create"
-        aria-label="Workspaces verwalten"
+        aria-label="Manage workspaces"
         @click="emit('create')"
       >
         <Plus />
@@ -50,7 +50,7 @@ function statusDotClass(workspace: Workspace): string {
         :key="workspace.id"
         type="button"
         data-testid="workspace-row"
-        :aria-label="`Workspace ${workspace.name} öffnen`"
+        :aria-label="`Open workspace ${workspace.name}`"
         class="flex h-7 cursor-pointer items-center gap-1.5 rounded-xl px-2 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary"
         :class="
           props.activeWorkspaceId === workspace.id ? 'bg-primary/10' : 'hover:bg-muted'
@@ -72,7 +72,7 @@ function statusDotClass(workspace: Workspace): string {
         class="flex h-7 w-full items-center rounded-xl px-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
         @click="emit('open-all')"
       >
-        Alle Workspaces ({{ props.totalCount }})
+        All workspaces ({{ props.totalCount }})
       </button>
     </div>
   </section>

@@ -38,7 +38,7 @@ const userInitials = computed(() => {
     <SidebarMenuItem>
       <DropdownMenu>
         <DropdownMenuTrigger as-child>
-          <SidebarMenuButton class="h-10" :tooltip="authStore.user?.email ?? 'Konto'">
+          <SidebarMenuButton class="h-10" :tooltip="authStore.user?.email ?? 'Account'">
             <span class="relative shrink-0">
               <Avatar class="size-6">
                 <AvatarFallback class="text-[10px]">{{ userInitials }}</AvatarFallback>
@@ -57,17 +57,17 @@ const userInitials = computed(() => {
         <DropdownMenuContent class="w-60 text-xs" align="end" side="top">
           <DropdownMenuItem @click="emit('settings')">
             <Settings class="size-4" />
-            Einstellungen öffnen
+            Open settings
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem @click="setTheme('light')">
             <Sun class="size-4" />
-            <span class="flex-1">Hell</span>
+            <span class="flex-1">Light</span>
             <Check v-if="mode === 'light'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuItem @click="setTheme('dark')">
             <Moon class="size-4" />
-            <span class="flex-1">Dunkel</span>
+            <span class="flex-1">Dark</span>
             <Check v-if="mode === 'dark'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuItem @click="setTheme('auto')">
@@ -84,7 +84,7 @@ const userInitials = computed(() => {
           </DropdownMenuItem>
           <DropdownMenuItem @click="emit('logout')">
             <LogOut class="size-4" />
-            Abmelden
+            Log out
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

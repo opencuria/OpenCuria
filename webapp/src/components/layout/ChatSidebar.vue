@@ -325,7 +325,7 @@ watch(
       <div class="px-2 pt-1 group-data-[collapsible=icon]:hidden">
         <Button class="w-full rounded-xl" size="sm" @click="handleNewChat">
           <Plus class="size-4" />
-          Neuer Chat
+          New chat
         </Button>
         <button
           type="button"
@@ -333,16 +333,16 @@ watch(
           @click="searchOpen = true"
         >
           <Search class="size-4 shrink-0" />
-          <span class="flex-1 truncate">Suchen</span>
+          <span class="flex-1 truncate">Search</span>
           <kbd class="rounded border border-border bg-background px-1 text-[10px]">⌘K</kbd>
         </button>
       </div>
 
       <div class="hidden flex-col items-center gap-1 pt-1 group-data-[collapsible=icon]:flex">
-        <SidebarMenuButton tooltip="Neuer Chat" @click="handleNewChat">
+        <SidebarMenuButton tooltip="New chat" @click="handleNewChat">
           <Plus />
         </SidebarMenuButton>
-        <SidebarMenuButton tooltip="Suchen (⌘K)" @click="searchOpen = true">
+        <SidebarMenuButton tooltip="Search (⌘K)" @click="searchOpen = true">
           <Search />
         </SidebarMenuButton>
         <SidebarMenuButton tooltip="Workspaces" @click="handleOpenWorkspaces">
@@ -413,15 +413,14 @@ watch(
   <Dialog :open="deleteTarget !== null" @update:open="(open) => { if (!open) deleteTarget = null }">
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Chat löschen?</DialogTitle>
+        <DialogTitle>Delete chat?</DialogTitle>
         <DialogDescription>
-          „{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}“ wird dauerhaft gelöscht.
-          Ein laufender Lauf wird abgebrochen.
+          "{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}" will be permanently deleted. A running session will be cancelled.
         </DialogDescription>
       </DialogHeader>
       <DialogFooter>
-        <Button variant="outline" @click="deleteTarget = null">Abbrechen</Button>
-        <Button variant="destructive" @click="confirmDelete">Löschen</Button>
+        <Button variant="outline" @click="deleteTarget = null">Cancel</Button>
+        <Button variant="destructive" @click="confirmDelete">Delete</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

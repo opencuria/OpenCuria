@@ -264,6 +264,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           :processes-active="isProcessesPanelVisible"
           :running-process-count="runningProcessCount"
           :can-prompt="canPrompt"
+          :has-active-session="workspace.has_active_session"
           @new-chat="handleNewHarnessChat"
           @start-workspace="handleStartWorkspace"
           @stop-workspace="handleStopWorkspace"

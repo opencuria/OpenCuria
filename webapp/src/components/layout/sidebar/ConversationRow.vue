@@ -93,7 +93,7 @@ function confirmRename(): void {
 }
 
 function tooltipDate(): string {
-  return new Date(props.conversation.updated_at).toLocaleString('de-DE', {
+  return new Date(props.conversation.updated_at).toLocaleString('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
@@ -112,7 +112,7 @@ function tooltipDate(): string {
       class="h-7 flex-1 rounded-lg text-xs"
       maxlength="255"
       data-testid="conversation-rename-input"
-      aria-label="Chat umbenennen"
+      aria-label="Rename chat"
       @keydown.enter.prevent="confirmRename"
       @keydown.esc.prevent="cancelRename"
       @click.stop
@@ -120,7 +120,7 @@ function tooltipDate(): string {
     <Button
       variant="ghost"
       size="icon-xs"
-      aria-label="Umbenennen bestätigen"
+      aria-label="Confirm rename"
       @click.stop="confirmRename"
     >
       <Check />
@@ -128,7 +128,7 @@ function tooltipDate(): string {
     <Button
       variant="ghost"
       size="icon-xs"
-      aria-label="Umbenennen abbrechen"
+      aria-label="Cancel rename"
       @click.stop="cancelRename"
     >
       <X />
@@ -141,7 +141,7 @@ function tooltipDate(): string {
     tabindex="0"
     data-testid="conversation-row"
     :aria-selected="props.active"
-    :aria-label="needsAttention ? `Chat ${title} öffnen — ${attentionLabel}` : `Chat ${title} öffnen`"
+    :aria-label="needsAttention ? `Open chat ${title} — ${attentionLabel}` : `Open chat ${title}`"
     class="group/row relative flex h-8 cursor-pointer items-center gap-1.5 rounded-xl px-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary"
     :class="
       needsAttention
@@ -218,7 +218,7 @@ function tooltipDate(): string {
             type="button"
             data-testid="conversation-row-menu"
             class="absolute inset-y-0 right-0 hidden size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:flex focus-visible:outline-2 focus-visible:outline-primary group-hover/row:flex group-focus-within/row:flex data-[state=open]:flex"
-            :aria-label="`Aktionen für ${title}`"
+            :aria-label="`Actions for ${title}`"
             @click.stop
           >
             <MoreHorizontal class="size-3.5" />
@@ -227,7 +227,7 @@ function tooltipDate(): string {
         <DropdownMenuContent align="end" class="w-48">
           <DropdownMenuItem @click="startRename">
             <Pencil class="size-4" />
-            Umbenennen
+            Rename
           </DropdownMenuItem>
           <DropdownMenuItem
             v-if="props.conversation.unread"
@@ -235,7 +235,7 @@ function tooltipDate(): string {
             @click="emit('mark-read', props.conversation)"
           >
             <MailOpen class="size-4" />
-            Als gelesen markieren
+            Mark as read
           </DropdownMenuItem>
           <DropdownMenuItem
             v-else
@@ -243,11 +243,11 @@ function tooltipDate(): string {
             @click="emit('mark-unread', props.conversation)"
           >
             <Mail class="size-4" />
-            Als ungelesen markieren
+            Mark as unread
           </DropdownMenuItem>
           <DropdownMenuItem variant="destructive" @click="emit('delete', props.conversation)">
             <Trash2 class="size-4" />
-            Löschen
+            Delete
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

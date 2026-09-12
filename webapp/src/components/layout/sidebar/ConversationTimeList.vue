@@ -42,7 +42,7 @@ const grouped = computed(() => {
       class="flex items-center gap-2 rounded-xl px-2 py-2 text-xs text-muted-foreground"
     >
       <MessageSquare class="size-3.5 shrink-0 opacity-60" />
-      <span>Noch keine Chats — starte mit Neuer Chat</span>
+      <span>No chats yet — start with New chat</span>
     </div>
 
     <div v-else class="flex flex-col gap-2">
@@ -70,7 +70,7 @@ const grouped = computed(() => {
         class="w-full rounded-xl px-2 py-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
         @click="expanded = true"
       >
-        {{ grouped.hiddenCount }} weitere Chats anzeigen
+        Show {{ grouped.hiddenCount }} more chats
       </button>
     </div>
   </section>

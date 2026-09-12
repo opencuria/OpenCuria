@@ -204,7 +204,7 @@ describe('ChatSidebar', () => {
     expect(wrapper.text()).toContain('Active')
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha')
-    expect(wrapper.text()).toContain('Alle Workspaces (2)')
+    expect(wrapper.text()).toContain('All workspaces (2)')
     expect(wrapper.text()).not.toContain('Beta')
     expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
@@ -232,14 +232,14 @@ describe('ChatSidebar', () => {
   it('renders new chat and search actions', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Neuer Chat')
-    expect(wrapper.text()).toContain('Suchen')
+    expect(wrapper.text()).toContain('New chat')
+    expect(wrapper.text()).toContain('Search')
   })
 
   it('navigates to the workspace thread on chat click', async () => {
     const wrapper = mountSidebar()
 
-    const row = wrapper.find('[aria-label="Chat First chat öffnen"]')
+    const row = wrapper.find('[aria-label="Open chat First chat"]')
     await row.trigger('click')
 
     expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
@@ -263,7 +263,7 @@ describe('ChatSidebar', () => {
 
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
     expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(15)
-    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('5 weitere Chats')
+    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 5 more chats')
 
     await wrapper.get('[data-testid="show-more-chats"]').trigger('click')
 
@@ -274,7 +274,7 @@ describe('ChatSidebar', () => {
     conversationStore.conversations = []
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Noch keine Chats — starte mit Neuer Chat')
+    expect(wrapper.text()).toContain('No chats yet — start with New chat')
   })
 
   it('emits opencuria:open-settings from the user menu', async () => {
@@ -286,7 +286,7 @@ describe('ChatSidebar', () => {
     try {
       const settingsItem = wrapper
         .findAll('button')
-        .find((item) => item.text().includes('Einstellungen öffnen'))
+        .find((item) => item.text().includes('Open settings'))
       expect(settingsItem).toBeTruthy()
       await settingsItem!.trigger('click')
       expect(events.length).toBeGreaterThan(0)

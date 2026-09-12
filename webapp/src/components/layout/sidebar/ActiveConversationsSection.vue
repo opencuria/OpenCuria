@@ -41,13 +41,13 @@ const unreadCount = computed(
             size="icon-xs"
             class="ml-auto text-muted-foreground"
             data-testid="mark-all-read"
-            aria-label="Alle als gelesen"
+            aria-label="Mark all as read"
             @click="emit('mark-all-read')"
           >
             <CheckCheck />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Alle als gelesen</TooltipContent>
+        <TooltipContent>Mark all as read</TooltipContent>
       </Tooltip>
     </div>
     <div class="flex flex-col gap-0.5">

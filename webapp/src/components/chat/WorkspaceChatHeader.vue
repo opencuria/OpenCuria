@@ -1,15 +1,15 @@
 <script setup lang="ts">
 /**
- * WorkspaceChatHeader — minimaler Chat-Header (OpenWebUI-Navbar angelehnt).
+ * WorkspaceChatHeader — minimal chat header (inspired by the OpenWebUI navbar).
  *
- * Kein Balken: transparent, ohne Border. Links steht der Chat-Name groß,
- * darunter Workspace-Name (per Klick/Pencil inline editierbar) plus Status.
- * Rechts: New chat, Background processes, `…`-Menü mit Start/Stop, Capture
- * und Delete, dann der Side-Panel-Toggle. Der Header spannt nur den
- * Chat-Bereich — bei geöffnetem Side-Panel liegen diese Buttons also immer
- * links neben dem Panel, dessen eigene Tab-Leiste (Git/Desktop/Terminal/
- * Files) die volle Panel-Breite einnimmt. Die Chatliste lebt ausschließlich
- * in der globalen Sidebar; Chat-Rename/Delete passiert dort.
+ * No bar: transparent, no border. On the left the chat name is shown large,
+ * below it the workspace name (inline editable via click/pencil) plus status.
+ * On the right: new chat, background processes, `…` menu with start/stop,
+ * capture and delete, then the side-panel toggle. The header only spans the
+ * chat area — with the side panel open these buttons always sit
+ * to the left of the panel, whose own tab bar (Git/Desktop/Terminal/
+ * Files) takes the full panel width. The chat list lives exclusively
+ * in the global sidebar; chat rename/delete happens there.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
@@ -49,6 +49,7 @@ const props = defineProps<{
   processesActive: boolean
   runningProcessCount: number
   canPrompt: boolean
+  hasActiveSession?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -68,6 +69,7 @@ const workspaceNameInput = ref('')
 const statusDotClass = computed(() => {
   if (props.runnerOffline) return 'bg-muted-foreground/40'
   if (props.transitionLabel) return 'bg-amber-500'
+  if (props.hasActiveSession) return 'bg-amber-500'
   return 'bg-green-500'
 })
 
@@ -78,8 +80,8 @@ const statusText = computed(() => {
   return props.workspace.status
 })
 
-// Start/Stop (gleiche Logik wie WorkspaceActions): Stop nur bei laufendem
-// Workspace mit online Runner, Start bei gestopptem Workspace.
+// Start/stop (same logic as WorkspaceActions): stop only for a running
+// workspace with an online runner, start for a stopped workspace.
 const isTransitioning = computed(() => props.transitionLabel !== null)
 const showStopButton = computed(
   () => !props.runnerOffline && props.workspace.status === WorkspaceStatus.RUNNING,

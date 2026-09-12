@@ -78,8 +78,8 @@ describe('conversationTitle', () => {
 })
 
 describe('formatTimeAgo', () => {
-  it('uses compact German-style labels', () => {
-    expect(formatTimeAgo(new Date(NOW - 30 * 1000).toISOString(), NOW)).toBe('jetzt')
+  it('uses compact labels', () => {
+    expect(formatTimeAgo(new Date(NOW - 30 * 1000).toISOString(), NOW)).toBe('now')
     expect(formatTimeAgo(new Date(NOW - 5 * 60 * 1000).toISOString(), NOW)).toBe('5m')
     expect(formatTimeAgo(new Date(NOW - 2 * 60 * 60 * 1000).toISOString(), NOW)).toBe('2h')
     expect(formatTimeAgo(new Date(NOW - 3 * 24 * 60 * 60 * 1000).toISOString(), NOW)).toBe('3d')
@@ -179,7 +179,7 @@ describe('groupConversationsByTime', () => {
 
     expect(groups).toHaveLength(1)
     expect(groups[0]?.key).toBe('today')
-    expect(groups[0]?.label).toBe('Heute')
+    expect(groups[0]?.label).toBe('Today')
     expect(groups[0]?.conversations.map((row) => row.session_id)).toEqual(['newer', 'older-today'])
   })
 })

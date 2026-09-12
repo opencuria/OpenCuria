@@ -103,10 +103,10 @@ describe('CommandPalette', () => {
   it('lists actions, recent chats, and workspaces without a query', () => {
     const wrapper = mountPalette()
 
-    expect(wrapper.text()).toContain('Neuer Chat')
+    expect(wrapper.text()).toContain('New chat')
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha workspace')
-    expect(wrapper.text()).toContain('Workspaces verwalten')
+    expect(wrapper.text()).toContain('Manage workspaces')
   })
 
   it('filters chats, workspaces, and actions by query', async () => {
@@ -118,10 +118,10 @@ describe('CommandPalette', () => {
     expect(wrapper.text()).toContain('Second chat')
     expect(wrapper.text()).toContain('Beta workspace')
     expect(wrapper.text()).not.toContain('First chat')
-    expect(wrapper.text()).not.toContain('Neuer Chat')
+    expect(wrapper.text()).not.toContain('New chat')
   })
 
-  it('runs Neuer Chat on Enter when the query is empty', async () => {
+  it('runs New chat on Enter when the query is empty', async () => {
     const wrapper = mountPalette()
     const input = wrapper.find('[data-testid="command-palette-input"]')
 
@@ -151,7 +151,7 @@ describe('CommandPalette', () => {
     await input.trigger('keydown', { key: 'ArrowDown' })
 
     const selected = wrapper.find('[aria-selected="true"]')
-    expect(selected.text()).toContain('Workspaces verwalten')
+    expect(selected.text()).toContain('Manage workspaces')
   })
 
   it('lists action-required chats above recent chats', () => {

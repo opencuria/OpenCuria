@@ -93,6 +93,13 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.findAllComponents({ name: 'Badge' })).toHaveLength(0)
   })
 
+  it('shows an amber status dot when a session is active', () => {
+    const wrapper = mountHeader({ hasActiveSession: true })
+    const dot = wrapper.find('[data-testid="workspace-chat-header-status"] span.rounded-full')
+    expect(dot.exists()).toBe(true)
+    expect(dot.classes()).toContain('bg-amber-500')
+  })
+
   it('shows a stop action in the overflow menu for a running workspace', async () => {
     const wrapper = mountHeader()
     const stop = wrapper.find('[data-testid="workspace-chat-header-stop"]')

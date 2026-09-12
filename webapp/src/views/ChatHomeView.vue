@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * ChatHomeView — zentrierter Home-Screen (Route `/`, name `home`).
+ * ChatHomeView — centered home screen (route `/`, name `home`).
  *
- * OpenWebUI-Placeholder-Layout: Greeting + WorkspacePicker-Pill +
- * wiederverwendeter HarnessChatInput + Suggestion-Chips. Oben rechts
- * nur der Side-Panel-Toggle (kein New Chat / Processes / Overflow).
- * Kein Polling: ChatSidebar übernimmt Live-Updates; hier reicht ein
- * einmaliges fetchWorkspaces()/fetchSkills() beim Mount.
+ * OpenWebUI-style placeholder layout: greeting + WorkspacePicker pill +
+ * reused HarnessChatInput. Top right shows only the side-panel toggle
+ * (no new chat / processes / overflow menu).
+ * No polling: ChatSidebar handles live updates; a single
+ * fetchWorkspaces()/fetchSkills() on mount is enough here.
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -40,34 +40,19 @@ const sending = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
 const createOpen = ref(false)
 
-interface HomeSuggestion {
-  title: string
-  subtitle: string
-  prompt: string
+function isWorkspaceAvailable(workspace: {
+  status: WorkspaceStatus
+  runner_online: boolean
+  active_operation: string | null
+  has_active_session: boolean
+}): boolean {
+  return (
+    workspace.status === WorkspaceStatus.RUNNING &&
+    workspace.runner_online &&
+    !workspace.active_operation &&
+    !workspace.has_active_session
+  )
 }
-
-const suggestions: HomeSuggestion[] = [
-  {
-    title: 'Neues Projekt starten',
-    subtitle: 'Idee beschreiben, Struktur vorschlagen lassen',
-    prompt: 'Hilf mir, ein neues Projekt zu starten: ',
-  },
-  {
-    title: 'Code erklären lassen',
-    subtitle: 'Unbekannte Datei oder Funktion verstehen',
-    prompt: 'Erkläre mir folgenden Code: ',
-  },
-  {
-    title: 'Bug fixen',
-    subtitle: 'Fehlerbild schildern, Ursache finden',
-    prompt: 'Hilf mir, diesen Fehler zu beheben: ',
-  },
-  {
-    title: 'Dokumentation schreiben',
-    subtitle: 'README oder Kommentare entwerfen',
-    prompt: 'Schreibe eine Dokumentation für: ',
-  },
-]
 
 const greetingName = computed(() => {
   const email = authStore.user?.email ?? ''
@@ -94,16 +79,16 @@ const hasWorkspaces = computed(() => workspaceStore.workspaces.length > 0)
 
 const busyMessage = computed(() => {
   if (!hasWorkspaces.value) return ''
-  if (!selectedWorkspaceId.value) return 'Wähle einen laufenden Workspace'
+  if (!selectedWorkspaceId.value) return 'Select a running workspace'
   const workspace = workspaceStore.workspaces.find(
     (entry) => entry.id === selectedWorkspaceId.value,
   )
-  if (!workspace) return 'Wähle einen laufenden Workspace'
+  if (!workspace) return 'Select a running workspace'
   if (workspace.status !== WorkspaceStatus.RUNNING || !workspace.runner_online) {
-    return 'Workspace ist nicht bereit — Runner offline oder gestoppt'
+    return 'Workspace is not ready — runner offline or stopped'
   }
   if (workspace.active_operation) {
-    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace ist beschäftigt…'
+    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace is busy…'
   }
   return ''
 })
@@ -123,8 +108,16 @@ function pickInitialWorkspace(): void {
     return
   }
   const stored = localStorage.getItem(LAST_WORKSPACE_KEY)
-  if (stored && workspaces.some((entry) => entry.id === stored)) {
-    selectedWorkspaceId.value = stored
+  if (stored) {
+    const storedWorkspace = workspaces.find((entry) => entry.id === stored)
+    if (storedWorkspace && isWorkspaceAvailable(storedWorkspace)) {
+      selectedWorkspaceId.value = stored
+      return
+    }
+  }
+  const firstAvailable = workspaces.find((entry) => isWorkspaceAvailable(entry))
+  if (firstAvailable) {
+    selectedWorkspaceId.value = firstAvailable.id
     return
   }
   const firstReady = workspaces.find(
@@ -186,16 +179,6 @@ async function handleSend(
   }
 }
 
-function handleSuggestion(suggestion: HomeSuggestion): void {
-  void handleSend(
-    suggestion.prompt,
-    composerMode.value,
-    harnessStore.modelInput,
-    [],
-    harnessStore.effortInput,
-  )
-}
-
 onMounted(async () => {
   if (workspaceStore.workspaces.length === 0) {
     await workspaceStore.fetchWorkspaces()
@@ -230,8 +213,8 @@ onMounted(async () => {
         </div>
 
         <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
-          <template v-if="greetingName">Wie kann ich helfen, {{ greetingName }}?</template>
-          <template v-else>Wie kann ich helfen?</template>
+          <template v-if="greetingName">How can I help, {{ greetingName }}?</template>
+          <template v-else>How can I help?</template>
         </h1>
 
         <div class="mt-4 flex justify-center">
@@ -248,11 +231,11 @@ onMounted(async () => {
         >
           <Container :size="20" class="text-muted-foreground" aria-hidden="true" />
           <p class="text-sm text-muted-foreground">
-            Noch kein Workspace vorhanden. Erstelle einen Workspace, um zu starten.
+            No workspace yet. Create a workspace to get started.
           </p>
           <Button size="sm" data-testid="chat-home-create" @click="createOpen = true">
             <Plus :size="14" aria-hidden="true" />
-            Workspace erstellen
+            Create workspace
           </Button>
           <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
             <span class="hidden" aria-hidden="true" />
@@ -277,45 +260,8 @@ onMounted(async () => {
             @update:effort="harnessStore.setComposerEffort($event)"
             @send="handleSend"
           />
-
-          <div
-            class="mt-4 grid grid-cols-1 gap-2 text-left sm:grid-cols-2"
-            data-testid="chat-home-suggestions"
-          >
-            <button
-              v-for="(suggestion, idx) in suggestions"
-              :key="suggestion.title"
-              type="button"
-              :style="{ animationDelay: `${idx * 45}ms` }"
-              :disabled="inputDisabled"
-              :aria-label="`${suggestion.title} — ${suggestion.subtitle}`"
-              data-testid="chat-home-suggestion"
-              class="animate-[harness-fade-up_0.35s_ease-out_both] rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-              @click="handleSuggestion(suggestion)"
-            >
-              <span class="block truncate text-sm font-medium text-foreground">
-                {{ suggestion.title }}
-              </span>
-              <span class="block truncate text-xs text-muted-foreground">
-                {{ suggestion.subtitle }}
-              </span>
-            </button>
-          </div>
         </div>
       </div>
     </div>
   </WorkspaceToolsSplit>
 </template>
-
-<style scoped>
-@keyframes harness-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-</style>

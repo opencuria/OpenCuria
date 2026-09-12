@@ -15,11 +15,11 @@ export interface TimeBucket {
 }
 
 const TIME_BUCKET_LABELS: Record<TimeBucketKey, string> = {
-  today: 'Heute',
-  yesterday: 'Gestern',
-  last7days: 'Letzte 7 Tage',
-  last30days: 'Letzte 30 Tage',
-  older: 'Älter',
+  today: 'Today',
+  yesterday: 'Yesterday',
+  last7days: 'Last 7 days',
+  last30days: 'Last 30 days',
+  older: 'Older',
 }
 
 const HIDDEN_WORKSPACE_STATUSES = new Set<string>([
@@ -45,12 +45,12 @@ export function conversationTitle(conversation: HarnessConversation): string {
 }
 
 /**
- * Compact relative timestamp for sidebar rows (`jetzt`, `5m`, `2h`, `3d`).
+ * Compact relative timestamp for sidebar rows (`now`, `5m`, `2h`, `3d`).
  */
 export function formatTimeAgo(isoString: string, now = Date.now()): string {
   const diff = now - new Date(isoString).getTime()
   const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return 'jetzt'
+  if (minutes < 1) return 'now'
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h`

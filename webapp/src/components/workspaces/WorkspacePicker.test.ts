@@ -105,4 +105,23 @@ describe('WorkspacePicker', () => {
 
     expect(wrapper.emitted('update:modelValue')).toEqual([['ws-2']])
   })
+
+  it('shows an amber dot and Busy label for a workspace with an active session', () => {
+    workspaceStore.workspaces = [runningWorkspace({ has_active_session: true })]
+    const wrapper = mountPicker({ modelValue: 'ws-1' })
+
+    const trigger = wrapper.get('[data-testid="workspace-picker-trigger"]')
+    const triggerDot = trigger.find('span[aria-hidden="true"]')
+    expect(triggerDot.classes()).toContain('bg-amber-500')
+    expect(wrapper.text()).toContain('Busy')
+  })
+
+  it('shows a green dot for a ready idle workspace', () => {
+    workspaceStore.workspaces = [runningWorkspace()]
+    const wrapper = mountPicker({ modelValue: 'ws-1' })
+
+    const trigger = wrapper.get('[data-testid="workspace-picker-trigger"]')
+    const triggerDot = trigger.find('span[aria-hidden="true"]')
+    expect(triggerDot.classes()).toContain('bg-green-500')
+  })
 })
