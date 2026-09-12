@@ -42,7 +42,6 @@ from .desktop import (
     validate_desktop_geometry,
 )
 from .exceptions import (
-    NoAvailableRunnerError,
     RunnerNotFoundError,
     RunnerOfflineError,
     RunnerTimeoutError,
@@ -478,6 +477,52 @@ class RunnerService:
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
             )
 
+    def _placement_for_image_instance(
+        self,
+        image: "ImageInstance",
+        *,
+        organization_id: uuid.UUID | None = None,
+        requested_runner_id: uuid.UUID | None = None,
+    ) -> tuple["Runner", str]:
+        """Resolve runner and runtime from the image, not origin_workspace.
+
+        ``origin_workspace`` is provenance only. Captured images stay
+        usable after the source workspace is deleted or pending deletion.
+        """
+        selected_build_job = image.build_job
+        if selected_build_job is not None:
+            if selected_build_job.status != "active":
+                raise ConflictError("Selected image artifact is not active on runner")
+            origin_definition = selected_build_job.image_definition
+            if origin_definition is not None and (
+                not origin_definition.is_active
+                or origin_definition.status != origin_definition.Status.ACTIVE
+            ):
+                raise ConflictError(
+                    "Selected image definition is not available for new workspaces"
+                )
+            runner = selected_build_job.runner
+            runtime_type = (
+                origin_definition.runtime_type
+                if origin_definition is not None
+                else image.runtime_type
+            )
+        else:
+            runner = image.runner
+            runtime_type = image.runtime_type
+
+        if runner is None:
+            raise ConflictError(
+                f"Image artifact '{image.id}' is missing runner placement"
+            )
+        if organization_id and runner.organization_id != organization_id:
+            raise NotFoundError("ImageArtifact", str(image.id))
+        if requested_runner_id is not None and requested_runner_id != runner.id:
+            raise ConflictError(
+                "Selected runner does not have the selected image artifact"
+            )
+        return runner, runtime_type
+
     def _forward_workspace_operation(
         self,
         workspace_id: str,
@@ -832,76 +877,13 @@ class RunnerService:
         if selected_image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        selected_build_job = selected_image.build_job
-        source_workspace = selected_image.origin_workspace
-        requested_runner_id = runner_id
-        if selected_build_job is not None:
-            if selected_build_job.status != "active":
-                raise ConflictError("Selected image artifact is not active on runner")
-            origin_definition = selected_build_job.image_definition
-            if origin_definition is not None and (
-                not origin_definition.is_active
-                or origin_definition.status != origin_definition.Status.ACTIVE
-            ):
-                raise ConflictError(
-                    "Selected image definition is not available for new workspaces"
-                )
-            if (
-                organization_id
-                and selected_build_job.runner.organization_id != organization_id
-            ):
-                raise NotFoundError("ImageArtifact", str(image_artifact_id))
-            if (
-                requested_runner_id is not None
-                and requested_runner_id != selected_build_job.runner_id
-            ):
-                raise ConflictError(
-                    "Selected runner does not have the selected image artifact"
-                )
-            runtime_type = selected_build_job.image_definition.runtime_type
-            runner_id = selected_build_job.runner_id
-        else:
-            if source_workspace is None:
-                raise ConflictError(
-                    "Captured image artifact is missing its source workspace"
-                )
-            if (
-                organization_id
-                and source_workspace.runner.organization_id != organization_id
-            ):
-                raise NotFoundError("ImageArtifact", str(image_artifact_id))
-            if (
-                requested_runner_id is not None
-                and requested_runner_id != source_workspace.runner_id
-            ):
-                raise ConflictError(
-                    "Selected runner does not have the selected image artifact"
-                )
-            runtime_type = source_workspace.runtime_type
-            runner_id = source_workspace.runner_id
-
-        # Find a suitable runner
-        if runner_id:
-            runner = await sync_to_async(self.runners.get_by_id)(runner_id)
-            if runner is None:
-                raise RunnerNotFoundError(str(runner_id))
-            if not runner.is_online:
-                raise RunnerOfflineError(str(runner_id))
-            # Verify runner belongs to the organization
-            if organization_id and runner.organization_id != organization_id:
-                raise RunnerNotFoundError(str(runner_id))
-        else:
-            # Pick any online runner
-            runners_qs = (
-                self.runners.list_by_organization(organization_id).filter(
-                    status=RunnerStatus.ONLINE
-                )
-                if organization_id
-                else self.runners.list_online()
-            )
-            runner = await sync_to_async(lambda: runners_qs.first())()
-            if runner is None:
-                raise NoAvailableRunnerError("any")
+        runner, runtime_type = self._placement_for_image_instance(
+            selected_image,
+            organization_id=organization_id,
+            requested_runner_id=runner_id,
+        )
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
 
         self._ensure_runner_supports_runtime(
             runner=runner,
@@ -5959,32 +5941,27 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         if image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
+        runner, runtime_type = self._placement_for_image_instance(
+            image,
+            organization_id=organization_id,
+        )
         source_workspace = image.origin_workspace
-        if source_workspace is not None:
-            runner = source_workspace.runner
-            runtime_type = source_workspace.runtime_type
-            qemu_vcpus = source_workspace.qemu_vcpus
-            qemu_memory_mb = source_workspace.qemu_memory_mb
-            qemu_disk_size_gb = source_workspace.qemu_disk_size_gb
-            desktop_width = source_workspace.desktop_width
-            desktop_height = source_workspace.desktop_height
-        elif image.build_job is not None:
-            runner = image.build_job.runner
-            runtime_type = image.build_job.image_definition.runtime_type
-            qemu_vcpus = None
-            qemu_memory_mb = None
-            qemu_disk_size_gb = None
-            desktop_width = DEFAULT_DESKTOP_WIDTH
-            desktop_height = DEFAULT_DESKTOP_HEIGHT
-        else:
-            raise ValueError(
-                f"Image artifact '{image_artifact_id}' is missing its source runtime metadata"
-            )
+        qemu_vcpus = getattr(source_workspace, "qemu_vcpus", None)
+        qemu_memory_mb = getattr(source_workspace, "qemu_memory_mb", None)
+        qemu_disk_size_gb = getattr(source_workspace, "qemu_disk_size_gb", None)
+        desktop_width = (
+            source_workspace.desktop_width
+            if source_workspace is not None
+            else DEFAULT_DESKTOP_WIDTH
+        )
+        desktop_height = (
+            source_workspace.desktop_height
+            if source_workspace is not None
+            else DEFAULT_DESKTOP_HEIGHT
+        )
 
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
-        if source_workspace is not None:
-            self._ensure_workspace_available(source_workspace)
 
         self._ensure_runner_supports_runtime(
             runner=runner,

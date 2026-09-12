@@ -118,6 +118,34 @@ def test_admin_only_sees_own_workspaces(workspace_access_setup):
 
 
 @pytest.mark.django_db
+def test_owner_can_clone_workspace_image_artifact(workspace_access_setup, monkeypatch):
+    from apps.runners.sio_server import get_runner_service
+
+    async def fake_emit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", fake_emit)
+
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.IMAGES_CLONE.value],
+    )
+    workspace = workspace_access_setup["owner_workspace"]
+    artifact = workspace_access_setup["artifact"]
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/image-artifacts/{artifact.id}/workspaces/",
+        data=json.dumps({"name": "owner-clone"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 202, response.content[:500]
+    body = response.json()
+    assert "workspace_id" in body
+    assert "task_id" in body
+
+
+@pytest.mark.django_db
 def test_global_image_artifact_create_requires_workspace_owner(workspace_access_setup):
     client = _make_client(
         user=workspace_access_setup["foreign_admin"],

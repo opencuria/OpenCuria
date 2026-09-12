@@ -294,10 +294,12 @@ async def _get_owned_workspace_artifact_async(
     """Return a workspace-scoped image artifact only for the workspace owner."""
     service = _get_service()
     workspace = await _get_owned_workspace_async(request, org_id, workspace_id)
-    artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
+    artifact = await sync_to_async(service.image_instances.get_by_id)(
+        image_artifact_id
+    )
     if artifact is None:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    if artifact.source_workspace_id != workspace.id:
+    if artifact.origin_workspace_id != workspace.id:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
     if artifact.created_by_id != request.user.id:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
@@ -1640,25 +1642,25 @@ image_artifact_router = Router(tags=["image-artifacts"])
 
 
 def _image_artifact_to_out(artifact) -> ImageArtifactOut:
-    """Map an ImageArtifact ORM instance to ImageArtifactOut."""
+    """Map an ImageInstance to ImageArtifactOut.
+
+    Runner and runtime come from the image itself. ``origin_workspace``
+    is provenance only and may be unset after the source is deleted.
+    """
     runner_build = getattr(artifact, "build_job", None)
-    source_workspace = getattr(artifact, "origin_workspace", None)
-    runtime_type = getattr(source_workspace, "runtime_type", None)
-    source_runner_id = getattr(source_workspace, "runner_id", None)
-    source_runner_online = False
     image_runner = getattr(artifact, "runner", None)
-    if image_runner is not None and source_runner_id is None:
-        source_runner_id = image_runner.id
+    runtime_type = getattr(artifact, "runtime_type", None)
+    source_runner_id = getattr(image_runner, "id", None)
+    source_runner_online = False
+    if image_runner is not None:
         source_runner_online = image_runner.status == RS.ONLINE
-    workspace_runner = getattr(source_workspace, "runner", None)
-    if workspace_runner is not None:
-        source_runner_online = workspace_runner.status == RS.ONLINE
     source_definition_name = None
     is_deactivated = False
     if runner_build is not None:
         source_runner_id = getattr(runner_build, "runner_id", source_runner_id)
         runner = getattr(runner_build, "runner", None)
         if runner is not None:
+            source_runner_id = runner.id
             source_runner_online = runner.status == RS.ONLINE
         image_definition = getattr(runner_build, "image_definition", None)
         if image_definition is not None:
@@ -1760,7 +1762,9 @@ async def rename_image_artifact(
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
-    artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+    artifact = await sync_to_async(service.image_instances.get_by_id)(
+        image_artifact_id
+    )
     if artifact is None:
         return 404, ErrorOut(detail="Image artifact not found", code="not_found")
     if artifact.created_by != request.user:

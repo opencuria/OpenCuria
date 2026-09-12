@@ -1090,6 +1090,35 @@ class TestCreateWorkspace:
                 organization_id=local_runner.organization_id,
             )
 
+    @pytest.mark.asyncio
+    async def test_creates_from_captured_image_without_origin_workspace(
+        self, service, sio_mock, runner, user
+    ):
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=None,
+            created_by=user,
+            name="Orphan Captured Create",
+            runner_ref="orphan-captured-create",
+            status=ImageInstance.Status.READY,
+        )
+
+        workspace, task = await service.create_workspace(
+            name="From Orphan Capture",
+            repos=[],
+            image_artifact_id=artifact.id,
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runtime_type == "docker"
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE
+        sio_mock.emit.assert_called_once()
+
 
 @pytest.mark.django_db(transaction=True)
 class TestRemoveWorkspace:
@@ -1877,6 +1906,76 @@ class TestCreateWorkspaceFromImageArtifact:
         assert payload["env_vars"] == {}
         assert payload["files"] == []
         assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "origin_status",
+        [
+            WorkspaceStatus.PENDING_DELETION,
+            WorkspaceStatus.DELETING,
+            WorkspaceStatus.DELETED,
+        ],
+    )
+    async def test_clones_when_origin_workspace_is_in_deletion_state(
+        self, service, sio_mock, runner, user, origin_status
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Deleting Source",
+            status=origin_status,
+            created_by=user,
+            runtime_type="docker",
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
+            created_by=user,
+            name="Captured From Deleting",
+            runner_ref="captured-deleting-1",
+            status=ImageInstance.Status.READY,
+        )
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone After Delete",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_clones_captured_image_without_origin_workspace(
+        self, service, sio_mock, runner, user
+    ):
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=None,
+            created_by=user,
+            name="Orphan Captured Clone",
+            runner_ref="orphan-captured-clone",
+            status=ImageInstance.Status.READY,
+        )
+
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Orphan Capture",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runtime_type == "docker"
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called_once()
 
 
 @pytest.mark.django_db

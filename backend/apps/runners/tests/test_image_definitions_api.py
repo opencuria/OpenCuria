@@ -288,6 +288,116 @@ def test_list_user_images_includes_source_runner_online_flag(client: Client):
 
 
 @pytest.mark.django_db
+def test_list_captured_image_without_origin_includes_runner_metadata(client: Client):
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="image-list-orphan@test.com",
+        password="secret",
+    )
+    org = Organization.objects.create(
+        name="Orphan Images Org",
+        slug="orphan-images-org",
+    )
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="orphan-image-runner",
+        api_token_hash=hash_token("orphan-image-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+    )
+    image = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=None,
+        created_by=admin,
+        name="Orphan Captured",
+        runner_ref="img-orphan",
+        status=ImageInstance.Status.READY,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGES_READ.value],
+    )
+    response = client.get(
+        "/api/v1/image-artifacts/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    payload = {entry["id"]: entry for entry in response.json()}
+    entry = payload[str(image.id)]
+    assert entry["source_workspace_id"] is None
+    assert entry["runtime_type"] == "docker"
+    assert entry["source_runner_id"] == str(runner.id)
+    assert entry["source_runner_online"] is True
+
+
+@pytest.mark.django_db
+def test_clone_captured_image_while_origin_deleting(client: Client, monkeypatch):
+    from apps.runners.sio_server import get_runner_service
+
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="image-clone-deleting@test.com",
+        password="secret",
+    )
+    org = Organization.objects.create(
+        name="Clone Deleting Org",
+        slug="clone-deleting-org",
+    )
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="runner-clone-deleting",
+        api_token_hash=hash_token("runner-clone-deleting-token"),
+        status=RunnerStatus.ONLINE,
+        sid="clone-deleting-sid",
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    source = Workspace.objects.create(
+        runner=runner,
+        name="Deleting Origin",
+        status=WorkspaceStatus.DELETING,
+        created_by=admin,
+        runtime_type="docker",
+    )
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=source,
+        created_by=admin,
+        name="Captured Deleting Origin",
+        runner_ref="img-deleting-origin",
+        status=ImageInstance.Status.READY,
+    )
+
+    async def fake_emit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", fake_emit)
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGES_CLONE.value],
+    )
+    response = client.post(
+        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
+        data=json.dumps({"name": "clone-while-deleting"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 202, response.content[:500]
+    body = response.json()
+    assert "workspace_id" in body
+    assert "task_id" in body
+    assert "pending deletion" not in response.content.decode().lower()
+
+
+@pytest.mark.django_db
 def test_clone_workspace_from_offline_image_returns_runner_offline(client: Client):
     user_model = get_user_model()
     admin = user_model.objects.create_user(email="image-clone-offline@test.com", password="secret")
