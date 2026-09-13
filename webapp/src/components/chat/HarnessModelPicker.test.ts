@@ -69,14 +69,15 @@ describe('HarnessModelPicker', () => {
     )
   })
 
-  it('shows model name and effort on the compact trigger', () => {
+  it('shows the model without duplicating the separately selected effort', () => {
     const wrapper = mount(HarnessModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
     const trigger = wrapper.find('[data-testid="composer-model-trigger"]')
     expect(trigger.text()).toContain('Think')
-    expect(trigger.text()).toContain('High')
+    expect(trigger.text()).not.toContain('High')
+    expect(wrapper.find('[data-testid="composer-effort-row"]').text()).toContain('High')
   })
 
   it('hides the effort submenu when the model has no reasoning', () => {

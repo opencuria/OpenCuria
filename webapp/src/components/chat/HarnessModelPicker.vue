@@ -52,11 +52,6 @@ const triggerModelName = computed(() => {
   return catalogModel.value?.name ?? props.model
 })
 
-const triggerEffortLabel = computed(() => {
-  if (effortOptions.value.length === 0 || !props.effort) return ''
-  return formatEffort(props.effort)
-})
-
 const filteredModels = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return props.models
@@ -90,11 +85,6 @@ function selectEffort(value: string): void {
   emit('update:effort', value)
 }
 
-function modelEffortHint(item: ProviderModel): string {
-  if (item.default_effort) return formatEffort(item.default_effort)
-  if (item.reasoning_efforts.length > 0) return formatEffort(item.reasoning_efforts[0] ?? '')
-  return ''
-}
 </script>
 
 <template>
@@ -105,16 +95,13 @@ function modelEffortHint(item: ProviderModel): string {
         type="button"
         variant="ghost"
         size="sm"
-        class="h-8 max-w-56 gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+        class="h-8 min-w-0 max-w-full shrink gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground sm:max-w-56"
         data-testid="composer-model-trigger"
         :disabled="disabled"
       >
         <span v-if="loading">Loading…</span>
         <template v-else>
           <span class="min-w-0 truncate" :class="model.trim() ? 'text-foreground' : 'text-muted-foreground'">{{ triggerModelName }}</span>
-          <span v-if="triggerEffortLabel" class="shrink-0 text-muted-foreground">
-            {{ triggerEffortLabel }}
-          </span>
         </template>
         <ChevronDown :size="12" class="shrink-0 opacity-70" />
       </Button>
@@ -177,9 +164,6 @@ function modelEffortHint(item: ProviderModel): string {
                   {{ providerDisplayName(item.provider) }}
                 </TooltipContent>
               </Tooltip>
-              <span v-if="modelEffortHint(item)" class="ml-2 shrink-0 text-muted-foreground">
-                {{ modelEffortHint(item) }}
-              </span>
               <Check v-if="model === item.id" class="ml-auto size-3.5 shrink-0" />
             </DropdownMenuItem>
             <p

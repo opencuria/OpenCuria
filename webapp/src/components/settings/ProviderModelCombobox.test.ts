@@ -74,13 +74,13 @@ describe('ProviderModelCombobox', () => {
     expect(big.attributes('title')).toBe('openrouter/model-big')
   })
 
-  it('shows the selected model name, provider, and effort in the trigger', () => {
+  it('shows only the model and provider in the trigger', () => {
     const wrapper = mountCombobox('openrouter/model-big', models, 'high')
 
     const trigger = wrapper.find('[data-testid="test-model-trigger"]')
     expect(trigger.text()).toContain('Big')
     expect(trigger.text()).toContain('OpenRouter')
-    expect(trigger.text()).toContain('High')
+    expect(trigger.text()).not.toContain('High')
     expect(trigger.attributes('title')).toContain('Big')
   })
 
