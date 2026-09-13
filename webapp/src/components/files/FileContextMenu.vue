@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { FileNode } from '@/types'
 import { Download, Copy } from '@lucide/vue'
+import { writeClipboardText } from '@/lib/clipboard'
 
 const props = defineProps<{
   node: FileNode
@@ -22,9 +23,9 @@ function handleDownload(): void {
   emit('close')
 }
 
-function handleCopyPath(): void {
-  navigator.clipboard.writeText(props.node.path)
-  emit('copyPath', props.node.path)
+async function handleCopyPath(): Promise<void> {
+  const ok = await writeClipboardText(props.node.path)
+  if (ok) emit('copyPath', props.node.path)
   emit('close')
 }
 

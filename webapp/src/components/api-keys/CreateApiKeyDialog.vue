@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useApiKeyStore } from '@/stores/apiKeys'
 import type { APIKeyCreatedOut } from '@/types'
 import { Copy, CheckCheck, AlertTriangle, KeyRound, Shield } from '@lucide/vue'
+import { writeClipboardText } from '@/lib/clipboard'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -80,7 +81,8 @@ async function handleSubmit(): Promise<void> {
 
 async function copyToken(): Promise<void> {
   if (!createdKey.value) return
-  await navigator.clipboard.writeText(createdKey.value.key)
+  const ok = await writeClipboardText(createdKey.value.key)
+  if (!ok) return
   copied.value = true
   setTimeout(() => (copied.value = false), 2000)
 }

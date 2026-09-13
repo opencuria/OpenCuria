@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { Copy, Check } from '@lucide/vue'
+import { writeClipboardText } from '@/lib/clipboard'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -42,26 +43,14 @@ watch(
   },
 )
 
-async function copyToClipboard(): Promise<void> {
+async function handleCopy(): Promise<void> {
   if (!publicKey.value) return
-  try {
-    await navigator.clipboard.writeText(publicKey.value)
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-  } catch {
-    const textarea = document.createElement('textarea')
-    textarea.value = publicKey.value
-    document.body.appendChild(textarea)
-    textarea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textarea)
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-  }
+  const ok = await writeClipboardText(publicKey.value)
+  if (!ok) return
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 2000)
 }
 
 function handleClose(): void {
@@ -98,7 +87,7 @@ function handleClose(): void {
             <button
               class="absolute top-2 right-2 p-1.5 rounded-sm bg-background/80 hover:bg-muted border border-border text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
               title="Copy to clipboard"
-              @click="copyToClipboard"
+              @click="handleCopy"
             >
               <Check v-if="copied" :size="14" class="text-green-600" />
               <Copy v-else :size="14" />
@@ -117,7 +106,7 @@ function handleClose(): void {
 
       <DialogFooter>
         <Button variant="outline" @click="handleClose">Close</Button>
-        <Button v-if="publicKey" @click="copyToClipboard">
+        <Button v-if="publicKey" @click="handleCopy">
           {{ copied ? 'Copied!' : 'Copy Public Key' }}
         </Button>
       </DialogFooter>

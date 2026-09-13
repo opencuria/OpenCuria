@@ -28,6 +28,7 @@ import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { writeClipboardText } from '@/lib/clipboard'
 import { connectionDetail, providerMeta } from './providerMeta'
 import type { ProviderId } from '@/lib/harnessModels'
 import {
@@ -213,11 +214,7 @@ async function startChatGptConnect(): Promise<void> {
 
 async function copyChatGptUserCode(): Promise<void> {
   if (!chatGptUserCode.value) return
-  try {
-    await navigator.clipboard.writeText(chatGptUserCode.value)
-  } catch {
-    // Clipboard may be unavailable in tests.
-  }
+  await writeClipboardText(chatGptUserCode.value)
 }
 
 async function saveOpenRouter(): Promise<void> {

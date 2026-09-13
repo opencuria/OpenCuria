@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useRunnerStore } from '@/stores/runners'
 import { Copy, Check } from '@lucide/vue'
+import { writeClipboardText } from '@/lib/clipboard'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -33,9 +34,10 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-function handleCopyToken(): void {
+async function handleCopyToken(): Promise<void> {
   if (!createdToken.value) return
-  navigator.clipboard.writeText(createdToken.value)
+  const ok = await writeClipboardText(createdToken.value)
+  if (!ok) return
   copied.value = true
   setTimeout(() => (copied.value = false), 2000)
 }

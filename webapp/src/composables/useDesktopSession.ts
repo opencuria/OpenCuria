@@ -11,6 +11,7 @@ import { ref, type Ref } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
+import { writeClipboardText } from '@/lib/clipboard'
 import { onEvent } from '@/services/socket'
 
 export const STOP_DESKTOP_POLL_TIMEOUT_MS = 5000
@@ -209,7 +210,11 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     clipboardBusy.value = true
     try {
       const { text } = await workspacesApi.readDesktopClipboard(workspaceId.value)
-      await navigator.clipboard.writeText(text || '')
+      const ok = await writeClipboardText(text || '')
+      if (!ok) {
+        notifications.error('Copy failed', 'Clipboard unavailable')
+        return false
+      }
       notifications.success('Copied from VM', 'VM clipboard copied to local clipboard.')
       return true
     } catch (err: unknown) {

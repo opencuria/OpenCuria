@@ -3,6 +3,7 @@ import { computed, inject, ref } from 'vue'
 import { Copy, Play, RefreshCw, RotateCcw, Square, Trash2, X } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { writeClipboardText } from '@/lib/clipboard'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
 import { ProcessStatus } from '@/types'
@@ -83,15 +84,12 @@ async function handleDelete(process: WorkspaceProcess): Promise<void> {
 
 async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
   if (!process.log_path) return
-  try {
-    await navigator.clipboard.writeText(process.log_path)
-    copiedPath.value = process.id
-    setTimeout(() => {
-      if (copiedPath.value === process.id) copiedPath.value = null
-    }, 1500)
-  } catch {
-    // Clipboard unavailable — the path is still visible for manual copy.
-  }
+  const ok = await writeClipboardText(process.log_path)
+  if (!ok) return
+  copiedPath.value = process.id
+  setTimeout(() => {
+    if (copiedPath.value === process.id) copiedPath.value = null
+  }, 1500)
 }
 </script>
 
