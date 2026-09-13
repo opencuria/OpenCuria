@@ -401,7 +401,7 @@ Six separate routers:
 | `/api/v1/credential-services/` | `GET /` list catalog (admin-managed) |
 | `/api/v1/credentials/` | `GET /` list, `POST /` create, `PATCH /{id}/`, `DELETE /{id}/`, `GET /{id}/public-key/` |
 
-Conversation and session list responses include `unread` (idle assistant work since last open, or an explicit `manual_unread_at`), plus `needs_attention` / `attention_kind` when a permission or question gate is pending (including descendant subagent sessions).
+Conversation and session list responses include `unread` (idle assistant work since last open, or an explicit `manual_unread_at`), plus `needs_attention` / `attention_kind` when a permission or question gate is pending (including descendant subagent sessions). Conversation rows also include `last_message_at` (last completed user or assistant message — not last open, not tool/part events); the dashboard feed sorts and displays times from that field.
 
 **Parity requirement:** Every capability exposed via the REST API must also be
 available via MCP. When adding a new REST endpoint, add the corresponding MCP

@@ -211,12 +211,6 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
-    onEvent('harness.part_updated', (data) => {
-      conversationStore.touchConversation(data.session_id)
-    }),
-  )
-
-  cleanupFns.push(
     onEvent('harness.permission_required', (data) => {
       const sessionId = data.root_session_id || data.session_id
       if (data.decision) {

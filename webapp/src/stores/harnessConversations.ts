@@ -4,6 +4,8 @@
  * Powers the dashboard kanban/list feed of root harness sessions.
  * Unread state is sourced from backend `last_read_at` / `manual_unread_at`.
  * Pending permission/question gates set `needs_attention`.
+ * Order and displayed times use `last_message_at` (last completed
+ * user or assistant message), not `updated_at`.
  */
 
 import { defineStore } from 'pinia'
@@ -74,7 +76,8 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     try {
       const raw = await listHarnessConversations()
       conversations.value = raw.sort(
-        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+        (a, b) =>
+          new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
       )
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to load conversations'
@@ -128,8 +131,10 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
   ): void {
     const conv = conversations.value.find((row) => row.session_id === sessionId)
     if (!conv) return
+    if (conv.status !== status) {
+      conv.last_message_at = new Date().toISOString()
+    }
     conv.status = status
-    conv.updated_at = new Date().toISOString()
     if (!conv.manual_unread) {
       if (status === 'idle') {
         conv.unread = !viewed
@@ -138,16 +143,8 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
       }
     }
     conversations.value = [...conversations.value].sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-    )
-  }
-
-  function touchConversation(sessionId: string): void {
-    const conv = conversations.value.find((row) => row.session_id === sessionId)
-    if (!conv) return
-    conv.updated_at = new Date().toISOString()
-    conversations.value = [...conversations.value].sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+      (a, b) =>
+        new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
     )
   }
 
@@ -190,7 +187,6 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     markAsRead,
     markAsUnread,
     updateSessionStatus,
-    touchConversation,
     setAttention,
     clearAttention,
   }

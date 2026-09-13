@@ -15,6 +15,7 @@ from .models import (
     AgentConfig,
     AgentSConfig,
     HarnessMessage,
+    HarnessMessageRole,
     HarnessPart,
     HarnessSession,
     HarnessSessionStatus,
@@ -276,6 +277,7 @@ class HarnessSessionRepository:
             reasoning_effort=reasoning_effort or "",
             parent_id=parent_id,
             skill_ids=list(skill_ids or []),
+            last_message_at=timezone.now(),
         )
 
     @staticmethod
@@ -305,6 +307,7 @@ class HarnessSessionRepository:
             tokens={},
             last_read_at=None,
             manual_unread_at=None,
+            last_message_at=timezone.now(),
         )
 
     @staticmethod
@@ -388,7 +391,7 @@ class HarnessSessionRepository:
             HarnessSession.objects.filter(
                 workspace_id__in=workspace_ids,
                 parent__isnull=True,
-            ).order_by("-updated_at")
+            ).order_by("-last_message_at")
         )
 
     @staticmethod
@@ -424,6 +427,16 @@ class HarnessSessionRepository:
             current_id = parent.id
             parent_id = parent.parent_id
         return current_id
+
+    @staticmethod
+    def touch_last_message_at(
+        session_id: uuid.UUID,
+        when: datetime | None = None,
+    ) -> None:
+        """Record that a completed user or assistant message landed."""
+        HarnessSession.objects.filter(id=session_id).update(
+            last_message_at=when or timezone.now()
+        )
 
     @staticmethod
     def mark_read(session: HarnessSession) -> HarnessSession:
@@ -529,7 +542,7 @@ class HarnessMessageRepository:
         provider: str = "",
     ) -> HarnessMessage:
         """Create a user or assistant message shell."""
-        return HarnessMessage.objects.create(
+        message = HarnessMessage.objects.create(
             session_id=session_id,
             role=role,
             content=content or "",
@@ -537,6 +550,11 @@ class HarnessMessageRepository:
             reasoning_effort=reasoning_effort or "",
             provider=provider or "",
         )
+        if role == HarnessMessageRole.USER:
+            HarnessSessionRepository.touch_last_message_at(
+                session_id, when=message.created_at
+            )
+        return message
 
     @staticmethod
     def list_for_session(session_id: uuid.UUID) -> list[HarnessMessage]:
@@ -666,8 +684,6 @@ class HarnessMessageRepository:
             return {}
         from django.db.models import Max
 
-        from .models import HarnessMessageRole
-
         rows = (
             HarnessMessage.objects.filter(
                 session_id__in=session_ids,
@@ -717,6 +733,9 @@ class HarnessMessageRepository:
         message.error = error or ""
         message.completed_at = timezone.now()
         message.save(update_fields=["finish", "error", "completed_at"])
+        HarnessSessionRepository.touch_last_message_at(
+            message.session_id, when=message.completed_at
+        )
         return message
 
 

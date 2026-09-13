@@ -28,6 +28,7 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
     model: '',
     unread: false,
     updated_at: new Date().toISOString(),
+    last_message_at: new Date().toISOString(),
     ...overrides,
   }
 }
@@ -109,6 +110,15 @@ describe('ConversationRow', () => {
     await wrapper.get('[data-testid="conversation-row"]').trigger('click')
 
     expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ session_id: 's-1' })
+  })
+
+  it('shows relative time from last_message_at, not updated_at', () => {
+    const wrapper = mountRow({
+      last_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+
+    expect(wrapper.get('[data-testid="conversation-row-meta"]').text()).toContain('5m')
   })
 
   it('renames via the row menu and confirms with Enter', async () => {

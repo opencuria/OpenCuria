@@ -27,6 +27,7 @@ function conversation(overrides: Partial<HarnessConversation> = {}): HarnessConv
     model: '',
     unread: false,
     updated_at: new Date(NOW).toISOString(),
+    last_message_at: new Date(NOW).toISOString(),
     ...overrides,
   }
 }
@@ -89,14 +90,14 @@ describe('formatTimeAgo', () => {
 describe('extractActiveConversations', () => {
   it('puts busy sessions ahead of unread and caps at 5', () => {
     const conversations = [
-      conversation({ session_id: 'unread-old', unread: true, updated_at: new Date(NOW - 60_000).toISOString() }),
-      conversation({ session_id: 'busy-new', status: 'busy', updated_at: new Date(NOW - 10_000).toISOString() }),
-      conversation({ session_id: 'busy-old', status: 'busy', updated_at: new Date(NOW - 20_000).toISOString() }),
-      conversation({ session_id: 'unread-new', unread: true, updated_at: new Date(NOW).toISOString() }),
+      conversation({ session_id: 'unread-old', unread: true, last_message_at: new Date(NOW - 60_000).toISOString() }),
+      conversation({ session_id: 'busy-new', status: 'busy', last_message_at: new Date(NOW - 10_000).toISOString() }),
+      conversation({ session_id: 'busy-old', status: 'busy', last_message_at: new Date(NOW - 20_000).toISOString() }),
+      conversation({ session_id: 'unread-new', unread: true, last_message_at: new Date(NOW).toISOString() }),
       conversation({ session_id: 'idle', unread: false, status: 'idle' }),
-      conversation({ session_id: 'unread-3', unread: true, updated_at: new Date(NOW - 30_000).toISOString() }),
-      conversation({ session_id: 'unread-4', unread: true, updated_at: new Date(NOW - 40_000).toISOString() }),
-      conversation({ session_id: 'unread-5', unread: true, updated_at: new Date(NOW - 50_000).toISOString() }),
+      conversation({ session_id: 'unread-3', unread: true, last_message_at: new Date(NOW - 30_000).toISOString() }),
+      conversation({ session_id: 'unread-4', unread: true, last_message_at: new Date(NOW - 40_000).toISOString() }),
+      conversation({ session_id: 'unread-5', unread: true, last_message_at: new Date(NOW - 50_000).toISOString() }),
     ]
 
     const active = extractActiveConversations(conversations, 5)
@@ -133,13 +134,13 @@ describe('extractActionRequired', () => {
         session_id: 'old-gate',
         needs_attention: true,
         attention_kind: 'question',
-        updated_at: new Date(NOW - 20_000).toISOString(),
+        last_message_at: new Date(NOW - 20_000).toISOString(),
       }),
       conversation({
         session_id: 'new-gate',
         needs_attention: true,
         attention_kind: 'permission',
-        updated_at: new Date(NOW).toISOString(),
+        last_message_at: new Date(NOW).toISOString(),
       }),
     ])
     expect(rows.map((row) => row.session_id)).toEqual(['new-gate', 'old-gate'])
@@ -150,11 +151,11 @@ describe('groupConversationsByTime', () => {
   it('buckets around local midnight, 7 days, and 30 days', () => {
     const groups = groupConversationsByTime(
       [
-        conversation({ session_id: 'today', updated_at: atHour('2026-03-15', 10) }),
-        conversation({ session_id: 'yesterday', updated_at: atHour('2026-03-14', 22) }),
-        conversation({ session_id: 'week', updated_at: atHour('2026-03-10', 12) }),
-        conversation({ session_id: 'month', updated_at: atHour('2026-03-01', 12) }),
-        conversation({ session_id: 'older', updated_at: atHour('2026-01-01', 12) }),
+        conversation({ session_id: 'today', last_message_at: atHour('2026-03-15', 10) }),
+        conversation({ session_id: 'yesterday', last_message_at: atHour('2026-03-14', 22) }),
+        conversation({ session_id: 'week', last_message_at: atHour('2026-03-10', 12) }),
+        conversation({ session_id: 'month', last_message_at: atHour('2026-03-01', 12) }),
+        conversation({ session_id: 'older', last_message_at: atHour('2026-01-01', 12) }),
       ],
       NOW,
     )
@@ -171,8 +172,8 @@ describe('groupConversationsByTime', () => {
   it('omits empty buckets and keeps newest-first order inside a bucket', () => {
     const groups = groupConversationsByTime(
       [
-        conversation({ session_id: 'newer', updated_at: atHour('2026-03-15', 14) }),
-        conversation({ session_id: 'older-today', updated_at: atHour('2026-03-15', 8) }),
+        conversation({ session_id: 'newer', last_message_at: atHour('2026-03-15', 14) }),
+        conversation({ session_id: 'older-today', last_message_at: atHour('2026-03-15', 8) }),
       ],
       NOW,
     )
@@ -188,10 +189,10 @@ describe('capConversationGroups', () => {
   it('trims later groups and reports the hidden count', () => {
     const groups = groupConversationsByTime(
       [
-        conversation({ session_id: 't1', updated_at: atHour('2026-03-15', 14) }),
-        conversation({ session_id: 't2', updated_at: atHour('2026-03-15', 13) }),
-        conversation({ session_id: 'y1', updated_at: atHour('2026-03-14', 12) }),
-        conversation({ session_id: 'y2', updated_at: atHour('2026-03-14', 11) }),
+        conversation({ session_id: 't1', last_message_at: atHour('2026-03-15', 14) }),
+        conversation({ session_id: 't2', last_message_at: atHour('2026-03-15', 13) }),
+        conversation({ session_id: 'y1', last_message_at: atHour('2026-03-14', 12) }),
+        conversation({ session_id: 'y2', last_message_at: atHour('2026-03-14', 11) }),
       ],
       NOW,
     )

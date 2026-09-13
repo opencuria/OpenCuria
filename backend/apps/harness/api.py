@@ -133,6 +133,7 @@ class HarnessConversationOut(Schema):
     needs_attention: bool = False
     attention_kind: str = ""
     updated_at: datetime
+    last_message_at: datetime
 
 
 class HarnessMessageIn(Schema):
@@ -1218,6 +1219,7 @@ def list_harness_conversations(request: HttpRequest):
             needs_attention=bool(row.get("needs_attention")),
             attention_kind=row.get("attention_kind") or "",
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            last_message_at=datetime.fromisoformat(row["last_message_at"]),
         )
         for row in rows
     ]

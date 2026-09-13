@@ -21,6 +21,7 @@ const baseConversations = [
       needs_attention: false,
       attention_kind: '',
       updated_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
     },
     {
       session_id: 's-2',
@@ -35,6 +36,7 @@ const baseConversations = [
       needs_attention: false,
       attention_kind: '',
       updated_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
     },
   ]
 
@@ -182,6 +184,7 @@ describe('CommandPalette', () => {
         needs_attention: true,
         attention_kind: 'question',
         updated_at: new Date().toISOString(),
+        last_message_at: new Date().toISOString(),
       },
     ]
     const wrapper = mountPalette()

@@ -28,6 +28,7 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
     reasoning_effort: 'high',
     unread: false,
     updated_at: '2026-03-29T10:00:00.000Z',
+    last_message_at: '2026-03-29T10:00:00.000Z',
     ...overrides,
   }
 }
@@ -142,5 +143,70 @@ describe('harnessConversations store unread', () => {
     await vi.advanceTimersByTimeAsync(300)
     expect(listMock).toHaveBeenCalled()
     vi.useRealTimers()
+  })
+
+  it('sorts fetched conversations by last_message_at', async () => {
+    listMock.mockResolvedValueOnce([
+      makeConversation({
+        session_id: 'older',
+        last_message_at: '2026-03-29T09:00:00.000Z',
+      }),
+      makeConversation({
+        session_id: 'newer',
+        last_message_at: '2026-03-29T11:00:00.000Z',
+      }),
+    ])
+    const store = useHarnessConversationStore()
+    await store.fetchConversations()
+    expect(store.conversations.map((row) => row.session_id)).toEqual(['newer', 'older'])
+  })
+
+  it('bumps last_message_at only when session status changes', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'))
+    const store = useHarnessConversationStore()
+    store.conversations = [
+      makeConversation({
+        session_id: 'session-1',
+        status: 'idle',
+        last_message_at: '2026-03-29T10:00:00.000Z',
+      }),
+    ]
+    store.updateSessionStatus('session-1', 'idle', true)
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+    store.updateSessionStatus('session-1', 'busy')
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T12:00:00.000Z')
+    vi.useRealTimers()
+  })
+
+  it('reorders by last_message_at after a status transition', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'))
+    const store = useHarnessConversationStore()
+    store.conversations = [
+      makeConversation({
+        session_id: 'idle-recent',
+        status: 'idle',
+        last_message_at: '2026-03-29T11:00:00.000Z',
+      }),
+      makeConversation({
+        session_id: 'session-1',
+        status: 'idle',
+        last_message_at: '2026-03-29T10:00:00.000Z',
+      }),
+    ]
+    store.updateSessionStatus('session-1', 'busy')
+    expect(store.conversations.map((row) => row.session_id)).toEqual([
+      'session-1',
+      'idle-recent',
+    ])
+    vi.useRealTimers()
+  })
+
+  it('does not bump last_message_at when marking read', async () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation({ status: 'idle', unread: true })]
+    await store.markAsRead('session-1')
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
   })
 })

@@ -57,6 +57,7 @@ const defaultConversation: HarnessConversation = {
   model: '',
   unread: true,
   updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  last_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
 }
 
 const conversationStore = {
@@ -66,7 +67,6 @@ const conversationStore = {
   markAsRead: vi.fn(),
   markAsUnread: vi.fn(),
   updateSessionStatus: vi.fn(),
-  touchConversation: vi.fn(),
 }
 
 const harnessStore = {
@@ -255,7 +255,7 @@ describe('ChatSidebar', () => {
         session_id: `s-${index}`,
         title: `Chat ${index}`,
         unread: false,
-        updated_at: new Date(Date.now() - index * 60 * 1000).toISOString(),
+        last_message_at: new Date(Date.now() - index * 60 * 1000).toISOString(),
       }),
     )
 

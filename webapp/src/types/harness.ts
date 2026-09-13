@@ -198,6 +198,7 @@ export interface HarnessConversation {
   needs_attention?: boolean
   attention_kind?: HarnessAttentionKind
   updated_at: string
+  last_message_at: string
 }
 
 // --- Socket event payloads (M6 `HarnessService` emit shapes) ----------------

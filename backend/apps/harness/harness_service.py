@@ -507,6 +507,9 @@ class HarnessService:
                     "attention_kind", ""
                 ),
                 "updated_at": session.updated_at.isoformat(),
+                "last_message_at": (
+                    session.last_message_at or session.created_at
+                ).isoformat(),
             }
             for session in sessions
         ]

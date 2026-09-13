@@ -20,6 +20,7 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
     model: '',
     unread: false,
     updated_at: '2026-03-29T10:00:00.000Z',
+    last_message_at: '2026-03-29T10:00:00.000Z',
     ...overrides,
   }
 }

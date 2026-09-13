@@ -13,7 +13,12 @@ from django.utils import timezone
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessMessage, HarnessMessageRole, HarnessSessionStatus
+from apps.harness.models import (
+    HarnessMessage,
+    HarnessMessageRole,
+    HarnessSession,
+    HarnessSessionStatus,
+)
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
@@ -164,6 +169,7 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["needs_attention"] is False
     assert row["attention_kind"] == ""
     assert "updated_at" in row
+    assert "last_message_at" in row
 
 
 @pytest.mark.django_db
@@ -477,3 +483,91 @@ def test_needs_attention_maps_child_gate_to_root(conv_setup, fake_harness_servic
     assert by_id[str(child.id)]["attention_kind"] == "question"
     assert HarnessSessionRepository.get_root_id(child) == parent.id
     assert HarnessSessionRepository.get_root_id(parent) == parent.id
+
+
+@pytest.mark.django_db
+def test_list_conversations_orders_by_last_message_at_not_updated_at(
+    conv_setup, fake_harness_service
+):
+    """Opening a chat must not move it above more recently messaged chats."""
+    older = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="older activity",
+    )
+    newer = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="newer activity",
+    )
+    now = timezone.now()
+    HarnessSession.objects.filter(id=older.id).update(
+        last_message_at=now - timedelta(hours=2)
+    )
+    HarnessSession.objects.filter(id=newer.id).update(
+        last_message_at=now - timedelta(minutes=1)
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    mark = client.post(f"/api/v1/harness/sessions/{older.id}/read")
+    assert mark.status_code == 204
+    older.refresh_from_db()
+    newer.refresh_from_db()
+    assert older.updated_at > newer.updated_at
+    rows = client.get("/api/v1/harness/conversations/").json()
+    assert [row["session_id"] for row in rows] == [str(newer.id), str(older.id)]
+
+
+@pytest.mark.django_db
+def test_mark_read_does_not_change_last_message_at(conv_setup, fake_harness_service):
+    """Mark-read updates last_read_at without changing last_message_at."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="stay put",
+    )
+    session.refresh_from_db()
+    before = session.last_message_at
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    assert client.post(f"/api/v1/harness/sessions/{session.id}/read").status_code == 204
+    session.refresh_from_db()
+    assert session.last_message_at == before
+
+
+@pytest.mark.django_db
+def test_last_message_at_touches_user_create_and_assistant_complete(
+    conv_setup, fake_harness_service
+):
+    """Status changes and assistant shells leave last_message_at alone."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="running",
+    )
+    past = timezone.now() - timedelta(minutes=5)
+    HarnessSession.objects.filter(id=session.id).update(last_message_at=past)
+    frozen = HarnessSession.objects.get(id=session.id).last_message_at
+
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.BUSY)
+    session.refresh_from_db()
+    assert session.last_message_at == frozen
+
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role=HarnessMessageRole.ASSISTANT,
+        content="",
+    )
+    session.refresh_from_db()
+    assert session.last_message_at == frozen
+
+    HarnessMessageRepository.complete(assistant)
+    session.refresh_from_db()
+    assert session.last_message_at > frozen
+
+    after_complete = session.last_message_at
+    HarnessMessageRepository.create(
+        session_id=session.id,
+        role=HarnessMessageRole.USER,
+        content="follow up",
+    )
+    session.refresh_from_db()
+    assert session.last_message_at > after_complete

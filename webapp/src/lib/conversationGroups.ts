@@ -78,7 +78,7 @@ export function extractActiveConversations(
     .sort((a, b) => {
       if (a.status === 'busy' && b.status !== 'busy') return -1
       if (a.status !== 'busy' && b.status === 'busy') return 1
-      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      return new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime()
     })
     .slice(0, limit)
 }
@@ -91,7 +91,7 @@ export function extractActionRequired(
 ): HarnessConversation[] {
   return [...conversations]
     .filter((conversation) => Boolean(conversation.needs_attention))
-    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime())
 }
 
 /**
@@ -118,7 +118,7 @@ export function groupConversationsByTime(
   }
 
   for (const conversation of conversations) {
-    const timestamp = new Date(conversation.updated_at).getTime()
+    const timestamp = new Date(conversation.last_message_at).getTime()
     buckets[bucketForTimestamp(timestamp, startToday, startYesterday, start7, start30)].push(
       conversation,
     )

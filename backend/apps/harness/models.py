@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
+from django.utils import timezone
 
 from .enums import ProviderType
 from .permissions.models import PermissionAllowlist, PermissionRequest
@@ -335,6 +336,14 @@ class HarnessSession(models.Model):
         null=True,
         blank=True,
         help_text="When the user explicitly marked this session unread.",
+    )
+    last_message_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True,
+        help_text=(
+            "Last completed user or assistant message "
+            "(not tools, not last open)."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

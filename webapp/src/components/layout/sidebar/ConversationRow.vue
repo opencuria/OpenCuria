@@ -93,7 +93,7 @@ function confirmRename(): void {
 }
 
 function tooltipDate(): string {
-  return new Date(props.conversation.updated_at).toLocaleString('en-US', {
+  return new Date(props.conversation.last_message_at).toLocaleString('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
@@ -209,7 +209,7 @@ function tooltipDate(): string {
         {{
           props.showWorkspace
             ? props.conversation.workspace_name
-            : formatTimeAgo(props.conversation.updated_at)
+            : formatTimeAgo(props.conversation.last_message_at)
         }}
       </span>
       <DropdownMenu>
