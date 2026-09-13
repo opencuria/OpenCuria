@@ -719,20 +719,27 @@ function onComposerKeydown(e: KeyboardEvent): void {
         </div>
       </div>
 
-      <div class="flex items-center gap-1 p-2 pl-2 pb-2">
+      <div
+        class="flex flex-wrap items-center gap-1 p-2 pl-2 pb-2"
+        data-testid="composer-toolbar"
+      >
+        <div
+          class="flex min-w-0 flex-[1_1_10rem] flex-wrap items-center gap-1"
+          data-testid="composer-toolbar-leading"
+        >
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              class="h-8 gap-1.5 rounded-full px-2.5 text-xs font-medium"
+              class="h-8 min-w-0 max-w-full shrink gap-1.5 rounded-full px-2.5 text-xs font-medium"
               data-testid="composer-mode-trigger"
               :disabled="disabled"
             >
-              <component :is="modeIcon" :size="14" />
-              {{ modeLabel }}
-              <ChevronDown :size="12" class="opacity-70" />
+              <component :is="modeIcon" :size="14" class="shrink-0" />
+              <span class="min-w-0 truncate">{{ modeLabel }}</span>
+              <ChevronDown :size="12" class="shrink-0 opacity-70" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent side="top" align="start" class="min-w-36">
@@ -759,7 +766,9 @@ function onComposerKeydown(e: KeyboardEvent): void {
           @update:effort="setEffort"
         />
 
-        <div class="ml-auto flex items-center gap-1">
+        </div>
+
+        <div class="ml-auto flex shrink-0 items-center gap-1">
           <Button
             type="button"
             variant="ghost"

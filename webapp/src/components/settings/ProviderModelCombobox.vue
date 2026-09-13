@@ -43,13 +43,6 @@ const search = ref('')
 
 const selected = computed(() => resolveCatalogModel(props.models, props.modelValue))
 
-const selectedEffortLabel = computed(() => {
-  const effort = props.modelValue.trim() ? props.effort : ''
-  const efforts = selected.value?.reasoning_efforts ?? []
-  if (!effort.trim() || efforts.length === 0) return ''
-  return formatEffort(effort)
-})
-
 const triggerLabel = computed(() => {
   if (selected.value) return selected.value.name
   if (props.modelValue.trim()) return props.modelValue
@@ -154,9 +147,6 @@ watch(
           </span>
           <span v-if="selected" class="ml-1.5 text-muted-foreground">
             {{ providerDisplayName(selected.provider) }}
-          </span>
-          <span v-if="selectedEffortLabel" class="ml-1.5 text-muted-foreground">
-            {{ selectedEffortLabel }}
           </span>
         </span>
         <ChevronsUpDown class="size-4 shrink-0 opacity-50" />

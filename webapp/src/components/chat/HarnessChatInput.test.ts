@@ -119,6 +119,17 @@ describe('HarnessChatInput', () => {
     )
   })
 
+  it('keeps all composer controls inside a responsive wrapping toolbar', () => {
+    const wrapper = mountInput()
+    const toolbar = wrapper.find('[data-testid="composer-toolbar"]')
+    const leading = wrapper.find('[data-testid="composer-toolbar-leading"]')
+
+    expect(toolbar.classes()).toContain('flex-wrap')
+    expect(leading.classes()).toContain('min-w-0')
+    expect(leading.classes()).toContain('flex-wrap')
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
+  })
+
   it('starts as a single line and caps growth at 200px', async () => {
     const wrapper = mountInput()
     const textarea = wrapper.find('[data-testid="composer-textarea"]')
