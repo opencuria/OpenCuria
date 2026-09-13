@@ -6,6 +6,10 @@ import { createRouter, createWebHistory } from 'vue-router'
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
 import { markHarnessSessionRead } from '@/services/harness.api'
+import {
+  armComposerTransition,
+  clearComposerTransition,
+} from '@/lib/composerTransition'
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
@@ -47,7 +51,8 @@ vi.mock('@/stores/skills', () => ({
 
 const HarnessChatInputStub = {
   name: 'HarnessChatInput',
-  template: '<div data-testid="harness-chat-input" />',
+  template:
+    '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
   props: ['disabled', 'workspaceId', 'sessionId'],
   emits: ['prefill'],
   methods: {
@@ -91,6 +96,7 @@ describe('HarnessChatPanel', () => {
   beforeEach(async () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    clearComposerTransition()
     await router.push('/workspaces/ws-1')
     await router.isReady()
   })
@@ -110,6 +116,78 @@ describe('HarnessChatPanel', () => {
     const input = wrapper.findComponent(HarnessChatInputStub)
     expect(input.exists()).toBe(true)
     expect(input.props('disabled')).toBe(false)
+  })
+
+  it('morphs the composer from the armed home rect', async () => {
+    const rafCallbacks: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafCallbacks.push(cb)
+      return 1
+    })
+    armComposerTransition({
+      x: 100,
+      y: 200,
+      left: 100,
+      top: 200,
+      right: 400,
+      bottom: 280,
+      width: 300,
+      height: 80,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+
+    // jsdom reports a zero rect for the card, so the delta matches the armed rect.
+    const card = wrapper.get('[data-testid="composer-card"]')
+    const cardEl = card.element as HTMLElement
+    expect(cardEl.style.transform).toBe('translate(100px, 200px)')
+    expect(cardEl.style.width).toBe('300px')
+    expect(cardEl.style.transition).toBe('none')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.chat-content-enter').exists()).toBe(true)
+
+    // Next frame: animate to the natural position, then clean up.
+    vi.useFakeTimers()
+    for (const cb of rafCallbacks) cb(0)
+    expect(cardEl.style.transform).toBe('')
+    expect(cardEl.style.width).toBe('')
+    expect(cardEl.style.transition).toContain('transform')
+
+    vi.advanceTimersByTime(400)
+    await wrapper.vm.$nextTick()
+    expect(cardEl.style.transition).toBe('')
+    expect(wrapper.find('.chat-content-enter').exists()).toBe(false)
+
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('renders without a morph when no transition is armed', () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+
+    const cardEl = wrapper.get('[data-testid="composer-card"]').element as HTMLElement
+    expect(cardEl.style.transform).toBe('')
+    expect(cardEl.style.width).toBe('')
+    expect(wrapper.find('.chat-content-enter').exists()).toBe(false)
   })
 
   it('hides composer panel chrome (toggles live in the chat header) when viewing any session', async () => {

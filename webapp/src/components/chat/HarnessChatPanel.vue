@@ -14,6 +14,7 @@ import {
   type NoticeSheetState,
 } from '@/lib/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
+import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
 import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
@@ -112,6 +113,46 @@ const chatInputRef = ref<{
   chooseMention: (candidate: MentionCandidate) => void
   setPrompt: (text: string) => void
 } | null>(null)
+
+/** Composer section container, used to locate the FLIP morph anchor card. */
+const composerMorphEl = ref<HTMLElement | null>(null)
+/** True while the home → chat entrance animation plays. */
+const entering = ref(false)
+
+/**
+ * FLIP-morph the composer from its armed home position (centered, narrower)
+ * to the natural chat position (bottom, full width). Runs synchronously in
+ * onMounted so the first paint already shows the transformed start state.
+ */
+function startComposerMorph(): void {
+  const from = consumeComposerTransition()
+  if (!from) return
+  const card = composerMorphEl.value?.querySelector<HTMLElement>(
+    '[data-testid="composer-card"]',
+  )
+  if (!card) return
+  const target = card.getBoundingClientRect()
+  const dx = from.left - target.left
+  const dy = from.top - target.top
+  const dw = from.width - target.width
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(dw) < 1) return
+  entering.value = true
+  const easing = 'cubic-bezier(0.22, 0.61, 0.21, 1)'
+  card.style.transition = 'none'
+  card.style.transform = `translate(${dx}px, ${dy}px)`
+  card.style.width = `${from.width}px`
+  // Force reflow so the start state is applied before the transition begins.
+  void card.offsetWidth
+  requestAnimationFrame(() => {
+    card.style.transition = `transform ${COMPOSER_MORPH_MS}ms ${easing}, width ${COMPOSER_MORPH_MS}ms ${easing}`
+    card.style.transform = ''
+    card.style.width = ''
+    window.setTimeout(() => {
+      card.style.transition = ''
+      entering.value = false
+    }, COMPOSER_MORPH_MS + 60)
+  })
+}
 
 function handleMentionMirror(
   open: boolean,
@@ -299,6 +340,7 @@ function cleanupSocket(): void {
 }
 
 onMounted(() => {
+  startComposerMorph()
   setupSocketListeners()
   void harness.fetchSessions(props.workspaceId).then(() => {
     applySessionQuery()
@@ -484,12 +526,14 @@ async function handleForkMessage(messageId: string): Promise<void> {
       :child-session-ids="childSessionIds"
       :disabled="messageActionsDisabled"
       class="min-h-0 flex-1"
+      :class="entering ? 'chat-content-enter' : ''"
       @open-subtask="handleOpenSubtask"
       @edit="handleEditMessage"
       @fork="handleForkMessage"
     />
     <div
       v-if="!isSubagentSession"
+      ref="composerMorphEl"
       class="relative z-10 flex min-w-0 shrink-0 overflow-x-hidden"
     >
       <div class="flex min-w-0 flex-1 flex-col">
@@ -541,3 +585,22 @@ async function handleForkMessage(messageId: string): Promise<void> {
     </div>
   </div>
 </template>
+
+<style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .chat-content-enter {
+    animation: chat-content-in 220ms ease-out 60ms both;
+  }
+}
+
+@keyframes chat-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+</style>

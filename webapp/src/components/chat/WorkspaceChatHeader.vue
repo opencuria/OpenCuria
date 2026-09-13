@@ -50,6 +50,8 @@ const props = defineProps<{
   runningProcessCount: number
   canPrompt: boolean
   hasActiveSession?: boolean
+  /** Play a subtle entrance animation (home → chat transition). */
+  animateEntrance?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -146,7 +148,10 @@ watch(
     <SidebarTrigger class="shrink-0 text-muted-foreground" />
 
     <!-- Left: chat name (large) + workspace name/status (small, editable) -->
-    <div class="flex min-w-0 flex-1 flex-col justify-center">
+    <div
+      class="flex min-w-0 flex-1 flex-col justify-center"
+      :class="animateEntrance ? 'chat-header-enter' : ''"
+    >
       <div
         class="min-w-0 truncate py-0.5 text-left text-[15px] font-normal text-foreground"
         data-testid="workspace-chat-header-chat-title"
@@ -218,7 +223,11 @@ watch(
     </div>
 
     <!-- Right: compact toggles + processes + overflow menu -->
-    <div class="flex shrink-0 items-center gap-0.5">
+    <div
+      class="flex shrink-0 items-center gap-0.5"
+      :class="animateEntrance ? 'chat-header-enter-stagger' : ''"
+      data-testid="workspace-chat-header-actions"
+    >
       <Button
         variant="ghost"
         size="icon-sm"
@@ -302,3 +311,42 @@ watch(
     </div>
   </header>
 </template>
+
+<style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .chat-header-enter {
+    animation: chat-header-in 200ms ease-out both;
+  }
+
+  .chat-header-enter-stagger > * {
+    animation: chat-header-in 200ms ease-out both;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(1) {
+    animation-delay: 0ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(2) {
+    animation-delay: 40ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(3) {
+    animation-delay: 80ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(4) {
+    animation-delay: 120ms;
+  }
+}
+
+@keyframes chat-header-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+</style>

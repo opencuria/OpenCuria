@@ -170,6 +170,20 @@ describe('WorkspaceChatHeader', () => {
     )
   })
 
+  it('plays the entrance animation when animateEntrance is set', () => {
+    const wrapper = mountHeader({ animateEntrance: true })
+    expect(
+      wrapper.find('[data-testid="workspace-chat-header-actions"]').classes(),
+    ).toContain('chat-header-enter-stagger')
+  })
+
+  it('does not play the entrance animation by default', () => {
+    const wrapper = mountHeader()
+    expect(
+      wrapper.find('[data-testid="workspace-chat-header-actions"]').classes(),
+    ).not.toContain('chat-header-enter-stagger')
+  })
+
   it('routes overflow actions through emits', async () => {
     const wrapper = mountHeader()
     const buttons = wrapper.findAll('button')

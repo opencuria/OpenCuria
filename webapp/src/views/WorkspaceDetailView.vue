@@ -13,6 +13,7 @@ import {
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
+import { isComposerTransitionPending } from '@/lib/composerTransition'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
@@ -33,6 +34,8 @@ const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
+/** Header entrance animation only when arriving from the home composer send. */
+const animateEntrance = ref(isComposerTransitionPending())
 
 const canPrompt = computed(
   () =>
@@ -265,6 +268,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           :running-process-count="runningProcessCount"
           :can-prompt="canPrompt"
           :has-active-session="workspace.has_active_session"
+          :animate-entrance="animateEntrance"
           @new-chat="handleNewHarnessChat"
           @start-workspace="handleStartWorkspace"
           @stop-workspace="handleStopWorkspace"

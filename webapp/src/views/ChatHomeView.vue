@@ -18,6 +18,11 @@ import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
 import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import { Button } from '@/components/ui/button'
+import {
+  HOME_EXIT_MS,
+  armComposerTransition,
+  prefersReducedMotion,
+} from '@/lib/composerTransition'
 import type { HarnessSessionMode } from '@/types/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
@@ -39,6 +44,9 @@ const selectedWorkspaceId = ref<string | null>(null)
 const sending = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
 const createOpen = ref(false)
+/** Drives the exit animation of the greeting block while sending. */
+const leaving = ref(false)
+const composerWrapRef = ref<HTMLElement | null>(null)
 
 function isWorkspaceAvailable(workspace: {
   status: WorkspaceStatus
@@ -157,6 +165,9 @@ async function handleSend(
   const workspace = readyWorkspace.value
   if (!workspace || sending.value) return
   sending.value = true
+  const animate = !prefersReducedMotion()
+  const sendStartedAt = performance.now()
+  if (animate) leaving.value = true
   try {
     const session = await harnessStore.createSession(
       workspace.id,
@@ -167,13 +178,33 @@ async function handleSend(
       effort,
     )
     const sessionId = session?.id ?? harnessStore.activeSessionId
-    if (sessionId) {
-      await router.push({
-        name: 'workspace-detail',
-        params: { id: workspace.id },
-        query: { session: sessionId },
-      })
+    if (!sessionId) {
+      leaving.value = false
+      return
     }
+    if (animate) {
+      // Hand the composer rect to the chat view so it can FLIP-morph the
+      // composer from this centered position to the bottom of the chat.
+      const card =
+        composerWrapRef.value?.querySelector('[data-testid="composer-card"]') ??
+        composerWrapRef.value
+      const rect = card?.getBoundingClientRect()
+      if (rect) armComposerTransition(rect)
+      // Let the exit animation finish before unmounting (the network wait
+      // usually covers it already).
+      const remaining = HOME_EXIT_MS - (performance.now() - sendStartedAt)
+      if (remaining > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remaining))
+      }
+    }
+    // Seed the detail view so it renders immediately (no loading spinner);
+    // the polling refresh merges fresh fields into it.
+    workspaceStore.activeWorkspace = workspace
+    await router.push({
+      name: 'workspace-detail',
+      params: { id: workspace.id },
+      query: { session: sessionId },
+    })
   } finally {
     sending.value = false
   }
@@ -208,20 +239,26 @@ onMounted(async () => {
 
     <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
       <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
-        <div class="mb-4 flex justify-center">
-          <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
-        </div>
+        <div
+          class="transition-all duration-200 ease-in"
+          :class="leaving ? '-translate-y-2 opacity-0' : 'translate-y-0 opacity-100'"
+          data-testid="chat-home-hero"
+        >
+          <div class="mb-4 flex justify-center">
+            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
+          </div>
 
-        <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
-          <template v-if="greetingName">How can I help, {{ greetingName }}?</template>
-          <template v-else>How can I help?</template>
-        </h1>
+          <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
+            <template v-if="greetingName">How can I help, {{ greetingName }}?</template>
+            <template v-else>How can I help?</template>
+          </h1>
 
-        <div class="mt-4 flex justify-center">
-          <WorkspacePicker
-            :model-value="selectedWorkspaceId"
-            @update:model-value="handleSelectionChange"
-          />
+          <div class="mt-4 flex justify-center">
+            <WorkspacePicker
+              :model-value="selectedWorkspaceId"
+              @update:model-value="handleSelectionChange"
+            />
+          </div>
         </div>
 
         <div
@@ -242,7 +279,7 @@ onMounted(async () => {
           </CreateWorkspaceDialog>
         </div>
 
-        <div v-else class="mt-6">
+        <div v-else ref="composerWrapRef" class="mt-6">
           <HarnessChatInput
             :workspace-id="selectedWorkspaceId ?? undefined"
             :session-id="null"

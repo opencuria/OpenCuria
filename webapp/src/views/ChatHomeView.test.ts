@@ -5,9 +5,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatHomeView from './ChatHomeView.vue'
 import { WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import {
+  clearComposerTransition,
+  isComposerTransitionPending,
+} from '@/lib/composerTransition'
 
 const workspaceStore = {
   workspaces: [] as Workspace[],
+  activeWorkspace: null as Workspace | null,
   fetchWorkspaces: vi.fn().mockResolvedValue(undefined),
   getWorkspaceTransitionLabel: vi.fn().mockReturnValue(null),
 }
@@ -165,7 +170,9 @@ describe('ChatHomeView', () => {
     localStorage.clear()
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    clearComposerTransition()
     workspaceStore.workspaces = [makeWorkspace()]
+    workspaceStore.activeWorkspace = null
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
   })
@@ -239,6 +246,69 @@ describe('ChatHomeView', () => {
       params: { id: 'ws-1' },
       query: { session: 'session-1' },
     })
+  })
+
+  it('animates the hero out, arms the composer morph and seeds the workspace on send', async () => {
+    const { wrapper, router } = await mountHome()
+    const pushSpy = vi.spyOn(router, 'push')
+    let resolveSession: (value: { id: string }) => void = () => {}
+    harnessStore.createSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSession = resolve
+        }),
+    )
+
+    const vm = wrapper.vm as unknown as {
+      handleSend: (
+        prompt: string,
+        mode: 'build',
+        model: string,
+        skillIds: string[],
+        effort: string,
+      ) => Promise<void>
+    }
+    const sendPromise = vm.handleSend('hello', 'build', '', [], '')
+    await flushPromises()
+
+    // While the session is created, the hero plays its exit animation.
+    expect(wrapper.get('[data-testid="chat-home-hero"]').classes()).toContain('opacity-0')
+    expect(pushSpy).not.toHaveBeenCalled()
+
+    resolveSession({ id: 'session-1' })
+    await sendPromise
+    await flushPromises()
+
+    expect(isComposerTransitionPending()).toBe(true)
+    expect(workspaceStore.activeWorkspace?.id).toBe('ws-1')
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'workspace-detail',
+      params: { id: 'ws-1' },
+      query: { session: 'session-1' },
+    })
+  })
+
+  it('resets the exit animation and does not navigate when the session fails', async () => {
+    const { wrapper, router } = await mountHome()
+    const pushSpy = vi.spyOn(router, 'push')
+    harnessStore.createSession.mockResolvedValue(null)
+
+    const vm = wrapper.vm as unknown as {
+      handleSend: (
+        prompt: string,
+        mode: 'build',
+        model: string,
+        skillIds: string[],
+        effort: string,
+      ) => Promise<void>
+    }
+    await vm.handleSend('hello', 'build', '', [], '')
+    await flushPromises()
+
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(isComposerTransitionPending()).toBe(false)
+    expect(workspaceStore.activeWorkspace).toBeNull()
+    expect(wrapper.get('[data-testid="chat-home-hero"]').classes()).not.toContain('opacity-0')
   })
 
   it('shows an empty state when no workspaces exist', async () => {
