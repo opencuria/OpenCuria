@@ -58,6 +58,7 @@ describe('OpenCuriaLogo', () => {
     expect(wrapper.get('svg').attributes('data-motion')).toBe('working')
     expect(wrapper.get('svg').classes()).toContain('oc-logo--working')
     expect(wrapper.findAll('.oc-face')).toHaveLength(6)
+    expect(wrapper.findAll('.oc-face--primary')).toHaveLength(2)
   })
 
   it('applies the enter motion class on the wordmark', () => {

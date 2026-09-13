@@ -117,43 +117,45 @@ const rootClass = computed(() =>
 }
 
 .oc-face--tl polygon {
-  --oc-rest: 0.24;
+  --oc-rest: 0.11;
   --oc-peak: 0.5;
 }
 
 .oc-face--tr polygon {
-  --oc-rest: 0.42;
+  --oc-rest: 0.18;
   --oc-peak: 0.68;
 }
 
 .oc-face--l polygon {
-  --oc-rest: 0.18;
+  --oc-rest: 0.08;
   --oc-peak: 0.44;
 }
 
 .oc-face--bl polygon {
-  --oc-rest: 0.1;
+  --oc-rest: 0.04;
   --oc-peak: 0.36;
 }
 
+.oc-face--primary polygon {
+  --oc-rest: 0.42;
+  --oc-peak: 1;
+}
+
 @media (prefers-reduced-motion: no-preference) {
-  .oc-logo--idle .oc-mark {
-    animation: oc-idle-scale 8s ease-in-out infinite;
-  }
-
   .oc-logo--idle .oc-face--primary {
-    animation: oc-idle-primary 8s ease-in-out infinite;
+    animation: oc-idle-primary 4.8s ease-in-out infinite;
   }
 
-  .oc-logo--working .oc-face--tl polygon,
-  .oc-logo--working .oc-face--tr polygon,
-  .oc-logo--working .oc-face--l polygon,
-  .oc-logo--working .oc-face--bl polygon {
-    animation: oc-working-muted 2.4s ease-in-out infinite;
+  .oc-logo--idle .oc-face:not(.oc-face--primary) {
+    animation: oc-idle-muted 4.8s ease-in-out infinite;
   }
 
-  .oc-logo--working .oc-face--primary polygon {
-    animation: oc-working-primary 2.4s ease-in-out infinite;
+  .oc-logo--working .oc-edges {
+    opacity: 0.45;
+  }
+
+  .oc-logo--working .oc-face polygon {
+    animation: oc-working-face 2.4s ease-in-out infinite;
   }
 
   .oc-logo--working .oc-face--tl polygon {
@@ -220,27 +222,29 @@ const rootClass = computed(() =>
   }
 }
 
-@keyframes oc-idle-scale {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.025);
-  }
-}
-
 @keyframes oc-idle-primary {
   0%,
   100% {
-    opacity: 1;
+    opacity: 0.44;
+    filter: brightness(1);
   }
   50% {
-    opacity: 0.88;
+    opacity: 1;
+    filter: brightness(1.36);
   }
 }
 
-@keyframes oc-working-muted {
+@keyframes oc-idle-muted {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes oc-working-face {
   0%,
   100% {
     opacity: var(--oc-rest);
@@ -250,19 +254,6 @@ const rootClass = computed(() =>
   }
   32% {
     opacity: var(--oc-rest);
-  }
-}
-
-@keyframes oc-working-primary {
-  0%,
-  100% {
-    filter: brightness(1);
-  }
-  14% {
-    filter: brightness(1.16);
-  }
-  32% {
-    filter: brightness(1);
   }
 }
 
