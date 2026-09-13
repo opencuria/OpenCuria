@@ -389,6 +389,8 @@ export interface FilesContentResultEvent {
   size: number
   truncated: boolean
   mime_type?: string
+  chunked?: boolean
+  total_chunks?: number
   error?: string
 }
 
@@ -407,7 +409,30 @@ export interface FilesDownloadResultEvent {
   content: string
   filename: string
   is_archive: boolean
+  size?: number
+  chunked?: boolean
+  total_chunks?: number
   error?: string
+}
+
+// --- Chunked file transport (256 KiB base64 slices + metadata final) ---
+
+export interface FilesContentChunkEvent {
+  workspace_id: string
+  request_id: string
+  path: string
+  index: number
+  total_chunks: number
+  content: string
+}
+
+export interface FilesDownloadChunkEvent {
+  workspace_id: string
+  request_id: string
+  path: string
+  index: number
+  total_chunks: number
+  content: string
 }
 
 // --- Skills ---

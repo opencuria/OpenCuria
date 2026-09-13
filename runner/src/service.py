@@ -38,6 +38,11 @@ logger = structlog.get_logger(__name__)
 FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
 FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+#: Max raw bytes served by ``download_file``. Matches the absolute read cap
+#: (100 MiB) so a single download can never buffer unbounded memory even
+#: though payloads are chunked on the wire. Oversized downloads fail with a
+#: small structured error instead of a runner disconnect.
+FILE_DOWNLOAD_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 FIND_FILES_DEFAULT_LIMIT = 50
 FIND_FILES_PRUNE_NAMES = (
     ".git",
@@ -3443,9 +3448,20 @@ class WorkspaceService:
             runtime, info.instance_id, safe_path
         )
 
-        # Check upload size
-        raw_size = len(content_b64) * 3 // 4  # approximate decoded size
-        if raw_size > FILE_UPLOAD_MAX_SIZE:
+        # Exact cap on decoded bytes: decode + validate first, before any
+        # mkdir side effect. A cheap approximate precheck may reject
+        # obvious oversize early, but it must never reject a valid payload
+        # at/below the cap (padding-aware bound, not a lossy estimate).
+        clean = "".join((content_b64 or "").split())
+        if len(clean) > (FILE_UPLOAD_MAX_SIZE + 2) // 3 * 4 + 4:
+            raise ValueError(
+                f"Upload exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
+            )
+        try:
+            decoded_content = base64.b64decode(clean, validate=True)
+        except Exception as exc:
+            raise ValueError("Invalid base64 upload payload") from exc
+        if len(decoded_content) > FILE_UPLOAD_MAX_SIZE:
             raise ValueError(
                 f"Upload exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
             )
@@ -3456,11 +3472,6 @@ class WorkspaceService:
             command=["mkdir", "-p", safe_path],
             workdir="/workspace",
         )
-
-        try:
-            decoded_content = base64.b64decode(content_b64, validate=True)
-        except Exception as exc:  # pragma: no cover - safety net
-            raise ValueError("Invalid base64 upload payload") from exc
 
         if is_directory:
             archive_data = self._convert_archive_to_tar(decoded_content)
@@ -3487,8 +3498,11 @@ class WorkspaceService:
     ) -> dict:
         """Download a file or directory from the workspace container.
 
-        Returns a dict with ``content`` (base64), ``filename``, ``is_archive``.
-        For directories, the content is a tar.gz archive.
+        Returns a dict with ``content`` (base64), ``filename``, ``is_archive``
+        and ``size`` (raw byte count). For directories, the content is a
+        tar.gz archive. Payloads larger than ``FILE_DOWNLOAD_MAX_SIZE``
+        raise ``ValueError`` so callers can return a small structured error
+        instead of buffering unbounded memory.
         """
         safe_path = self._sanitize_path(path)
         info = self._get_cached(workspace_id)
@@ -3510,6 +3524,29 @@ class WorkspaceService:
         if is_dir:
             qp_dir = shlex.quote(os.path.dirname(safe_path))
             qp_base = shlex.quote(os.path.basename(safe_path))
+            # Report the archive size first so huge directories fail with a
+            # small error instead of streaming unbounded base64 into memory.
+            size_cmd = (
+                f"tar czf - -C {qp_dir} {qp_base} 2>/dev/null | wc -c"
+            )
+            exit_code, size_output = await runtime.exec_command_wait(
+                info.instance_id,
+                command=["sh", "-c", size_cmd],
+                workdir="/workspace",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to download: {size_output}")
+            try:
+                archive_size = int(size_output.strip().split()[0])
+            except (ValueError, IndexError) as exc:
+                raise RuntimeError(
+                    f"Failed to download: invalid size {size_output!r}"
+                ) from exc
+            if archive_size > FILE_DOWNLOAD_MAX_SIZE:
+                raise ValueError(
+                    "Download exceeds maximum size of "
+                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
+                )
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=[
@@ -3520,7 +3557,31 @@ class WorkspaceService:
                 workdir="/workspace",
             )
             filename = os.path.basename(safe_path) + ".tar.gz"
+            raw_size = archive_size
         else:
+            qpath = shlex.quote(safe_path)
+            shell_cmd = (
+                f"test -f {qpath} || exit 1; "
+                f"stat -c '%s' {qpath}"
+            )
+            exit_code, size_output = await runtime.exec_command_wait(
+                info.instance_id,
+                command=["sh", "-c", shell_cmd],
+                workdir="/workspace",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to download: {size_output}")
+            try:
+                raw_size = int(size_output.strip().split()[-1])
+            except (ValueError, IndexError) as exc:
+                raise RuntimeError(
+                    f"Failed to download: invalid size {size_output!r}"
+                ) from exc
+            if raw_size > FILE_DOWNLOAD_MAX_SIZE:
+                raise ValueError(
+                    "Download exceeds maximum size of "
+                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
+                )
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
                 command=["base64", safe_path],
@@ -3535,6 +3596,7 @@ class WorkspaceService:
             "content": output.strip(),
             "filename": filename,
             "is_archive": is_dir,
+            "size": raw_size,
         }
 
     async def stat_path(
@@ -3609,10 +3671,16 @@ class WorkspaceService:
         safe_path = await self._realpath_under_workspace(
             runtime, info.instance_id, safe_path
         )
+        # Exact cap on decoded bytes: decode + validate before writing.
+        # Whitespace is normalized first (base64 output may wrap lines).
         try:
-            decoded = base64.b64decode(content_b64, validate=True)
+            decoded = base64.b64decode("".join(content_b64.split()), validate=True)
         except Exception as exc:
             raise ValueError("Invalid base64 file payload") from exc
+        if len(decoded) > FILE_UPLOAD_MAX_SIZE:
+            raise ValueError(
+                f"Write exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
+            )
         if mode < 0 or mode > 0o777:
             raise ValueError(f"Invalid file mode: {mode!r}")
 

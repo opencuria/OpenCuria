@@ -35,7 +35,10 @@ const showingGitDiff = computed(
   () => Boolean(gitStore.viewingDiffChange || gitStore.viewingCommitDiff),
 )
 const showingFile = computed(
-  () => fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent,
+  () =>
+    fileExplorerStore.isViewingFile ||
+    fileExplorerStore.isLoadingContent ||
+    fileExplorerStore.contentError !== null,
 )
 const showingOverlay = computed(() => showingGitDiff.value || showingFile.value)
 const hasWorkspace = computed(() => props.workspaceId.length > 0)

@@ -11,11 +11,13 @@ import pytest
 
 from apps.harness.access.base import ExecChunk
 from apps.harness.access.runner_accessor import (
+    HARNESS_CHUNK_B64_SIZE,
     RunnerAccessorError,
     RunnerWorkspaceAccessor,
     create_harness_accessor,
     route_harness_chunk,
     route_harness_done,
+    route_harness_file_chunk,
     route_harness_result,
 )
 
@@ -524,3 +526,431 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     task.cancel()
     with pytest.raises(_asyncio.CancelledError):
         await task
+
+
+# --- Chunked file transfer -------------------------------------------------
+
+
+def _chunk_payloads(raw: bytes, total: int, request_id: str) -> list[dict]:
+    """Split base64(raw) into *total* slices for read_chunk routing."""
+    encoded = base64.b64encode(raw).decode("ascii")
+    size = (len(encoded) + total - 1) // total
+    slices = [encoded[i : i + size] for i in range(0, len(encoded), size)]
+    while len(slices) < total:
+        slices.append("QQ==")
+    return [
+        {
+            "request_id": request_id,
+            "workspace_id": "ws-1",
+            "path": "/workspace/big.bin",
+            "index": index,
+            "total_chunks": total,
+            "content": piece,
+        }
+        for index, piece in enumerate(slices[:total])
+    ]
+
+
+async def test_chunked_read_reassembles_out_of_order() -> None:
+    """Three out-of-order read chunks plus a chunked final join in order."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+    seen: dict[str, dict] = {}
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        seen["payload"] = payload
+        rid = payload["request_id"]
+        chunks = _chunk_payloads(raw, 3, rid)
+        for chunk in (chunks[2], chunks[0], chunks[1]):
+            assert route_harness_file_chunk(chunk) is True
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+                "size": len(raw),
+                "mime": "application/octet-stream",
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    accessor = _accessor(transport)
+    content = await accessor.read_file("/workspace/big.bin")
+    assert content.content == raw
+    assert content.size == len(raw)
+    assert seen["payload"]["path"] == "/workspace/big.bin"
+
+
+async def test_chunked_read_final_total_mismatch_raises() -> None:
+    """Chunks pin total 3 but the final announces total 2 → mismatch error."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        for chunk in _chunk_payloads(raw, 3, rid):
+            route_harness_file_chunk(chunk)
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 2,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="mismatch"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_incomplete_transfer_raises() -> None:
+    """Only 2 of 3 announced chunks arrive → incomplete/missing error."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        for chunk in _chunk_payloads(raw, 3, rid)[:2]:
+            route_harness_file_chunk(chunk)
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="incomplete|missing"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_bad_index_raises() -> None:
+    """A chunk with an out-of-range index fails the pending read."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        assert route_harness_file_chunk(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "index": 9,
+                "total_chunks": 3,
+                "content": base64.b64encode(b"nope").decode(),
+            }
+        ) is True
+        await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_chunk_workspace_mismatch_raises() -> None:
+    """A chunk for another workspace fails the pending read."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        assert route_harness_file_chunk(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-other",
+                "path": "/workspace/big.bin",
+                "index": 0,
+                "total_chunks": 3,
+                "content": base64.b64encode(b"nope").decode(),
+            }
+        ) is True
+        await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="workspace mismatch"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_read_file_small_inline_payload_needs_no_chunks() -> None:
+    """Small inline finals (no chunked flag) still decode without chunks."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "path": "/workspace/a.txt",
+                "content": base64.b64encode(b"hi").decode(),
+                "size": 2,
+                "truncated": False,
+                "mime": "text/plain",
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    content = await _accessor(transport).read_file("/workspace/a.txt")
+    assert content.content == b"hi"
+    assert content.mime == "text/plain"
+
+
+async def test_chunked_write_event_sequence() -> None:
+    """A ~300 KiB write rides start + ordered chunks + finish, then ok."""
+    transport = FakeTransport()
+    content = bytes((i % 251 for i in range(300 * 1024)))
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        if event == "harness:write_file_finish":
+            route_harness_result(
+                {
+                    "request_id": payload["request_id"],
+                    "workspace_id": "ws-1",
+                    "ok": True,
+                }
+            )
+
+    transport.auto_reply = auto_reply
+    await _accessor(transport).write_file("/workspace/big.bin", content)
+
+    events = [event for event, _ in transport.emitted]
+    assert events[0] == "harness:write_file_start"
+    assert events[-1] == "harness:write_file_finish"
+    chunk_events = [event for event in events if event == "harness:write_file_chunk"]
+    assert len(chunk_events) >= 2
+
+    start_payload = _request_id(transport, "harness:write_file_start")
+    assert start_payload["path"] == "/workspace/big.bin"
+    total = int(start_payload["total_chunks"])
+    assert total >= 2
+    assert len(chunk_events) == total
+
+    chunk_payloads = [
+        payload
+        for event, payload in transport.emitted
+        if event == "harness:write_file_chunk"
+    ]
+    assert [p["index"] for p in chunk_payloads] == list(range(total))
+    assert all(int(p["total_chunks"]) == total for p in chunk_payloads)
+    assert all(
+        len("".join(str(p["content"]).split())) <= HARNESS_CHUNK_B64_SIZE
+        for p in chunk_payloads
+    )
+    joined = "".join(str(p["content"]) for p in chunk_payloads)
+    assert base64.b64decode(joined) == content
+
+
+async def test_write_file_rejects_above_absolute_cap_without_emitting() -> None:
+    """Content past the 10 MiB cap raises before any socket emit."""
+    transport = FakeTransport()
+    accessor = _accessor(transport)
+    with pytest.raises(ValueError, match="maximum size"):
+        await accessor.write_file("/workspace/big.bin", b"x" * (10 * 1024 * 1024 + 4))
+    assert transport.emitted == []
+
+
+async def test_write_file_exact_cap_allowed_plus_one_rejected() -> None:
+    """Exactly 10 MiB passes the cap check; 10 MiB + 1 raises, no emit."""
+    transport = FakeTransport()
+    accessor = _accessor(transport)
+
+    async def auto_reply_ok(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "ok": True,
+            }
+        )
+
+    transport.auto_reply = auto_reply_ok
+    await accessor.write_file("/workspace/exact.bin", b"x" * (10 * 1024 * 1024))
+    assert transport.emitted, "exact-cap write must emit"
+
+    transport2 = FakeTransport()
+    with pytest.raises(ValueError, match="maximum size"):
+        await _accessor(transport2).write_file(
+            "/workspace/over.bin", b"x" * (10 * 1024 * 1024 + 1)
+        )
+    assert transport2.emitted == []
+
+
+async def test_write_file_rejects_too_many_chunks(monkeypatch) -> None:
+    """More than HARNESS_WRITE_MAX_CHUNKS slices raise before emitting."""
+    from apps.harness.access import runner_accessor as accessor_module
+
+    transport = FakeTransport()
+    accessor = _accessor(transport)
+    monkeypatch.setattr(
+        accessor_module.RunnerWorkspaceAccessor,
+        "_chunk_b64_slices",
+        staticmethod(lambda payload_b64: ["QQ=="] * 65),
+    )
+    with pytest.raises(ValueError, match="maximum size"):
+        await accessor.write_file("/workspace/big.bin", bytes(300 * 1024))
+    assert transport.emitted == []
+
+
+async def test_read_file_timeout_cancels_and_cleans_state() -> None:
+    """A timed-out read emits harness:cancel and drops routing state."""
+    transport = FakeTransport()
+    accessor = _accessor(transport, default_timeout=0.02)
+    with pytest.raises(TimeoutError, match="timed out"):
+        await accessor.read_file("/workspace/big.bin")
+    events = [event for event, _ in transport.emitted]
+    assert events[0] == "harness:read_file"
+    assert events[-1] == "harness:cancel"
+    assert accessor._pending == {}
+    assert accessor._file_chunks == {}
+
+
+async def test_read_file_rejects_path_outside_workspace() -> None:
+    """Absolute paths outside /workspace raise before any socket emit."""
+    transport = FakeTransport()
+    with pytest.raises(ValueError, match="under /workspace"):
+        await _accessor(transport).read_file("/etc/passwd")
+    assert transport.emitted == []
+
+
+async def _read_with_final(
+    final: dict, *, max_size: int | None = None
+) -> object:
+    """Run read_file against a canned inline final; return FileContent."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result({"request_id": payload["request_id"], **final})
+
+    transport.auto_reply = auto_reply
+    return await _accessor(transport).read_file(
+        "/workspace/a.txt", max_size=max_size
+    )
+
+
+async def test_read_file_rejects_invalid_base64() -> None:
+    """Malformed base64 (validate=True) fails instead of decoding lossy."""
+    with pytest.raises(RunnerAccessorError, match="invalid base64"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": "!!!not-base64!!!",
+                "size": 4,
+                "truncated": False,
+            }
+        )
+
+
+async def test_read_file_rejects_size_mismatch() -> None:
+    """Complete reads require decoded length == reported size."""
+    with pytest.raises(RunnerAccessorError, match="size mismatch"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": base64.b64encode(b"hi").decode(),
+                "size": 99,
+                "truncated": False,
+            }
+        )
+
+
+async def test_read_file_rejects_truncated_empty_payload() -> None:
+    """Truncated reads must carry a non-empty prefix (empty file ⇒ False)."""
+    with pytest.raises(RunnerAccessorError, match="non-empty"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": "",
+                "size": 100,
+                "truncated": True,
+            }
+        )
+
+
+async def test_read_file_allows_truncated_prefix() -> None:
+    """Truncated reads accept decoded length < reported size."""
+    content = await _read_with_final(
+        {
+            "workspace_id": "ws-1",
+            "content": base64.b64encode(b"hi").decode(),
+            "size": 100,
+            "truncated": True,
+        }
+    )
+    assert content.content == b"hi"
+    assert content.truncated is True
+
+
+async def test_read_file_default_cap_is_5mib_not_100mib(
+    monkeypatch,
+) -> None:
+    """Omitted max_size budgets the runner default (5 MiB), not 100 MiB."""
+    from apps.harness.access import runner_accessor as accessor_module
+
+    assert accessor_module.HARNESS_READ_DEFAULT_BYTES == 5 * 1024 * 1024
+    assert accessor_module.HARNESS_READ_MAX_BYTES == 100 * 1024 * 1024
+
+    # Pure arithmetic: the accessor must budget (5 MiB + 2) // 3 * 4 + 4
+    # base64 chars for an omitted max_size, and the 100 MiB formula for
+    # an explicit 100 MiB request.
+    def chars_for(raw: int) -> int:
+        return (raw + 2) // 3 * 4 + 4
+
+    assert chars_for(5 * 1024 * 1024) < chars_for(100 * 1024 * 1024)
+
+    seen: dict[str, object] = {}
+
+    async def fake_wait(self, request_id, payload, timeout):
+        try:
+            read_limit = (
+                int(payload.get("max_size"))
+                if payload.get("max_size") is not None
+                else accessor_module.HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            read_limit = accessor_module.HARNESS_READ_DEFAULT_BYTES
+        if read_limit <= 0 or read_limit > accessor_module.HARNESS_READ_MAX_BYTES:
+            read_limit = accessor_module.HARNESS_READ_DEFAULT_BYTES
+        seen["max_chars"] = chars_for(read_limit)
+        return {
+            "request_id": request_id,
+            "workspace_id": "ws-1",
+            "content": base64.b64encode(b"hi").decode(),
+            "size": 2,
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        accessor_module.RunnerWorkspaceAccessor,
+        "_await_chunked_read_result",
+        fake_wait,
+    )
+    content = await _accessor(FakeTransport()).read_file("/workspace/a.txt")
+    assert content.content == b"hi"
+    expected = (5 * 1024 * 1024 + 2) // 3 * 4 + 4
+    assert seen["max_chars"] == expected

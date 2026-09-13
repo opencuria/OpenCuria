@@ -117,7 +117,11 @@ class FakeGitRuntime:
     """Emulate workspace git via local subprocesses (no network)."""
 
     def __init__(self, workspace_root: str) -> None:
-        self.workspace_root = workspace_root
+        # macOS tempdirs live under /var/folders, which realpath resolves
+        # to /private/var/folders. Probe emulation realpath's paths before
+        # containment checks, so the fake root must use the same canonical
+        # path or every in-workspace repo looks like an escape.
+        self.workspace_root = os.path.realpath(workspace_root)
         self.calls: list[tuple[list[str], str | None, dict | None]] = []
         self.delay: dict[str, float] = {}
         self.entered = 0

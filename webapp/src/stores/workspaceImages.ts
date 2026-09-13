@@ -6,6 +6,11 @@
 import { defineStore } from 'pinia'
 import { ref, reactive } from 'vue'
 import { sendFilesRead } from '@/services/socket'
+import {
+  createChunkedTransferStore,
+  type ChunkedTransferStore,
+} from '@/lib/fileChunks'
+import { useNotificationStore } from '@/stores/notifications'
 
 let requestCounter = 0
 
@@ -65,6 +70,9 @@ const VIDEO_MIME_MAP: Record<string, string> = {
 
 const VIDEO_READ_MAX_SIZE = 100 * 1024 * 1024 // 100 MB
 
+/** Max buffered base64 chars for one chunked media read (~140 MiB chars). */
+const MEDIA_CHUNK_MAX_CHARS = 140 * 1024 * 1024
+
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
 export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
@@ -78,12 +86,63 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   // requestId → pending read metadata
   const pendingReadRequests = ref<Map<string, PendingReadRequest>>(new Map())
 
+  // Bounded reassembly for chunked media reads (request_id → slices).
+  // The chunk store timeout fires the single cleanup callback so stale
+  // fetching flags and the concurrency slot never hang.
+  let mediaChunks: ChunkedTransferStore | null = null
+
+  function getMediaChunks(): ChunkedTransferStore {
+    if (!mediaChunks) {
+      mediaChunks = createChunkedTransferStore({
+        maxChars: MEDIA_CHUNK_MAX_CHARS,
+        onTimeout: (requestId) => {
+          const pending = pendingReadRequests.value.get(requestId)
+          const path = pending?.path ?? ''
+          pendingReadRequests.value.delete(requestId)
+          if (path) failPendingMedia(path, pending?.kind)
+        },
+      })
+    }
+    return mediaChunks
+  }
+
   // paths currently being fetched
   const fetchingPaths = reactive<Record<string, boolean>>({})
   const fetchingVideos = reactive<Record<string, boolean>>({})
 
-  // Timeout handles for video fetch requests (to recover from silent failures)
-  const videoFetchTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+  // request-id-keyed safety timeouts: every media read (image or video)
+  // gets a 30 s timer at request time so a silent backend never leaks the
+  // fetching flag or the concurrency slot. Timer handles live here (not in
+  // the chunk store) and completion always clears them exactly once via
+  // clearFetchTimeout(); the chunk-store onTimeout only covers transfers
+  // whose timer already fired.
+  const MEDIA_FETCH_TIMEOUT_MS = 30_000
+  const fetchTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+  // requestId → whether its timeout already fired (prevents double slot
+  // release when both the timeout callback and a late result run).
+  const timedOutRequests = new Set<string>()
+
+  function armFetchTimeout(requestId: string): void {
+    clearFetchTimeout(requestId)
+    const timer = setTimeout(() => {
+      fetchTimeouts.delete(requestId)
+      timedOutRequests.add(requestId)
+      const pending = pendingReadRequests.value.get(requestId)
+      pendingReadRequests.value.delete(requestId)
+      getMediaChunks().cancel(requestId)
+      if (pending) failPendingMedia(pending.path, pending.kind)
+    }, MEDIA_FETCH_TIMEOUT_MS)
+    fetchTimeouts.set(requestId, timer)
+  }
+
+  function clearFetchTimeout(requestId: string): void {
+    const timer = fetchTimeouts.get(requestId)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      fetchTimeouts.delete(requestId)
+    }
+  }
 
   // Upload state tracking: path → status
   const uploadStatuses = reactive<Record<string, UploadStatus>>({})
@@ -112,6 +171,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
       activeCount++
       const requestId = nextRequestId()
       pendingReadRequests.value.set(requestId, { path: item.path, kind: item.kind })
+      armFetchTimeout(requestId)
       sendFilesRead(item.workspaceId, requestId, item.path, item.maxSize)
     }
   }
@@ -157,6 +217,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
       activeCount++
       const requestId = nextRequestId()
       pendingReadRequests.value.set(requestId, { path, kind: 'image' })
+      armFetchTimeout(requestId)
       sendFilesRead(workspaceId, requestId, path)
     } else {
       fetchQueue.push({ workspaceId, path, kind: 'image' })
@@ -167,30 +228,11 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     if (videoCache[path] || fetchingVideos[path]) return
     fetchingVideos[path] = true
 
-    // Safety timeout: if the backend never responds (runner offline without
-    // sending an error, or connection dropped mid-transfer), reset the
-    // fetching state after 30 s so the user can retry.
-    const timeoutHandle = setTimeout(() => {
-      if (fetchingVideos[path]) {
-        delete fetchingVideos[path]
-        videoFetchTimeouts.delete(path)
-        // Also clean up any pending request tracking
-        for (const [reqId, req] of pendingReadRequests.value) {
-          if (req.path === path && req.kind === 'video') {
-            pendingReadRequests.value.delete(reqId)
-            activeCount = Math.max(0, activeCount - 1)
-            break
-          }
-        }
-        processQueue()
-      }
-    }, 30_000)
-    videoFetchTimeouts.set(path, timeoutHandle)
-
     if (activeCount < MAX_CONCURRENT) {
       activeCount++
       const requestId = nextRequestId()
       pendingReadRequests.value.set(requestId, { path, kind: 'video' })
+      armFetchTimeout(requestId)
       sendFilesRead(workspaceId, requestId, path, VIDEO_READ_MAX_SIZE)
     } else {
       fetchQueue.push({
@@ -204,7 +246,9 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
 
   /**
    * Called from useWorkspaceFileEvents when a files:content_result event arrives.
-   * Only processes requests initiated by this store.
+   * Only processes requests initiated by this store. Supports both inline
+   * (backward compatible) and chunked (`chunked: true` + prior
+   * files:content_chunk slices) payloads.
    */
   function handleContentResult(
     requestId: string,
@@ -212,52 +256,184 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     content: string,
     error?: string,
     mimeType?: string,
+    options: { chunked?: boolean; totalChunks?: number } = {},
   ): void {
+    // A late result for an already-timed-out request must never repopulate
+    // the cache or release the slot twice: drop it (the timeout already
+    // ran failPendingMedia exactly once).
+    if (timedOutRequests.has(requestId)) {
+      timedOutRequests.delete(requestId)
+      pendingReadRequests.value.delete(requestId)
+      getMediaChunks().cancel(requestId)
+      return
+    }
+    // Error first: a failed final must clear fetching flags and the
+    // concurrency slot (including the request safety timer) before any
+    // other handling.
+    if (error) {
+      const pending = pendingReadRequests.value.get(requestId)
+      pendingReadRequests.value.delete(requestId)
+      clearFetchTimeout(requestId)
+      getMediaChunks().cancel(requestId)
+      failPendingMedia(pending?.path ?? path, pending?.kind)
+      const notify = useNotificationStore()
+      notify.error('Media load failed', error)
+      return
+    }
     const pending = pendingReadRequests.value.get(requestId)
-    if (!pending) return
-    pendingReadRequests.value.delete(requestId)
+    const hasChunks = getMediaChunks().has(requestId)
+    if (!pending && !hasChunks) return
 
-    if (pending.kind === 'video') {
-      const t = videoFetchTimeouts.get(path)
-      if (t !== undefined) {
-        clearTimeout(t)
-        videoFetchTimeouts.delete(path)
+    if (options.chunked) {
+      try {
+        const assembled = getMediaChunks().finish(requestId, options.totalChunks)
+        const expectedPath = pending?.path ?? assembled.path ?? path
+        if (path !== expectedPath || (assembled.path && assembled.path !== expectedPath)) {
+          throw new Error(`path mismatch for ${requestId}`)
+        }
+        pendingReadRequests.value.delete(requestId)
+        clearFetchTimeout(requestId)
+        storeAssembledMedia(
+          expectedPath,
+          pending?.kind ?? 'image',
+          assembled.content,
+          mimeType,
+        )
+      } catch {
+        pendingReadRequests.value.delete(requestId)
+        clearFetchTimeout(requestId)
+        getMediaChunks().cancel(requestId)
+        failPendingMedia(pending?.path ?? path, pending?.kind)
       }
+      return
     }
 
+    if (!pending) {
+      // Final result for an unknown transfer (e.g. timed-out video fetch):
+      // drop it so stale payloads never populate the cache.
+      return
+    }
+    pendingReadRequests.value.delete(requestId)
+    clearFetchTimeout(requestId)
+
     if (error || !content) {
-      if (pending.kind === 'image') delete fetchingPaths[path]
-      else delete fetchingVideos[path]
-      activeCount--
-      processQueue()
+      failPendingMedia(pending.path, pending.kind)
+      return
+    }
+
+    if (path !== pending.path) {
+      failPendingMedia(pending.path, pending.kind)
+      return
+    }
+    storeAssembledMedia(pending.path, pending.kind, content, mimeType)
+  }
+
+  /**
+   * Called from useWorkspaceFileEvents when a files:content_chunk slice arrives.
+   * Chunks carry payload only; authoritative mime comes from the final result.
+   * A chunk for the wrong path fails the transfer (with cleanup) instead of
+   * being silently dropped, so a stuck spinner can never linger.
+   */
+  function handleContentChunk(
+    requestId: string,
+    path: string,
+    index: number,
+    totalChunks: number,
+    content: string,
+  ): void {
+    if (timedOutRequests.has(requestId)) return
+    const pending = pendingReadRequests.value.get(requestId)
+    if (!pending && !getMediaChunks().has(requestId)) return
+    if (pending && pending.path !== path) {
+      pendingReadRequests.value.delete(requestId)
+      clearFetchTimeout(requestId)
+      getMediaChunks().cancel(requestId)
+      failPendingMedia(pending.path, pending.kind)
+      return
+    }
+    try {
+      const store = getMediaChunks()
+      if (!store.has(requestId)) {
+        store.start(requestId, totalChunks, { totalChunks }, pending?.path ?? path)
+      }
+      store.addChunk(requestId, {
+        workspace_id: '',
+        request_id: requestId,
+        path,
+        index,
+        total_chunks: totalChunks,
+        content,
+      })
+    } catch {
+      pendingReadRequests.value.delete(requestId)
+      clearFetchTimeout(requestId)
+      getMediaChunks().cancel(requestId)
+      failPendingMedia(pending?.path ?? path, pending?.kind)
+    }
+  }
+
+  function failPendingMedia(path: string, kind?: 'image' | 'video'): void {
+    if (kind === 'video' || (!kind && fetchingVideos[path])) {
+      delete fetchingVideos[path]
+    } else {
+      delete fetchingPaths[path]
+    }
+    activeCount = Math.max(0, activeCount - 1)
+    processQueue()
+  }
+
+  function storeAssembledMedia(
+    path: string,
+    kind: 'image' | 'video',
+    content: string,
+    mimeType?: string,
+  ): void {
+    if (!content) {
+      failPendingMedia(path, kind)
       return
     }
 
     const cleanBase64 = content.replace(/\s+/g, '')
-
-    if (pending.kind === 'image') {
-      const ext = getExt(path)
-      const mime = mimeType || IMAGE_MIME_MAP[ext] || 'image/png'
-      imageCache[path] = `data:${mime};base64,${cleanBase64}`
-      delete fetchingPaths[path]
-    } else {
-      const ext = getExt(path)
-      const resolvedMime = mimeType || VIDEO_MIME_MAP[ext] || 'video/mp4'
-      const binary = atob(cleanBase64)
-      const bytes = new Uint8Array(binary.length)
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i)
-      }
-
-      if (videoCache[path]) {
-        URL.revokeObjectURL(videoCache[path]!)
-      }
-      videoCache[path] = URL.createObjectURL(new Blob([bytes], { type: resolvedMime }))
-      videoMimeTypes[path] = resolvedMime
-      delete fetchingVideos[path]
+    if (!cleanBase64) {
+      failPendingMedia(path, kind)
+      return
     }
 
-    activeCount--
+    try {
+      if (kind === 'image') {
+        const ext = getExt(path)
+        const mime = mimeType || IMAGE_MIME_MAP[ext] || 'image/png'
+        imageCache[path] = `data:${mime};base64,${cleanBase64}`
+        delete fetchingPaths[path]
+      } else {
+        const ext = getExt(path)
+        const resolvedMime = mimeType || VIDEO_MIME_MAP[ext] || 'video/mp4'
+        let binary: string
+        try {
+          binary = atob(cleanBase64)
+        } catch {
+          throw new Error('invalid base64 media payload')
+        }
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i)
+        }
+
+        if (videoCache[path]) {
+          URL.revokeObjectURL(videoCache[path]!)
+        }
+        videoCache[path] = URL.createObjectURL(new Blob([bytes], { type: resolvedMime }))
+        videoMimeTypes[path] = resolvedMime
+        delete fetchingVideos[path]
+      }
+    } catch {
+      failPendingMedia(path, kind)
+      const notify = useNotificationStore()
+      notify.error('Media load failed', 'The media payload could not be decoded.')
+      return
+    }
+
+    activeCount = Math.max(0, activeCount - 1)
     processQueue()
   }
 
@@ -314,10 +490,12 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     Object.keys(fetchingPaths).forEach((k) => { delete fetchingPaths[k] })
     Object.keys(fetchingVideos).forEach((k) => { delete fetchingVideos[k] })
     Object.keys(uploadStatuses).forEach((k) => { delete uploadStatuses[k] })
-    videoFetchTimeouts.forEach((t) => clearTimeout(t))
-    videoFetchTimeouts.clear()
+    fetchTimeouts.forEach((t) => clearTimeout(t))
+    fetchTimeouts.clear()
+    timedOutRequests.clear()
     pendingReadRequests.value.clear()
     pendingUploadIds.value.clear()
+    mediaChunks?.clear()
     fetchQueue.length = 0
     activeCount = 0
   }
@@ -343,6 +521,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     handleUploadResult,
     getUploadStatus,
     handleContentResult,
+    handleContentChunk,
     reset,
   }
 })

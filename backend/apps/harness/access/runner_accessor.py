@@ -13,6 +13,8 @@ Protocol (backend -> runner)::
                          env, timeout}
     harness:read_file   {request_id, workspace_id, path, max_size}
     harness:write_file  {request_id, workspace_id, path, content, mode}
+                        (small payloads only; large writes use
+                        harness:write_file_start/chunk/finish below)
     harness:list        {request_id, workspace_id, path}
     harness:stat           {request_id, workspace_id, path}
     harness:desktop_action {request_id, workspace_id, action, args}
@@ -27,6 +29,16 @@ Protocol (runner -> backend)::
                               stdout, stderr} or {..., error}
     harness:read_file_result {request_id, workspace_id, content, size,
                               truncated, mime} or {..., error}
+    harness:read_file_chunk  {request_id, workspace_id, path, index,
+                              total_chunks, content} (256 KiB base64 slices,
+                              followed by a metadata-only
+                              harness:read_file_result with
+                              ``chunked=True`` and empty content)
+    harness:write_file_start  {request_id, workspace_id, path, mode,
+                               total_chunks}
+    harness:write_file_chunk  {request_id, workspace_id, path, index,
+                               total_chunks, content}
+    harness:write_file_finish {request_id, workspace_id, path}
     harness:write_file_result {request_id, workspace_id, ok}
                               or {..., error}
     harness:list_result      {request_id, workspace_id, entries}
@@ -76,6 +88,45 @@ EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 DEFAULT_TIMEOUT = 60.0
 
+#: Base64 characters per chunk event on the harness file channel. Mirrors the
+#: runner constant (``runner/src/chunking.py`` ``CHUNK_B64_SIZE``) and the
+#: webapp copy (``webapp/src/lib/fileChunks.ts`` ``FILE_CHUNK_B64_SIZE``):
+#: 256 KiB base64 per event stays far below Daphne's default 1 MiB
+#: inbound message/frame cap (which dropped oversize frames as
+#: disconnects). Engine.IO keeps its separate 200 MiB HTTP buffer for
+#: pre-existing monolithic non-chunk events.
+HARNESS_CHUNK_B64_SIZE = 256 * 1024
+
+#: Max buffered base64 chars for one chunked harness read. 100 MiB of raw
+#: bytes encode to ~139.81 M base64 chars; cap slightly above so valid
+#: reads up to the runner's absolute read cap fit, but unbounded streams
+#: fail closed. Requests pass their negotiated ``max_size`` (runner
+#: default 5 MiB when omitted); explicit values may go up to 100 MiB.
+HARNESS_READ_MAX_CHARS = 141 * 1024 * 1024
+
+#: Max chunks for one chunked harness read. 100 MiB of raw bytes encode
+#: to ~534 chunks at 256 KiB base64; the cap leaves headroom for padding
+#: while rejecting unbounded ``total_chunks`` announcements.
+HARNESS_READ_MAX_CHUNKS = 560
+
+#: Max chunks for one chunked harness write. 10 MiB of raw bytes encode
+#: to ~52 chunks; 64 leaves headroom and matches the runner upload cap.
+HARNESS_WRITE_MAX_CHUNKS = 64
+
+#: Max decoded bytes for a chunked harness write. Matches the runner's
+#: ``FILE_UPLOAD_MAX_SIZE`` (10 MiB) so the backend never buffers more.
+HARNESS_WRITE_MAX_BYTES = 10 * 1024 * 1024
+
+#: Max raw bytes for one chunked harness read. Matches the runner's
+#: absolute read cap so the backend never buffers more than the runner
+#: can legitimately send.
+HARNESS_READ_MAX_BYTES = 100 * 1024 * 1024
+
+#: Default read budget (raw bytes) when the caller passes max_size=None.
+#: Mirrors the runner's FILE_READ_DEFAULT_MAX_SIZE (5 MiB) — NOT the
+#: absolute 100 MiB cap. Explicit max_size may still go up to 100 MiB.
+HARNESS_READ_DEFAULT_BYTES = 5 * 1024 * 1024
+
 
 class RunnerAccessorError(RuntimeError):
     """Raised when the runner reports a harness operation failure."""
@@ -122,6 +173,19 @@ def route_harness_result(data: dict[str, Any]) -> bool:
         )
         return False
     accessor._deliver_result(data)
+    return True
+
+
+def route_harness_file_chunk(data: dict[str, Any]) -> bool:
+    """Deliver a ``harness:read_file_chunk`` payload to its accessor."""
+    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
+    if accessor is None:
+        log.warning(
+            "harness_file_chunk_unknown_request",
+            request_id=data.get("request_id", ""),
+        )
+        return False
+    accessor._deliver_file_chunk(data)
     return True
 
 
@@ -182,6 +246,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self._desktop_geometry = desktop_geometry
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Bounded reassembly for chunked harness reads (request_id -> state).
+        # Entries expire via the read timeout and are dropped on
+        # timeout/error/cancel so partial transfers never linger.
+        self._file_chunks: dict[str, dict[str, Any]] = {}
         try:
             self._loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -219,6 +287,87 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             log.warning("harness_result_no_pending", request_id=request_id)
             return
         self._schedule(_resolve_future, future, data)
+
+    def _deliver_file_chunk(self, data: dict[str, Any]) -> None:
+        """Buffer one ``harness:read_file_chunk`` slice for *data*.
+
+        The first chunk pins a strictly validated ``total_chunks``
+        (1..``HARNESS_READ_MAX_CHUNKS``); every chunk must repeat the
+        same total, workspace, and path. Per-chunk and total size caps
+        are fail-closed: any violation drops the whole transfer and
+        fails the pending read future with a small error instead of
+        buffering unbounded data.
+        """
+        request_id = str(data.get("request_id", ""))
+        future = self._pending.get(request_id)
+        state = self._file_chunks.get(request_id)
+        if future is None or future.done() or state is None:
+            log.warning("harness_file_chunk_no_pending", request_id=request_id)
+            return
+
+        def _store() -> None:
+            try:
+                try:
+                    index = int(data.get("index", -1))
+                    total = int(data.get("total_chunks", -1))
+                except (TypeError, ValueError) as exc:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid chunk index"
+                    ) from exc
+                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    )
+                pinned = state.get("total_chunks") or 0
+                if not pinned:
+                    # First chunk pins the announced total.
+                    state["total_chunks"] = total
+                    pinned = total
+                elif total != pinned:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk total mismatch"
+                    )
+                if str(data.get("workspace_id", "")) != str(
+                    state.get("workspace_id", "")
+                ):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: workspace mismatch"
+                    )
+                if str(data.get("path", "")) != str(state.get("path", "")):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: path mismatch"
+                    )
+                if index < 0 or index >= pinned:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk index out of range"
+                    )
+                if index in state["chunks"]:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: duplicate chunk"
+                    )
+                clean = "".join(str(data.get("content", "")).split())
+                if not clean:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: empty chunk"
+                    )
+                if len(clean) > HARNESS_CHUNK_B64_SIZE:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk too large"
+                    )
+                max_chars = int(
+                    state.get("max_chars", HARNESS_READ_MAX_CHARS)
+                )
+                if state["buffered"] + len(clean) > max_chars:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: transfer too large"
+                    )
+                state["chunks"][index] = clean
+                state["buffered"] += len(clean)
+            except Exception as exc:
+                self._file_chunks.pop(request_id, None)
+                _resolve_future_exception(future, exc)
+
+        self._schedule(_store)
 
     def _deliver_chunk(self, data: dict[str, Any]) -> None:
         """Push a stream chunk into the queue for *data*."""
@@ -266,6 +415,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         _ACCESSORS_BY_REQUEST.pop(request_id, None)
         self._pending.pop(request_id, None)
         self._streams.pop(request_id, None)
+        self._file_chunks.pop(request_id, None)
 
     def _resolve_timeout(self, timeout: float | None) -> float:
         """Return the effective timeout for a call."""
@@ -425,12 +575,19 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         path: str,
         max_size: int | None = None,
     ) -> FileContent:
-        """Read a file from the sandboxed workspace."""
+        """Read a file from the sandboxed workspace.
+
+        The public contract is unchanged: returns complete bytes up to
+        *max_size*. The runner sends large payloads as ordered
+        ``harness:read_file_chunk`` slices plus a metadata-only final
+        result; small payloads still arrive inline for backward
+        compatibility. Incomplete or invalid chunk streams fail closed
+        and clean up routing state.
+        """
         safe_path = sanitize_harness_path(path)
         request_id = uuid.uuid4().hex
-        result = await self._await_result(
+        result = await self._await_chunked_read_result(
             request_id,
-            "harness:read_file",
             {
                 "request_id": request_id,
                 "workspace_id": self.workspace_id,
@@ -440,13 +597,66 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             None,
         )
         self._raise_for_error(result, "harness:read_file")
-        raw_content = str(result.get("content", ""))
+        raw_content = "".join(str(result.get("content", "")).split())
         try:
-            content = base64.b64decode(raw_content) if raw_content else b""
+            content = (
+                base64.b64decode(raw_content, validate=True)
+                if raw_content
+                else b""
+            )
         except Exception as exc:
             raise RunnerAccessorError(
                 "harness:read_file failed: invalid base64 payload"
             ) from exc
+        # Plausibility against runner metadata: size must be a finite
+        # non-negative int within the effective cap; decoded bytes must
+        # equal size for complete reads, or be a non-empty prefix of size
+        # for truncated reads (empty files are only valid non-truncated).
+        try:
+            effective_limit = (
+                int(max_size)
+                if max_size is not None
+                else HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            effective_limit = HARNESS_READ_DEFAULT_BYTES
+        if (
+            effective_limit <= 0
+            or effective_limit > HARNESS_READ_MAX_BYTES
+        ):
+            effective_limit = HARNESS_READ_DEFAULT_BYTES
+        try:
+            reported_size = int(result.get("size", len(content)))
+        except (TypeError, ValueError) as exc:
+            raise RunnerAccessorError(
+                "harness:read_file failed: invalid size metadata"
+            ) from exc
+        if isinstance(result.get("size"), bool):
+            raise RunnerAccessorError(
+                "harness:read_file failed: invalid size metadata"
+            )
+        if reported_size < 0 or reported_size > HARNESS_READ_MAX_BYTES:
+            raise RunnerAccessorError(
+                "harness:read_file failed: size out of range"
+            )
+        if len(content) > effective_limit:
+            raise RunnerAccessorError(
+                "harness:read_file failed: payload exceeds requested max_size"
+            )
+        truncated = bool(result.get("truncated", False))
+        if truncated:
+            if reported_size == 0 or len(content) == 0:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: truncated payload must be non-empty"
+                )
+            if len(content) > reported_size:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: size mismatch"
+                )
+        elif len(content) != reported_size:
+            raise RunnerAccessorError(
+                "harness:read_file failed: size mismatch"
+            )
         mime = str(
             result.get("mime") or result.get("mime_type") or guess_mime_type(
                 safe_path
@@ -454,10 +664,123 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         )
         return FileContent(
             content=content,
-            size=int(result.get("size", len(content))),
-            truncated=bool(result.get("truncated", False)),
+            size=reported_size,
+            truncated=truncated,
             mime=mime,
         )
+
+    async def _await_chunked_read_result(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        """Emit ``harness:read_file`` and reassemble chunked replies.
+
+        Registers a bounded chunk buffer for *request_id*, waits for the
+        final ``harness:read_file_result``, then joins ``total_chunks``
+        slices in order (or uses the inline ``content`` when the runner
+        sent a small backward-compatible payload).
+        """
+        timeout_s = self._resolve_timeout(timeout)
+        future: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._register(request_id, future=future)
+        # Pin transfer identity up front; the first chunk pins the
+        # announced total. max_chars follows the negotiated read cap:
+        # the runner default of 5 MiB applies when max_size is omitted;
+        # an explicit max_size may go up to the absolute 100 MiB cap.
+        try:
+            read_limit = (
+                int(payload.get("max_size"))
+                if payload.get("max_size") is not None
+                else HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            read_limit = HARNESS_READ_DEFAULT_BYTES
+        if read_limit <= 0 or read_limit > HARNESS_READ_MAX_BYTES:
+            read_limit = HARNESS_READ_DEFAULT_BYTES
+        max_chars = (read_limit + 2) // 3 * 4 + 4
+        self._file_chunks[request_id] = {
+            "total_chunks": 0,
+            "chunks": {},
+            "buffered": 0,
+            "meta": {},
+            "workspace_id": str(payload.get("workspace_id", "")),
+            "path": str(payload.get("path", "")),
+            "max_chars": max_chars,
+        }
+        completed = False
+        try:
+            await self._emit("harness:read_file", payload)
+            result = await asyncio.wait_for(future, timeout_s)
+            completed = True
+            state = self._file_chunks.get(request_id, {})
+            chunks: dict[int, str] = state.get("chunks", {})
+            if result.get("error"):
+                return result
+            if result.get("chunked"):
+                try:
+                    total = int(result.get("total_chunks", 0))
+                except (TypeError, ValueError) as exc:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    ) from exc
+                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    )
+                # The final metadata must match the pinned chunk stream.
+                pinned = int(state.get("total_chunks", 0) or 0)
+                if pinned and pinned != total:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk total mismatch"
+                    )
+                if not pinned:
+                    state["total_chunks"] = total
+                if str(result.get("workspace_id", "")) != str(
+                    state.get("workspace_id", "")
+                ):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: workspace mismatch"
+                    )
+                if str(result.get("path", "")) != str(state.get("path", "")):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: path mismatch"
+                    )
+                missing = [i for i in range(total) if i not in chunks]
+                if missing:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: incomplete transfer "
+                        f"(missing {len(missing)} of {total} chunks)"
+                    )
+                joined = "".join(chunks[i] for i in range(total))
+                merged = dict(result)
+                merged["content"] = joined
+                # The runner announces total_chunks with metadata; keep it.
+                return merged
+            # Backward-compatible small inline payload.
+            return result
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Harness request 'harness:read_file' timed out "
+                f"after {timeout_s:.1f}s"
+            ) from exc
+        finally:
+            self._unregister(request_id)
+            if not completed:
+                future.cancel()
+                await self._emit_cancel(request_id)
+
+    @staticmethod
+    def _chunk_b64_slices(payload_b64: str) -> list[str]:
+        """Split whitespace-free base64 into 256 KiB slices (4-char aligned)."""
+        clean = "".join(payload_b64.split())
+        size = HARNESS_CHUNK_B64_SIZE - (HARNESS_CHUNK_B64_SIZE % 4)
+        if not clean:
+            return []
+        return [clean[i : i + size] for i in range(0, len(clean), size)]
 
     async def write_file(
         self,
@@ -465,24 +788,98 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         content: bytes,
         mode: int = 0o644,
     ) -> None:
-        """Write a file atomically into the sandboxed workspace."""
+        """Write a file atomically into the sandboxed workspace.
+
+        Small payloads use the legacy single ``harness:write_file`` event;
+        payloads above 256 KiB base64 ride as
+        ``harness:write_file_start`` + ordered ``harness:write_file_chunk``
+        slices + ``harness:write_file_finish`` (all small events), so large
+        writes stay far below Daphne's default 1 MiB inbound cap.
+        """
         safe_path = sanitize_harness_path(path)
         if not isinstance(content, (bytes, bytearray)):
             raise ValueError("content must be bytes")
+        # Exact raw cap: len(content) decides, no base64 slack involved.
+        # Exactly 10 MiB is allowed, 10 MiB + 1 byte is rejected.
+        if len(content) > HARNESS_WRITE_MAX_BYTES:
+            raise ValueError(
+                "content exceeds maximum size of "
+                f"{HARNESS_WRITE_MAX_BYTES} bytes"
+            )
+        payload_b64 = base64.b64encode(bytes(content)).decode("ascii")
         request_id = uuid.uuid4().hex
-        result = await self._await_result(
-            request_id,
-            "harness:write_file",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "path": safe_path,
-                "content": base64.b64encode(bytes(content)).decode("ascii"),
-                "mode": mode,
-            },
-            None,
+        if len(payload_b64) <= HARNESS_CHUNK_B64_SIZE:
+            result = await self._await_result(
+                request_id,
+                "harness:write_file",
+                {
+                    "request_id": request_id,
+                    "workspace_id": self.workspace_id,
+                    "path": safe_path,
+                    "content": payload_b64,
+                    "mode": mode,
+                },
+                None,
+            )
+            self._raise_for_error(result, "harness:write_file")
+            return
+        slices = self._chunk_b64_slices(payload_b64)
+        total = len(slices)
+        if total > HARNESS_WRITE_MAX_CHUNKS:
+            raise ValueError(
+                "content exceeds maximum size of "
+                f"{HARNESS_WRITE_MAX_BYTES} bytes"
+            )
+        completion: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
         )
-        self._raise_for_error(result, "harness:write_file")
+        self._register(request_id, future=completion)
+        completed = False
+        try:
+            await self._emit(
+                "harness:write_file_start",
+                {
+                    "request_id": request_id,
+                    "workspace_id": self.workspace_id,
+                    "path": safe_path,
+                    "mode": mode,
+                    "total_chunks": total,
+                },
+            )
+            for index, piece in enumerate(slices):
+                await self._emit(
+                    "harness:write_file_chunk",
+                    {
+                        "request_id": request_id,
+                        "workspace_id": self.workspace_id,
+                        "path": safe_path,
+                        "index": index,
+                        "total_chunks": total,
+                        "content": piece,
+                    },
+                )
+            await self._emit(
+                "harness:write_file_finish",
+                {
+                    "request_id": request_id,
+                    "workspace_id": self.workspace_id,
+                    "path": safe_path,
+                },
+            )
+            timeout_s = self._resolve_timeout(None)
+            result = await asyncio.wait_for(completion, timeout_s)
+            completed = True
+            self._raise_for_error(result, "harness:write_file")
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Harness request 'harness:write_file' timed out "
+                f"after {self._resolve_timeout(None):.1f}s"
+            ) from exc
+        finally:
+            self._unregister(request_id)
+            if not completed:
+                completion.cancel()
+                await self._emit_cancel(request_id)
 
     async def list_dir(self, path: str) -> list[DirEntry]:
         """List directory entries inside the sandboxed workspace."""
@@ -714,6 +1111,14 @@ def _resolve_future(
     """Set *future* result if it is still waiting."""
     if not future.done():
         future.set_result(data)
+
+
+def _resolve_future_exception(
+    future: asyncio.Future[dict[str, Any]], exc: BaseException
+) -> None:
+    """Fail *future* with *exc* if it is still waiting."""
+    if not future.done():
+        future.set_exception(exc)
 
 
 async def create_harness_accessor(

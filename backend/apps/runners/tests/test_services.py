@@ -3495,3 +3495,485 @@ class TestPersistentWorkspaceCredentials:
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:inject_credentials"
         assert payload["env_vars"]["GITHUB_TOKEN"] == "reconcile-token"
+
+
+@pytest.mark.django_db(transaction=True)
+class TestChunkedFileTransferOwnership:
+    """Chunked file transfer routing and validation.
+
+    ``handle_files_result`` only forwards runner-owned ``files:*_chunk``
+    payloads to the frontend; ``forward_files_event`` validates untrusted
+    chunk metadata from the frontend before it reaches the runner.
+    """
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_forwards_for_owning_runner(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "content-1",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 2,
+            "content": "aGVsbG8=",
+        }
+        await service.handle_files_result(
+            "files:content_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with(
+            "files:content_chunk", payload, str(workspace.id)
+        )
+
+    @pytest.mark.asyncio
+    async def test_download_chunk_forwards_for_owning_runner(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "download-1",
+            "path": "/workspace/a.txt",
+            "index": 1,
+            "total_chunks": 2,
+            "content": "d29ybGQ=",
+        }
+        await service.handle_files_result(
+            "files:download_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with(
+            "files:download_chunk", payload, str(workspace.id)
+        )
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_from_other_runner_is_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "content-evil",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(uuid.uuid4()),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_invalid_metadata_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        sio_mock.emit.reset_mock()
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-1",
+                "path": "/workspace/a.bin",
+                "index": 5,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        assert payload["status"] == "error"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_total_999_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        sio_mock.emit.reset_mock()
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-999",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 999,
+                "content": "aGVsbG8=",
+            },
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chunked_upload_start_relays_to_runner(
+        self, service, sio_mock, workspace
+    ):
+        sio_mock.emit.reset_mock()
+        data = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-start",
+            "path": "/workspace/a.bin",
+            "total_chunks": 2,
+            "chunked": True,
+        }
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload",
+            data=data,
+        )
+        sio_mock.emit.assert_awaited_once()
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "files:upload"
+        assert payload["total_chunks"] == 2
+
+    @pytest.mark.asyncio
+    async def test_offline_chunked_start_emits_one_error_then_chunks_are_silent(
+        self, service, sio_mock, offline_runner, user, monkeypatch
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline Upload Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        sio_mock.emit.reset_mock()
+        start = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-off",
+            "path": "/workspace/a.bin",
+            "total_chunks": 2,
+            "chunked": True,
+        }
+        await service.forward_files_event(
+            workspace_id=str(workspace.id), event="files:upload", data=start
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        assert payload["error"] == "Runner is offline"
+
+        emit.reset_mock()
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-off",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+        )
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_finish",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-off",
+                "path": "/workspace/a.bin",
+            },
+        )
+        emit.assert_not_called()
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_non_string_content_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        sio_mock.emit.reset_mock()
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-bytes",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": b"not-a-string",
+            },
+        )
+        emit.assert_awaited_once()
+        event, _payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_oversized_content_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        sio_mock.emit.reset_mock()
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-huge",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": "A" * (256 * 1024 + 1),
+            },
+        )
+        emit.assert_awaited_once()
+        event, _payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_exact_cap_relays_whitespace_accepted(
+        self, service, sio_mock, workspace
+    ):
+        sio_mock.emit.reset_mock()
+        data = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-exact",
+            "path": "/workspace/a.bin",
+            "index": 0,
+            "total_chunks": 2,
+            # Exactly 256 KiB clean; surrounding whitespace is normalized.
+            "content": "  " + "A" * (256 * 1024) + "\n",
+        }
+        await service.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data=data,
+        )
+        sio_mock.emit.assert_awaited_once()
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "files:upload_chunk"
+        assert payload["request_id"] == "upload-exact"
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_invalid_total_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        for total in (0, 561, "bad"):
+            await service.handle_files_result(
+                "files:content_chunk",
+                {
+                    "workspace_id": str(workspace.id),
+                    "request_id": f"bad-{total}",
+                    "path": "/workspace/a.txt",
+                    "index": 0,
+                    "total_chunks": total,
+                    "content": "aGVsbG8=",
+                },
+                runner_id=str(workspace.runner_id),
+            )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_index_out_of_range_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "bad-index",
+                "path": "/workspace/a.txt",
+                "index": 2,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_exact_cap_forwards_but_plus_one_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        exact = {
+            "workspace_id": str(workspace.id),
+            "request_id": "exact-cap",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 1,
+            "content": "A" * (256 * 1024),
+        }
+        await service.handle_files_result(
+            "files:content_chunk", exact, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with(
+            "files:content_chunk", exact, str(workspace.id)
+        )
+
+        emit.reset_mock()
+        over = dict(exact, request_id="over-cap", content="A" * (256 * 1024 + 1))
+        await service.handle_files_result(
+            "files:content_chunk", over, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_empty_or_oversize_content_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        for content in ("", "   \n ", "A" * (256 * 1024 + 1)):
+            await service.handle_files_result(
+                "files:content_chunk",
+                {
+                    "workspace_id": str(workspace.id),
+                    "request_id": "bad-content",
+                    "path": "/workspace/a.txt",
+                    "index": 0,
+                    "total_chunks": 1,
+                    "content": content,
+                },
+                runner_id=str(workspace.runner_id),
+            )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_whitespace_clean_still_forwards(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "ws-clean",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 1,
+            "content": "aGVs\nbG8=  ",
+        }
+        await service.handle_files_result(
+            "files:content_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with(
+            "files:content_chunk", payload, str(workspace.id)
+        )
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_missing_workspace_id_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.handle_files_result(
+            "files:content_chunk",
+            {
+                "request_id": "no-ws",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_invalid_workspace_id_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": "not-a-uuid",
+                "request_id": "bad-ws",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_chunk_missing_path_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        await service.handle_files_result(
+            "files:download_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "no-path",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_harness_read_chunk_invalid_payload_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        from apps.harness.access.runner_accessor import _ACCESSORS_BY_REQUEST
+
+        request_id = f"hr-chunk-{uuid.uuid4().hex[:8]}"
+        accessor = _ACCESSORS_BY_REQUEST.get(request_id)
+        assert accessor is None
+        # Invalid chunk (empty content) must not reach the accessor routing:
+        # it drops inside _route_harness_reply before any accessor lookup.
+        service.handle_harness_reply(
+            "harness:read_file_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": request_id,
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        assert request_id not in _ACCESSORS_BY_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_harness_read_chunk_missing_workspace_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        from apps.harness.access.runner_accessor import _ACCESSORS_BY_REQUEST
+
+        request_id = f"hr-nowss-{uuid.uuid4().hex[:8]}"
+        service.handle_harness_reply(
+            "harness:read_file_chunk",
+            {
+                "request_id": request_id,
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        assert request_id not in _ACCESSORS_BY_REQUEST

@@ -916,6 +916,8 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
                 captured.append(command)
                 if command[:2] == ["test", "-d"]:
                     return 0, ""
+                if command[:2] == ["sh", "-c"] and "wc -c" in command[2]:
+                    return 0, "4\n"
                 return 0, "QUJD"
 
         service._runtimes = {"docker": DirRuntime()}

@@ -143,6 +143,13 @@ def test_verbatim_texts_match_checked_in_goldens():
         assert _sha256(text) == digest, name
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason=(
+        "CPython 3.13+ strips docstring indent at compile time and "
+        "stringifies Optional[str] as str | None; goldens pin 3.10-3.12."
+    ),
+)
 def test_worker_prompt_matches_checked_in_golden():
     prompt = build_worker_prompt(AgentActionSurface, skipped_actions=[])
     assert len(prompt) == GOLDEN_WORKER_PROMPT[0]
@@ -151,6 +158,13 @@ def test_worker_prompt_matches_checked_in_golden():
     assert "alxl the text" in prompts_mod.PHRASE_TO_WORD_COORDS_PROMPT
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason=(
+        "CPython 3.13+ strips docstring indent at compile time and "
+        "stringifies Optional[str] as str | None; goldens pin 3.10-3.12."
+    ),
+)
 def test_action_order_signatures_docstrings_match_checked_in_goldens():
     names = [
         n
