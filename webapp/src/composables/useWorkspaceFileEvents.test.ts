@@ -94,6 +94,7 @@ describe('useWorkspaceFileEvents', () => {
       'abc',
       undefined,
       'image/png',
+      { chunked: undefined, totalChunks: undefined },
     )
   })
 })

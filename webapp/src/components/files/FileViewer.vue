@@ -65,6 +65,21 @@ const fileSizeLabel = computed(() => {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 })
 
+const previewBytesLabel = computed(() => {
+  const preview = file.value?.previewBytes
+  if (preview == null) return null
+  if (preview < 1024) return `${preview} B`
+  if (preview < 1024 * 1024) return `${(preview / 1024).toFixed(1)} KB`
+  return `${(preview / (1024 * 1024)).toFixed(1)} MB`
+})
+
+const truncationLabel = computed(() => {
+  if (!file.value?.truncated) return null
+  const total = fileSizeLabel.value ?? 'unknown size'
+  const shown = previewBytesLabel.value ?? 'unknown size'
+  return `Showing first ${shown} of ${total}`
+})
+
 const mediaTypeLabel = computed(() => {
   if (!file.value) return ''
   switch (file.value.mediaType) {
@@ -107,6 +122,10 @@ const pdfDataUrl = computed(() => {
 function handleClose(): void {
   store.closeFileViewer()
   emit('close')
+}
+
+function handleRetry(): void {
+  store.retryViewingFile(props.workspaceId)
 }
 
 function handleDownload(): void {
@@ -163,8 +182,21 @@ function handleDownload(): void {
 
     <!-- Content -->
     <div class="min-h-0 flex-1 overflow-auto bg-background">
+      <!-- Error (keeps the overlay visible with retry) -->
+      <div
+        v-if="store.contentError && !store.isLoadingContent"
+        class="flex h-full flex-col items-center justify-center gap-3 p-6 text-center"
+        data-testid="file-viewer-error"
+      >
+        <AlertTriangle :size="28" class="text-amber-500" />
+        <p class="max-w-sm text-sm text-muted-foreground">{{ store.contentError }}</p>
+        <Button variant="outline" size="sm" data-testid="file-viewer-retry" @click="handleRetry">
+          Retry
+        </Button>
+      </div>
+
       <!-- Loading -->
-      <div v-if="store.isLoadingContent" class="space-y-2 p-4" data-testid="file-viewer-loading">
+      <div v-else-if="store.isLoadingContent" class="space-y-2 p-4" data-testid="file-viewer-loading">
         <Skeleton v-for="i in 12" :key="i" class="h-3.5" :style="{ width: `${88 - (i % 4) * 14}%` }" />
       </div>
 
@@ -198,11 +230,11 @@ function handleDownload(): void {
       <!-- Text -->
       <template v-else-if="file">
         <div
-          v-if="file.truncated"
+          v-if="file.truncated && truncationLabel"
           class="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-600 dark:text-amber-400"
         >
           <AlertTriangle :size="14" />
-          File truncated at 5 MB
+          {{ truncationLabel }}
         </div>
 
         <div class="p-3">

@@ -734,8 +734,12 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `workspace:credentials_injected` | `{task_id, workspace_id, credentials_present}` |
 | Backend -> Runner | `harness:exec_stream` / `harness:exec_wait` | `{request_id, workspace_id, command, workdir, env, timeout}` |
 | Runner -> Backend | `harness:exec_chunk` / `harness:exec_done` / `harness:exec_wait_result` | `{request_id, workspace_id, stream/data/exit_code/stdout/stderr}` |
-| Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` |
-| Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` |
+| Backend -> Runner | `harness:read_file` / `harness:write_file` / `harness:list` / `harness:stat` | `{request_id, workspace_id, path, ...}` (`harness:write_file` carries the full payload only for small writes; large writes use `harness:write_file_start/chunk/finish`) |
+| Runner -> Backend | `harness:read_file_result` / `harness:write_file_result` / `harness:list_result` / `harness:stat_result` | `{request_id, workspace_id, ...}` (small reads stay inline; large reads arrive as `harness:read_file_chunk` slices plus a metadata-only final result) |
+| Backend -> Runner | `harness:write_file_start` / `harness:write_file_chunk` / `harness:write_file_finish` | `{request_id, workspace_id, path, mode?, total_chunks}` / `{..., index, total_chunks, content}` / `{request_id, workspace_id, path}` |
+| Runner -> Backend | `harness:read_file_chunk` | `{request_id, workspace_id, path, index, total_chunks, content}` (ordered 256 KiB base64 slices; final `harness:read_file_result` carries metadata only: `chunked: true`, `total_chunks: N`, empty content) |
+| Backend -> Runner | `files:read` / `files:upload` (+`chunked`) / `files:upload_chunk` / `files:upload_finish` / `files:download` | `{request_id, workspace_id, path, ...}` (chunked upload start rides as `files:upload` with `chunked: true, total_chunks: N`; small uploads stay single-shot) |
+| Runner -> Backend | `files:content_chunk` + `files:content_result` / `files:download_chunk` + `files:download_result` / `files:upload_result` | `{request_id, workspace_id, path, index, total_chunks, content}` slices plus metadata-only finals (`chunked: true`, `total_chunks: N`, empty content); small payloads stay inline in the result |
 | Backend -> Runner | `harness:process_start` | `{request_id, workspace_id, process_id, command, workdir, env, name, log_path, exit_path, run_count}` (restart reuses this event with `run_count+1` and a new `_r<run>` log path; no separate `harness:process_restart`/`harness:process_delete` socket events — restart/delete are REST-only: `POST .../processes/{id}/restart`, `DELETE .../processes/{id}`) |
 | Runner -> Backend | `harness:process_start_result` | `{request_id, workspace_id, process_id, pid, log_path, exit_path, status, run_count?}` |
 | Backend -> Runner | `harness:process_list` | `{request_id, workspace_id}` |
@@ -746,6 +750,31 @@ The runner connects to the backend as a socketio client. Events:
 | Runner -> Backend | `harness:process_stop_result` | `{request_id, workspace_id, process_id, stopped, ...}` |
 | Backend -> Runner | `files:find` | `{request_id, workspace_id, query, limit}` |
 | Runner -> Backend | `files:find_result` | `{request_id, workspace_id, query, paths, truncated}` |
+
+Chunked file transport (Daphne's default inbound message/frame cap is
+1 MiB, which dropped oversize frames as disconnects, so no single event
+may carry a large base64 payload): payloads above 256 KiB base64 ride as
+ordered `*_chunk` slices of at most 256 KiB base64 each (4-char aligned,
+so slices concatenate without re-padding), followed by a small
+metadata-only final result (`chunked: true`, `total_chunks: N`, empty
+content). Engine.IO keeps its 200 MiB HTTP buffer for pre-existing
+monolithic non-chunk events (screenshots, video payloads). Caps: 10 MiB
+raw for uploads/writes (max 64 chunks), 100 MiB raw for reads/downloads
+(max 560 chunks). Oversize uploads/writes fail before any relay/write
+with a small structured error; oversize single-file downloads fail via a
+size precheck, directory downloads via an archive-size precheck (a second
+tar pass, not literally "before base64"). Chunk streams validate exactly:
+first chunk pins `total_chunks`, every chunk must repeat the same
+`total`/`workspace_id`/`path`, the final metadata total must match the
+pinned total, and missing/duplicate/oversize/invalid chunks fail closed
+(drop transfer + small error + cleanup, including timeout/cancel/offline
+paths; the one synthesized offline error per transfer fires only for an
+offline-at-start upload). Small payloads stay inline for backward
+compatibility. Constants must stay in sync: runner
+`runner/src/chunking.py` (`CHUNK_B64_SIZE`), backend
+`backend/apps/harness/access/runner_accessor.py`
+(`HARNESS_CHUNK_B64_SIZE`), webapp `webapp/src/lib/fileChunks.ts`
+(`FILE_CHUNK_B64_SIZE`).
 | Backend -> Runner | `harness:desktop_action` | `{request_id, workspace_id, action, args}` (`ensure`/`hold` include `desktop_width`/`desktop_height`) |
 | Runner -> Backend | `harness:desktop_action_result` | `{request_id, workspace_id, ok?, error?, image_b64?, path?, ...}` |
 | Backend -> Runner | `task:start_desktop` | `{task_id, workspace_id, desktop_width, desktop_height}` |
@@ -779,6 +808,8 @@ Frontend ↔ Backend events (via `/frontend` Socket.IO namespace):
 | Frontend -> Backend | `frontend:terminal_resize` | `{workspace_id, terminal_id, cols, rows}` |
 | Frontend -> Backend | `frontend:terminal_close` | `{workspace_id, terminal_id}` |
 | Frontend -> Backend | `frontend:files_find` | `{workspace_id, request_id, query, limit}` |
+| Frontend -> Backend | `frontend:files_read` / `frontend:files_upload`(+`_start`/`_chunk`/`_finish`) / `frontend:files_download` | `{workspace_id, request_id, path, ...}` (large uploads split into `frontend:files_upload_start` + ordered `frontend:files_upload_chunk` slices + `frontend:files_upload_finish`) |
+| Backend -> Frontend | `files:content_chunk` + `files:content_result` / `files:download_chunk` + `files:download_result` / `files:upload_result` | slices plus metadata-only finals, reassembled in order by the stores; small payloads stay inline |
 | Backend -> Frontend | `files:find_result` | `{workspace_id, request_id, query, paths, truncated}` |
 | Backend -> Frontend | `terminal:started` | `{workspace_id, terminal_id, task_id}` |
 | Backend -> Frontend | `terminal:output` | `{workspace_id, terminal_id, data}` (base64) |

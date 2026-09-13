@@ -111,10 +111,10 @@ def get_sio_server() -> socketio.AsyncServer:
             cors_allowed_origins=cors_origins,
             logger=False,
             engineio_logger=False,
-            # Allow large file transfers (up to 200 MB) so that video files
-            # can be read from workspace containers and forwarded to the
-            # frontend.  The engine.io default of 1 MB is too small for any
-            # binary file payload sent as base64 over Socket.IO.
+            # Keep the pre-existing 200 MiB engine.io HTTP buffer: control
+            # traffic (screenshots, credential tasks, video payloads) still
+            # relies on it. Chunking solves the separate ~1 MiB Daphne
+            # WebSocket message limit for file transfers.
             max_http_buffer_size=200 * 1024 * 1024,
         )
         _register_event_handlers(_sio)
@@ -451,6 +451,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:read_file_result", data, runner_id=runner_id
         )
 
+    @sio.on("harness:read_file_chunk")
+    async def on_harness_read_file_chunk(sid: str, data: dict):
+        """Route chunked file content to the owning harness accessor."""
+        runner_id = await _require_runner_id(sio, sid, "harness:read_file_chunk")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            "harness:read_file_chunk", data, runner_id=runner_id
+        )
+
     @sio.on("harness:write_file_result")
     async def on_harness_write_file_result(sid: str, data: dict):
         """Route file write results to the owning harness accessor."""
@@ -731,6 +742,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "files:content_result", data, runner_id=runner_id
         )
 
+    @sio.on("files:content_chunk")
+    async def on_files_content_chunk(sid: str, data: dict):
+        """Forward one files:content_chunk from runner to frontend."""
+        runner_id = await _require_runner_id(sio, sid, "files:content_chunk")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_files_result(
+            "files:content_chunk", data, runner_id=runner_id
+        )
+
     @sio.on("files:upload_result")
     async def on_files_upload_result(sid: str, data: dict):
         """Forward files:upload_result from runner to frontend."""
@@ -751,6 +773,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await service.handle_files_result(
             "files:download_result", data, runner_id=runner_id
+        )
+
+    @sio.on("files:download_chunk")
+    async def on_files_download_chunk(sid: str, data: dict):
+        """Forward one files:download_chunk from runner to frontend."""
+        runner_id = await _require_runner_id(sio, sid, "files:download_chunk")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await service.handle_files_result(
+            "files:download_chunk", data, runner_id=runner_id
         )
 
     # --- Image artifact events from runner ---
@@ -1160,6 +1193,51 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         await service.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:upload",
+            data=data,
+        )
+
+    @sio.on("frontend:files_upload_start", namespace="/frontend")
+    async def on_frontend_files_upload_start(sid: str, data: dict):
+        """Forward a chunked upload start from frontend to the runner."""
+        if not await _ensure_frontend_workspace_access(
+            sio, sid, data.get("workspace_id")
+        ):
+            return
+
+        service = get_runner_service()
+        await service.forward_files_event(
+            workspace_id=data["workspace_id"],
+            event="files:upload",
+            data={**data, "chunked": True},
+        )
+
+    @sio.on("frontend:files_upload_chunk", namespace="/frontend")
+    async def on_frontend_files_upload_chunk(sid: str, data: dict):
+        """Forward one upload chunk from frontend to the runner."""
+        if not await _ensure_frontend_workspace_access(
+            sio, sid, data.get("workspace_id")
+        ):
+            return
+
+        service = get_runner_service()
+        await service.forward_files_event(
+            workspace_id=data["workspace_id"],
+            event="files:upload_chunk",
+            data=data,
+        )
+
+    @sio.on("frontend:files_upload_finish", namespace="/frontend")
+    async def on_frontend_files_upload_finish(sid: str, data: dict):
+        """Forward an upload finish marker from frontend to the runner."""
+        if not await _ensure_frontend_workspace_access(
+            sio, sid, data.get("workspace_id")
+        ):
+            return
+
+        service = get_runner_service()
+        await service.forward_files_event(
+            workspace_id=data["workspace_id"],
+            event="files:upload_finish",
             data=data,
         )
 
