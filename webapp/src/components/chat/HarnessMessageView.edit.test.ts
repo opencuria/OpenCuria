@@ -159,6 +159,6 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.find('.bg-primary\\/10').exists()).toBe(false)
     expect(wrapper.find('.markdown-stub').attributes('data-on-primary')).toBe('true')
     expect(wrapper.html()).toContain('px-3')
-    expect(wrapper.html()).toContain('py-1')
+    expect(wrapper.html()).toContain('py-2')
   })
 })
