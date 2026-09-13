@@ -260,6 +260,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
         <WorkspaceChatHeader
           :workspace="workspace"
           :active-chat-title="activeChatTitle"
+          :chat-lineage="harnessStore.activeSessionLineage"
           :transition-label="workspaceTransitionLabel"
           :auto-stop-label="navbarStatusLabel"
           :runner-offline="isRunnerOfflineState"
@@ -270,6 +271,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           :has-active-session="workspace.has_active_session"
           :animate-entrance="animateEntrance"
           @new-chat="handleNewHarnessChat"
+          @open-session="harnessStore.setActiveSession($event)"
           @start-workspace="handleStartWorkspace"
           @stop-workspace="handleStopWorkspace"
           @save-workspace-name="handleSaveWorkspaceName"

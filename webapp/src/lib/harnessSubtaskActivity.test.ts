@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HarnessMessage, HarnessPart, HarnessSession } from '@/types/harness'
 import {
+  collectAncestorSessions,
   collectDescendantSessionIds,
   collectRunningChildSessionIds,
   formatSubagentType,
@@ -75,6 +76,54 @@ describe('gateSourceLabel', () => {
     expect(gateSourceLabel('build')).toBeNull()
     expect(gateSourceLabel('plan')).toBeNull()
     expect(gateSourceLabel('')).toBeNull()
+  })
+})
+
+describe('collectAncestorSessions', () => {
+  it('returns a single session for a root', () => {
+    const sessions = [makeSession({ id: 'root', parent_id: null })]
+    expect(collectAncestorSessions('root', sessions).map((s) => s.id)).toEqual(['root'])
+  })
+
+  it('walks from child to root', () => {
+    const sessions = [
+      makeSession({ id: 'root', parent_id: null }),
+      makeSession({ id: 'child', parent_id: 'root' }),
+    ]
+    expect(collectAncestorSessions('child', sessions).map((s) => s.id)).toEqual([
+      'root',
+      'child',
+    ])
+  })
+
+  it('walks a nested grandchild chain', () => {
+    const sessions = [
+      makeSession({ id: 'root', parent_id: null }),
+      makeSession({ id: 'child', parent_id: 'root' }),
+      makeSession({ id: 'grand', parent_id: 'child' }),
+    ]
+    expect(collectAncestorSessions('grand', sessions).map((s) => s.id)).toEqual([
+      'root',
+      'child',
+      'grand',
+    ])
+  })
+
+  it('stops when a parent is missing', () => {
+    const sessions = [makeSession({ id: 'child', parent_id: 'missing' })]
+    expect(collectAncestorSessions('child', sessions).map((s) => s.id)).toEqual(['child'])
+  })
+
+  it('is cycle-safe', () => {
+    const sessions = [
+      makeSession({ id: 'a', parent_id: 'b' }),
+      makeSession({ id: 'b', parent_id: 'a' }),
+    ]
+    expect(collectAncestorSessions('a', sessions).map((s) => s.id)).toEqual(['b', 'a'])
+  })
+
+  it('returns an empty list when the session is unknown', () => {
+    expect(collectAncestorSessions('missing', [])).toEqual([])
   })
 })
 

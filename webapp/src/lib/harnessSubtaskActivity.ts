@@ -31,6 +31,32 @@ export function gateSourceLabel(agentName: string | null | undefined): string | 
 }
 
 /**
+ * Ancestor chain from root to *sessionId* (inclusive).
+ * Cycle-safe; stops when a parent is missing from *sessions*.
+ */
+export function collectAncestorSessions(
+  sessionId: string,
+  sessions: HarnessSession[],
+): HarnessSession[] {
+  const byId = new Map(sessions.map((session) => [session.id, session]))
+  const current = byId.get(sessionId)
+  if (!current) return []
+  const chain: HarnessSession[] = []
+  const seen = new Set<string>()
+  let cursor: HarnessSession | undefined = current
+  while (cursor) {
+    if (seen.has(cursor.id)) break
+    seen.add(cursor.id)
+    chain.push(cursor)
+    const parentId = cursor.parent_id
+    if (!parentId) break
+    cursor = byId.get(parentId)
+  }
+  chain.reverse()
+  return chain
+}
+
+/**
  * *rootId* plus every descendant session id (parent_id chain), breadth-first.
  */
 export function collectDescendantSessionIds(

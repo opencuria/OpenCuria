@@ -4,16 +4,20 @@
  *
  * No bar: transparent, no border. On the left the chat name is shown large,
  * below it the workspace name (inline editable via click/pencil) plus status.
- * On the right: new chat, background processes, `…` menu with start/stop,
- * capture and delete, then the side-panel toggle. The header only spans the
- * chat area — with the side panel open these buttons always sit
- * to the left of the panel, whose own tab bar (Git/Desktop/Terminal/
- * Files) takes the full panel width. The chat list lives exclusively
- * in the global sidebar; chat rename/delete happens there.
+ * Inside a subagent session the title becomes a breadcrumb (root › … › parent
+ * › current) with a back-arrow to the direct parent. On the right: new chat,
+ * background processes, `…` menu with start/stop, capture and delete, then
+ * the side-panel toggle. The header only spans the chat area — with the side
+ * panel open these buttons always sit to the left of the panel, whose own
+ * tab bar (Git/Desktop/Terminal/Files) takes the full panel width. The chat
+ * list lives exclusively in the global sidebar; chat rename/delete happens
+ * there.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
 import { WorkspaceStatus } from '@/types'
+import type { HarnessSession } from '@/types/harness'
+import { formatSubagentType } from '@/lib/harnessSubtaskActivity'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -26,8 +30,10 @@ import {
 import { SidebarTrigger } from '@/components/ui/sidebar'
 import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import {
+  ArrowLeft,
   Camera,
   Check,
+  ChevronRight,
   Container,
   Ellipsis,
   Loader2,
@@ -52,6 +58,8 @@ const props = defineProps<{
   hasActiveSession?: boolean
   /** Play a subtle entrance animation (home → chat transition). */
   animateEntrance?: boolean
+  /** Root → current session chain. Length > 1 means a subagent is open. */
+  chatLineage?: HarnessSession[]
 }>()
 
 const emit = defineEmits<{
@@ -63,7 +71,60 @@ const emit = defineEmits<{
   'toggle-processes': []
   'capture-image': []
   'delete-workspace': []
+  'open-session': [sessionId: string]
 }>()
+
+const lineage = computed(() => props.chatLineage ?? [])
+const currentSession = computed(() => lineage.value[lineage.value.length - 1] ?? null)
+const parentSession = computed(() =>
+  lineage.value.length >= 2 ? (lineage.value[lineage.value.length - 2] ?? null) : null,
+)
+const parentSessionId = computed(
+  () => parentSession.value?.id ?? currentSession.value?.parent_id ?? null,
+)
+const showBreadcrumb = computed(() => lineage.value.length > 1)
+const backToParentTitle = computed(() => {
+  const title = parentSession.value?.title?.trim()
+  if (title) return `Back to ${title}`
+  return 'Back to parent chat'
+})
+const currentAgentLabel = computed(() => {
+  if (!currentSession.value?.parent_id) return null
+  return formatSubagentType(currentSession.value.agent_name)
+})
+
+type BreadcrumbCrumb =
+  | { kind: 'session'; session: HarnessSession }
+  | { kind: 'overflow'; sessions: HarnessSession[] }
+
+const breadcrumbCrumbs = computed<BreadcrumbCrumb[]>(() => {
+  const ancestors = lineage.value.slice(0, -1)
+  if (ancestors.length <= 2) {
+    return ancestors.map((session) => ({ kind: 'session' as const, session }))
+  }
+  return [
+    { kind: 'session', session: ancestors[0]! },
+    { kind: 'overflow', sessions: ancestors.slice(1, -1) },
+    { kind: 'session', session: ancestors[ancestors.length - 1]! },
+  ]
+})
+
+function sessionTitle(session: HarnessSession): string {
+  return session.title?.trim() || 'Chat'
+}
+
+function crumbKey(crumb: BreadcrumbCrumb): string {
+  return crumb.kind === 'session' ? crumb.session.id : 'overflow'
+}
+
+function openSession(sessionId: string): void {
+  emit('open-session', sessionId)
+}
+
+function handleBackToParent(): void {
+  if (!parentSessionId.value) return
+  openSession(parentSessionId.value)
+}
 
 const editingWorkspace = ref(false)
 const workspaceNameInput = ref('')
@@ -147,16 +208,85 @@ watch(
   >
     <SidebarTrigger class="shrink-0 text-muted-foreground" />
 
-    <!-- Left: chat name (large) + workspace name/status (small, editable) -->
+    <Button
+      v-if="parentSessionId"
+      variant="ghost"
+      size="icon-sm"
+      class="shrink-0"
+      :title="backToParentTitle"
+      :aria-label="backToParentTitle"
+      data-testid="workspace-chat-header-back-to-parent"
+      @click="handleBackToParent"
+    >
+      <ArrowLeft :size="16" />
+    </Button>
+
+    <!-- Left: chat name (large) or subagent breadcrumb + workspace name/status -->
     <div
       class="flex min-w-0 flex-1 flex-col justify-center"
       :class="animateEntrance ? 'chat-header-enter' : ''"
     >
       <div
-        class="min-w-0 truncate py-0.5 text-left text-[15px] font-normal text-foreground"
-        data-testid="workspace-chat-header-chat-title"
+        class="flex min-w-0 items-center gap-1.5 py-0.5"
+        :data-testid="showBreadcrumb ? 'workspace-chat-header-breadcrumb' : undefined"
       >
-        {{ activeChatTitle || 'New chat' }}
+        <template v-if="showBreadcrumb">
+          <template v-for="crumb in breadcrumbCrumbs" :key="crumbKey(crumb)">
+            <button
+              v-if="crumb.kind === 'session'"
+              type="button"
+              class="min-w-0 max-w-[9rem] shrink truncate text-left text-[15px] font-normal text-muted-foreground transition-colors hover:text-foreground"
+              :title="sessionTitle(crumb.session)"
+              data-testid="workspace-chat-header-breadcrumb-item"
+              :data-session-id="crumb.session.id"
+              @click="openSession(crumb.session.id)"
+            >
+              {{ sessionTitle(crumb.session) }}
+            </button>
+            <DropdownMenu v-else>
+              <DropdownMenuTrigger as-child>
+                <button
+                  type="button"
+                  class="shrink-0 rounded px-1 text-[15px] leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  title="More sessions"
+                  data-testid="workspace-chat-header-breadcrumb-overflow"
+                >
+                  …
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" class="w-56">
+                <DropdownMenuItem
+                  v-for="session in crumb.sessions"
+                  :key="session.id"
+                  class="text-xs"
+                  data-testid="workspace-chat-header-breadcrumb-overflow-item"
+                  :data-session-id="session.id"
+                  @select="openSession(session.id)"
+                >
+                  {{ sessionTitle(session) }}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <ChevronRight
+              :size="14"
+              class="shrink-0 text-muted-foreground/50"
+              aria-hidden="true"
+            />
+          </template>
+        </template>
+        <div
+          class="min-w-0 truncate text-left text-[15px] font-normal text-foreground"
+          data-testid="workspace-chat-header-chat-title"
+        >
+          {{ activeChatTitle || 'New chat' }}
+        </div>
+        <span
+          v-if="currentAgentLabel"
+          class="shrink-0 text-xs font-normal text-muted-foreground"
+          data-testid="workspace-chat-header-agent-type"
+        >
+          {{ currentAgentLabel }}
+        </span>
       </div>
       <div
         class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"

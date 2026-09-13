@@ -45,7 +45,11 @@ import {
   mergeBusyFetchedMessages,
   settleOpenStreamParts,
 } from '@/lib/harnessReducer'
-import { collectDescendantSessionIds, collectRunningChildSessionIds } from '@/lib/harnessSubtaskActivity'
+import {
+  collectAncestorSessions,
+  collectDescendantSessionIds,
+  collectRunningChildSessionIds,
+} from '@/lib/harnessSubtaskActivity'
 import { loadAgentConfigsCached } from '@/lib/agentConfigs'
 import type { AgentConfig } from '@/lib/harnessAgents'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
@@ -137,6 +141,12 @@ export const useHarnessStore = defineStore('harness', () => {
       })
     }
     return map
+  })
+
+  /** Root → current session chain for the header breadcrumb. */
+  const activeSessionLineage = computed<HarnessSession[]>(() => {
+    if (!activeSessionId.value) return []
+    return collectAncestorSessions(activeSessionId.value, sessions.value)
   })
 
   function messagesFor(sessionId: string): HarnessMessage[] {
@@ -728,6 +738,7 @@ export const useHarnessStore = defineStore('harness', () => {
     activeQuestionRequests,
     rootSessions,
     childSessionsByParent,
+    activeSessionLineage,
     // Actions
     fetchSessions,
     setActiveSession,

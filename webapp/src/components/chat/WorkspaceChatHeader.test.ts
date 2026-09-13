@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 import WorkspaceChatHeader from './WorkspaceChatHeader.vue'
 import { WorkspaceStatus } from '@/types'
 import type { WorkspaceDetail } from '@/types'
+import type { HarnessSession } from '@/types/harness'
 
 const sidebarStubs = {
   SidebarTrigger: { template: '<button data-testid="sidebar-trigger" />' },
@@ -32,6 +33,24 @@ function makeWorkspace(): WorkspaceDetail {
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   } as WorkspaceDetail
+}
+
+function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
+  return {
+    id: 'session-1',
+    workspace_id: 'ws-1',
+    parent_id: null,
+    title: 'First chat',
+    mode: 'build',
+    agent_name: 'build',
+    model: 'acme/think',
+    reasoning_effort: 'high',
+    status: 'idle',
+    unread: false,
+    cost: 0,
+    tokens: {},
+    ...overrides,
+  }
 }
 
 function baseProps(overrides: Record<string, unknown> = {}) {
@@ -198,5 +217,102 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.emitted('stop-workspace')).toEqual([[]])
     expect(wrapper.emitted('capture-image')).toEqual([[]])
     expect(wrapper.emitted('delete-workspace')).toEqual([[]])
+  })
+
+  it('hides the back button and breadcrumb on a root session', () => {
+    const wrapper = mountHeader({
+      chatLineage: [makeSession({ id: 'root', title: 'First chat' })],
+    })
+    expect(wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe(
+      'First chat',
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-agent-type"]').exists()).toBe(false)
+  })
+
+  it('shows a back button and breadcrumb in a subagent session', async () => {
+    const root = makeSession({ id: 'root', title: 'First chat' })
+    const child = makeSession({
+      id: 'child',
+      parent_id: 'root',
+      title: 'Explore auth',
+      agent_name: 'explore',
+    })
+    const wrapper = mountHeader({
+      activeChatTitle: 'Explore auth',
+      chatLineage: [root, child],
+    })
+
+    const back = wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]')
+    expect(back.exists()).toBe(true)
+    expect(back.attributes('title')).toBe('Back to First chat')
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(true)
+    const crumb = wrapper.find('[data-testid="workspace-chat-header-breadcrumb-item"]')
+    expect(crumb.text()).toBe('First chat')
+    expect(crumb.attributes('data-session-id')).toBe('root')
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe(
+      'Explore auth',
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-agent-type"]').text()).toBe('Explorer')
+
+    await back.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['root']])
+
+    await crumb.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['root'], ['root']])
+  })
+
+  it('collapses middle ancestors into a dropdown when the chain is deep', async () => {
+    const root = makeSession({ id: 'root', title: 'Root chat' })
+    const midA = makeSession({ id: 'mid-a', parent_id: 'root', title: 'Mid A', agent_name: 'explore' })
+    const midB = makeSession({ id: 'mid-b', parent_id: 'mid-a', title: 'Mid B', agent_name: 'general' })
+    const current = makeSession({
+      id: 'leaf',
+      parent_id: 'mid-b',
+      title: 'Leaf task',
+      agent_name: 'explore',
+    })
+    const wrapper = mountHeader({
+      activeChatTitle: 'Leaf task',
+      chatLineage: [root, midA, midB, current],
+    })
+
+    const crumbs = wrapper.findAll('[data-testid="workspace-chat-header-breadcrumb-item"]')
+    expect(crumbs.map((crumb) => crumb.attributes('data-session-id'))).toEqual(['root', 'mid-b'])
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb-overflow"]').exists()).toBe(
+      true,
+    )
+    const overflow = wrapper.findAll('[data-testid="workspace-chat-header-breadcrumb-overflow-item"]')
+    expect(overflow).toHaveLength(1)
+    expect(overflow[0]?.text()).toBe('Mid A')
+    expect(overflow[0]?.attributes('data-session-id')).toBe('mid-a')
+
+    await overflow[0]!.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['mid-a']])
+  })
+
+  it('falls back to parent_id when the parent session is not in the lineage', async () => {
+    const wrapper = mountHeader({
+      activeChatTitle: 'Orphan subagent',
+      chatLineage: [
+        makeSession({
+          id: 'child',
+          parent_id: 'missing-parent',
+          title: 'Orphan subagent',
+          agent_name: 'explore',
+        }),
+      ],
+    })
+
+    const back = wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]')
+    expect(back.exists()).toBe(true)
+    expect(back.attributes('title')).toBe('Back to parent chat')
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(false)
+
+    await back.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['missing-parent']])
   })
 })
