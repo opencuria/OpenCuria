@@ -1248,3 +1248,110 @@ def test_runner_build_mutation_rejected_for_deleting_definition(client: Client):
 
     assert response.status_code == 409
     assert "deleting" in response.json()["detail"]
+
+
+@pytest.mark.django_db
+def test_list_runner_builds_omits_full_log_but_reports_size(client: Client):
+    """List endpoint stays polling-cheap: no build_log, only build_log_size."""
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="build-log-size@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Log Size Org", slug="log-size-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="log-size-runner",
+        api_token_hash=hash_token("log-size-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Log Size Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    log_text = "x" * 5000 + "\n"
+    ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.BUILDING,
+        build_log=log_text,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_READ.value],
+    )
+    response = client.get(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert "build_log" not in payload[0]
+    assert payload[0]["build_log_size"] == len(log_text)
+
+
+@pytest.mark.django_db
+def test_handle_image_build_progress_appends_atomically_and_caps_log():
+    """Progress writes never read the full log and cap the stored tail."""
+    from apps.runners.services import RunnerService
+
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="build-progress@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Progress Org", slug="progress-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="progress-runner",
+        api_token_hash=hash_token("progress-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Progress Definition",
+        runtime_type="docker",
+        base_distro="ubuntu:24.04",
+    )
+    build = ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.PENDING,
+        build_log="old\n",
+    )
+
+    service = RunnerService(sio_server=None)
+    service.handle_image_build_progress(
+        str(build.id), "new line", runner_id=str(runner.id)
+    )
+
+    build.refresh_from_db()
+    assert build.status == ImageBuildJob.Status.BUILDING
+    assert build.build_log == "old\nnew line\n"
+
+    # Over-long stored logs are trimmed to the tail cap atomically.
+    big = "y" * (RunnerService.BUILD_LOG_MAX_CHARS + 100)
+    ImageBuildJob.objects.filter(id=build.id).update(build_log=big)
+    service.handle_image_build_progress(str(build.id), "tail", runner_id=None)
+    build.refresh_from_db()
+    assert len(build.build_log) == RunnerService.BUILD_LOG_MAX_CHARS
+    assert build.build_log.endswith("tail\n")
+
+    # Runner mismatch and unknown jobs are ignored without writes.
+    before = build.build_log
+    service.handle_image_build_progress(
+        str(build.id), "evil", runner_id="00000000-0000-0000-0000-000000000000"
+    )
+    build.refresh_from_db()
+    assert build.build_log == before
+    service.handle_image_build_progress(
+        "00000000-0000-0000-0000-000000000000", "noop", runner_id=None
+    )

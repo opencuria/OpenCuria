@@ -57,6 +57,7 @@ from .schemas import (
     RunnerUpdateIn,
     RunnerSystemMetricsOut,
     ImageBuildJobCreateIn,
+    ImageBuildJobListOut,
     ImageBuildJobOut,
     ImageBuildJobUpdateIn,
     ProcessOut,
@@ -2065,7 +2066,33 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
         runner_id=build.runner_id,
         image_artifact_id=getattr(artifact, "id", None),
         status=build.status,
-        build_log=build.build_log,
+        build_log=getattr(build, "build_log", "") or "",
+        build_task_id=build.build_task_id,
+        built_at=build.built_at,
+        deactivated_at=build.deactivated_at,
+        delete_requested_at=getattr(build, "delete_requested_at", None),
+        delete_confirmed_at=getattr(build, "delete_confirmed_at", None),
+        delete_last_error=getattr(build, "delete_last_error", "") or "",
+        created_at=build.created_at,
+        updated_at=build.updated_at,
+    )
+
+
+def _build_job_to_list_out(build) -> ImageBuildJobListOut:
+    """Convert a (build_log-deferred) build row to the polling-safe schema."""
+    artifact = None
+    try:
+        artifact = getattr(build, "image_instance", None)
+    except (ObjectDoesNotExist, SynchronousOnlyOperation):
+        artifact = None
+
+    return ImageBuildJobListOut(
+        id=build.id,
+        image_definition_id=build.image_definition_id,
+        runner_id=build.runner_id,
+        image_artifact_id=getattr(artifact, "id", None),
+        status=build.status,
+        build_log_size=int(getattr(build, "build_log_size", 0) or 0),
         build_task_id=build.build_task_id,
         built_at=build.built_at,
         deactivated_at=build.deactivated_at,
@@ -2329,7 +2356,7 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
 
 @image_definition_router.get(
     "/{definition_id}/runner-builds/",
-    response={200: list[ImageBuildJobOut], 403: ErrorOut, 404: ErrorOut},
+    response={200: list[ImageBuildJobListOut], 403: ErrorOut, 404: ErrorOut},
     summary="List runner builds for image definition",
 )
 def list_image_definition_runner_builds(request: HttpRequest, definition_id: uuid.UUID):
@@ -2342,7 +2369,8 @@ def list_image_definition_runner_builds(request: HttpRequest, definition_id: uui
     if _get_image_definition_for_org(org_id, definition_id) is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
     return 200, [
-        _build_job_to_out(b) for b in service.list_build_jobs(definition_id, org_id)
+        _build_job_to_list_out(b)
+        for b in service.list_build_jobs(definition_id, org_id)
     ]
 
 

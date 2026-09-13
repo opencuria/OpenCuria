@@ -552,7 +552,13 @@ export interface RunnerImageBuild {
   runner_id: string
   image_artifact_id?: string | null
   status: 'pending' | 'building' | 'active' | 'failed' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
-  build_log: string
+  /**
+   * Full log text — only present on create/update responses and the
+   * dedicated /log/ endpoint. List (polling) responses carry
+   * `build_log_size` instead; see `ImageBuildJobListOut`.
+   */
+  build_log?: string
+  build_log_size?: number
   build_task_id?: string | null
   built_at?: string | null
   deactivated_at?: string | null

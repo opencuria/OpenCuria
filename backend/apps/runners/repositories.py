@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Value
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
 from .enums import (
@@ -1236,7 +1236,13 @@ class ImageBuildJobRepository:
         image_definition_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
     ) -> QuerySet[ImageBuildJob]:
-        """List runner image builds, optionally scoped to an organization."""
+        """List runner image builds, optionally scoped to an organization.
+
+        The ``build_log`` column is deferred: list/poll responses carry
+        status + metadata only (see ``ImageBuildJobListOut``). The full log
+        is served on demand via the dedicated ``/log/`` endpoint. This keeps
+        the 3s frontend polling from re-reading megabytes of log text.
+        """
         queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id
         ).exclude(status=ImageBuildJob.Status.DELETED)
@@ -1250,7 +1256,7 @@ class ImageBuildJobRepository:
             "image_definition",
             "build_task",
             "image_instance",
-        )
+        ).defer("build_log").annotate(build_log_size=Length("build_log"))
 
     @staticmethod
     def get(

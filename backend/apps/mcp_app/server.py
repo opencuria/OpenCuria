@@ -1757,7 +1757,11 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
                 "image_definition_id": str(build.image_definition_id),
                 "runner_id": str(build.runner_id),
                 "status": build.status,
-                "build_log": build.build_log,
+                # Size only: the full log is served by get_build_log and
+                # would otherwise re-introduce the unbounded payload here.
+                "build_log_size": int(
+                    getattr(build, "build_log_size", 0) or 0
+                ),
                 "build_task_id": str(build.build_task_id)
                 if build.build_task_id
                 else None,
