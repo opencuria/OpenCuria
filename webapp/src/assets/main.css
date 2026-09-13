@@ -216,6 +216,12 @@
   min-width: 100%;
 }
 
+/* Markdown is wrapped in an extra div for v-html, so typography's
+   `.prose > :first-child { margin-top: 0 }` never reaches the first <p>. */
+.prose-output > :first-child > :first-child {
+  margin-top: 0;
+}
+
 .prose :not(pre) > code::before,
 .prose :not(pre) > code::after {
   content: '' !important;

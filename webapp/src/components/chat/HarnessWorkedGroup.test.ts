@@ -41,6 +41,7 @@ describe('HarnessWorkedGroup', () => {
 
     expect(wrapper.text()).toContain('Worked')
     expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('2')
+    expect(wrapper.find('svg.lucide-chevron-down').exists()).toBe(false)
   })
 
   it('stays collapsed by default when no part is running', () => {

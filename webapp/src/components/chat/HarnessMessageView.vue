@@ -235,7 +235,10 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   <!-- Assistant message: chronological blocks in left prose shell -->
   <div v-else class="group flex items-start gap-3">
     <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
-      <div v-if="blocks.length" class="flex flex-col gap-2">
+      <div
+        v-if="blocks.length"
+        class="flex flex-col gap-2 [&>[data-block-kind=workedFor]]:-mb-0.5"
+      >
         <template v-for="(block, index) in blocks" :key="blockKey(index)">
           <div
             v-if="block.kind === 'workedFor'"

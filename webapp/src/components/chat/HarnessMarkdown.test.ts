@@ -66,6 +66,7 @@ describe('HarnessMarkdown', () => {
     expect(wrapper.find('a').attributes('href')).toBe('https://example.com')
     expect(wrapper.find('video').exists()).toBe(false)
     expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.get('.prose-output > div').find('h2').exists()).toBe(true)
   })
 
   it('shows a loading placeholder while media is fetching', () => {

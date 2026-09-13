@@ -12,6 +12,10 @@ describe('HarnessWorkedFor', () => {
     expect(wrapper.get('[data-testid="harness-worked-for-label"]').text()).toBe(
       'Worked for 5m 11s',
     )
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').classes()).toContain(
+      'font-semibold',
+    )
+    expect(wrapper.find('svg.lucide-chevron-down').exists()).toBe(false)
     expect(wrapper.find('[data-testid="inner"]').exists()).toBe(false)
   })
 

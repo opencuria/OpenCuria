@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ChevronDown } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import type { RenderBlock } from '@/lib/harnessBlocks'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -124,13 +123,8 @@ function blockKey(index: number): string {
           <div class="flex items-center gap-2">
             <Separator class="flex-1" />
             <CollapsibleTrigger
-              class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              class="flex shrink-0 items-center text-xs text-muted-foreground hover:text-foreground"
             >
-              <ChevronDown
-                :size="12"
-                class="shrink-0 opacity-70 transition-transform"
-                :class="isCompactionOpen(block.part.id) ? '' : '-rotate-90'"
-              />
               <span>Session compacted</span>
             </CollapsibleTrigger>
             <Separator class="flex-1" />

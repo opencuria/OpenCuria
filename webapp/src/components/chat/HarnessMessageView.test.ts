@@ -80,6 +80,9 @@ describe('HarnessMessageView', () => {
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['text', 'workedFor', 'text'])
+    expect(
+      wrapper.get('[data-block-kind="workedFor"]').element.parentElement?.className,
+    ).toContain('[&>[data-block-kind=workedFor]]:-mb-0.5')
     expect(wrapper.text()).toContain('Hello')
     expect(wrapper.text()).toContain('Worked for 5m 11s')
     expect(wrapper.text()).toContain('Done')
@@ -524,6 +527,9 @@ describe('HarnessMessageView', () => {
     expect(wrapper.text()).toContain('Session compacted')
     expect(wrapper.text()).not.toContain('secret summary')
     expect(wrapper.find('pre').exists()).toBe(false)
+    expect(
+      wrapper.find('[data-testid="harness-compaction-divider"] svg.lucide-chevron-down').exists(),
+    ).toBe(false)
   })
 
   it('does not render message errors inline', () => {

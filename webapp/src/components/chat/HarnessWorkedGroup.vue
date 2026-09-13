@@ -5,7 +5,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
-import { ChevronDown } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { countWorkItems, isWorkItem } from '@/lib/harnessBlocks'
 import { toolDisplayLabel } from '@/lib/toolDisplay'
@@ -48,11 +47,6 @@ const workCount = computed(() => countWorkItems(props.parts))
     <CollapsibleTrigger
       class="flex w-full min-w-0 items-center gap-1.5 py-0.5 text-left text-xs font-normal text-muted-foreground hover:text-foreground"
     >
-      <ChevronDown
-        :size="12"
-        class="shrink-0 opacity-70 transition-transform"
-        :class="open ? '' : '-rotate-90'"
-      />
       <span>Worked</span>
       <span data-testid="harness-worked-count" class="opacity-70">{{ workCount }}</span>
       <template v-if="isRunning">
