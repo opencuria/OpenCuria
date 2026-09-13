@@ -728,6 +728,30 @@ async def test_steps_budget_forces_text_only_last_step() -> None:
     assert errors[0]["error"] == MAX_STEPS_TOOL_ERROR
 
 
+async def test_unbounded_loop_past_former_default_cap() -> None:
+    """Without a configured budget the loop continues past 100 steps."""
+    extra = 101
+    provider = FakeProvider(
+        [
+            _tool_step(
+                "read",
+                {"path": f"/workspace/f{i}.txt"},
+                call_id=f"c{i}",
+            )
+            for i in range(extra)
+        ]
+        + [_text_step("done after many steps")]
+    )
+    events: list[dict[str, Any]] = []
+    files = {f"/workspace/f{i}.txt": b"x" for i in range(extra)}
+    runner, opts = _runner(provider, events, auto_approve=True, files=files)
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.finish_reason == "stop"
+    assert result.steps == extra + 1
+    assert all(call["tool_choice"] is None for call in provider.calls)
+    assert all(call["tools"] for call in provider.calls)
+
+
 async def test_cost_tokens_summed_across_steps() -> None:
     """Usage from every step is summed into the final result."""
     provider = FakeProvider(

@@ -21,10 +21,9 @@ from apps.harness.providers.base import (
 )
 from apps.harness.runner import (
     CONTENT_FILTER_NOTICE,
-    DEFAULT_MAX_STEPS,
-    HarnessRunner,
     LENGTH_TRUNCATION_NOTICE,
     RECENT_CALLS_MAXLEN,
+    HarnessRunner,
     RunOptions,
 )
 from apps.harness.tests.conftest import FakeAccessor
@@ -270,8 +269,9 @@ async def _doom_probe(runner: HarnessRunner, calls: list, recent: list[str]) -> 
     orig_decide = HarnessRunner._decide
 
     async def spy_run_step_tools(**kwargs):  # type: ignore[no-untyped-def]
-        from apps.harness.runner import DOOM_LOOP_REPEATS
         import json as _json
+
+        from apps.harness.runner import DOOM_LOOP_REPEATS
 
         flags = []
         for call in kwargs["calls"]:
@@ -383,9 +383,15 @@ async def test_concurrent_edits_serialize_on_path_lock() -> None:
     assert get_lock("/workspace/n.txt") is get_lock("/workspace/n.txt")
 
 
-async def test_default_step_budget_is_100() -> None:
-    """No opts/agent budget resolves to DEFAULT_MAX_STEPS=100."""
-    assert DEFAULT_MAX_STEPS == 100
+async def test_no_default_step_budget() -> None:
+    """Without RunOptions.max_steps or agent.steps the loop is unbounded."""
+    import apps.harness.runner as runner_mod
+
+    assert not hasattr(runner_mod, "DEFAULT_MAX_STEPS")
+    assert runner_mod._is_last_step(1, None) is False
+    assert runner_mod._is_last_step(100, None) is False
+    assert runner_mod._is_last_step(10_000, None) is False
+    assert runner_mod._is_last_step(2, 2) is True
     provider = ScriptProvider([[Delta(text="ok", usage=Usage(1, 1, 2))]])
     runner = HarnessRunner(
         provider=provider,

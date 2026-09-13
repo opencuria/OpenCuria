@@ -79,11 +79,6 @@ log = structlog.get_logger(__name__)
 #: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
 DEFAULT_MAX_DEPTH = 1
 
-#: Default step budget when neither RunOptions.max_steps nor the agent
-#: definition sets one. DoS leash for unbounded loops; override per run
-#: via ``RunOptions.max_steps``.
-DEFAULT_MAX_STEPS = 100
-
 #: Max fingerprints kept for the doom-loop guard. The guard only reads
 #: the last 3 entries, so trimming is behavior-preserving.
 RECENT_CALLS_MAXLEN = 10
@@ -826,9 +821,11 @@ class HarnessRunner:
             elif run_cap:
                 max_steps = int(run_cap)
             else:
-                max_steps = agent.steps or DEFAULT_MAX_STEPS
+                max_steps = agent.steps
         else:
-            max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+            # No default cap. The loop runs until the model stops
+            # calling tools, unless RunOptions or the agent sets one.
+            max_steps = options.max_steps or agent.steps
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
         depth = max(0, options.depth)
         depth = max(0, options.depth)
