@@ -110,6 +110,104 @@ describe('harnessReducer', () => {
     expect(findPart(assistant, { callId: 'call-2' })?.output).toBe('b')
   })
 
+  it('merges live attachments into meta on tool_completed and keeps step', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'read cat.png', call_id: 'call-img' },
+      { step: 3, partId: 'part-img' },
+    )
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_completed: 'read',
+        call_id: 'call-img',
+        output: 'Image read successfully',
+        attachments: [
+          { type: 'file', mime: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=', filename: 'cat.png' },
+          { type: 'file', mime: '', url: 'https://example.com/a.png' },
+        ],
+      },
+      { step: 3, partId: 'part-img' },
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const tool = findPart(assistant, { callId: 'call-img' })
+    expect(tool?.state).toBe('completed')
+    expect(tool?.output).toBe('Image read successfully')
+    expect(tool?.meta).toMatchObject({
+      step: 3,
+      attachments: [
+        { type: 'file', mime: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=', filename: 'cat.png' },
+      ],
+    })
+  })
+
+  it('creates meta.attachments on the fallback part when tool_completed arrives first', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_completed: 'read',
+        call_id: 'call-late',
+        output: 'PDF read successfully',
+        attachments: [
+          { type: 'file', mime: 'application/pdf', url: 'data:application/pdf;base64,JVBERi0=', filename: 'doc.pdf' },
+        ],
+      },
+      { step: 4, partId: 'part-late' },
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const tool = findPart(assistant, { callId: 'call-late' })
+    expect(tool?.state).toBe('completed')
+    expect(tool?.meta).toMatchObject({
+      step: 4,
+      attachments: [
+        { type: 'file', mime: 'application/pdf', url: 'data:application/pdf;base64,JVBERi0=', filename: 'doc.pdf' },
+      ],
+    })
+  })
+
+  it('does not crash on tool_completed without attachments', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'read a.txt', call_id: 'call-plain' },
+      { step: 1, partId: 'part-plain' },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_completed: 'read', call_id: 'call-plain', output: 'body' },
+      { step: 1, partId: 'part-plain' },
+    )
+    // Broken attachment payloads are dropped defensively.
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_completed: 'read', call_id: 'call-broken', attachments: 'nope' as unknown as [] },
+      {},
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const plain = findPart(assistant, { callId: 'call-plain' })
+    expect(plain?.state).toBe('completed')
+    expect(plain?.output).toBe('body')
+    expect(plain?.meta).toMatchObject({ step: 1 })
+    const broken = findPart(assistant, { callId: 'call-broken' })
+    expect(broken?.state).toBe('completed')
+    expect(broken?.meta?.['attachments']).toBeUndefined()
+  })
+
   it('stores cost and tokens on step-finish parts', () => {
     const messages = makeMessages()
 

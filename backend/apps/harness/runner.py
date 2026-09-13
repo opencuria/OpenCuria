@@ -48,7 +48,7 @@ from .compaction import (
     is_overflow,
     select,
 )
-from .images import hydrate_workspace_images
+from .images import build_tool_message_content, hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import (
     ASK,
@@ -659,6 +659,7 @@ class HarnessRunner:
                 "call_id": call.call_id,
                 "tool": call.name,
                 "output": result.output,
+                "attachments": list(result.attachments or []),
             }
         )
         if result.metadata.get("unified_diff"):
@@ -685,9 +686,15 @@ class HarnessRunner:
                 }
             )
         return _ToolCallOutcome(
+            # Images and PDFs become multimodal parts (see
+            # build_tool_message_content): images as image_url, PDFs as
+            # canonical file parts lowered per provider. The bytes also
+            # travel via the tool_completed event into HarnessPart.meta.
             message=LLMMessage(
                 role="tool",
-                content=result.output,
+                content=build_tool_message_content(
+                    result.output, result.attachments
+                ),
                 tool_call_id=call.call_id,
             ),
             result=result,

@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import type { HarnessPart } from '@/types/harness'
+import ImageLightbox from '../ImageLightbox.vue'
 import ToolDetailBash from './ToolDetailBash.vue'
 import ToolDetailDefault from './ToolDetailDefault.vue'
 import ToolDetailQuestion from './ToolDetailQuestion.vue'
@@ -24,6 +25,14 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
 }
 
 describe('tool detail components', () => {
+  beforeEach(() => {
+    class ResizeObserverStub {
+      observe(): void {}
+      disconnect(): void {}
+      unobserve(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+  })
   it('renders bash command, output, and a failed exit code', () => {
     const wrapper = mount(ToolDetailBash, {
       props: {
@@ -55,6 +64,176 @@ describe('tool detail components', () => {
 
     expect(wrapper.text()).toContain('/workspace/a.ts')
     expect(wrapper.text()).toContain('export const x = 1')
+  })
+
+  it('renders image attachments as thumbnails that open the lightbox', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'Image read successfully',
+          input: { arguments: '{"path":"/workspace/cat.png"}' },
+          meta: { attachments: [{ type: 'file', mime: 'image/png', url }] },
+        }),
+      },
+      global: {
+        stubs: { teleport: true },
+      },
+    })
+
+    const img = wrapper.get('[data-testid="tool-detail-read-image"]')
+    expect(img.attributes('src')).toBe(url)
+    // Text preview from the backend is kept alongside the thumbnail.
+    expect(wrapper.text()).toContain('Image read successfully')
+
+    await wrapper.get('button').trigger('click')
+    const lightbox = wrapper.findComponent(ImageLightbox)
+    expect(lightbox.exists()).toBe(true)
+    expect(lightbox.props('src')).toBe(url)
+  })
+
+  it('renders PDF attachments as a download link with the file name', () => {
+    const url = 'data:application/pdf;base64,JVBERi0='
+    const wrapper = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/doc.pdf"}' },
+          meta: { attachments: [{ type: 'file', mime: 'application/pdf', url }] },
+        }),
+      },
+    })
+
+    const link = wrapper.get('[data-testid="tool-detail-read-pdf"]')
+    expect(link.attributes('href')).toBe(url)
+    expect(link.attributes('download')).toBe('doc.pdf')
+    expect(link.text()).toContain('PDF attachment')
+    expect(wrapper.text()).toContain('PDF read successfully')
+  })
+
+  it('prefers attachment.filename over meta.path and tool args for the PDF name', () => {
+    const url = 'data:application/pdf;base64,JVBERi0='
+    const withFilename = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/args.pdf"}' },
+          meta: {
+            path: '/workspace/meta.pdf',
+            attachments: [{ type: 'file', mime: 'application/pdf', url, filename: 'live.pdf' }],
+          },
+        }),
+      },
+    })
+    expect(withFilename.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'live.pdf',
+    )
+
+    const metaOnly = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/args.pdf"}' },
+          meta: {
+            path: '/workspace/meta.pdf',
+            attachments: [{ type: 'file', mime: 'application/pdf', url }],
+          },
+        }),
+      },
+    })
+    expect(metaOnly.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'meta.pdf',
+    )
+
+    const fallback = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          meta: { attachments: [{ type: 'file', mime: 'application/pdf', url }] },
+        }),
+      },
+    })
+    expect(fallback.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'document.pdf',
+    )
+  })
+
+  it('renders a live reducer part with meta.attachments as a thumbnail', async () => {
+    const { applyPartDelta } = await import('@/lib/harnessReducer')
+    const { resetHarnessPartCounter } = await import('@/lib/harnessReducer')
+    resetHarnessPartCounter()
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const messages = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user' as const,
+        content: 'hello',
+        parts: [],
+      },
+    ]
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'read cat.png', call_id: 'call-live' },
+      { step: 1, partId: 'part-live' },
+    )
+    const message = applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_completed: 'read',
+        call_id: 'call-live',
+        output: 'Image read successfully',
+        attachments: [{ type: 'file', mime: 'image/png', url, filename: 'cat.png' }],
+      },
+      { step: 1, partId: 'part-live' },
+    )
+    const livePart = message.parts.find((p) => p.call_id === 'call-live')!
+
+    const wrapper = mount(ToolDetailRead, {
+      props: { part: livePart },
+      global: { stubs: { teleport: true } },
+    })
+    const img = wrapper.get('[data-testid="tool-detail-read-image"]')
+    expect(img.attributes('src')).toBe(url)
+    expect(img.attributes('alt')).toContain('cat.png')
+
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).exists()).toBe(true)
+  })
+
+  it('renders only text when read meta attachments are broken', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (const meta of [
+        undefined,
+        {},
+        { attachments: 'nope' },
+        { attachments: [{ type: 'file', mime: '', url: 'https://example.com/a.png' }] },
+      ]) {
+        const wrapper = mount(ToolDetailRead, {
+          props: {
+            part: makePart({
+              tool: 'read',
+              output: 'file body',
+              input: { arguments: '{"path":"/workspace/a.ts"}' },
+              ...(meta === undefined ? {} : { meta }),
+            }),
+          },
+        })
+        expect(wrapper.find('[data-testid="tool-detail-read-image"]').exists()).toBe(false)
+        expect(wrapper.find('[data-testid="tool-detail-read-pdf"]').exists()).toBe(false)
+        expect(wrapper.text()).toContain('file body')
+      }
+    } finally {
+      consoleSpy.mockRestore()
+    }
   })
 
   it('renders search hits with a count, and an empty result', () => {

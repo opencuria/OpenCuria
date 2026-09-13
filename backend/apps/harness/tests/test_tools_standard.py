@@ -82,13 +82,99 @@ async def test_read_rejects_binary() -> None:
         await tool.execute({"path": "/workspace/b.bin"}, _ctx(accessor))
 
 
+async def test_read_image_detected_from_content_not_extension() -> None:
+    """JPEG magic bytes with a .bin name return an image attachment."""
+    import base64
+
+    from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
+
+    jpeg = bytes(
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01]
+    )
+    accessor = FakeAccessor(files={"/workspace/image.bin": jpeg})
+    result = await ReadTool().execute({"path": "/workspace/image.bin"}, _ctx(accessor))
+    assert result.output == "Image read successfully"
+    assert result.truncated is False
+    assert len(result.attachments) == 1
+    attachment = result.attachments[0]
+    assert attachment["type"] == "file"
+    assert attachment["mime"] == "image/jpeg"
+    assert attachment["filename"] == "image.bin"
+    url = str(attachment["url"])
+    assert url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == jpeg
+    assert result.metadata["attachments"] == result.attachments
+    assert result.metadata["mime"] == "image/jpeg"
+    assert MAX_MEDIA_INGEST_BYTES == 20 * 1024 * 1024
+
+
+async def test_read_png_happy_path() -> None:
+    """PNG magic bytes return an image attachment."""
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * 8
+    accessor = FakeAccessor(files={"/workspace/cat.png": png})
+    result = await ReadTool().execute({"path": "/workspace/cat.png"}, _ctx(accessor))
+    assert result.output == "Image read successfully"
+    assert result.truncated is False
+    assert result.attachments[0]["mime"] == "image/png"
+    url = str(result.attachments[0]["url"])
+    assert url.startswith("data:image/png;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == png
+
+
+async def test_read_pdf_happy_path() -> None:
+    """%PDF magic bytes return a PDF attachment."""
+    import base64
+
+    pdf = b"%PDF-1.4\n" + b"x" * 16
+    accessor = FakeAccessor(files={"/workspace/doc.pdf": pdf})
+    result = await ReadTool().execute({"path": "/workspace/doc.pdf"}, _ctx(accessor))
+    assert result.output == "PDF read successfully"
+    assert result.truncated is False
+    assert result.attachments[0]["mime"] == "application/pdf"
+    assert result.attachments[0]["filename"] == "doc.pdf"
+    url = str(result.attachments[0]["url"])
+    assert url.startswith("data:application/pdf;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == pdf
+    assert result.metadata["attachments"] == result.attachments
+
+
+async def test_read_media_over_ingestion_limit_rejected() -> None:
+    """Media larger than MAX_MEDIA_INGEST_BYTES raises ToolError."""
+    from apps.harness.access.base import FileContent
+    from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
+
+    jpeg = b"\xff\xd8\xff" + b"x" * 8
+
+    class _HugeAccessor(FakeAccessor):
+        async def read_file(  # type: ignore[override]
+            self, path: str, max_size=None
+        ) -> FileContent:
+            full = self.files[path]
+            size = MAX_MEDIA_INGEST_BYTES + 1
+            shown = full[: int(max_size)] if max_size is not None else full
+            return FileContent(content=shown, size=size, truncated=True)
+
+    accessor = _HugeAccessor(files={"/workspace/big.png": jpeg})
+    with pytest.raises(ToolError, match="ingestion limit"):
+        await ReadTool().execute({"path": "/workspace/big.png"}, _ctx(accessor))
+
+
+async def test_read_unsupported_image_mime_falls_through_to_text() -> None:
+    """BMP bytes (unsupported) are read as text, not attachments."""
+    tool = ReadTool()
+    accessor = FakeAccessor(files={"/workspace/photo.bmp": b"BM text content"})
+    result = await tool.execute({"path": "/workspace/photo.bmp"}, _ctx(accessor))
+    assert result.attachments == []
+    assert "BM text content" in result.output
+
+
 async def test_read_paginates_large_file_instead_of_rejecting() -> None:
     """Files over the default page size return a continue hint, not an error."""
     tool = ReadTool()
     lines = [f"line-{i}" for i in range(3000)]
-    accessor = FakeAccessor(
-        files={"/workspace/big.py": ("\n".join(lines)).encode()}
-    )
+    accessor = FakeAccessor(files={"/workspace/big.py": ("\n".join(lines)).encode()})
     result = await tool.execute({"path": "/workspace/big.py"}, _ctx(accessor))
     assert "File too large" not in result.output
     assert "Use offset=" in result.output
@@ -121,9 +207,7 @@ async def test_read_caps_page_bytes_with_continue_hint() -> None:
 async def test_read_truncates_long_lines() -> None:
     """Lines longer than 2000 characters are clipped with a marker."""
     tool = ReadTool()
-    accessor = FakeAccessor(
-        files={"/workspace/min.js": ("y" * 5000).encode()}
-    )
+    accessor = FakeAccessor(files={"/workspace/min.js": ("y" * 5000).encode()})
     result = await tool.execute({"path": "/workspace/min.js"}, _ctx(accessor))
     assert "line truncated to 2000 chars" in result.output
     assert "y" * 2500 not in result.output.split("...", 1)[0]
@@ -134,9 +218,7 @@ async def test_read_offset_out_of_range() -> None:
     tool = ReadTool()
     accessor = FakeAccessor(files={"/workspace/a.txt": b"hello\nworld"})
     with pytest.raises(ToolError, match="out of range"):
-        await tool.execute(
-            {"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor)
-        )
+        await tool.execute({"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor))
 
 
 async def test_read_sandbox_violation_rejected(fake_accessor) -> None:
@@ -286,9 +368,7 @@ async def test_bash_runner_error_propagates() -> None:
 
 async def test_bash_allowed_env_passes_through() -> None:
     """Benign env vars reach the accessor unchanged."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     result = await BashTool().execute(
         {"command": "echo hi", "env": {"FOO": "1", "MY_APP_X": "y"}},
         _ctx(accessor),
@@ -298,18 +378,14 @@ async def test_bash_allowed_env_passes_through() -> None:
 
 async def test_bash_empty_env_ok() -> None:
     """Missing/empty env is treated as {} and executes normally."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     result = await BashTool().execute({"command": "echo hi"}, _ctx(accessor))
     assert result.output == "ok"
 
 
 async def test_bash_external_workdir_allowed() -> None:
     """workdir outside /workspace is forwarded to the accessor."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     result = await BashTool().execute(
         {"command": "pwd", "workdir": "/tmp"}, _ctx(accessor)
     )
@@ -332,9 +408,7 @@ async def test_bash_invalid_workdir_rejected() -> None:
 )
 async def test_bash_blocked_env_rejected(key: str) -> None:
     """Shell/runtime search-path overrides are blocked with a clear error."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     with pytest.raises(ToolError, match=key.split("_")[0]):
         await BashTool().execute(
             {"command": "echo hi", "env": {key: "evil"}}, _ctx(accessor)
@@ -438,9 +512,7 @@ async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:
     """TaskTool without provider/registry in ctx fails loudly (no wiring)."""
     ctx = _ctx(fake_accessor)
     with pytest.raises(ToolError, match="not wired"):
-        await TaskTool().execute(
-            {"description": "d", "prompt": "p"}, ctx
-        )
+        await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
 
 
 async def test_read_missing_file_is_tool_error(fake_accessor) -> None:

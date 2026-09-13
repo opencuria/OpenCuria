@@ -226,6 +226,147 @@ class ChatGPTAdapter(ProviderAdapter):
         return "\n".join(parts)
 
     @staticmethod
+    def _user_content(
+        content: str | list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Lower user content via :meth:`_message_content_block`.
+
+        Kept as a thin alias (the feature branch called this
+        ``_user_content`` while ``HEAD`` calls it
+        ``_message_content_block``): both lower text plus images/PDFs to
+        Responses content — text parts become ``input_text``,
+        ``image_url`` (and ``input_image``) parts become ``input_image``
+        items so hydrated workspace images and tool images reach the
+        model (openai-responses.ts parity). Canonical PDF ``file`` parts
+        become ``input_file`` items (OpenCode parity); unknown file MIMEs
+        are dropped without crashing.
+        """
+        return ChatGPTAdapter._message_content_block_static(content)
+
+    @staticmethod
+    def _message_content_block_static(
+        content: str | list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Static lowering core shared by :meth:`_message_content_block`."""
+        if content is None:
+            return [{"type": "input_text", "text": ""}]
+        if isinstance(content, str):
+            return [{"type": "input_text", "text": content}]
+        blocks: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            file_data = ChatGPTAdapter._file_part_data(part)
+            if file_data is not None:
+                _, file_url, filename = file_data
+                blocks.append(
+                    {
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": file_url,
+                    }
+                )
+                continue
+            part_type = part.get("type")
+            if part_type in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    blocks.append({"type": "input_text", "text": text})
+                continue
+            url = ChatGPTAdapter._image_part_url(part)
+            if url:
+                blocks.append({"type": "input_image", "image_url": url})
+                continue
+        if not blocks:
+            blocks.append({"type": "input_text", "text": ""})
+        return blocks
+
+    @staticmethod
+    def _image_part_url(part: dict[str, Any]) -> str | None:
+        """Return the data URL of an image part, or None.
+
+        Handles canonical ``image_url`` parts as well as already-lowered
+        ``input_image`` items (``image_url``/``url``/``data`` refs, the
+        latter kept for the Agent-S ``data`` shape).
+        """
+        part_type = part.get("type")
+        if part_type == "image_url":
+            ref = part.get("image_url")
+            url = ref.get("url") if isinstance(ref, dict) else ref
+            return url if isinstance(url, str) and url else None
+        if part_type == "input_image":
+            ref = part.get("image_url", part.get("url", part.get("data")))
+            url = ref.get("url") if isinstance(ref, dict) else ref
+            return url if isinstance(url, str) and url else None
+        return None
+
+    @staticmethod
+    def _file_part_data(part: dict[str, Any]) -> tuple[str, str, str] | None:
+        """Return (mime, data-URL, filename) of a PDF file part, or None.
+
+        Only canonical ``{"type": "file", "mime": "application/pdf",
+        "url": data-URL}`` parts map; unknown file MIMEs return None so
+        callers keep dropping them without crashing.
+        """
+        if part.get("type") != "file":
+            return None
+        mime = part.get("mime")
+        url = part.get("url")
+        if not isinstance(mime, str) or not isinstance(url, str):
+            return None
+        if mime.strip().lower() != "application/pdf":
+            return None
+        if not url or not url.startswith("data:"):
+            return None
+        filename = part.get("filename", "")
+        if not isinstance(filename, str) or not filename:
+            filename = "document.pdf"
+        return (mime.strip().lower(), url, filename)
+
+    @staticmethod
+    def _tool_output_items(
+        content: str | list[dict[str, Any]] | None,
+    ) -> str | list[dict[str, Any]]:
+        """Lower tool output to a Responses ``function_call_output`` value.
+
+        Plain string output stays a string (backwards compatible).
+        List content with images/PDFs becomes
+        ``[{"type": "input_text", ...}, {"type": "input_image", ...},
+        {"type": "input_file", ...}]`` so tool media reaches the model;
+        media-less lists collapse back to their text.
+        """
+        if content is None or isinstance(content, str):
+            return content or ""
+        text = ChatGPTAdapter._message_text(content)
+        images: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            url = ChatGPTAdapter._image_part_url(part)
+            if url:
+                images.append({"type": "input_image", "image_url": url})
+                continue
+            file_data = ChatGPTAdapter._file_part_data(part)
+            if file_data is not None:
+                _, file_url, filename = file_data
+                files.append(
+                    {
+                        "type": "input_file",
+                        "filename": filename,
+                        "file_data": file_url,
+                    }
+                )
+        if not images and not files:
+            return text
+        items: list[dict[str, Any]] = []
+        if text:
+            items.append({"type": "input_text", "text": text})
+        items.extend(images)
+        items.extend(files)
+        return items
+
+    @staticmethod
     def _tool_arguments(call: dict[str, Any]) -> str:
         """Return authoritative function-call arguments as a JSON string.
 
@@ -241,43 +382,17 @@ class ChatGPTAdapter(ProviderAdapter):
         return str(arguments if isinstance(arguments, str) else "")
 
     def _message_content_block(self, content: Any) -> list[dict[str, Any]]:
-        """Convert harness content (text + image_url parts) to input items.
+        """Convert harness content (text + images + PDF files) to input items.
 
         Agent-S wire messages carry PNG ``image_url`` data URLs (see
         ``HarnessCompletionAdapter._wire_to_harness``); without this the
-        run would go blind on ``chatgpt/*``. Keeps the OpenAI-Responses
-        ``input_image`` shape (``openai-responses.ts`` parity:
-        ``{type: "input_image", image_url}``).
+        run would go blind on ``chatgpt/*``. Canonical PDF ``file`` parts
+        (see :mod:`apps.harness.images`) also lower to ``input_file``
+        items so read-tool PDF attachments reach the model. Keeps the
+        OpenAI-Responses shapes (``openai-responses.ts`` parity:
+        ``{type: "input_image", image_url}`` / ``input_file``).
         """
-        if content is None:
-            return [{"type": "input_text", "text": ""}]
-        if isinstance(content, str):
-            return [{"type": "input_text", "text": content}]
-        blocks: list[dict[str, Any]] = []
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = part.get("type")
-            if part_type in ("text", "input_text", "output_text"):
-                text = part.get("text")
-                if isinstance(text, str):
-                    blocks.append({"type": "input_text", "text": text})
-                continue
-            if part_type == "image_url":
-                ref = part.get("image_url")
-                url = ref.get("url") if isinstance(ref, dict) else ref
-                if isinstance(url, str) and url:
-                    blocks.append({"type": "input_image", "image_url": url})
-                continue
-            if part_type == "input_image":
-                ref = part.get("image_url", part.get("url", part.get("data")))
-                url = ref.get("url") if isinstance(ref, dict) else ref
-                if isinstance(url, str) and url:
-                    blocks.append({"type": "input_image", "image_url": url})
-                continue
-        if not blocks:
-            blocks.append({"type": "input_text", "text": ""})
-        return blocks
+        return self._message_content_block_static(content)
 
     def _convert_messages(
         self,
@@ -346,7 +461,10 @@ class ChatGPTAdapter(ProviderAdapter):
                 continue
 
             if message.role == "tool":
-                output = self._message_text(message.content)
+                # Images ride inside function_call_output (Responses API
+                # accepts multimodal output parts); the text part keeps
+                # the tool output so non-image providers stay text-only.
+                output_items = self._tool_output_items(message.content)
                 call_id = str(message.tool_call_id or "")
                 if not call_id:
                     # OpenCode requires call_id; keep a best-effort id so
@@ -356,7 +474,7 @@ class ChatGPTAdapter(ProviderAdapter):
                     {
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": output,
+                        "output": output_items,
                     }
                 )
 

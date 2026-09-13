@@ -17,6 +17,7 @@ import type {
   HarnessTodo,
   HarnessTodoUpdatedEvent,
 } from '@/types/harness'
+import { deltaAttachments } from './harnessAttachments'
 
 let partCounter = 0
 
@@ -158,6 +159,7 @@ export function applyPartDelta(
   }
 
   if (delta.tool_completed) {
+    const liveAttachments = deltaAttachments(delta)
     const part = findPart(message, {
       partId: opts.partId,
       callId: delta.call_id,
@@ -165,6 +167,9 @@ export function applyPartDelta(
     if (part) {
       part.state = 'completed'
       if (delta.output) part.output = delta.output
+      if (liveAttachments.length > 0) {
+        part.meta = { ...part.meta, attachments: liveAttachments }
+      }
     } else {
       message.parts.push({
         id: opts.partId ?? nextLocalPartId(sessionId),
@@ -176,7 +181,10 @@ export function applyPartDelta(
         tool: delta.tool_completed,
         title: delta.title ?? delta.tool_completed,
         output: delta.output ?? '',
-        meta: opts.step !== undefined ? { step: opts.step } : {},
+        meta: {
+          ...(opts.step !== undefined ? { step: opts.step } : {}),
+          ...(liveAttachments.length > 0 ? { attachments: liveAttachments } : {}),
+        },
       })
     }
   }
