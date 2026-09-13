@@ -94,6 +94,22 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(marker_clear, xvnc_launch)
         self.assertLess(xvnc_launch, xstartup_launch)
 
+    async def test_start_command_creates_xauthority_for_xlib_clients(
+        self,
+    ) -> None:
+        """The start command touches .Xauthority before Xvnc launches.
+
+        Regression: Xvnc uses ``-SecurityTypes None``, but python-Xlib
+        unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` — without
+        the file every PyAutoGUI ``execute`` snippet dies with
+        ``FileNotFoundError`` before even connecting.
+        """
+        command = self.service._desktop_start_command(1920, 1080)
+        self.assertIn("touch /root/.Xauthority", command)
+        xauth_touch = command.index("touch /root/.Xauthority")
+        xvnc_launch = command.index("/usr/bin/Xvnc :1")
+        self.assertLess(xauth_touch, xvnc_launch)
+
     async def test_concurrent_viewer_and_computeruse_start_xvnc_once(
         self,
     ) -> None:

@@ -4847,7 +4847,10 @@ class RunnerService:
         apt-Python). pip on 24.04 requires ``--break-system-packages``
         (PEP 668); pip on 22.04 does not know the flag, so retry without
         it. ``python3-pyperclip`` from apt already provides
-        ``import pyperclip`` (no pip needed). Existing
+        ``import pyperclip`` (no pip needed). ``python3-tk`` is a pure
+        runtime dep: pyautogui imports mouseinfo, which imports tkinter —
+        without it every execute snippet dies at import time with
+        "You must install tkinter on Linux to use MouseInfo". Existing
         images are never modified in place: rebuild the image definition
         after this block changes.
         """
@@ -4859,7 +4862,7 @@ RUN apt-get update && apt-get install -y \\
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
     wget ca-certificates \\
     tesseract-ocr wmctrl xclip xsel libreoffice-calc python3-uno \\
-    python3-pyperclip sudo iproute2 python3-pip \\
+    python3-pyperclip python3-tk sudo iproute2 python3-pip \\
     && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
     && (apt-get install -y python3-pyautogui \\
         || python3 -m pip install --break-system-packages pyautogui \\
@@ -4874,9 +4877,13 @@ RUN apt-get update && apt-get install -y \\
     && rm -f /tmp/google-chrome.deb \\
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-configure KasmVNC (skip interactive wizard)
+# Pre-configure KasmVNC (skip interactive wizard).
+# python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally, even
+# against the auth-less Xvnc (-SecurityTypes None): bake an empty file
+# so PyAutoGUI/mouseinfo connect out of the box (the runner also
+# touches it at every start and before each execute for self-healing).
 RUN mkdir -p /root/.vnc \\
-    && touch /root/.vnc/.de-was-selected \\
+    && touch /root/.vnc/.de-was-selected /root/.Xauthority \\
     && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: false\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\

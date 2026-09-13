@@ -130,7 +130,11 @@ async def test_move_uses_xdotool_with_display(service: WorkspaceService) -> None
     assert result == {"ok": True}
     call = service._runtime.exec_command_wait.await_args_list[-1]
     assert call.args[1] == ["sh", "-lc", "xdotool mousemove --sync 10 20"]
-    assert call.kwargs["env"] == {"HOME": "/root", "DISPLAY": ":1"}
+    assert call.kwargs["env"] == {
+        "HOME": "/root",
+        "DISPLAY": ":1",
+        "XAUTHORITY": "/root/.Xauthority",
+    }
 
 
 @pytest.mark.asyncio
@@ -538,9 +542,89 @@ async def test_execute_success_runs_python_with_desktop_env(
     )
 
     assert result == {"ok": True, "exit_code": 0, "stdout": "out", "stderr": "err"}
-    assert service._runtime.exec_command_wait.await_count == 1
+    # Live probe + Xauthority self-heal, then the snippet itself.
+    assert service._runtime.exec_command_wait.await_count == 2
     assert calls[0]["command"] == ["python3", "-c", "print(1)"]
-    assert calls[0]["env"] == {"HOME": "/root", "DISPLAY": ":1"}
+    assert calls[0]["env"] == {
+        "HOME": "/root",
+        "DISPLAY": ":1",
+        "XAUTHORITY": "/root/.Xauthority",
+    }
+
+
+async def test_execute_self_heals_missing_xauthority(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute touches ``/root/.Xauthority`` so python-Xlib can connect.
+
+    Regression: Xvnc uses ``-SecurityTypes None``, but python-Xlib
+    unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` — without the
+    file every PyAutoGUI snippet dies with ``FileNotFoundError`` before
+    even connecting. The touch is idempotent and failures only warn
+    (they degrade to the previous behaviour, never fail the action).
+    """
+    service._runtime.exec_command_wait.return_value = (0, "alive")
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        calls.append(
+            {"command": command, "workdir": workdir, "env": env}
+        )
+        return 0, "out", "err"
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    await service.desktop_action(
+        service._workspace_id, "execute", {"code": "print(1)"}
+    )
+
+    touch_calls = [
+        call
+        for call in service._runtime.exec_command_wait.await_args_list
+        if "touch /root/.Xauthority" in " ".join(str(a) for a in call.args[1])
+    ]
+    assert len(touch_calls) == 1
+    assert touch_calls[0].kwargs["env"] == {
+        "HOME": "/root",
+        "DISPLAY": ":1",
+        "XAUTHORITY": "/root/.Xauthority",
+    }
+    assert calls[0]["env"]["XAUTHORITY"] == "/root/.Xauthority"
+
+
+async def test_execute_xauthority_heal_failure_still_runs_code(
+    service: WorkspaceService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing Xauthority touch must not fail the action itself."""
+    service._runtime.exec_command_wait.side_effect = [
+        (0, "alive"),
+        (1, "touch failed"),
+    ]
+
+    async def _fake_exec(workspace_id, command, workdir="/workspace", env=None):  # type: ignore[no-untyped-def]
+        return 0, "out", "err"
+
+    monkeypatch.setattr(service, "exec_harness_command", _fake_exec)
+
+    result = await service.desktop_action(
+        service._workspace_id, "execute", {"code": "print(1)"}
+    )
+
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+
+
+async def test_desktop_env_pins_xauthority(
+    service: WorkspaceService,
+) -> None:
+    """Every X11 client resolves auth via the runner-owned file."""
+    assert service._desktop_env() == {
+        "HOME": "/root",
+        "DISPLAY": ":1",
+        "XAUTHORITY": "/root/.Xauthority",
+    }
 
 
 @pytest.mark.asyncio

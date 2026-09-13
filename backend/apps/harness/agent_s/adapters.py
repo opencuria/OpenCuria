@@ -348,7 +348,7 @@ class WorkspaceCodeExecutionAdapter:
 AGENT_S_DEPS_HINT = (
     "Rebuild the workspace image to install the Agent-S dependencies "
     "(PyAutoGUI/pyperclip, tesseract-ocr, wmctrl, xclip/xsel, "
-    "libreoffice-calc, python3-uno)."
+    "libreoffice-calc, python3-uno, python3-tk/tkinter)."
 )
 
 
@@ -394,9 +394,13 @@ class WorkspaceActionExecutor:
             hint = (
                 f" {AGENT_S_DEPS_HINT}"
                 if (
-                    "pyautogui" in lowered
-                    or "tesseract" in lowered
-                    or "no module named" in lowered
+                    "no module named" in lowered
+                    or "modulenotfounderror" in lowered.replace(" ", "")
+                    # pyautogui imports mouseinfo, which imports tkinter:
+                    # without python3-tk the snippet dies with MouseInfo's
+                    # "You must install tkinter on Linux ..." note instead
+                    # of a ModuleNotFoundError.
+                    or "tkinter" in lowered
                 )
                 else ""
             )

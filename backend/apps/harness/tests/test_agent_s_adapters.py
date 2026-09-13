@@ -361,6 +361,63 @@ async def test_action_executor_reports_rebuild_hint_for_missing_deps() -> None:
     assert "Rebuild the workspace image" in AGENT_S_DEPS_HINT
 
 
+async def test_action_executor_reports_rebuild_hint_for_missing_tkinter() -> None:
+    """MouseInfo's tkinter note points at the image rebuild.
+
+    Regression (session 00520ce4): without python3-tk, pyautogui's
+    mouseinfo import dies with ``NOTE: You must install tkinter on
+    Linux ...`` — not a ``No module named`` error — so the rebuild hint
+    must also trigger on ``tkinter``.
+    """
+    tkinter_stderr = (
+        "NOTE: You must install tkinter on Linux to use MouseInfo. "
+        "Run: sudo apt-get install python3-tk python3-dev"
+    )
+    with pytest.raises(RuntimeError, match="Rebuild the workspace image"):
+        await WorkspaceActionExecutor(
+            accessor=FakeDesktopAccessor(
+                {
+                    "ok": True,
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": tkinter_stderr,
+                }
+            )
+        ).execute_action_code("import pyautogui")
+
+
+async def test_action_executor_no_rebuild_hint_for_runtime_failures() -> None:
+    """Runtime failures (e.g. missing .Xauthority) must not suggest a rebuild.
+
+    Regression: the hint used to trigger on any stderr mentioning
+    ``pyautogui`` — including tracebacks where the import succeeded and
+    the snippet itself failed (e.g. ``FileNotFoundError: '/root/.Xauthority'``
+    via ``pyautogui/__init__.py``). Only genuine missing-dependency
+    signals (``No module named`` / ``tkinter``) get the hint.
+    """
+    xauth_stderr = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        '  File "/usr/local/lib/python3.12/dist-packages/pyautogui/__init__.py", '
+        "line 246, in <module>\n"
+        "FileNotFoundError: [Errno 2] No such file or directory: "
+        "'/root/.Xauthority'\n"
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        await WorkspaceActionExecutor(
+            accessor=FakeDesktopAccessor(
+                {
+                    "ok": True,
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": xauth_stderr,
+                }
+            )
+        ).execute_action_code("import pyautogui")
+    assert "Rebuild the workspace image" not in str(exc_info.value)
+    assert "FileNotFoundError" in str(exc_info.value)
+
+
 async def test_action_executor_rejects_empty_and_failures() -> None:
     """Empty code is refused; ok/exit failures raise visibly."""
     executor = WorkspaceActionExecutor(accessor=FakeDesktopAccessor({"ok": True}))
