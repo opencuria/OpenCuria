@@ -635,10 +635,11 @@ class HarnessService:
         """Ensure provider config and model are present before starting a run.
 
         Returns the resolved model id for this turn. An empty session model
-        (Auto) is filled from the org default without pinning ``session.model``.
+        (Auto) is filled from the agent config; the legacy org default is
+        only a deprecated fallback when available.
 
         Raises:
-            NotFoundError: When no ProviderConfig exists for the org.
+            NotFoundError: When no provider connection exists for the model.
             ValueError: When API key or model is missing.
         """
         session_model = (session.model or "").strip()
@@ -647,13 +648,18 @@ class HarnessService:
         from .services import ProviderConfigService
 
         config_service = ProviderConfigService()
-        config = config_service.get_config(organization_id)
+        config = None
+        try:
+            config = config_service.get_config(organization_id)
+        except NotFoundError:
+            config = None
         agent_name = (session.agent_name or session.mode or "build").strip().lower()
         agent_defaults = self._agent_defaults(organization_id, agent_name)
         agent_model = "" if agent_defaults["inherit_model"] else agent_defaults["model"]
-        model = session_model or agent_model or (config.default_model or "").strip()
+        legacy_default = (config.default_model or "").strip() if config else ""
+        model = session_model or agent_model or legacy_default
         if not model:
-            raise ValueError("No model configured for harness run")
+            raise NotFoundError("ProviderConnection", str(organization_id))
         config_service.provider_connected_for_model(organization_id, model)
         if (session.agent_name or "").strip().lower() == "computeruse":
             # Explicit grounding models must resolve to a connected
@@ -678,7 +684,7 @@ class HarnessService:
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
             )
             session.reasoning_effort = normalize_reasoning_effort(
-                agent_effort or config.default_effort or ""
+                agent_effort or (config.default_effort if config else "") or ""
             )
         return model
 
@@ -1319,10 +1325,18 @@ class HarnessService:
             ).resolve
         else:
             config_service = ProviderConfigService()
-            config = await sync_to_async(config_service.get_config)(organization_id)
-            resolver = await sync_to_async(config_service.build_resolver)(organization_id)
+            config = None
+            try:
+                config = await sync_to_async(config_service.get_config)(
+                    organization_id
+                )
+            except NotFoundError:
+                config = None
+            resolver = await sync_to_async(config_service.build_resolver)(
+                organization_id
+            )
             model_resolver = resolver.resolve
-            small_model = (config.small_model or "").strip()
+            small_model = ((config.small_model if config else "") or "").strip()
             agent_configs = await sync_to_async(
                 HarnessService._agent_configs_map
             )(organization_id)
@@ -1339,12 +1353,16 @@ class HarnessService:
             if session.model:
                 model_default = session.model
             else:
-                model_default = agent_model or config.default_model
+                legacy_default = (
+                    (config.default_model if config else "") or ""
+                ).strip()
+                model_default = agent_model or legacy_default
             if not model_default:
                 raise ValueError("No model configured for harness run")
             session.model = model_default
+            legacy_effort = (config.default_effort if config else "") or ""
             run_effort = normalize_reasoning_effort(
-                agent_effort or config.default_effort or ""
+                agent_effort or legacy_effort or ""
             )
             if not (session.reasoning_effort or "").strip() and run_effort:
                 # Robust fallback for sessions created before effort defaults
@@ -2147,11 +2165,19 @@ class HarnessService:
             from .services import ProviderConfigService
 
             config_service = ProviderConfigService()
-            config = await sync_to_async(config_service.get_config)(organization_id)
-            small_model = (config.small_model or "").strip()
+            config = None
+            try:
+                config = await sync_to_async(config_service.get_config)(
+                    organization_id
+                )
+            except NotFoundError:
+                config = None
+            small_model = ((config.small_model if config else "") or "").strip()
             if not small_model:
                 return
-            small_effort = normalize_reasoning_effort(config.small_effort or "")
+            small_effort = normalize_reasoning_effort(
+                (config.small_effort if config else "") or ""
+            )
             if self._provider_factory is not None:
                 model_resolver = StaticModelResolver(
                     self._provider_factory(organization_id)

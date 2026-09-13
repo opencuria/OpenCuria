@@ -90,11 +90,11 @@ def test_get_missing_config_raises(organization) -> None:
 def test_build_adapter_uses_stored_connection(organization) -> None:
     """build_adapter decrypts the key and honors the stored base URL."""
     service = ProviderConfigService()
-    service.save_config(
+    service.save_connection(
         organization_id=organization.id,
-        api_key="sk-live",
-        base_url="https://example.com/v1",
-        default_model="m",
+        provider="openrouter",
+        credentials={"api_key": "sk-live"},
+        config={"base_url": "https://example.com/v1"},
     )
     adapter = service.build_adapter(organization.id)
     assert isinstance(adapter, OpenRouterAdapter)

@@ -541,11 +541,13 @@ class ProviderConfigService:
     ) -> ProviderAdapter:
         """Build a provider adapter from stored org connections.
 
+        Only the ``ProviderConnection`` row is required; the legacy
+        ``ProviderConfig`` defaults row is optional and ignored here.
+
         Raises:
             KeyError: If the provider name is not registered.
             NotFoundError: If no connection exists for the organization.
         """
-        self.get_config(organization_id)
         connection = self.connections.get_by_org_and_provider(
             organization_id,
             provider_name,
@@ -587,10 +589,12 @@ class ProviderConfigService:
     def list_models(self, organization_id: uuid.UUID) -> list[ProviderModel]:
         """Return the merged catalog for all connected providers.
 
+        Only ``ProviderConnection`` rows are required; the legacy
+        ``ProviderConfig`` defaults row is optional and ignored here.
+
         Raises:
-            NotFoundError: If no ProviderConfig exists for the organization.
+            NotFoundError: If no provider connection exists for the org.
         """
-        self.get_config(organization_id)
         connections = self.connections.list_by_org(organization_id)
         if not connections:
             raise NotFoundError("ProviderConnection", str(organization_id))

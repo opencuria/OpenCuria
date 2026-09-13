@@ -704,7 +704,7 @@ def test_mode_switch_needs_run_permission(harness_setup, fake_harness_service):
 
 @pytest.mark.django_db(transaction=True)
 def test_missing_provider_config_is_4xx(harness_setup, monkeypatch):
-    """Creating a session without provider config returns 404, not a hang."""
+    """Creating a session without provider/model config returns 404, not a hang."""
     service = HarnessService(emit=_drop_emit)
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
     client = _client(

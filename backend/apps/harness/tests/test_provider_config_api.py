@@ -390,12 +390,52 @@ def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
 
 @pytest.mark.django_db(transaction=True)
 def test_org_provider_models_missing_config_is_404(provider_setup):
-    """GET models without a stored config yields 404."""
+    """GET models without any connection yields 404."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
     )
     response = client.get("/api/v1/provider-config/models/")
     assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_org_provider_models_lists_catalog_without_config_row(
+    provider_setup, monkeypatch
+):
+    """GET models works with only a connection (no ProviderConfig row)."""
+    from apps.harness.providers.models_catalog import ProviderModel
+
+    ProviderConfigService().save_connection(
+        organization_id=provider_setup["org"].id,
+        provider="openrouter",
+        credentials={"api_key": "sk-models-key"},
+        config={"base_url": "https://openrouter.ai/api/v1"},
+    )
+
+    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+        assert organization_id == provider_setup["org"].id
+        return [
+            ProviderModel(
+                id="openrouter/acme/fast",
+                name="Fast",
+                provider="openrouter",
+                reasoning_efforts=("high",),
+                default_effort="high",
+                supports_tools=True,
+                context_length=128000,
+                max_output_tokens=16384,
+            )
+        ]
+
+    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
+    )
+    response = client.get("/api/v1/provider-config/models/")
+    assert response.status_code == 200, response.content[:500]
+    body = response.json()
+    assert body[0]["id"] == "openrouter/acme/fast"
+    assert body[0]["provider"] == "openrouter"
 
 
 @pytest.mark.django_db(transaction=True)

@@ -152,11 +152,14 @@ describe('HarnessChatInput', () => {
 
   it('opens the provider tab via event (no router navigation) when provider config is missing', async () => {
     getProviderConfigMock.mockRejectedValue(new Error('not found'))
+    listProviderModelsMock.mockResolvedValue([])
     const wrapper = mountInput()
-    await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
-    })
-    await wrapper.vm.$nextTick()
+    await vi.waitFor(
+      () => {
+        expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
+      },
+      { timeout: 2000 },
+    )
     const events: Array<{ tab?: string }> = []
     const listener = (e: Event) =>
       events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
@@ -187,11 +190,25 @@ describe('HarnessChatInput', () => {
       api_key_hint: '',
     })
     const wrapper = mountInput()
-    await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
-    })
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
+    await vi.waitFor(
+      () => {
+        expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
+      },
+      { timeout: 2000 },
+    )
+  })
+
+  it('loads the catalog when the legacy defaults row is missing (404)', async () => {
+    const { ApiRequestError } = await import('@/services/api')
+    getProviderConfigMock.mockRejectedValue(new ApiRequestError(404, 'Not Found', 'not_found'))
+    const wrapper = mountInput()
+    await vi.waitFor(
+      () => {
+        expect(wrapper.html()).toContain('Big')
+      },
+      { timeout: 2000 },
+    )
+    expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(false)
   })
 
   it('toggles plan/build with Shift+Tab', async () => {

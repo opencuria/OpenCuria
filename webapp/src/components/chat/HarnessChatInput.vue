@@ -185,8 +185,14 @@ async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
   try {
-    const config = await getProviderConfig()
-    void config
+    // Gating fetch that still tolerates a missing legacy ProviderConfig row
+    // (404 until defaults are saved once); the models catalog + agent
+    // configs decide whether a provider is actually available.
+    await getProviderConfig().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : ''
+      if (!message.toLowerCase().includes('not found')) throw error
+      return null
+    })
     const [models] = await Promise.all([loadProviderModelsCached(), harness.loadAgentConfigs()])
     catalog.value = models
     if (catalog.value.length === 0) {

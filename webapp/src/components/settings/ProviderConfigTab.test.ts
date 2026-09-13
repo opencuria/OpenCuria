@@ -304,4 +304,16 @@ describe('ProviderConfigTab', () => {
 
     expect(wrapper.find('[data-testid="defaults-no-provider-hint"]').exists()).toBe(true)
   })
+
+  it('keeps connections visible when the defaults row is missing (404)', async () => {
+    const { ApiRequestError } = await import('@/services/api')
+    getProviderConfigMock.mockRejectedValue(new ApiRequestError(404, 'Not Found', 'not_found'))
+    const wrapper = mountTab()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="provider-row-openrouter"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Connected')
+    expect(wrapper.find('[data-testid="defaults-no-provider-hint"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
+  })
 })

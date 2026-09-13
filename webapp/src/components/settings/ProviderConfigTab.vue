@@ -17,6 +17,7 @@ import SettingsSection from './SettingsSection.vue'
 import { PROVIDER_META, connectionDetail, type ProviderMeta } from './providerMeta'
 import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
 import { invalidateProviderCatalog, loadProviderModelsCached } from '@/lib/providerCatalog'
+import { ApiRequestError } from '@/services/api'
 import { useNotificationStore } from '@/stores/notifications'
 import {
   getProviderConfig,
@@ -70,16 +71,27 @@ const defaultsDirty = computed(
     smallEffort.value.trim() !== (config.value?.small_effort ?? ''),
 )
 
-function applyConfig(next: HarnessProviderConfig): void {
+function applyConfig(next: HarnessProviderConfig | null): void {
   config.value = next
-  smallModel.value = next.small_model || ''
-  smallEffort.value = next.small_effort || ''
+  smallModel.value = next?.small_model || ''
+  smallEffort.value = next?.small_effort || ''
+}
+
+/** A missing ProviderConfig row is normal until defaults are saved once. */
+function isNotFoundError(error: unknown): boolean {
+  return (
+    (error instanceof ApiRequestError && error.status === 404) ||
+    (error instanceof Error && error.message.toLowerCase().includes('not found'))
+  )
 }
 
 async function refreshAll(): Promise<void> {
   invalidateProviderCatalog()
   const [configRes, connectionRes, modelsRes] = await Promise.all([
-    getProviderConfig(),
+    getProviderConfig().catch((error: unknown) => {
+      if (isNotFoundError(error)) return null
+      throw error
+    }),
     listProviderConnections(),
     loadProviderModelsCached().catch(() => [] as ProviderModel[]),
   ])

@@ -1527,7 +1527,7 @@ async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_missing_provider_config_raises(harness_workspace) -> None:
-    """start_run without provider config raises NotFoundError before task."""
+    """start_run without model/provider config raises NotFoundError before task."""
     collected: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
