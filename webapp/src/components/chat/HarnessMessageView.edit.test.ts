@@ -21,8 +21,9 @@ vi.mock('@/components/common/LoadingSpinner.vue', () => ({
 
 vi.mock('./HarnessMarkdown.vue', () => ({
   default: {
-    props: ['text', 'compact'],
-    template: '<div class="markdown-stub">{{ text }}</div>',
+    props: ['text', 'compact', 'onPrimary'],
+    template:
+      '<div class="markdown-stub" :data-on-primary="String(onPrimary ?? false)">{{ text }}</div>',
   },
 }))
 
@@ -148,5 +149,16 @@ describe('HarnessMessageView edit/fork', () => {
     await wrapper.get('[data-testid="message-fork"]').trigger('click')
 
     expect(wrapper.emitted('fork')).toEqual([['user-1']])
+  })
+
+  it('renders the user bubble without an avatar and with on-primary markdown', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser() },
+    })
+
+    expect(wrapper.find('.bg-primary\\/10').exists()).toBe(false)
+    expect(wrapper.find('.markdown-stub').attributes('data-on-primary')).toBe('true')
+    expect(wrapper.html()).toContain('px-3')
+    expect(wrapper.html()).toContain('py-1')
   })
 })

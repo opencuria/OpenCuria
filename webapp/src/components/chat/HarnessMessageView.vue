@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { GitFork, Pencil, User } from '@lucide/vue'
+import { GitFork, Pencil } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import {
   buildMessageBlocks,
@@ -157,9 +157,9 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
     <div class="min-w-0 max-w-3xl">
       <div
         v-if="!editing"
-        class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-4 py-3 text-sm break-words"
+        class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-3 py-1 text-sm break-words"
       >
-        <HarnessMarkdown :text="message.content" compact />
+        <HarnessMarkdown :text="message.content" compact :on-primary="true" />
       </div>
       <div v-else class="flex flex-col gap-2">
         <Textarea
@@ -229,9 +229,6 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           </Tooltip>
         </TooltipProvider>
       </div>
-    </div>
-    <div class="flex items-center justify-center w-8 h-8 rounded-full bg-primary/10 text-primary shrink-0">
-      <User :size="14" />
     </div>
   </div>
 

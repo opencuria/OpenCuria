@@ -11,7 +11,51 @@ import type { HarnessPart } from '@/types/harness'
 const props = defineProps<{
   text: string
   compact?: boolean
+  /** White text for dark primary backgrounds (user prompt bubble). */
+  onPrimary?: boolean
 }>()
+
+const rootClass = computed(() => {
+  const classes = [
+    'prose-output prose prose-sm max-w-3xl break-words',
+    'prose-pre:p-2 prose-pre:rounded-md',
+  ]
+  if (props.compact) {
+    classes.push('text-[13px] [&_p]:my-0 prose-p:leading-snug')
+  } else {
+    classes.push('prose-p:leading-relaxed')
+  }
+  if (props.onPrimary) {
+    classes.push(
+      'prose-on-primary',
+      'prose-pre:bg-primary-foreground/15 prose-pre:text-primary-foreground',
+      'prose-headings:text-primary-foreground',
+      'prose-p:text-primary-foreground',
+      'prose-strong:text-primary-foreground',
+      'prose-ul:text-primary-foreground',
+      'prose-ol:text-primary-foreground',
+      'prose-li:text-primary-foreground',
+      'prose-a:text-primary-foreground prose-a:underline',
+      'prose-code:text-primary-foreground',
+      'prose-blockquote:text-primary-foreground/80 prose-blockquote:border-l-primary-foreground',
+    )
+    return classes
+  }
+  classes.push(
+    'prose-pre:bg-muted prose-pre:text-muted-foreground',
+    'dark:prose-invert',
+    'prose-headings:text-foreground',
+    'prose-p:text-foreground',
+    'prose-strong:text-foreground',
+    'prose-ul:text-foreground',
+    'prose-ol:text-foreground',
+    'prose-li:text-foreground',
+    'prose-a:text-primary',
+    'prose-code:text-foreground',
+    'prose-blockquote:text-muted-foreground prose-blockquote:border-l-primary',
+  )
+  return classes
+})
 
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
@@ -123,10 +167,7 @@ export type { HarnessPart }
 </script>
 
 <template>
-  <div
-    class="prose-output prose prose-sm max-w-3xl break-words prose-p:leading-relaxed prose-pre:p-2 prose-pre:bg-muted prose-pre:text-muted-foreground prose-pre:rounded-md dark:prose-invert prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-ul:text-foreground prose-ol:text-foreground prose-li:text-foreground prose-a:text-primary prose-code:text-foreground prose-blockquote:text-muted-foreground prose-blockquote:border-l-primary"
-    :class="compact ? 'text-[13px]' : ''"
-  >
+  <div :class="rootClass">
     <template v-for="(segment, index) in segments" :key="index">
       <div v-if="segment.kind === 'html'" v-html="segment.html" />
       <template v-else>

@@ -21,7 +21,7 @@ vi.mock('@/components/common/LoadingSpinner.vue', () => ({
 
 vi.mock('./HarnessMarkdown.vue', () => ({
   default: {
-    props: ['text', 'compact'],
+    props: ['text', 'compact', 'onPrimary'],
     template: '<div class="markdown-stub">{{ text }}</div>',
   },
 }))

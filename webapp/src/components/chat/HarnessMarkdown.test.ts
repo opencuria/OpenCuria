@@ -12,9 +12,13 @@ vi.mock('@/services/socket', () => ({
   sendFilesRead: vi.fn(),
 }))
 
-function mountMarkdown(text: string, workspaceId = 'ws-1') {
+function mountMarkdown(
+  text: string,
+  workspaceId = 'ws-1',
+  extra: { compact?: boolean; onPrimary?: boolean } = {},
+) {
   return mount(HarnessMarkdown, {
-    props: { text },
+    props: { text, ...extra },
     global: {
       provide: {
         [harnessWorkspaceIdKey as symbol]: ref(workspaceId),
@@ -80,5 +84,15 @@ describe('HarnessMarkdown', () => {
 
     expect(wrapper.find('[data-testid="harness-markdown-media-fallback"]').text()).toBe('clip')
     expect(wrapper.find('video').exists()).toBe(false)
+  })
+
+  it('applies on-primary prose classes instead of foreground modifiers', () => {
+    const wrapper = mountMarkdown('Hello **world**', 'ws-1', { onPrimary: true })
+    const classes = wrapper.get('div').classes()
+
+    expect(classes).toContain('prose-on-primary')
+    expect(classes).toContain('prose-p:text-primary-foreground')
+    expect(classes).not.toContain('prose-p:text-foreground')
+    expect(classes).not.toContain('dark:prose-invert')
   })
 })
