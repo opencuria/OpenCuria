@@ -433,6 +433,15 @@ defined in Section 7.
 The ASGI routing in `config/asgi.py` directs `/ws/runner` and `/socket.io`
 paths to the Socket.IO app; all other requests go to Django.
 
+Daphne 4.2.2+ defaults WebSocket **message and frame** size to 1 MiB
+(CVE-2026-44545). Computer-use PNG screenshots and workspace file reads
+are sent as base64 over this connection and exceed that, which drops the
+runner WebSocket. Keep Daphne (`DAPHNE_WEBSOCKET_MAX_MESSAGE_SIZE` /
+`DAPHNE_WEBSOCKET_MAX_FRAME_SIZE` in settings, plus the matching
+`--websocket-max-*` flags in `backend/entrypoint.sh`) aligned with
+Socket.IO `max_http_buffer_size` at **200 MiB**. Both Daphne caps must
+be raised: a screenshot is a single WebSocket frame.
+
 ### 5.6 Settings (`config/settings/`)
 
 Settings are split into `base.py` (shared), `development.py` (SQLite, debug),
@@ -696,7 +705,10 @@ pip install -r requirements.txt
 # Apply migrations
 python manage.py migrate
 
-# Run development server (Daphne ASGI)
+# Run development server (Daphne ASGI).
+# Daphne 4.2.3+ runserver honors DAPHNE_WEBSOCKET_MAX_MESSAGE/FRAME_SIZE
+# (200 MiB) from settings; pin daphne>=4.2.3 so computer-use screenshots
+# are not dropped by the 1 MiB CVE-2026-44545 default.
 python manage.py runserver
 
 # API docs available at http://localhost:8000/api/v1/docs

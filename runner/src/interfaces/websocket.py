@@ -35,6 +35,12 @@ from .base import Interface
 
 logger = structlog.get_logger(__name__)
 
+# Align with backend Socket.IO / Daphne 200 MiB caps. Passed to aiohttp
+# ws_connect as max_msg_size (Engine.IO clients have no
+# max_http_buffer_size). aiohttp's 4 MiB default would drop inbound
+# workspace file payloads.
+SOCKETIO_MAX_HTTP_BUFFER_SIZE = 200 * 1024 * 1024
+
 
 async def _stream_with_timeout(agen, timeout_s: float):
     """Yield items from *agen* enforcing an overall timeout."""
@@ -83,6 +89,13 @@ class WebSocketInterface(Interface):
             reconnection_delay=2,
             reconnection_delay_max=30,
             logger=False,
+            # Engine.IO clients do not take max_http_buffer_size (server
+            # only). aiohttp's ws_connect default max_msg_size is 4 MiB;
+            # raise it to match backend Socket.IO / Daphne 200 MiB caps
+            # so inbound workspace file payloads are not dropped.
+            websocket_extra_options={
+                "max_msg_size": SOCKETIO_MAX_HTTP_BUFFER_SIZE,
+            },
         )
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]

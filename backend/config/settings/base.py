@@ -170,6 +170,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Socket.IO CORS — default allows all in dev, restricted in production.py
 SIO_CORS_ALLOWED_ORIGINS = "*"
 
+# Daphne 4.2.2+ defaults both WebSocket message and frame size to 1 MiB
+# (CVE-2026-44545). Computer-use PNG screenshots and workspace file reads
+# are sent as base64 over the runner Socket.IO connection and routinely
+# exceed that. Keep these aligned with Socket.IO max_http_buffer_size in
+# apps.runners.sio_server (200 MiB). Both message and frame caps must be
+# raised: a screenshot is a single WebSocket frame.
+DAPHNE_WEBSOCKET_MAX_MESSAGE_SIZE = 200 * 1024 * 1024
+DAPHNE_WEBSOCKET_MAX_FRAME_SIZE = 200 * 1024 * 1024
+
 
 # --- Logging (structlog) ---
 

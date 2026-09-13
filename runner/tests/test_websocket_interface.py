@@ -3,7 +3,7 @@ import uuid
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
 
 
 class DummyService:
@@ -70,6 +70,15 @@ class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebSocketMetricsPathTests(unittest.TestCase):
+    def test_socketio_client_raises_http_buffer_size(self) -> None:
+        """aiohttp inbound WS messages must accept 200 MiB like the backend."""
+        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        self.assertEqual(SOCKETIO_MAX_HTTP_BUFFER_SIZE, 200 * 1024 * 1024)
+        self.assertEqual(
+            interface._sio.eio.websocket_extra_options["max_msg_size"],
+            SOCKETIO_MAX_HTTP_BUFFER_SIZE,
+        )
+
     def test_storage_root_defaults_to_var_lib_opencuria(self) -> None:
         settings = RunnerSettings(
             qemu_image_cache_dir="/var/lib/opencuria/images",

@@ -112,9 +112,13 @@ def get_sio_server() -> socketio.AsyncServer:
             logger=False,
             engineio_logger=False,
             # Allow large file transfers (up to 200 MB) so that video files
-            # can be read from workspace containers and forwarded to the
-            # frontend.  The engine.io default of 1 MB is too small for any
-            # binary file payload sent as base64 over Socket.IO.
+            # and computer-use PNG screenshots can be sent as base64 over
+            # Socket.IO. The engine.io default of 1 MB is too small. This
+            # cap is not enough on its own: Daphne 4.2.2+ defaults
+            # websocket message/frame size to 1 MiB and rejects the frame
+            # before engine.io sees it. Keep DAPHNE_WEBSOCKET_MAX_MESSAGE
+            # / FRAME_SIZE (settings) and the daphne CLI flags in
+            # entrypoint.sh at the same 200 MiB value.
             max_http_buffer_size=200 * 1024 * 1024,
         )
         _register_event_handlers(_sio)

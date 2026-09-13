@@ -2796,9 +2796,17 @@ class WorkspaceService:
             if exit_code != 0 or not output.strip():
                 log.error("desktop_screenshot_failed", exit_code=exit_code)
                 raise RuntimeError("Failed to capture desktop screenshot")
+            image_b64 = output.strip()
+            log.info(
+                "desktop_screenshot_captured",
+                format=image_format,
+                width=result_width,
+                height=result_height,
+                image_b64_chars=len(image_b64),
+            )
             return {
                 "ok": True,
-                "image_b64": output.strip(),
+                "image_b64": image_b64,
                 "mime": result_mime,
                 "width": result_width,
                 "height": result_height,
