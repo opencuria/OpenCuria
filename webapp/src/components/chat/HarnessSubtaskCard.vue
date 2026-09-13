@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ChevronRight, Loader2 } from '@lucide/vue'
+import { ChevronRight } from '@lucide/vue'
+import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import type { HarnessPart } from '@/types/harness'
 import { useHarnessStore } from '@/stores/harness'
 import {
@@ -113,13 +114,14 @@ function handleOpen(): void {
     <span
       data-testid="harness-subtask-indicator"
       :data-running="isRunning ? '1' : '0'"
-      class="mt-1.5 flex h-3 w-3 shrink-0 items-center justify-center"
+      class="mt-0.5 flex size-[18px] shrink-0 items-center justify-center"
     >
-      <Loader2
+      <OpenCuriaLogo
         v-if="isRunning"
-        :size="12"
-        class="text-muted-foreground motion-reduce:hidden motion-safe:animate-spin"
-        aria-hidden="true"
+        icon-only
+        motion="working"
+        alt=""
+        class="size-[18px] motion-reduce:hidden"
       />
       <span
         class="h-1.5 w-1.5 rounded-full bg-muted-foreground"

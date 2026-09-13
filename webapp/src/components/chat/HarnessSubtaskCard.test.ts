@@ -54,6 +54,7 @@ describe('HarnessSubtaskCard', () => {
     expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
       '0',
     )
+    expect(wrapper.find('[data-testid="harness-subtask-indicator"] svg').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('explore')
   })
 
@@ -62,9 +63,13 @@ describe('HarnessSubtaskCard', () => {
       props: { part: makeSubtaskPart({ state: 'running', output: '' }) },
     })
 
-    expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
-      '1',
-    )
+    const indicator = wrapper.get('[data-testid="harness-subtask-indicator"]')
+    expect(indicator.attributes('data-running')).toBe('1')
+    const logo = indicator.get('svg')
+    expect(logo.attributes('data-motion')).toBe('working')
+    expect(logo.classes()).toContain('oc-logo--working')
+    expect(logo.classes()).toContain('size-[18px]')
+    expect(logo.attributes('aria-hidden')).toBe('true')
     expect(wrapper.find('[data-testid="harness-subtask-activity"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Completed')
   })

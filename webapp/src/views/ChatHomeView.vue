@@ -245,7 +245,7 @@ onMounted(async () => {
           data-testid="chat-home-hero"
         >
           <div class="mb-4 flex justify-center">
-            <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
+            <OpenCuriaLogo icon-only motion="idle" alt="OpenCuria" class="size-16" />
           </div>
 
           <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">

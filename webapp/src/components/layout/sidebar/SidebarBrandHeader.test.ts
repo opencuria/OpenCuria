@@ -71,6 +71,10 @@ describe('SidebarBrandHeader', () => {
 
     expect(logo.classes()).toContain('size-8!')
     expect(logo.attributes('viewBox')).toBe('13 13 38 38')
+    expect(logo.attributes('data-motion')).toBe('none')
+    expect(logo.classes()).not.toContain('oc-logo--idle')
+    expect(logo.classes()).not.toContain('oc-logo--working')
+    expect(logo.classes()).not.toContain('oc-logo--enter')
   })
 
   it('renders OpenCuria instead of the active organization name', () => {
