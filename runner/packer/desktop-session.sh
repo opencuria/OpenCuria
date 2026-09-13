@@ -69,7 +69,10 @@ apt-get install -y libasound2t64 || apt-get install -y libasound2
 # python (python3 -m pip keeps the distribution visible to apt-Python).
 # pip on 24.04 requires --break-system-packages (PEP 668); pip on 22.04
 # does not know the flag, so retry without it. python3-pyperclip from
-# apt already provides `import pyperclip` (no pip needed). No Agent-S
+# apt already provides `import pyperclip` (no pip needed). python3-tk is
+# a pure runtime dep: pyautogui imports mouseinfo, which imports tkinter —
+# without it every execute snippet dies at import time with
+# "You must install tkinter on Linux to use MouseInfo". No Agent-S
 # CLI is installed here. Rebuild the image after changing this block.
 apt-get install -y --no-install-recommends \
     tesseract-ocr \
@@ -79,6 +82,7 @@ apt-get install -y --no-install-recommends \
     libreoffice-calc \
     python3-uno \
     python3-pyperclip \
+    python3-tk \
     sudo \
     iproute2 \
     python3-pip
@@ -116,6 +120,12 @@ rm -f /tmp/google-chrome.deb
 mkdir -p /root/.vnc
 touch /root/.vnc/.de-was-selected
 printf "password\npassword\n" | vncpasswd -u root -w -r 2>/dev/null || true
+# python-Xlib unconditionally opens $XAUTHORITY/~/.Xauthority on connect,
+# even against the auth-less Xvnc (-SecurityTypes None). Bake an empty
+# file into the image so X11 Python clients (PyAutoGUI, mouseinfo, ...)
+# connect out of the box; the runner additionally touches it at every
+# desktop start and before each execute for self-healing.
+touch /root/.Xauthority
 
 cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
 desktop:

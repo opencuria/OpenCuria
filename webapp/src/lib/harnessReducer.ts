@@ -12,6 +12,7 @@ import type {
   HarnessPart,
   HarnessPartDelta,
   HarnessPartState,
+  HarnessPartType,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodo,
@@ -90,7 +91,11 @@ function ensureTextPart(message: HarnessMessage, sessionId: string): HarnessPart
   return part
 }
 
-function ensureReasoningPart(message: HarnessMessage, sessionId: string): HarnessPart {
+function ensureReasoningPart(
+  message: HarnessMessage,
+  sessionId: string,
+  opts: { step?: number } = {},
+): HarnessPart {
   let part = message.parts.find(
     (p) => p.type === 'reasoning' && p.state === 'running',
   )
@@ -103,10 +108,48 @@ function ensureReasoningPart(message: HarnessMessage, sessionId: string): Harnes
       state: 'running',
       title: '',
       output: '',
+      ...(opts.step !== undefined ? { meta: { step: opts.step } } : {}),
     }
     message.parts.push(part)
   }
   return part
+}
+
+/** Read a finite step number from a part id or payload step. */
+function toStepNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return value
+}
+
+/** Parts that identify an Agent-S step and must survive busy reconciliation. */
+const STEP_IDENTITY_TYPES: ReadonlySet<HarnessPartType> = new Set([
+  'agent',
+  'reasoning',
+  'step-start',
+  'step-finish',
+])
+
+/** Step number carried by a part (`meta.step` or `delta.step_*` markers). */
+function partStepNumber(part: HarnessPart): number | undefined {
+  const metaStep = toStepNumber(part.meta?.['step'])
+  if (metaStep !== undefined) return metaStep
+  if (part.type === 'step-start' || part.type === 'step-finish') {
+    const titleStep = /step\s+(\d+)/i.exec(part.title ?? '')
+    if (titleStep) return Number(titleStep[1])
+  }
+  return undefined
+}
+
+/** Normalize a defensive agent_meta map (unknown keys are dropped). */
+function sanitizeAgentMeta(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!value || typeof value !== 'object') return out
+  const source = value as Record<string, unknown>
+  for (const key of ['verification', 'analysis', 'next_action', 'action', 'action_kind']) {
+    const entry = source[key]
+    if (typeof entry === 'string' && entry) out[key] = entry
+  }
+  return out
 }
 
 /** Cost/tokens meta keys forwarded on step-finish parts. */
@@ -117,7 +160,8 @@ const STEP_FINISH_META_KEYS = ['cost', 'tokens', 'step'] as const
  *
  * Text/reasoning deltas append to the running part; tool_started creates a
  * running tool part; tool_completed/tool_error transition the matching part
- * to completed/error; step_start/step_finish create step marker parts.
+ * to completed/error; step_start/step_finish create step marker parts;
+ * agent deltas create (or idempotently update) the Agent-S plan part.
  */
 export function applyPartDelta(
   messages: HarnessMessage[],
@@ -134,8 +178,11 @@ export function applyPartDelta(
   }
 
   if (delta.reasoning) {
-    const part = ensureReasoningPart(message, sessionId)
+    const part = ensureReasoningPart(message, sessionId, { step: opts.step })
     part.output += delta.reasoning
+    if (opts.step !== undefined) {
+      part.meta = { ...part.meta, step: opts.step }
+    }
   }
 
   if (delta.tool_started) {
@@ -213,16 +260,24 @@ export function applyPartDelta(
   }
 
   if (delta.step_start !== undefined) {
-    message.parts.push({
-      id: opts.partId ?? nextLocalPartId(sessionId),
-      message_id: message.id,
-      session_id: sessionId,
-      type: 'step-start',
-      state: 'running',
-      title: `Step ${delta.step_start}`,
-      output: '',
-      meta: { step: delta.step_start },
-    })
+    const existing = opts.partId ? findPart(message, { partId: opts.partId }) : undefined
+    if (existing) {
+      existing.type = 'step-start'
+      existing.state = 'running'
+      existing.title = `Step ${delta.step_start}`
+      existing.meta = { ...existing.meta, step: delta.step_start }
+    } else {
+      message.parts.push({
+        id: opts.partId ?? nextLocalPartId(sessionId),
+        message_id: message.id,
+        session_id: sessionId,
+        type: 'step-start',
+        state: 'running',
+        title: `Step ${delta.step_start}`,
+        output: '',
+        meta: { step: delta.step_start },
+      })
+    }
   }
 
   if (delta.step_finish !== undefined) {
@@ -249,6 +304,41 @@ export function applyPartDelta(
       ) {
         part.state = 'completed'
       }
+    }
+  }
+
+  if (delta.agent !== undefined) {
+    // Agent-S plan event: create (or idempotently update) the completed
+    // plan part. Never touches the assistant `content` (plans are cards,
+    // not the final answer). The idle REST fetch reconciles afterwards;
+    // no per-event refetch is scheduled here.
+    const step = toStepNumber(opts.step)
+    const agentMeta = sanitizeAgentMeta(delta.agent_meta)
+    const existing = opts.partId ? findPart(message, { partId: opts.partId }) : undefined
+    if (existing) {
+      existing.type = 'agent'
+      existing.state = 'completed'
+      existing.title = 'Agent plan'
+      existing.output = delta.agent
+      existing.meta = {
+        ...existing.meta,
+        ...(step !== undefined ? { step } : {}),
+        ...(Object.keys(agentMeta).length > 0 ? { agent_meta: agentMeta } : {}),
+      }
+    } else {
+      message.parts.push({
+        id: opts.partId ?? nextLocalPartId(sessionId),
+        message_id: message.id,
+        session_id: sessionId,
+        type: 'agent',
+        state: 'completed',
+        title: 'Agent plan',
+        output: delta.agent,
+        meta: {
+          ...(step !== undefined ? { step } : {}),
+          ...(Object.keys(agentMeta).length > 0 ? { agent_meta: agentMeta } : {}),
+        },
+      })
     }
   }
 
@@ -333,6 +423,13 @@ function streamLength(message: HarnessMessage): number {
 /**
  * Keep a locally streamed assistant turn when a mid-run `fetchParts` snapshot
  * is behind the live deltas. Idle fetches should skip this and replace fully.
+ *
+ * The server snapshot may be older than the live socket state, so live-only
+ * Agent-S step parts (`agent` / `reasoning` / `step-start` / `step-finish`)
+ * are carried over by id instead of being dropped when the total stream
+ * length is equal (or the server is ahead). Text streaming keeps its
+ * existing behavior: the longer running text output wins, including across
+ * unstable local/server part ids.
  */
 export function mergeBusyFetchedMessages(
   previous: HarnessMessage[],
@@ -340,16 +437,133 @@ export function mergeBusyFetchedMessages(
 ): HarnessMessage[] {
   const prevLast = [...previous].reverse().find((m) => m.role === 'assistant')
   const nextLast = [...incoming].reverse().find((m) => m.role === 'assistant')
-  if (
-    prevLast &&
-    nextLast &&
-    prevLast.completed_at == null &&
-    streamLength(prevLast) > streamLength(nextLast)
-  ) {
-    nextLast.parts = prevLast.parts
+  if (!prevLast || !nextLast || prevLast.completed_at != null) {
+    return incoming
+  }
+  const liveLonger = streamLength(prevLast) > streamLength(nextLast)
+
+  const liveById = new Map(prevLast.parts.map((part) => [part.id, part]))
+  const merged = nextLast.parts.map((serverPart) => {
+    const live = liveById.get(serverPart.id)
+    if (!live) return serverPart
+    if (
+      (serverPart.type === 'text' ||
+        serverPart.type === 'reasoning' ||
+        serverPart.type === 'agent') &&
+      live.output.length > serverPart.output.length
+    ) {
+      return live
+    }
+    if (
+      serverPart.meta?.['agent_meta'] == null &&
+      live.meta?.['agent_meta'] != null
+    ) {
+      return { ...serverPart, meta: { ...serverPart.meta, agent_meta: live.meta['agent_meta'] } }
+    }
+    return serverPart
+  })
+  const mergedIds = new Set(merged.map((part) => part.id))
+
+  for (const live of prevLast.parts) {
+    if (mergedIds.has(live.id)) continue
+    if (live.type === 'text') {
+      // Local and server text ids differ; fold the longer running output
+      // into the server text slot instead of duplicating the row.
+      const slot = merged.find((part) => part.type === 'text' && part.state === 'running')
+      if (slot && live.state === 'running' && live.output.length > slot.output.length) {
+        slot.output = live.output
+      } else if (!slot && liveLonger && live.output) {
+        merged.push(live)
+        mergedIds.add(live.id)
+      }
+      continue
+    }
+    if (STEP_IDENTITY_TYPES.has(live.type)) {
+      // Never drop a live step part just because an older server snapshot
+      // does not know it yet; skip it only when the server already holds
+      // the same step content under a different id (e.g. reconciled row).
+      // Reasoning uses a prefix fold (local vs server ids diverge): same
+      // step + prefix-related outputs are one stream, the longer wins.
+      if (live.type === 'reasoning' && foldLiveReasoningIntoServerSlot(merged, live)) {
+        continue
+      }
+      if (isSameStepContent(merged, live)) continue
+      merged.push(live)
+      mergedIds.add(live.id)
+      continue
+    }
+    if (liveLonger) {
+      merged.push(live)
+      mergedIds.add(live.id)
+    }
+  }
+
+  nextLast.parts = merged
+  if (liveLonger) {
     nextLast.content = prevLast.content
   }
   return incoming
+}
+
+/**
+ * Fold a live reasoning part into the matching server reasoning slot.
+ *
+ * Live reasoning carries a local id while the server row uses a UUID; when
+ * both share the same step and one output is a prefix of the other they are
+ * the same stream observed at different times (not two rows). The longer /
+ * more advanced output wins on the server id; state/meta merge sensibly
+ * (exact matches dedupe). Same-step but genuinely different (non-prefix)
+ * content is kept as its own row (returns false).
+ */
+function foldLiveReasoningIntoServerSlot(
+  merged: HarnessPart[],
+  live: HarnessPart,
+): boolean {
+  const step = partStepNumber(live)
+  const liveOutput = live.output ?? ''
+  const slot = merged.find((part) => {
+    if (part.type !== 'reasoning') return false
+    if (partStepNumber(part) !== step) return false
+    const serverOutput = part.output ?? ''
+    return (
+      serverOutput === liveOutput ||
+      serverOutput.startsWith(liveOutput) ||
+      liveOutput.startsWith(serverOutput)
+    )
+  })
+  if (!slot) return false
+  const serverOutput = slot.output ?? ''
+  if (liveOutput.length > serverOutput.length) {
+    slot.output = liveOutput
+    slot.state = live.state
+    if (live.title) slot.title = live.title
+  } else if (serverOutput.length === liveOutput.length) {
+    // Exact match: dedupe on the server id, keep the furthest state.
+    if (slot.state !== 'completed' && live.state === 'completed') {
+      slot.state = 'completed'
+    }
+  }
+  // Merge live meta (e.g. step attribution) without losing server keys.
+  slot.meta = { ...slot.meta, ...live.meta }
+  if (step !== undefined) slot.meta = { ...slot.meta, step }
+  return true
+}
+
+/**
+ * True when the merged server parts already hold this live step part under
+ * a different id (same step number and same output for agent/reasoning,
+ * same step number for step markers).
+ */
+function isSameStepContent(merged: HarnessPart[], live: HarnessPart): boolean {
+  const step = partStepNumber(live)
+  return merged.some((part) => {
+    if (part.type !== live.type) return false
+    if (part.type === 'step-start' || part.type === 'step-finish') {
+      return step !== undefined && partStepNumber(part) === step
+    }
+    if (step !== undefined && partStepNumber(part) !== step) return false
+    return part.output === live.output
+  })
 }
 
 const STREAM_PART_TYPES = new Set(['text', 'reasoning'])

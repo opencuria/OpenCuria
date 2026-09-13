@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import migrations
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
@@ -68,6 +69,8 @@ def test_agent_s_config_defaults(agent_s_setup) -> None:
     assert view["max_trajectory_length"] == 8
     assert view["enable_reflection"] is True
     assert view["enable_code_agent"] is True
+    # Session recording is an explicit org-wide opt-in, default off.
+    assert view["enable_recording"] is False
     assert view["screenshot_max_dimension"] == 2400
     assert view["action_pre_delay"] == 1.0
     assert view["action_post_delay"] == 1.0
@@ -93,6 +96,7 @@ def test_agent_s_config_save_and_grounding_fallback(agent_s_setup) -> None:
             "max_trajectory_length": 4,
             "enable_reflection": False,
             "enable_code_agent": False,
+            "enable_recording": False,
             "screenshot_max_dimension": 1200,
             "action_pre_delay": 0.5,
             "action_post_delay": 0.25,
@@ -101,6 +105,7 @@ def test_agent_s_config_save_and_grounding_fallback(agent_s_setup) -> None:
     )
     assert view["max_steps"] == 7
     assert view["enable_reflection"] is False
+    assert view["enable_recording"] is False
     assert (
         AgentSConfig.objects.filter(organization_id=agent_s_setup["org"].id).count()
         == 1
@@ -115,6 +120,7 @@ def test_agent_s_config_save_and_grounding_fallback(agent_s_setup) -> None:
     assert run_config.grounding_width == 1000
     assert run_config.max_steps == 7
     assert run_config.model_temperature is None
+    assert run_config.enable_recording is False
 
     service.save_config(
         agent_s_setup["org"].id,
@@ -143,6 +149,8 @@ def test_agent_s_config_validation(agent_s_setup) -> None:
         service.save_config(agent_s_setup["org"].id, {"max_steps": 0})
     with pytest.raises(ValueError, match="enable_reflection"):
         service.save_config(agent_s_setup["org"].id, {"enable_reflection": "yes"})
+    with pytest.raises(ValueError, match="enable_recording"):
+        service.save_config(agent_s_setup["org"].id, {"enable_recording": "yes"})
     with pytest.raises(ValueError, match="wait_delay"):
         service.save_config(agent_s_setup["org"].id, {"wait_delay": -1.0})
     assert (
@@ -180,6 +188,7 @@ def test_agent_s_config_rest_roundtrip(agent_s_setup) -> None:
                 "max_trajectory_length": 5,
                 "enable_reflection": True,
                 "enable_code_agent": False,
+                "enable_recording": True,
                 "screenshot_max_dimension": 1600,
                 "action_pre_delay": 0.2,
                 "action_post_delay": 0.3,
@@ -193,6 +202,7 @@ def test_agent_s_config_rest_roundtrip(agent_s_setup) -> None:
     assert saved["grounding_model"] == "openai-compatible/uitars"
     assert saved["max_steps"] == 9
     assert saved["enable_code_agent"] is False
+    assert saved["enable_recording"] is True
     assert saved["wait_delay"] == 1.5
 
     again = read_client.get(URL)
@@ -273,19 +283,29 @@ def test_agent_s_config_mcp_parity(agent_s_setup) -> None:
     org_id = agent_s_setup["org"].id
     fetched = _call_get_agent_s_config(api_key, org_id, {})
     assert _json.loads(fetched[0].text)["max_steps"] == 15
+    assert _json.loads(fetched[0].text)["enable_recording"] is False
 
     saved = _call_save_agent_s_config(
         api_key,
         org_id,
-        {"grounding_model": "openai-compatible/uitars", "max_steps": 6},
+        {
+            "grounding_model": "openai-compatible/uitars",
+            "max_steps": 6,
+            "enable_recording": True,
+        },
     )
     payload = _json.loads(saved[0].text)
     assert payload["grounding_model"] == "openai-compatible/uitars"
     assert payload["max_steps"] == 6
+    assert payload["enable_recording"] is True
     assert payload["model_temperature"] is None
 
     invalid = _call_save_agent_s_config(api_key, org_id, {"max_steps": 0})
     assert invalid[0].text.startswith("Error:")
+    invalid_recording = _call_save_agent_s_config(
+        api_key, org_id, {"enable_recording": "yes"}
+    )
+    assert invalid_recording[0].text.startswith("Error:")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -310,6 +330,7 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
                 "max_trajectory_length": 5,
                 "enable_reflection": False,
                 "enable_code_agent": False,
+                "enable_recording": True,
                 "screenshot_max_dimension": 1600,
                 "action_pre_delay": 0.2,
                 "action_post_delay": 0.3,
@@ -319,6 +340,7 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
         content_type="application/json",
     )
     assert seeded.status_code == 200, seeded.content[:500]
+    assert seeded.json()["enable_recording"] is True
 
     partial = run_client.put(
         URL,
@@ -334,6 +356,7 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
     assert body["max_trajectory_length"] == 5
     assert body["enable_reflection"] is False
     assert body["enable_code_agent"] is False
+    assert body["enable_recording"] is True
     assert body["wait_delay"] == 1.5
     assert read_client.get(URL).json()["max_steps"] == 4
 
@@ -351,4 +374,70 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
     assert payload["max_steps"] == 4
     assert payload["grounding_model"] == "openai-compatible/uitars"
     assert payload["enable_reflection"] is False
+    assert payload["enable_recording"] is True
     assert read_client.get(URL).json()["wait_delay"] == 2.5
+
+
+@pytest.mark.django_db(transaction=True)
+def test_agent_s_config_recording_roundtrip_and_run_config(agent_s_setup) -> None:
+    """enable_recording round-trips via REST/MCP and reaches the run config."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from apps.mcp_app.server import _call_save_agent_s_config
+
+    service = AgentSConfigService()
+    assert service.get_or_default(agent_s_setup["org"].id)["enable_recording"] is False
+
+    run_client = _client(
+        user=agent_s_setup["owner"], org=agent_s_setup["org"], permissions=RUN
+    )
+    put = run_client.put(
+        URL,
+        data=json.dumps({"enable_recording": True}),
+        content_type="application/json",
+    )
+    assert put.status_code == 200, put.content[:500]
+    assert put.json()["enable_recording"] is True
+    run_config = service.to_run_config(
+        agent_s_setup["org"].id, main_model="openrouter/acme/main"
+    )
+    assert run_config.enable_recording is True
+
+    api_key = SimpleNamespace(user=agent_s_setup["owner"])
+    saved = _call_save_agent_s_config(
+        api_key, agent_s_setup["org"].id, {"enable_recording": False}
+    )
+    assert _json.loads(saved[0].text)["enable_recording"] is False
+    assert (
+        service.to_run_config(
+            agent_s_setup["org"].id, main_model="openrouter/acme/main"
+        ).enable_recording
+        is False
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_agent_s_config_migration_0019_adds_recording_default_off(
+    agent_s_setup,
+) -> None:
+    """Migration 0019 state adds enable_recording with default False."""
+    import importlib
+
+    migration = importlib.import_module(
+        "apps.harness.migrations.0019_agentsconfig_recording"
+    )
+    (operation,) = migration.Migration.operations
+    assert isinstance(operation, migrations.AddField)
+    assert operation.name == "enable_recording"
+    assert operation.field.default is False
+    assert migration.Migration.dependencies == [
+        ("harness", "0018_harnesssession_last_message_at"),
+    ]
+
+    # Model-level default: new rows are created with recording off.
+    row = AgentSConfig.objects.create(
+        organization_id=agent_s_setup["org"].id,
+    )
+    assert row.enable_recording is False
+    assert AgentSConfig._meta.get_field("enable_recording").default is False

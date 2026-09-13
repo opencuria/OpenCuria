@@ -534,8 +534,14 @@ allowed. `explore` allows research bash
 destructive shell (`rm`/`sudo`/…); pending permission/question gates of
 child sessions surface on the parent composer (and on `GET …/parts`).
 The `computeruse` subagent exposes desktop tools only (spawned via `task`);
-session recordings are written under `.opencuria/computeruse/` and appended to
-chat as markdown video refs. Computer-use acquires a desktop lease for the
+session recordings are opt-in and off by default (org-wide
+`AgentSConfig.enable_recording`; REST `GET/PUT /agent-s-config/` + MCP
+`get/save_agent_s_config`, no extra endpoint/permission): when enabled,
+recordings are written under `.opencuria/computeruse/` and appended to
+chat as markdown video refs; when disabled (default), no `record_start`/
+`record_stop` runs, no video is appended, and no `recording_path` is set.
+Parent subtask cards only preserve a video when the child output really
+contains a recording marker (never invented). Computer-use acquires a desktop lease for the
 run (`hold`/`release`) so closing the manual VNC viewer does not kill the
 agent. While computer-use holds the display, the viewer is observe-only;
 **Take control** aborts busy `computeruse` sessions on that workspace.
@@ -550,8 +556,8 @@ QEMU): PyAutoGUI/pyperclip, `tesseract-ocr`, `wmctrl`, `xclip`/`xsel`,
 `sudo`/`iproute2` (`ss`), LibreOffice Calc + `python3-uno`; `ffmpeg` and
 `xdotool` stay for recording/input. Rebuild image definitions after changing
 the desktop stack (existing images are never modified in place; runs fail
-with a rebuild hint when deps are missing). Recording stops and the lease
-releases in `finally`; cancellation propagates (`harness:cancel` also cancels
+with a rebuild hint when deps are missing). When enabled, recording stops
+and the lease releases in `finally`; cancellation propagates (`harness:cancel` also cancels
 long-running `desktop_action('execute')` via the request-scoped runner task
 registry). To add tooling to workspaces, extend the image definitions
 (packages / custom Dockerfile / init script).
@@ -577,6 +583,18 @@ basename matches (8 files / 10 total rows) and scrolls the active row into view.
 
 **Security:** computer-use session recordings capture the workspace display;
 credentials or other sensitive content visible on screen may appear in the mp4.
+Recording stays off unless the org explicitly opts in
+(`AgentSConfig.enable_recording`).
+
+**Step/timeline observability:** Agent-S plans persist as `agent` parts with
+the full plan in `output` plus safe summaries in `meta.agent_meta`
+(`verification`/`analysis`/`next_action`/`action`/`action_kind` — never raw
+`exec_code`/coordinates; free-form plans yield empty fields) and the same
+`agent_meta` rides the live `delta.agent` event. `step_start` emits `part_id`;
+`step_finish` completes the matching step-start part DB-side and closes the
+per-step reasoning part (frontend already closes it live), so reasoning stays
+step-attributed via `meta.step`; normal LLM reasoning without a step keeps
+working (`step` None).
 
 ### 6.6 Adding a New Runtime Backend
 

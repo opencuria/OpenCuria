@@ -30,6 +30,7 @@ const defaults: AgentSConfig = {
   max_trajectory_length: 8,
   enable_reflection: true,
   enable_code_agent: true,
+  enable_recording: false,
   screenshot_max_dimension: 2400,
   action_pre_delay: 1.0,
   action_post_delay: 1.0,
@@ -114,6 +115,33 @@ describe('AgentSConfigPanel', () => {
     await flushPromises()
 
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ model_temperature: null })
+  })
+
+  it('defaults recording off, saves true, and returns to false', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const toggle = wrapper.find('[data-testid="agent-s-enable-recording"]')
+    expect(toggle.exists()).toBe(true)
+    expect(toggle.attributes('aria-describedby')).toBe('agent-s-recording-hint')
+    expect(wrapper.find('#agent-s-recording-hint').text()).toContain('sensitive content')
+    expect(wrapper.find('#agent-s-recording-hint').text()).toContain('Off by default')
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe(
+      'All changes saved',
+    )
+
+    await toggle.trigger('click')
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe(
+      'Unsaved changes',
+    )
+    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await flushPromises()
+    expect(saveAgentSConfigMock).toHaveBeenCalledWith({ enable_recording: true })
+
+    await toggle.trigger('click')
+    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await flushPromises()
+    expect(saveAgentSConfigMock).toHaveBeenCalledWith({ enable_recording: false })
   })
 
   it('blocks invalid numbers with inline errors instead of saving', async () => {

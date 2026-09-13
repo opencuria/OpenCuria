@@ -8,19 +8,16 @@ import {
   type RenderBlock,
 } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
+import { buildAgentStepViews, hasRunningAgentSequence } from '@/lib/harnessAgentSteps'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
 import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
+import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
 import HarnessWorkedFor from './HarnessWorkedFor.vue'
@@ -51,14 +48,37 @@ const elapsedLabel = computed(() => {
   return ms == null ? '' : formatElapsed(ms)
 })
 
+const agentViews = computed(() =>
+  buildAgentStepViews(props.message.parts, {
+    streaming: props.streaming === true,
+    // Only the final (non-streaming) message outcome may turn the last
+    // step into `Failed`; while streaming no stale error may leak in.
+    ...(props.streaming === true
+      ? {}
+      : { finish: props.message.finish, messageError: props.message.error }),
+  }),
+)
+
+function agentViewFor(partId: string): (typeof agentViews.value)[number] | undefined {
+  return agentViews.value.find((view) => view.part.id === partId)
+}
+
+function isAgentBlockConnected(index: number): boolean {
+  const next = blocks.value[index + 1]
+  return next?.kind === 'agent'
+}
+
 const lastBlockIsText = computed(() => {
   const last = blocks.value[blocks.value.length - 1]
   return last?.kind === 'text'
 })
 
-/** Thinking only in idle gaps: busy turn, no live tool/subtask. */
+/** Thinking only in idle gaps: busy turn, no live tool/subtask or agent step. */
 const showThinking = computed(
-  () => props.streaming === true && !hasRunningToolOrSubtask(props.message.parts),
+  () =>
+    props.streaming === true &&
+    !hasRunningToolOrSubtask(props.message.parts) &&
+    !hasRunningAgentSequence(props.message.parts),
 )
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])
@@ -93,12 +113,15 @@ function blockKey(index: number): string {
   }
   if (block.kind === 'workedFor') {
     const first = block.blocks[0]
-    if (first?.kind === 'group') return `workedFor-${first.parts[0]?.id ?? index}`
-    if (first && first.kind !== 'group') return `workedFor-${first.part.id}`
-    return `workedFor-${index}`
+    if (!first) return `workedFor-${index}`
+    if (first.kind === 'group') return `workedFor-${first.parts[0]?.id ?? index}`
+    return `workedFor-${first.part.id}`
   }
   if (block.kind === 'compaction') {
     return `compaction-${block.part.id}`
+  }
+  if (block.kind === 'agent') {
+    return `agent-${block.part.id}`
   }
   return `${block.kind}-${block.part.id}`
 }
@@ -110,9 +133,7 @@ const editDraft = ref('')
 /** Local optimistic ids (`local-user-*`) have no backend row to edit/fork. */
 const isEditableMessage = computed(
   () =>
-    props.message.role === 'user' &&
-    !props.disabled &&
-    !props.message.id.startsWith('local-user-'),
+    props.message.role === 'user' && !props.disabled && !props.message.id.startsWith('local-user-'),
 )
 
 watch(
@@ -252,6 +273,21 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
                 @open-subtask="emit('openSubtask', $event)"
               />
             </HarnessWorkedFor>
+          </div>
+          <div
+            v-else-if="block.kind === 'agent'"
+            data-block-kind="agent"
+            :data-part-id="block.part.id"
+            :class="isAgentBlockConnected(index) ? 'mb-0.5' : ''"
+          >
+            <HarnessAgentStep
+              :step="agentViewFor(block.part.id)?.step ?? null"
+              :part="block.part"
+              :status="agentViewFor(block.part.id)?.status ?? 'completed'"
+              :live="agentViewFor(block.part.id)?.live ?? false"
+              :legacy="agentViewFor(block.part.id)?.legacy ?? true"
+              :connected="isAgentBlockConnected(index)"
+            />
           </div>
           <HarnessBlockList
             v-else

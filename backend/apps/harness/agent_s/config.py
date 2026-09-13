@@ -28,7 +28,9 @@ resolves an effective config per run
   identically unless a per-org override is saved.
 
 Defaults mirror the Agent-S CLI (``gui_agents/s3/cli_app.py``): 15 max
-steps, trajectory length 8, reflection on.
+steps, trajectory length 8, reflection on. Session recording
+(``enable_recording``) stays off by default: it captures the workspace
+display as mp4 and is an explicit org-wide opt-in.
 """
 
 from __future__ import annotations
@@ -78,6 +80,8 @@ class AgentSRunConfig:
     max_trajectory_length: int = DEFAULT_MAX_TRAJECTORY_LENGTH
     enable_reflection: bool = True
     enable_code_agent: bool = True
+    #: Opt-in mp4 session recording for computer-use runs (default off).
+    enable_recording: bool = False
     screenshot_max_dimension: int = DEFAULT_SCREENSHOT_MAX_DIMENSION
     action_pre_delay: float = DEFAULT_ACTION_PRE_DELAY
     action_post_delay: float = DEFAULT_ACTION_POST_DELAY
@@ -147,6 +151,16 @@ class AgentSRunConfig:
                 "AgentSRunConfig.screenshot_max_dimension must be an int "
                 f"in 1..7680, got {self.screenshot_max_dimension!r}"
             )
+        for name in (
+            "enable_reflection",
+            "enable_code_agent",
+            "enable_recording",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"AgentSRunConfig.{name} must be a boolean, got {value!r}"
+                )
         for name in ("action_pre_delay", "action_post_delay", "wait_delay"):
             value = getattr(self, name)
             if (

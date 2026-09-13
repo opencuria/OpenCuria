@@ -5,7 +5,7 @@
  * into a "Worked" group. Reasoning and failed tools break the run and render
  * as standalone rows. Subtasks and patches stay as top-level cards.
  * After a turn finishes, wrapFinishedWork scoops work blocks into one
- * "Worked for" shell; text and compaction stay outside.
+ * "Worked for" shell; text, compaction, and Agent-S plan steps stay outside.
  */
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
@@ -13,7 +13,8 @@ import { isTaskToolPart } from '@/lib/harnessSubtaskActivity'
 import { resolveToolName } from '@/lib/toolDisplay'
 
 const GROUPABLE_TYPES = new Set<HarnessPartType>(['tool'])
-const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch', 'agent'])
+const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch'])
+const AGENT_TYPES = new Set<HarnessPartType>(['agent'])
 const SKIP_TYPES = new Set<HarnessPartType>(['step-start', 'step-finish'])
 const PATCHED_FILE_TOOLS = new Set(['edit', 'write'])
 
@@ -27,10 +28,16 @@ export function isCardPart(part: HarnessPart): boolean {
   return CARD_TYPES.has(part.type)
 }
 
+/** Agent-S plan steps render as their own timeline blocks. */
+export function isAgentPart(part: HarnessPart): boolean {
+  return AGENT_TYPES.has(part.type)
+}
+
 export type TextRenderBlock = { kind: 'text'; part: HarnessPart }
 export type SingleRenderBlock = { kind: 'single'; part: HarnessPart }
 export type GroupRenderBlock = { kind: 'group'; parts: HarnessPart[] }
 export type CardRenderBlock = { kind: 'card'; part: HarnessPart }
+export type AgentRenderBlock = { kind: 'agent'; part: HarnessPart }
 export type CompactionRenderBlock = { kind: 'compaction'; part: HarnessPart }
 export type WorkedForRenderBlock = { kind: 'workedFor'; blocks: RenderBlock[] }
 
@@ -39,6 +46,7 @@ export type RenderBlock =
   | SingleRenderBlock
   | GroupRenderBlock
   | CardRenderBlock
+  | AgentRenderBlock
   | CompactionRenderBlock
 
 /** Top-level blocks after a finished turn may wrap work in `workedFor`. */
@@ -111,6 +119,13 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
       blocks.push({ kind: 'compaction', part })
       continue
     }
+    if (part.type === 'agent') {
+      // Agent-S plan steps break tool runs so consecutive steps stay a
+      // visible vertical sequence instead of merging into Worked groups.
+      flushRun()
+      blocks.push({ kind: 'agent', part })
+      continue
+    }
     if (isStandaloneWork(part)) {
       flushRun()
       blocks.push({ kind: 'single', part })
@@ -129,12 +144,13 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
 }
 
 function isOuterWorkBlock(block: RenderBlock): boolean {
-  return block.kind !== 'text' && block.kind !== 'compaction'
+  return block.kind !== 'text' && block.kind !== 'compaction' && block.kind !== 'agent'
 }
 
 /**
  * Scoop every work block into one `workedFor` shell at the first work
- * position. Text and compaction stay in chronological order around it.
+ * position. Text, compaction, and agent steps stay in chronological
+ * order around it so the computer-use timeline stays visible.
  */
 export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
   const work: RenderBlock[] = []

@@ -172,6 +172,7 @@ class AgentSConfigService:
         "max_trajectory_length": 8,
         "enable_reflection": True,
         "enable_code_agent": True,
+        "enable_recording": False,
         "screenshot_max_dimension": 2400,
         "action_pre_delay": 1.0,
         "action_post_delay": 1.0,
@@ -214,6 +215,9 @@ class AgentSConfigService:
             "max_trajectory_length": int(row.max_trajectory_length),
             "enable_reflection": bool(row.enable_reflection),
             "enable_code_agent": bool(row.enable_code_agent),
+            "enable_recording": bool(
+                getattr(row, "enable_recording", False) or False
+            ),
             "screenshot_max_dimension": int(row.screenshot_max_dimension),
             "action_pre_delay": float(row.action_pre_delay),
             "action_post_delay": float(row.action_post_delay),
@@ -259,7 +263,7 @@ class AgentSConfigService:
             normalized["model_temperature"] = float(temperature)
         else:
             normalized["model_temperature"] = None
-        for name in ("enable_reflection", "enable_code_agent"):
+        for name in ("enable_reflection", "enable_code_agent", "enable_recording"):
             raw = values.get(name)
             if not isinstance(raw, bool):
                 raise ValueError(f"AgentSConfig.{name} must be a boolean")
@@ -338,6 +342,7 @@ class AgentSConfigService:
             max_trajectory_length=int(view["max_trajectory_length"]),
             enable_reflection=bool(view["enable_reflection"]),
             enable_code_agent=bool(view["enable_code_agent"]),
+            enable_recording=bool(view.get("enable_recording", False)),
             screenshot_max_dimension=int(view["screenshot_max_dimension"]),
             action_pre_delay=float(view["action_pre_delay"]),
             action_post_delay=float(view["action_post_delay"]),

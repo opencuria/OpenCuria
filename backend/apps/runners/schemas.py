@@ -414,7 +414,13 @@ class ImageDefinitionBuildSummaryOut(Schema):
 
 
 class ImageBuildJobOut(Schema):
-    """Response schema for runner-specific image build status."""
+    """Response schema for runner-specific image build status.
+
+    Includes the full ``build_log`` — used only for single-object create /
+    update responses. List responses use :class:`ImageBuildJobListOut`,
+    which carries ``build_log_size`` instead and keeps the 3s frontend
+    polling cheap.
+    """
 
     id: uuid.UUID
     image_definition_id: uuid.UUID
@@ -422,6 +428,30 @@ class ImageBuildJobOut(Schema):
     image_artifact_id: uuid.UUID | None = None
     status: str
     build_log: str
+    build_task_id: uuid.UUID | None = None
+    built_at: datetime | None = None
+    deactivated_at: datetime | None = None
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImageBuildJobListOut(Schema):
+    """Lightweight list schema for runner image builds (polling-safe).
+
+    Same fields as :class:`ImageBuildJobOut` except the full ``build_log``
+    is replaced by ``build_log_size`` (characters). The log itself is
+    fetched on demand via ``GET .../runner-builds/{runner_id}/log/``.
+    """
+
+    id: uuid.UUID
+    image_definition_id: uuid.UUID
+    runner_id: uuid.UUID
+    image_artifact_id: uuid.UUID | None = None
+    status: str
+    build_log_size: int = 0
     build_task_id: uuid.UUID | None = None
     built_at: datetime | None = None
     deactivated_at: datetime | None = None

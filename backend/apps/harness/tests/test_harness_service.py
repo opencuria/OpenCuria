@@ -1755,8 +1755,11 @@ async def test_agent_and_reasoning_events_persist_parts(harness_workspace) -> No
     reasoning_parts = [part for part in parts if part.type == "reasoning"]
     assert len(agent_parts) == 1
     assert agent_parts[0].output == "click save"
+    assert agent_parts[0].meta.get("step") == 1
+    assert agent_parts[0].meta.get("agent_meta", {}).get("action") == ""
     assert len(reasoning_parts) == 1
     assert reasoning_parts[0].output == "looks good"
+    assert reasoning_parts[0].meta.get("step") == 1
     assistant.refresh_from_db()
     assert assistant.content == ""
 
@@ -2076,3 +2079,289 @@ async def test_abort_busy_computeruse_leaves_parent_running(
         await parent_task
     with pytest.raises(asyncio.CancelledError):
         await explore_task
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_step_start_carries_part_id_and_finish_completes_it(
+    harness_workspace,
+) -> None:
+    """step_start emits part_id; step_finish completes that DB part."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    started = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "step_start" in (item.get("delta") or {})
+    ]
+    assert len(started) == 1
+    assert started[0].get("part_id")
+    part = await sync_to_async(HarnessPartRepository.list_for_session)(session.id)
+    step_starts = [p for p in part if p.type == "step-start"]
+    assert len(step_starts) == 1
+    assert step_starts[0].state == "running"
+    assert str(step_starts[0].id) == started[0]["part_id"]
+
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    step_starts[0].refresh_from_db()
+    assert step_starts[0].state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_reasoning_part_is_per_step_and_meta_carries_step(
+    harness_workspace,
+) -> None:
+    """Reasoning closes DB-side on step_finish; next step gets a fresh part."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"reasoning": "first"}, "step": 1},
+    )
+    first_id = service._runs[str(session.id)].get("reasoning_part_id")
+    assert first_id
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    assert service._runs[str(session.id)].get("reasoning_part_id") is None
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 2}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"reasoning": "second"}, "step": 2},
+    )
+    second_id = service._runs[str(session.id)].get("reasoning_part_id")
+    assert second_id and second_id != first_id
+    parts = HarnessPartRepository.list_for_session(session.id)
+    by_id = {str(part.id): part for part in parts if part.type == "reasoning"}
+    assert by_id[first_id].state == "completed"
+    assert by_id[first_id].output == "first"
+    assert by_id[first_id].meta.get("step") == 1
+    assert by_id[second_id].state == "running"
+    assert by_id[second_id].output == "second"
+    assert by_id[second_id].meta.get("step") == 2
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
+    """Normal LLM reasoning without a step keeps working (step None)."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"reasoning": "x"}}
+    )
+    parts = HarnessPartRepository.list_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert len(reasoning) == 1
+    assert reasoning[0].output == "x"
+    forwarded = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "reasoning" in (item.get("delta") or {})
+    ]
+    assert len(forwarded) == 1
+    assert forwarded[0].get("step") is None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_agent_event_persists_meta_and_forwards_agent_meta(
+    harness_workspace,
+) -> None:
+    """agent events persist step+agent_meta and forward delta.agent_meta."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    plan = (
+        "(Previous action verification)\nIt worked.\n\n"
+        "(Screenshot Analysis)\nDesktop shown.\n\n"
+        "(Next Action)\nClick save.\n\n"
+        "(Grounded Action)\n```python\n"
+        'agent.click("The save button in the dialog")\n'
+        "```"
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 3}
+    )
+    parts = HarnessPartRepository.list_for_session(session.id)
+    agent_parts = [p for p in parts if p.type == "agent"]
+    assert len(agent_parts) == 1
+    assert agent_parts[0].output == plan
+    assert agent_parts[0].meta.get("step") == 3
+    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
+    assert persisted_meta["action_kind"] == "click"
+    assert persisted_meta["action"] == 'click "The save button in the dialog"'
+    assert "exec_code" not in str(persisted_meta)
+    forwarded = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "agent" in (item.get("delta") or {})
+    ]
+    assert len(forwarded) == 1
+    assert forwarded[0]["delta"]["agent"] == plan
+    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
+    assert forwarded[0]["step"] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_agent_event_ignores_injected_agent_meta(harness_workspace) -> None:
+    """Injected delta.agent_meta (e.g. exec_code) is never persisted/forwarded."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    plan = (
+        "(Previous action verification)\nIt worked.\n\n"
+        "(Screenshot Analysis)\nDesktop shown.\n\n"
+        "(Next Action)\nClick save.\n\n"
+        "(Grounded Action)\n```python\n"
+        'agent.click("The save button in the dialog")\n'
+        "```"
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "agent",
+            "delta": {
+                "plan": plan,
+                "agent_meta": {
+                    "exec_code": 'agent.click("The save button")',
+                    "action": "pwned",
+                    "action_kind": "pwned",
+                    "extra": "evil",
+                },
+            },
+            "step": 4,
+        },
+    )
+    parts = HarnessPartRepository.list_for_session(session.id)
+    agent_parts = [p for p in parts if p.type == "agent"]
+    assert len(agent_parts) == 1
+    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
+    assert persisted_meta["action"] == 'click "The save button in the dialog"'
+    assert persisted_meta["action_kind"] == "click"
+    assert set(persisted_meta) == {
+        "verification",
+        "analysis",
+        "next_action",
+        "action",
+        "action_kind",
+    }
+    assert "exec_code" not in str(persisted_meta)
+    forwarded = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "agent" in (item.get("delta") or {})
+    ]
+    assert len(forwarded) == 1
+    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None:
+    """A type() plan with a secret persists/forwards no typed text."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    secret = "S3cr3t-P@ssw0rt-123"
+    plan = (
+        "(Previous action verification)\nIt worked.\n\n"
+        "(Screenshot Analysis)\nA password field is focused.\n\n"
+        "(Next Action)\nType the password.\n\n"
+        "(Grounded Action)\n```python\n"
+        f'agent.type("Password field", "{secret}")\n'
+        "```"
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 5}
+    )
+    parts = HarnessPartRepository.list_for_session(session.id)
+    agent_parts = [p for p in parts if p.type == "agent"]
+    assert len(agent_parts) == 1
+    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
+    assert persisted_meta["action"] == "type"
+    assert persisted_meta["action_kind"] == "type"
+    assert secret not in str(persisted_meta)
+    forwarded = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "agent" in (item.get("delta") or {})
+    ]
+    assert len(forwarded) == 1
+    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
+    assert secret not in str(forwarded[0]["delta"]["agent_meta"])

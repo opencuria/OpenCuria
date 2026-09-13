@@ -89,6 +89,13 @@ WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
 
 DESKTOP_DISPLAY = ":1"
 DESKTOP_HOME = "/root"
+#: Marker file written by the runner once a workspace X11 client
+#: environment is known to accept connections (currently an empty
+#: ``.Xauthority`` is sufficient: Xvnc uses ``-SecurityTypes None`` but
+#: python-Xlib unconditionally opens ``$XAUTHORITY``/``~/.Xauthority``,
+#: so every X11 client — including PyAutoGUI — requires the file to
+#: exist; without it every ``execute`` snippet fails before connecting).
+DESKTOP_XAUTHORITY_PATH = "/root/.Xauthority"
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
 MIN_DESKTOP_WIDTH = 800
@@ -2182,6 +2189,15 @@ class WorkspaceService:
             "set -e\n"
             "export DISPLAY=:1\n"
             "export HOME=/root\n"
+            # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
+            # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` on
+            # connect — every X11 Python client (PyAutoGUI, mouseinfo,
+            # pyscreeze, OCR helpers, ...) requires the file to exist.
+            # Touch it at start so ``execute`` snippets never die with
+            # ``FileNotFoundError: ... '/root/.Xauthority'`` before even
+            # connecting (``_desktop_env`` additionally exports
+            # ``XAUTHORITY`` explicitly for the same reason).
+            "touch /root/.Xauthority\n"
             "mkdir -p /root/.vnc\n"
             # Per-start marker: clearing it here guarantees xstartup runs
             # again after every Xvnc (re)start. It must not persist across
@@ -2583,8 +2599,18 @@ class WorkspaceService:
 
     @staticmethod
     def _desktop_env() -> dict[str, str]:
-        """Return environment variables for desktop X11 commands."""
-        return {"HOME": DESKTOP_HOME, "DISPLAY": DESKTOP_DISPLAY}
+        """Return environment variables for desktop X11 commands.
+
+        ``XAUTHORITY`` is pinned alongside ``HOME``/``DISPLAY`` so every
+        X11 client (xdotool, ffmpeg x11grab, python-Xlib/PyAutoGUI, ...)
+        resolves auth through the runner-owned file instead of depending
+        on ambient workspace state.
+        """
+        return {
+            "HOME": DESKTOP_HOME,
+            "DISPLAY": DESKTOP_DISPLAY,
+            "XAUTHORITY": DESKTOP_XAUTHORITY_PATH,
+        }
 
     @staticmethod
     def _sanitize_run_id(run_id: str) -> str:
@@ -2592,6 +2618,37 @@ class WorkspaceService:
         if not run_id or not _RUN_ID_RE.match(run_id):
             raise ValueError(f"Invalid run_id: {run_id}")
         return run_id
+
+    async def _ensure_desktop_xauthority(self, workspace_id: uuid.UUID) -> None:
+        """Ensure the X11 client auth file exists inside the workspace.
+
+        Xvnc runs with ``-SecurityTypes None``, but python-Xlib
+        unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` — an empty
+        file is sufficient for the auth-less server. Idempotent best
+        effort: failures only degrade to the previous behaviour (the
+        client raises ``FileNotFoundError``) and must never fail an
+        otherwise healthy ``execute``.
+        """
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        try:
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                ["sh", "-lc", "touch /root/.Xauthority"],
+                env=self._desktop_env(),
+            )
+            if exit_code != 0:
+                logger.warning(
+                    "desktop_xauthority_ensure_failed",
+                    workspace_id=str(workspace_id),
+                    exit_code=exit_code,
+                    output=output,
+                )
+        except Exception:
+            logger.exception(
+                "desktop_xauthority_ensure_failed",
+                workspace_id=str(workspace_id),
+            )
 
     async def _require_desktop_live(self, workspace_id: uuid.UUID) -> None:
         """Raise when the workspace desktop session is not accepting input."""
@@ -2989,6 +3046,13 @@ class WorkspaceService:
             # ``python3 -c`` with the desktop env. No agent logic lives
             # here; validation only guards the RPC boundary. Validation ran
             # above; a single generic liveness probe also ran above.
+            # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
+            # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` —
+            # without the file every snippet dies before connecting.
+            # Ensure it (idempotent) on the generic execute path as well:
+            # this self-heals desktops started before the start-command
+            # fix and any workspace where the file was removed.
+            await self._ensure_desktop_xauthority(workspace_id)
             exit_code, stdout, stderr = await asyncio.wait_for(
                 self.exec_harness_command(
                     workspace_id,

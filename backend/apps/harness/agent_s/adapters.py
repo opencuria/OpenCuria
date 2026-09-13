@@ -138,6 +138,7 @@ class HarnessCompletionAdapter:
         self._grounding_model = grounded
         self._chat_options_factory = chat_options_factory
         self._emit = emit
+        self._step: int | None = None
         self.calls: list[dict[str, Any]] = []
 
     @property
@@ -147,6 +148,15 @@ class HarnessCompletionAdapter:
     @property
     def grounding_model(self) -> str:
         return self._grounding_model
+
+    @property
+    def step(self) -> int | None:
+        """Current Agent-S outer step for reasoning event attribution."""
+        return self._step
+
+    @step.setter
+    def step(self, value: int | None) -> None:
+        self._step = value
 
     def _model_for(self, purpose: str) -> str:
         if purpose == "grounding":
@@ -247,13 +257,13 @@ class HarnessCompletionAdapter:
             if delta.reasoning:
                 reasoning_parts.append(delta.reasoning)
                 if self._emit is not None:
-                    await _safe_emit(
-                        self._emit,
-                        {
-                            "type": "part_updated",
-                            "delta": {"reasoning": delta.reasoning},
-                        },
-                    )
+                    event: dict[str, Any] = {
+                        "type": "part_updated",
+                        "delta": {"reasoning": delta.reasoning},
+                    }
+                    if self._step is not None:
+                        event["step"] = self._step
+                    await _safe_emit(self._emit, event)
             if delta.usage is not None:
                 usage = AgentSUsage(
                     input_tokens=usage.input_tokens + delta.usage.prompt_tokens,
@@ -348,7 +358,7 @@ class WorkspaceCodeExecutionAdapter:
 AGENT_S_DEPS_HINT = (
     "Rebuild the workspace image to install the Agent-S dependencies "
     "(PyAutoGUI/pyperclip, tesseract-ocr, wmctrl, xclip/xsel, "
-    "libreoffice-calc, python3-uno)."
+    "libreoffice-calc, python3-uno, python3-tk/tkinter)."
 )
 
 
@@ -394,9 +404,13 @@ class WorkspaceActionExecutor:
             hint = (
                 f" {AGENT_S_DEPS_HINT}"
                 if (
-                    "pyautogui" in lowered
-                    or "tesseract" in lowered
-                    or "no module named" in lowered
+                    "no module named" in lowered
+                    or "modulenotfounderror" in lowered.replace(" ", "")
+                    # pyautogui imports mouseinfo, which imports tkinter:
+                    # without python3-tk the snippet dies with MouseInfo's
+                    # "You must install tkinter on Linux ..." note instead
+                    # of a ModuleNotFoundError.
+                    or "tkinter" in lowered
                 )
                 else ""
             )

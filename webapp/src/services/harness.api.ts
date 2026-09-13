@@ -107,6 +107,12 @@ export interface AgentSConfig {
   max_trajectory_length: number
   enable_reflection: boolean
   enable_code_agent: boolean
+  /**
+   * Opt-in mp4 session recording for computer-use runs (org-wide).
+   * Off by default; captures the workspace display (may include
+   * sensitive content). Mirrors `AgentSConfigOut.enable_recording`.
+   */
+  enable_recording: boolean
   screenshot_max_dimension: number
   action_pre_delay: number
   action_post_delay: number

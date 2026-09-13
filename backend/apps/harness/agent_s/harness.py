@@ -128,6 +128,7 @@ def resolve_run_config(
             max_trajectory_length=explicit.max_trajectory_length,
             enable_reflection=explicit.enable_reflection,
             enable_code_agent=explicit.enable_code_agent,
+            enable_recording=bool(getattr(explicit, "enable_recording", False)),
             screenshot_max_dimension=explicit.screenshot_max_dimension,
             action_pre_delay=explicit.action_pre_delay,
             action_post_delay=explicit.action_post_delay,
@@ -157,6 +158,65 @@ def default_recording_path(run_id: str) -> str:
     return f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
 
 
+#: Canonical workspace-internal computer-use recording directory.
+_RECORDING_BASE = "/workspace/.opencuria/computeruse"
+
+#: Safe runner run ids (mirrors ``runner/src/service.py::_RUN_ID_RE``).
+_SAFE_RUN_ID_PATTERN = None  # compiled lazily to keep import cost low
+
+
+def _safe_run_id_re():  # type: ignore[no-untyped-def]
+    import re
+
+    global _SAFE_RUN_ID_PATTERN
+    if _SAFE_RUN_ID_PATTERN is None:
+        _SAFE_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    return _SAFE_RUN_ID_PATTERN
+
+
+def is_valid_recording_path(target: object) -> bool:
+    """True when *target* is a canonical workspace-internal recording path.
+
+    Only absolute paths under
+    ``/workspace/.opencuria/computeruse/<safe run id>/...`` ending in
+    ``.mp4`` are trusted (no ``..``/``.``/empty segments, no URLs, no
+    other workspace paths, no backslashes/control chars). The runner
+    always returns exactly such a path for ``record_start``/``record_stop``.
+    """
+    import posixpath
+
+    if not isinstance(target, str):
+        return False
+    candidate = target.strip()
+    if not candidate:
+        return False
+    if "\x00" in candidate or "\n" in candidate or "\r" in candidate:
+        return False
+    if "\\" in candidate:
+        return False
+    if "://" in candidate:
+        return False
+    prefix = _RECORDING_BASE + "/"
+    if not candidate.startswith(prefix):
+        return False
+    if not candidate.lower().endswith(".mp4"):
+        return False
+    rest = candidate[len(prefix) :]
+    if "/" not in rest:
+        return False
+    run_id, remainder = rest.split("/", 1)
+    if not run_id or _safe_run_id_re().match(run_id) is None:
+        return False
+    if not remainder:
+        return False
+    segments = remainder.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return False
+    if posixpath.normpath(candidate) != candidate:
+        return False
+    return True
+
+
 def sanitize_run_id(session_id: str) -> str:
     """Sanitize a session id for runner ``record_*`` actions."""
     import re
@@ -183,10 +243,37 @@ def append_video_to_output(output: str, recording_path: str) -> str:
 
 def truncate_task_output(
     output: str,
-    recording_path: str,
+    recording_path: str | None,
     max_chars: int,
 ) -> tuple[str, bool]:
-    """Truncate *output* for parent task cards, preserving the video line."""
+    """Truncate *output* for parent task cards, preserving a real video line.
+
+    A video embed is only ever preserved/added when *recording_path* is a
+    validated canonical recording path (see :func:`is_valid_recording_path`)
+    that is actually present in *output* (a real, previously recorded
+    session). When no recording exists (``recording_path`` is ``None``/
+    empty/invalid or no marker is present), the output is truncated as
+    plain text — never invented via a default path.
+    """
+    if recording_path and not is_valid_recording_path(recording_path):
+        recording_path = None
+    marker = _recording_marker(output)
+    if recording_path:
+        wanted = f"![Computer use]({recording_path})"
+        if wanted not in (output or ""):
+            # The caller-supplied path is not a real marker of this
+            # output (e.g. a sanitized default for a run that never
+            # recorded) — fall back to plain truncation.
+            recording_path = None
+        else:
+            marker = wanted
+    if not recording_path or marker is None:
+        text = output or ""
+        if len(text) <= max_chars:
+            return text, False
+        notice_reserve = 40
+        avail = max(0, max_chars - notice_reserve)
+        return text[:avail] + f"\n…[truncated {len(text)} chars total]", True
     full = append_video_to_output(output, recording_path)
     suffix = _video_markdown(recording_path)
     if full.endswith(suffix):
@@ -203,6 +290,39 @@ def truncate_task_output(
     notice_reserve = 40
     avail = max(0, max_chars - len(suffix) - notice_reserve)
     return text[:avail] + f"\n…[truncated {len(text)} chars total]" + suffix, True
+
+
+def _recording_marker(output: str) -> str | None:
+    """Return the first validated ``![Computer use](...)`` marker in *output*."""
+    import re
+
+    match = re.search(r"!\[Computer use\]\(([^)]+)\)", output or "")
+    if match is None:
+        return None
+    target = match.group(1).strip()
+    if not is_valid_recording_path(target):
+        return None
+    return match.group(0)
+
+
+def extract_recording_path(output: str) -> str | None:
+    """Return the first validated canonical recording path in *output*.
+
+    Only absolute paths under
+    ``/workspace/.opencuria/computeruse/<safe run id>/...`` ending in
+    ``.mp4`` are trusted; anything else (URLs, ``/etc``, other workspace
+    paths, ``..``, wrong extensions) returns ``None`` so callers never
+    preserve or forward an attacker-controlled marker.
+    """
+    import re
+
+    match = re.search(r"!\[Computer use\]\(([^)]+)\)", output or "")
+    if match is None:
+        return None
+    target = match.group(1).strip()
+    if not target or not is_valid_recording_path(target):
+        return None
+    return target
 
 
 def classify_signal(exec_code: str) -> str:
@@ -332,6 +452,12 @@ async def run_agent_s_computeruse(
     Agent-S string-signal order, executes materialized code remotely, and
     stops recording / releases the lease in ``finally``. Cancellation
     propagates after cleanup.
+
+    Session recording is opt-in via ``config.enable_recording`` (org-wide
+    ``AgentSConfig``; default off): when disabled no ``record_start``/
+    ``record_stop`` RPC ever runs, no video markdown is appended, and no
+    ``recording_path`` metadata is set. Screenshots and actions are
+    unaffected.
     """
     from ..providers.base import Usage
     from .materializer import DefaultActionMaterializer, MaterializerConfig
@@ -343,7 +469,8 @@ async def run_agent_s_computeruse(
     total_usage = Usage()
     max_steps = int(config.max_steps)
     run_id = sanitize_run_id(run_id or "session")
-    recording_path = default_recording_path(run_id)
+    enable_recording = bool(getattr(config, "enable_recording", False))
+    recording_path = default_recording_path(run_id) if enable_recording else ""
     held = False
     record_started = False
     steps = 0
@@ -426,17 +553,39 @@ async def run_agent_s_computeruse(
                 code_execution_available=bool(resolved_config.enable_code_agent),
             )
         max_steps = int(resolved_config.max_steps)
-        try:
-            start = await accessor.desktop_action("record_start", {"run_id": run_id})
-        except Exception as exc:
-            raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
-        if not (isinstance(start, dict) and start.get("ok")):
-            raise RuntimeError(f"Computer-use record_start failed: {start!r}")
-        record_started = True
-        recording_path = str(start.get("path") or default_recording_path(run_id))
+        enable_recording = bool(getattr(resolved_config, "enable_recording", False))
+        if enable_recording:
+            recording_path = default_recording_path(run_id)
+            try:
+                start = await accessor.desktop_action(
+                    "record_start", {"run_id": run_id}
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
+            if not (isinstance(start, dict) and start.get("ok")):
+                raise RuntimeError(f"Computer-use record_start failed: {start!r}")
+            record_started = True
+            start_path = str(start.get("path") or "")
+            # Only trust canonical workspace-internal recording paths; an
+            # unexpected runner path must never reach output/metadata.
+            recording_path = (
+                start_path
+                if is_valid_recording_path(start_path)
+                else default_recording_path(run_id)
+            )
 
         for _ in range(max_steps):
             steps += 1
+            # Attribute streamed reasoning of this Agent-S step (the
+            # completion adapter emits ``part_updated`` reasoning without
+            # step context) so persistence meta and socket opts carry it.
+            completion_step = getattr(completion, "step", None)
+            has_step_attr = hasattr(completion, "step")
+            if has_step_attr:
+                try:
+                    completion.step = steps  # type: ignore[attr-defined]
+                except Exception:
+                    has_step_attr = False
             await send({"type": "step_start", "step": steps})
             step_usage = Usage()
             step_finished = False
@@ -475,7 +624,7 @@ async def run_agent_s_computeruse(
                 exec_code = codes[0] if codes else ""
                 last_exec_code = exec_code
                 _absorb_collected()
-                for part in _observable_parts(last_info):
+                for part in _observable_parts(last_info, step=steps):
                     await send(part)
                 signal = classify_signal(exec_code)
                 if signal in (DONE_SIGNAL, FAIL_SIGNAL):
@@ -512,6 +661,12 @@ async def run_agent_s_computeruse(
                 _absorb_collected()
                 await _finish_step()
                 raise
+            finally:
+                if has_step_attr:
+                    try:
+                        completion.step = completion_step  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
         detail = str(last_info.get("plan", "") or last_exec_code or "").strip()
         status = _short_status(finish=finish, steps=steps, detail=detail)
         finish_reason = (
@@ -555,7 +710,18 @@ async def run_agent_s_computeruse(
                     error=str(stop_error),
                 )
             elif isinstance(stop, dict) and stop.get("path"):
-                final_recording_path = str(stop["path"])
+                stop_path = str(stop["path"])
+                # Only a canonical workspace-internal final path replaces
+                # the valid start/default path; an unexpected runner path
+                # falls back to the previously validated path instead.
+                if is_valid_recording_path(stop_path):
+                    final_recording_path = stop_path
+                else:  # pragma: no cover - defensive fallback
+                    log.warning(
+                        "computeruse_record_stop_path_invalid",
+                        run_id=run_id,
+                        path=stop_path[:200],
+                    )
         if held:
             _, release_error, release_cancelled = await _run_cleanup_rpc(
                 lambda: accessor.desktop_action(
@@ -571,10 +737,13 @@ async def run_agent_s_computeruse(
                 )
         if cleanup_cancelled:
             raise asyncio.CancelledError()
-    run_result["output"] = append_video_to_output(
-        run_result["output"], final_recording_path
-    )
-    run_result["metadata"]["recording_path"] = final_recording_path
+    if enable_recording and final_recording_path:
+        if not is_valid_recording_path(final_recording_path):
+            final_recording_path = default_recording_path(run_id)
+        run_result["output"] = append_video_to_output(
+            run_result["output"], final_recording_path
+        )
+        run_result["metadata"]["recording_path"] = final_recording_path
     return AgentSRunResult(**run_result)
 
 
@@ -599,33 +768,52 @@ def _to_harness_usage(agent_usage: Any) -> Any:
     )
 
 
-def _observable_parts(info: dict[str, Any]) -> list[dict[str, Any]]:
+def _observable_parts(
+    info: dict[str, Any], *, step: int | None = None
+) -> list[dict[str, Any]]:
     """Expose plan/reflections as persisted runner events (never assistant).
 
     ``HarnessService._persist_runner_event`` only persists ``part_updated``
     (text/reasoning deltas) and ``agent`` events are persisted by the new
     ``agent`` branch as ``HarnessPartType.AGENT`` (frontend card type).
+    The agent event carries safe ``agent_meta`` (see
+    :func:`apps.harness.agent_s.plan_meta.parse_plan_meta`) alongside the
+    full ``plan`` text (backcompat); the step number is attached so
+    persistence and socket payloads stay step-attributed.
     """
+    from .plan_meta import parse_plan_meta
+
     events: list[dict[str, Any]] = []
     plan = str(info.get("plan", "") or "").strip()
     if plan:
-        events.append({"type": "agent", "delta": {"plan": plan[:4000]}})
+        event: dict[str, Any] = {
+            "type": "agent",
+            "delta": {
+                "plan": plan[:4000],
+                "agent_meta": parse_plan_meta(plan[:4000]),
+            },
+        }
+        if step is not None:
+            event["step"] = step
+        events.append(event)
     reflection = info.get("reflection")
     if isinstance(reflection, str) and reflection.strip():
-        events.append(
-            {
-                "type": "part_updated",
-                "delta": {"reasoning": reflection[:4000]},
-            }
-        )
+        event = {
+            "type": "part_updated",
+            "delta": {"reasoning": reflection[:4000]},
+        }
+        if step is not None:
+            event["step"] = step
+        events.append(event)
     thoughts = info.get("reflection_thoughts")
     if isinstance(thoughts, str) and thoughts.strip():
-        events.append(
-            {
-                "type": "part_updated",
-                "delta": {"reasoning": thoughts[:4000]},
-            }
-        )
+        event = {
+            "type": "part_updated",
+            "delta": {"reasoning": thoughts[:4000]},
+        }
+        if step is not None:
+            event["step"] = step
+        events.append(event)
     return events
 
 
@@ -637,6 +825,7 @@ __all__ = [
     "DONE_SIGNAL",
     "LONG_CONTEXT_ENGINE_TYPES",
     "derive_worker_engine_type",
+    "extract_recording_path",
     "FAIL_SIGNAL",
     "NEXT_SIGNAL",
     "WAIT_SIGNAL",
@@ -644,6 +833,7 @@ __all__ = [
     "append_video_to_output",
     "classify_signal",
     "default_recording_path",
+    "is_valid_recording_path",
     "resolve_run_config",
     "run_agent_s_computeruse",
     "sanitize_run_id",

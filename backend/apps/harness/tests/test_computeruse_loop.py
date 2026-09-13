@@ -40,11 +40,18 @@ def test_video_helper_appends_exactly_once() -> None:
     assert twice == once
 
 
+def marker_for(recording_path: str) -> str:
+    """Return the recording markdown marker for *recording_path*."""
+    return f"![Computer use]({recording_path})"
+
+
 def test_truncate_task_output_preserves_video_marker() -> None:
-    """Long outputs still embed the session recording markdown exactly once."""
+    """Recorded outputs still embed the session recording markdown once."""
     run_id = sanitize_run_id("test-run-abc")
     recording_path = default_recording_path(run_id)
-    long_body = "x" * (TASK_OUTPUT_MAX_CHARS + 500)
+    long_body = (
+        "x" * (TASK_OUTPUT_MAX_CHARS + 500) + f"\n\n{marker_for(recording_path)}"
+    )
     output, truncated = truncate_task_output(
         long_body, recording_path, TASK_OUTPUT_MAX_CHARS
     )
@@ -53,6 +60,14 @@ def test_truncate_task_output_preserves_video_marker() -> None:
     assert output.count(marker) == 1
     assert truncated is True
     assert len(output) <= TASK_OUTPUT_MAX_CHARS + 50
+
+
+def test_truncate_task_output_without_recording_adds_no_video() -> None:
+    """Unrecorded outputs truncate as plain text (no phantom video)."""
+    long_body = "x" * (TASK_OUTPUT_MAX_CHARS + 500)
+    output, truncated = truncate_task_output(long_body, None, TASK_OUTPUT_MAX_CHARS)
+    assert truncated is True
+    assert "![Computer use](" not in output
 
 
 def test_agent_s_registry_is_empty_and_alias_matches() -> None:
@@ -248,4 +263,6 @@ async def test_runner_computeruse_path_delegates_without_tool_schemas(
         RunOptions(auto_approve=True, session_id="regression-cu"),
     )
     assert result.finish_reason == "stop"
-    assert result.output.count("![Computer use](") == 1
+    # Recording defaults to off: no phantom video on the parent output.
+    assert result.output.count("![Computer use](") == 0
+    assert "recording_path" not in result.metadata

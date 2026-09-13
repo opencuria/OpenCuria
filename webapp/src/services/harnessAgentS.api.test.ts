@@ -14,4 +14,13 @@ describe('harness agent-s api', () => {
     expect(putSpy).toHaveBeenCalledWith('/agent-s-config/', { max_steps: 20 })
     putSpy.mockRestore()
   })
+
+  it('saves the recording opt-in flag via /agent-s-config/', async () => {
+    const putSpy = vi.spyOn(api, 'put').mockResolvedValue({ enable_recording: true })
+    await expect(saveAgentSConfig({ enable_recording: true })).resolves.toEqual({
+      enable_recording: true,
+    })
+    expect(putSpy).toHaveBeenCalledWith('/agent-s-config/', { enable_recording: true })
+    putSpy.mockRestore()
+  })
 })

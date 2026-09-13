@@ -13,6 +13,7 @@ import { computed, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ProviderModelCombobox from './ProviderModelCombobox.vue'
 import SettingsSection from './SettingsSection.vue'
@@ -56,6 +57,7 @@ const postDelay = ref('')
 const waitDelay = ref('')
 const enableReflection = ref(true)
 const enableCodeAgent = ref(true)
+const enableRecording = ref(false)
 
 function applyConfig(next: AgentSConfig): void {
   loaded.value = next
@@ -71,6 +73,7 @@ function applyConfig(next: AgentSConfig): void {
   waitDelay.value = String(next.wait_delay)
   enableReflection.value = next.enable_reflection
   enableCodeAgent.value = next.enable_code_agent
+  enableRecording.value = next.enable_recording ?? false
   fieldErrors.value = {}
 }
 
@@ -183,6 +186,8 @@ function validate(): ValidatedState {
     payload.enable_reflection = enableReflection.value
   if (enableCodeAgent.value !== base.enable_code_agent)
     payload.enable_code_agent = enableCodeAgent.value
+  if (enableRecording.value !== (base.enable_recording ?? false))
+    payload.enable_recording = enableRecording.value
 
   return { payload, errors }
 }
@@ -203,7 +208,8 @@ const dirty = computed(() => {
     toText(postDelay.value).trim() !== String(base.action_post_delay) ||
     toText(waitDelay.value).trim() !== String(base.wait_delay) ||
     enableReflection.value !== base.enable_reflection ||
-    enableCodeAgent.value !== base.enable_code_agent
+    enableCodeAgent.value !== base.enable_code_agent ||
+    enableRecording.value !== (base.enable_recording ?? false)
   )
 })
 
@@ -510,6 +516,34 @@ onMounted(() => {
                 />
                 Enable code agent
               </label>
+            </div>
+          </div>
+
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="agent-s-enable-recording" class="block text-sm font-medium">
+                Session recording
+              </Label>
+              <p id="agent-s-recording-hint" class="text-sm text-muted-foreground">
+                Captures the workspace display as video during computer-use runs.
+                It may include sensitive content visible on screen. Off by default.
+              </p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <div class="flex items-center gap-3">
+                <Switch
+                  id="agent-s-enable-recording"
+                  :model-value="enableRecording"
+                  aria-describedby="agent-s-recording-hint"
+                  data-testid="agent-s-enable-recording"
+                  @update:model-value="enableRecording = $event"
+                />
+                <span class="text-sm text-muted-foreground" aria-hidden="true">
+                  {{ enableRecording ? 'On' : 'Off' }}
+                </span>
+              </div>
             </div>
           </div>
 

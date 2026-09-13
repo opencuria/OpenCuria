@@ -2740,6 +2740,7 @@ class TestAgentSWorkspaceDependencies:
         "libreoffice-calc",
         "python3-uno",
         "python3-pyperclip",
+        "python3-tk",
         "sudo",
         "iproute2",
     )
@@ -2767,6 +2768,9 @@ class TestAgentSWorkspaceDependencies:
         assert "python3 -m pip install pyautogui" in block
         # apt python3-pyperclip already provides `import pyperclip`.
         assert "python3-pyperclip" in block
+        # pyautogui imports mouseinfo, which imports tkinter: without
+        # python3-tk every execute snippet dies at import time.
+        assert "python3-tk" in block
 
     def test_qemu_init_script_pins_agent_s_packages(self, service, runner, user):
         """QEMU init script carries the same Agent-S deps (xfce stack intact)."""
@@ -2776,7 +2780,19 @@ class TestAgentSWorkspaceDependencies:
             assert package in script
         assert "python3-pyautogui" in script
         assert "python3 -m pip install --break-system-packages pyautogui" in script
+        # pyautogui imports mouseinfo, which imports tkinter: without
+        # python3-tk every execute snippet dies at import time.
+        assert "python3-tk" in script
         assert "startxfce4" in script
+        # python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally,
+        # even against the auth-less Xvnc: bake an empty file into the
+        # image so PyAutoGUI connects out of the box.
+        assert "touch /root/.Xauthority" in script
+
+    def test_docker_block_pins_xauthority_for_xlib_clients(self, service):
+        """Docker desktop block bakes .Xauthority for the same reason."""
+        block = service._desktop_session_dockerfile_block()
+        assert "/root/.Xauthority" in block
 
     def test_generated_dockerfile_includes_desktop_block(self, service, runner, user):
         """The bootstrap default flows through the auto-appended desktop block."""

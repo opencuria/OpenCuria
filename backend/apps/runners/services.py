@@ -4847,7 +4847,10 @@ class RunnerService:
         apt-Python). pip on 24.04 requires ``--break-system-packages``
         (PEP 668); pip on 22.04 does not know the flag, so retry without
         it. ``python3-pyperclip`` from apt already provides
-        ``import pyperclip`` (no pip needed). Existing
+        ``import pyperclip`` (no pip needed). ``python3-tk`` is a pure
+        runtime dep: pyautogui imports mouseinfo, which imports tkinter —
+        without it every execute snippet dies at import time with
+        "You must install tkinter on Linux to use MouseInfo". Existing
         images are never modified in place: rebuild the image definition
         after this block changes.
         """
@@ -4859,7 +4862,7 @@ RUN apt-get update && apt-get install -y \\
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
     wget ca-certificates \\
     tesseract-ocr wmctrl xclip xsel libreoffice-calc python3-uno \\
-    python3-pyperclip sudo iproute2 python3-pip \\
+    python3-pyperclip python3-tk sudo iproute2 python3-pip \\
     && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
     && (apt-get install -y python3-pyautogui \\
         || python3 -m pip install --break-system-packages pyautogui \\
@@ -4874,9 +4877,13 @@ RUN apt-get update && apt-get install -y \\
     && rm -f /tmp/google-chrome.deb \\
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-configure KasmVNC (skip interactive wizard)
+# Pre-configure KasmVNC (skip interactive wizard).
+# python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally, even
+# against the auth-less Xvnc (-SecurityTypes None): bake an empty file
+# so PyAutoGUI/mouseinfo connect out of the box (the runner also
+# touches it at every start and before each execute for self-healing).
 RUN mkdir -p /root/.vnc \\
-    && touch /root/.vnc/.de-was-selected \\
+    && touch /root/.vnc/.de-was-selected /root/.Xauthority \\
     && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
     && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: false\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
     && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
@@ -5148,6 +5155,21 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 status=ImageBuildJob.Status.PENDING,
             )
         else:
+            if existing.status in {
+                ImageBuildJob.Status.PENDING,
+                ImageBuildJob.Status.BUILDING,
+            } and existing.build_task_id is not None:
+                prior_task = await sync_to_async(self.tasks.get_by_id)(
+                    existing.build_task_id
+                )
+                if prior_task is not None and prior_task.status in {
+                    TaskStatus.PENDING,
+                    TaskStatus.IN_PROGRESS,
+                }:
+                    raise ConflictError(
+                        f"Build job is already '{existing.status}' "
+                        f"(task {existing.build_task_id})"
+                    )
             build = existing
             build.status = (
                 ImageBuildJob.Status.DEACTIVATED
@@ -5155,6 +5177,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 else ImageBuildJob.Status.PENDING
             )
             build.build_task = None
+            # A rebuild/retry starts from a clean slate: the old (possibly
+            # truncated) tail must not pollute the new run's log, and
+            # clearing it here also frees the TEXT payload immediately
+            # instead of growing it further.
+            build.build_log = ""
             build.deleting_task_id = None
             build.delete_requested_at = None
             build.delete_started_at = None
@@ -5164,6 +5191,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 update_fields=[
                     "status",
                     "build_task",
+                    "build_log",
                     "deleting_task_id",
                     "delete_requested_at",
                     "delete_started_at",
@@ -5270,21 +5298,71 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         await sync_to_async(self.tasks.mark_in_progress)(task)
         return build
 
+    #: Maximum build_log size kept per runner image build (chars). The log is
+    #: a rolling tail: new lines are appended atomically in the DB and the
+    #: stored value is trimmed to the last BUILD_LOG_MAX_CHARS characters.
+    #: This bounds the per-line SQL size and the per-poll response size so
+    #: long image builds (10k+ lines) cannot grow process memory without
+    #: bound. The list endpoint additionally omits build_log entirely (see
+    #: ImageBuildJobListOut and the dedicated /log/ endpoint).
+    BUILD_LOG_MAX_CHARS = 200_000
+
     def handle_image_build_progress(
         self, build_job_id: str, line: str, runner_id: str | None = None
     ) -> None:
-        """Append build log lines for runner image builds."""
+        """Append one build log line for a runner image build.
+
+        Uses a single atomic UPDATE (Concat + Right in the database) so the
+        full log is never read into Python and re-written. Per-query memory
+        therefore stays proportional to the line, not to the total log.
+        Unknown build jobs are ignored; runner_id mismatches are rejected.
+        """
+        from django.db import connection
+        from django.db.models import Value
+        from django.db.models.functions import Concat, Right
+
         from .models import ImageBuildJob
 
+        cleaned = (line or "").rstrip("\n")
+        if "\x00" in cleaned:
+            cleaned = cleaned.replace("\x00", "")
+        if len(cleaned) > 8000:
+            cleaned = cleaned[:8000] + "… [line truncated]"
+        suffix = cleaned + "\n"
         try:
-            build = ImageBuildJob.objects.select_related("runner").get(id=build_job_id)
-        except ImageBuildJob.DoesNotExist:
+            job_id = uuid.UUID(str(build_job_id))
+        except (TypeError, ValueError):
             return
-        if runner_id and str(build.runner_id) != str(runner_id):
-            return
-        build.status = ImageBuildJob.Status.BUILDING
-        build.build_log = (build.build_log or "") + (line.rstrip("\n") + "\n")
-        build.save(update_fields=["status", "build_log", "updated_at"])
+        if runner_id is not None:
+            exists = ImageBuildJob.objects.filter(
+                id=job_id, runner_id=runner_id
+            ).exists()
+            if not exists:
+                return
+        ImageBuildJob.objects.filter(id=job_id).update(
+            status=ImageBuildJob.Status.BUILDING,
+            build_log=Right(
+                Concat("build_log", Value(suffix)),
+                self.BUILD_LOG_MAX_CHARS,
+            ),
+            updated_at=timezone.now(),
+        )
+        # Cap each logged query's retained size so the DEBUG query log
+        # cannot accumulate gigabytes of UPDATE statements (DEBUG stays on).
+        # Also bound the number of retained queries: this handler can run
+        # thousands of times per build and shares the thread-local query
+        # log with all other handlers on this connection.
+        try:
+            logged = connection.queries_log
+            if logged:
+                last = logged[-1]
+                sql = last.get("sql", "")
+                if isinstance(sql, str) and len(sql) > 2048:
+                    last["sql"] = sql[:2048] + "… [query truncated]"
+            while len(logged) > 200:
+                logged.popleft()
+        except Exception:
+            pass
 
     def handle_image_built(
         self,
