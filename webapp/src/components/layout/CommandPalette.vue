@@ -272,7 +272,11 @@ function itemIndex(item: PaletteItem): number {
 
 <template>
   <Dialog :open="props.open" @update:open="setOpen">
-    <DialogContent class="max-w-xl p-0" :show-close-button="false">
+    <DialogContent
+      class="gap-0 p-0 sm:max-w-2xl"
+      data-testid="command-palette"
+      :show-close-button="false"
+    >
       <DialogHeader class="sr-only">
         <DialogTitle>Search</DialogTitle>
         <DialogDescription>
@@ -303,7 +307,7 @@ function itemIndex(item: PaletteItem): number {
         aria-label="Search results"
         data-testid="command-palette-results"
       >
-        <div v-for="group in groups" :key="group.heading" class="mb-1">
+        <div v-for="group in groups" :key="group.heading" class="mb-1 last:mb-0">
           <div class="px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground">
             {{ group.heading }}
           </div>

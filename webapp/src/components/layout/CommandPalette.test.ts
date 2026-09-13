@@ -85,7 +85,10 @@ function mountPalette(props = { open: true }) {
     global: {
       stubs: {
         Dialog: { template: '<div><slot /></div>' },
-        DialogContent: { template: '<div><slot /></div>' },
+        DialogContent: {
+          inheritAttrs: false,
+          template: '<div v-bind="$attrs"><slot /></div>',
+        },
         DialogHeader: { template: '<div><slot /></div>' },
         DialogTitle: { template: '<div><slot /></div>' },
         DialogDescription: { template: '<div><slot /></div>' },
@@ -98,6 +101,15 @@ describe('CommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     conversationStore.conversations = [...baseConversations]
+  })
+
+  it('drops the dialog gap and uses a wider max width', () => {
+    const wrapper = mountPalette()
+    const classes = wrapper.find('[data-testid="command-palette"]').classes()
+
+    expect(classes).toContain('gap-0')
+    expect(classes).toContain('p-0')
+    expect(classes).toContain('sm:max-w-2xl')
   })
 
   it('lists actions, recent chats, and workspaces without a query', () => {
