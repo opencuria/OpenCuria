@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessMessageView from './HarnessMessageView.vue'
@@ -38,14 +38,22 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   }
 }
 
-function makeAssistant(parts: HarnessPart[]): HarnessMessage {
+function makeAssistant(parts: HarnessPart[], extras: Partial<HarnessMessage> = {}): HarnessMessage {
   return {
     id: 'msg-1',
     session_id: 'session-1',
     role: 'assistant',
     content: parts.filter((part) => part.type === 'text').map((part) => part.output).join(''),
     parts,
+    created_at: '2026-03-29T10:00:00.000Z',
+    completed_at: '2026-03-29T10:05:11.000Z',
+    ...extras,
   }
+}
+
+async function expandWorkedFor(wrapper: VueWrapper): Promise<void> {
+  const trigger = wrapper.find('[data-testid="harness-worked-for"] [data-slot="collapsible-trigger"]')
+  if (trigger.exists()) await trigger.trigger('click')
 }
 
 describe('HarnessMessageView', () => {
@@ -53,7 +61,7 @@ describe('HarnessMessageView', () => {
     setActivePinia(createPinia())
     resetProviderCatalogCache()
   })
-  it('renders text and a single tool in chronological order', () => {
+  it('renders text and a single tool in chronological order', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -71,14 +79,16 @@ describe('HarnessMessageView', () => {
     })
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['text', 'single', 'text'])
+    expect(kinds).toEqual(['text', 'workedFor', 'text'])
     expect(wrapper.text()).toContain('Hello')
-    expect(wrapper.text()).toContain('Read index.ts')
+    expect(wrapper.text()).toContain('Worked for 5m 11s')
     expect(wrapper.text()).toContain('Done')
-    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Read index.ts')
+    await expandWorkedFor(wrapper)
+    expect(wrapper.text()).toContain('Read index.ts')
   })
 
-  it('groups consecutive work items under Worked', () => {
+  it('groups consecutive work items under Worked inside Worked for', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -101,14 +111,17 @@ describe('HarnessMessageView', () => {
     })
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['text', 'group', 'text'])
+    expect(kinds).toEqual(['text', 'workedFor', 'text'])
     expect(wrapper.text()).toContain('Looking around')
-    expect(wrapper.text()).toContain('Worked')
+    expect(wrapper.text()).toContain('Worked for 5m 11s')
     expect(wrapper.text()).toContain('Found it')
+    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+    await expandWorkedFor(wrapper)
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('2')
   })
 
-  it('keeps a lone reasoning part at the top level', () => {
+  it('wraps a lone reasoning part in Worked for after the turn finishes', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -123,7 +136,9 @@ describe('HarnessMessageView', () => {
     })
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['single'])
+    expect(kinds).toEqual(['workedFor'])
+    expect(wrapper.text()).not.toContain('Thought')
+    await expandWorkedFor(wrapper)
     expect(wrapper.text()).toContain('Thought')
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
   })
@@ -189,7 +204,7 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-testid="harness-worked-running"]').text()).toBe('2 running')
   })
 
-  it('keeps reasoning outside of a tool group', () => {
+  it('keeps reasoning outside of a tool group inside Worked for', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -215,10 +230,40 @@ describe('HarnessMessageView', () => {
       },
     })
 
+    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'workedFor',
+    ])
+    await expandWorkedFor(wrapper)
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['single', 'single', 'single'])
+    expect(kinds).toEqual(['workedFor', 'single', 'single', 'single'])
     expect(wrapper.text()).toContain('Thought')
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+  })
+
+  it('does not wrap tools while the turn is still streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'tool-1',
+            type: 'tool',
+            tool: 'read',
+            title: 'Read index.ts',
+          }),
+          makePart({
+            id: 'tool-2',
+            type: 'tool',
+            tool: 'grep',
+            title: 'Grep foo',
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-worked-for"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('2')
   })
 
   it('opens the matching child session for adjacent subtasks', async () => {
@@ -249,10 +294,41 @@ describe('HarnessMessageView', () => {
       },
     })
 
+    await expandWorkedFor(wrapper)
     const rows = wrapper.findAll('[data-testid="harness-subtask-row"]')
     await rows[0]!.trigger('click')
     await rows[1]!.trigger('click')
     expect(wrapper.emitted('openSubtask')).toEqual([['child-a'], ['child-b']])
+  })
+
+  it('shows a patch card instead of the paired edit row while streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: makeAssistant([
+          makePart({
+            id: 'edit-1',
+            type: 'tool',
+            tool: 'edit',
+            call_id: 'c1',
+            title: 'Edit CommandPalette.vue',
+          }),
+          makePart({
+            id: 'patch-1',
+            type: 'patch',
+            call_id: 'c1',
+            title: 'Patch CommandPalette.vue',
+            output: '--- a/a.ts\n+++ b/a.ts\n-old\n+new',
+            meta: { path: '/workspace/CommandPalette.vue' },
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.find('[data-testid="harness-worked-for"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="harness-patch-card"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('CommandPalette.vue')
+    expect(wrapper.text()).not.toContain('Edit CommandPalette.vue')
   })
 
   it('renders two running subtask cards at once', () => {

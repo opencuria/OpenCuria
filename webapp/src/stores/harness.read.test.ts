@@ -138,4 +138,27 @@ describe('harness store read tracking', () => {
     expect(store.messagesBySession['session-1']?.[0]?.model).toBe('acme/think')
     expect(store.messagesBySession['session-1']?.[0]?.reasoning_effort).toBe('high')
   })
+
+  it('stamps completed_at on the live assistant message when the session goes idle', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.messagesBySession['session-1'] = [
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [],
+        created_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+
+    store.handleSessionStatus('session-1', 'idle')
+
+    const completed = store.messagesBySession['session-1']?.[0]?.completed_at
+    expect(completed).toBeTruthy()
+    expect(Date.parse(completed ?? '')).toBeGreaterThan(
+      Date.parse('2026-03-29T10:00:00.000Z'),
+    )
+  })
 })

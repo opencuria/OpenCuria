@@ -534,6 +534,13 @@ export const useHarnessStore = defineStore('harness', () => {
     if (!last.reasoning_effort && effort) last.reasoning_effort = effort
   }
 
+  function stampAssistantCompleted(sessionId: string): void {
+    const messages = messagesBySession.value[sessionId]
+    const last = messages?.[messages.length - 1]
+    if (!last || last.role !== 'assistant' || last.completed_at != null) return
+    last.completed_at = new Date().toISOString()
+  }
+
   function handleSessionStatus(
     sessionId: string,
     status: HarnessSession['status'],
@@ -549,6 +556,7 @@ export const useHarnessStore = defineStore('harness', () => {
     }
     stampRunModel(sessionId, extras)
     if (status === 'idle') {
+      stampAssistantCompleted(sessionId)
       if (viewingSessionId.value === sessionId && !session?.manual_unread) {
         void markSessionRead(sessionId)
         return

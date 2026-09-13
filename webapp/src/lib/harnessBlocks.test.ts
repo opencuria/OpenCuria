@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
-import { buildRenderBlocks, countWorkItems, isCardPart, isWorkItem } from './harnessBlocks'
+import { buildRenderBlocks, countWorkItems, isCardPart, isWorkItem, wrapFinishedWork } from './harnessBlocks'
 
 function makePart(
   type: HarnessPartType,
@@ -237,6 +237,102 @@ describe('buildRenderBlocks', () => {
 
     const blocks = buildRenderBlocks(parts)
     expect(blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
+  })
+
+  it('skips edit/write tools that already have a matching patch card', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        title: 'Edit a.ts',
+      }),
+      makePart('patch', {
+        id: 'patch-1',
+        call_id: 'c1',
+        title: 'Patch a.ts',
+      }),
+      makePart('tool', { id: 'read-1', tool: 'read', title: 'Read b.ts' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['card', 'single'])
+    expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'patch-1' } })
+    expect(blocks[1]).toMatchObject({ kind: 'single', part: { id: 'read-1' } })
+  })
+
+  it('keeps a running edit row until the patch arrives', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        state: 'running',
+        title: 'Edit a.ts',
+      }),
+    ]
+
+    expect(buildRenderBlocks(parts)).toEqual([{ kind: 'single', part: parts[0] }])
+  })
+
+  it('keeps failed file tools as error rows', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        state: 'error',
+        title: 'Edit a.ts',
+      }),
+    ]
+
+    expect(buildRenderBlocks(parts)[0]).toMatchObject({
+      kind: 'single',
+      part: { id: 'edit-1' },
+    })
+  })
+})
+
+describe('wrapFinishedWork', () => {
+  it('scoops tools, thoughts, and patches into one workedFor shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Hello' }),
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('reasoning', { id: 'r1', output: 'hmm' }),
+      makePart('patch', { id: 'patch-1', title: 'Patch a.ts' }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'workedFor', 'text'])
+    const shell = wrapped[1]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['group', 'single', 'card'])
+  })
+
+  it('leaves compaction outside the workedFor shell', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('compaction', { id: 'compact-1', output: 'summary' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual([
+      'workedFor',
+      'compaction',
+    ])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'single'])
+  })
+
+  it('does not wrap a text-only message', () => {
+    const parts = [makePart('text', { id: 't1', output: 'Hello' })]
+    expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual([
+      'text',
+    ])
   })
 })
 
