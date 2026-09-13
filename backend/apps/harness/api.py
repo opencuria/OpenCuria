@@ -330,6 +330,7 @@ class AgentSConfigIn(Schema):
     max_trajectory_length: int = 8
     enable_reflection: bool = True
     enable_code_agent: bool = True
+    enable_recording: bool = False
     screenshot_max_dimension: int = 2400
     action_pre_delay: float = 1.0
     action_post_delay: float = 1.0
@@ -347,6 +348,7 @@ class AgentSConfigOut(Schema):
     max_trajectory_length: int = 8
     enable_reflection: bool = True
     enable_code_agent: bool = True
+    enable_recording: bool = False
     screenshot_max_dimension: int = 2400
     action_pre_delay: float = 1.0
     action_post_delay: float = 1.0
@@ -752,6 +754,7 @@ def _agent_s_config_to_out(row: dict) -> AgentSConfigOut:
         max_trajectory_length=int(row.get("max_trajectory_length", 8)),
         enable_reflection=bool(row.get("enable_reflection", True)),
         enable_code_agent=bool(row.get("enable_code_agent", True)),
+        enable_recording=bool(row.get("enable_recording", False)),
         screenshot_max_dimension=int(row.get("screenshot_max_dimension", 2400)),
         action_pre_delay=float(row.get("action_pre_delay", 1.0)),
         action_post_delay=float(row.get("action_post_delay", 1.0)),

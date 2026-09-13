@@ -29,6 +29,7 @@ def test_harness_service_resolves_agent_s_run_config(harness_workspace) -> None:
             "max_trajectory_length": 4,
             "enable_reflection": False,
             "enable_code_agent": True,
+            "enable_recording": False,
             "screenshot_max_dimension": 1600,
             "action_pre_delay": 0.2,
             "action_post_delay": 0.3,
@@ -42,6 +43,7 @@ def test_harness_service_resolves_agent_s_run_config(harness_workspace) -> None:
     assert config.max_steps == 9
     assert config.model_temperature is None
     assert config.enable_reflection is False
+    assert config.enable_recording is False
 
 
 def test_resolve_run_config_temperature_none_and_explicit() -> None:
@@ -286,3 +288,40 @@ def test_validate_provider_for_run_grounding_connected_and_missing(
         },
     )
     assert service.validate_provider_for_run(org_id, session) == "openrouter/acme/main"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_agent_s_run_config_propagates_enable_recording(
+    harness_workspace,
+) -> None:
+    """Persisted enable_recording reaches the computer-use run config."""
+    from apps.harness.harness_service import HarnessService
+
+    org_id = harness_workspace.runner.organization_id
+    service = AgentSConfigService()
+    default = HarnessService._resolve_agent_s_run_config(org_id, "openrouter/m")
+    assert default.enable_recording is False
+    service.save_config(org_id, {"enable_recording": True})
+    enabled = HarnessService._resolve_agent_s_run_config(org_id, "openrouter/m")
+    assert enabled.enable_recording is True
+
+
+def test_agent_s_run_config_validates_enable_recording() -> None:
+    """Non-boolean enable_recording is rejected on the run config."""
+    with pytest.raises(ValueError, match="enable_recording"):
+        AgentSRunConfig(main_model="m", grounding_model="m", enable_recording="yes")
+
+    resolved = resolve_run_config(
+        effective_model="m",
+        run_options=type(
+            "O",
+            (),
+            {
+                "agent_s_config": AgentSRunConfig(
+                    main_model="m", grounding_model="m", enable_recording=True
+                )
+            },
+        )(),
+    )
+    assert resolved.enable_recording is True
+    assert resolve_run_config(effective_model="m").enable_recording is False

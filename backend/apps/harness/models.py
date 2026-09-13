@@ -254,6 +254,13 @@ class AgentSConfig(models.Model):
     max_trajectory_length = models.IntegerField(default=8)
     enable_reflection = models.BooleanField(default=True)
     enable_code_agent = models.BooleanField(default=True)
+    enable_recording = models.BooleanField(
+        default=False,
+        help_text=(
+            "Opt-in session recording for computer-use runs (mp4, "
+            "org-wide, default off)."
+        ),
+    )
     screenshot_max_dimension = models.IntegerField(default=2400)
     action_pre_delay = models.FloatField(default=1.0)
     action_post_delay = models.FloatField(default=1.0)

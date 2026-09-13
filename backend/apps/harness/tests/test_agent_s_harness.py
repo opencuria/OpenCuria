@@ -24,10 +24,8 @@ from apps.harness.agent_s.config import AgentSRunConfig
 from apps.harness.agent_s.harness import (
     append_video_to_output,
     classify_signal,
-    default_recording_path,
     resolve_run_config,
     run_agent_s_computeruse,
-    sanitize_run_id,
     truncate_task_output,
 )
 from apps.harness.agent_s.ports import Usage as AgentSUsage
@@ -50,6 +48,7 @@ def _config(**kw: Any) -> AgentSRunConfig:
     params: dict[str, Any] = {
         "main_model": "fake/main",
         "grounding_model": "fake/main",
+        "enable_recording": True,
         # Explicit 1000-grid: grounding tests pin the upstream 1000x1000
         # coordinate scaling independent of the 1920x1080 domain default.
         "grounding_width": 1000,
@@ -81,7 +80,12 @@ class FakeAccessor:
                 or f"/workspace/.opencuria/computeruse/{run_id}/session.mp4",
             }
         if action == "record_stop":
-            return {"ok": True, "path": self.record_path or "rec.mp4"}
+            run_id = str((args or {}).get("run_id") or "run")
+            return {
+                "ok": True,
+                "path": self.record_path
+                or f"/workspace/.opencuria/computeruse/{run_id}/session.mp4",
+            }
         return {"ok": True}
 
     def actions(self) -> list[str]:
@@ -391,36 +395,59 @@ async def test_video_embedded_exactly_once() -> None:
     kwargs = _run_kwargs()
     _invoke(kwargs)
     result = await run_agent_s_computeruse(**kwargs)
-    # FakeAccessor.record_stop returns "rec.mp4" (no path override), so
-    # the final record_stop path wins over the record_start default.
-    marker = "![Computer use](rec.mp4)"
+    # FakeAccessor.record_stop returns the canonical default path, so the
+    # final record_stop path wins over the record_start default.
+    canonical = "/workspace/.opencuria/computeruse/run-1/session.mp4"
+    marker = f"![Computer use]({canonical})"
     assert result.output.count(marker) == 1
-    assert result.metadata["recording_path"] == "rec.mp4"
+    assert result.metadata["recording_path"] == canonical
     again = append_video_to_output(result.output, result.metadata["recording_path"])
     assert again == result.output
 
-    long_body = "x" * 9000
-    truncated, was = truncate_task_output(long_body, "rec.mp4", 8000)
+    recorded_body = "x" * 9000 + f"\n\n{marker}"
+    truncated, was = truncate_task_output(recorded_body, canonical, 8000)
     assert was is True
     assert truncated.count(marker) == 1
 
 
 async def test_record_stop_path_wins_for_output_and_metadata() -> None:
-    """A transcoded record_stop path replaces the default in all outputs."""
+    """A canonical record_stop path replaces the default in all outputs."""
+    final_path = "/workspace/.opencuria/computeruse/run-1/final.mp4"
 
     class TranscodingAccessor(FakeAccessor):
         async def desktop_action(self, action, args=None, timeout=None):
             result = await super().desktop_action(action, args, timeout)
             if action == "record_stop":
-                return {"ok": True, "path": "/videos/final.mp4"}
+                return {"ok": True, "path": final_path}
             return result
 
     kwargs = _run_kwargs(accessor=TranscodingAccessor())
     _invoke(kwargs)
     result = await run_agent_s_computeruse(**kwargs)
-    assert result.metadata["recording_path"] == "/videos/final.mp4"
-    assert result.output.endswith("\n\n![Computer use](/videos/final.mp4)")
+    assert result.metadata["recording_path"] == final_path
+    assert result.output.endswith(f"\n\n![Computer use]({final_path})")
     assert "session.mp4" not in result.output
+
+
+async def test_record_stop_invalid_path_falls_back_to_start_path() -> None:
+    """An unexpected record_stop path never reaches output/metadata."""
+    from apps.harness.agent_s.harness import default_recording_path
+
+    class EvilStopAccessor(FakeAccessor):
+        async def desktop_action(self, action, args=None, timeout=None):
+            result = await super().desktop_action(action, args, timeout)
+            if action == "record_stop":
+                return {"ok": True, "path": "https://evil.example/r.mp4"}
+            return result
+
+    kwargs = _run_kwargs(accessor=EvilStopAccessor())
+    _invoke(kwargs)
+    result = await run_agent_s_computeruse(**kwargs)
+    expected = default_recording_path("run-1")
+    assert result.metadata["recording_path"] == expected
+    assert result.output.endswith(f"\n\n![Computer use]({expected})")
+    assert "evil.example" not in result.output
+    assert "evil.example" not in str(result.metadata)
 
 
 async def test_cleanup_survives_outer_cancel() -> None:
@@ -440,7 +467,10 @@ async def test_cleanup_survives_outer_cancel() -> None:
                 gate = asyncio.Event()
                 asyncio.get_running_loop().call_later(0.01, gate.set)
                 await gate.wait()
-                return {"ok": True, "path": "/videos/final.mp4"}
+                return {
+                    "ok": True,
+                    "path": "/workspace/.opencuria/computeruse/run-1/session.mp4",
+                }
             if action == "release":
                 self.release_seen = True
             return await super().desktop_action(action, args, timeout)
@@ -562,9 +592,18 @@ async def test_observable_parts_plan_and_reasoning() -> None:
     events = _invoke(kwargs)
     await run_agent_s_computeruse(**kwargs)
     kinds = [(e["type"], e.get("delta")) for e in events]
-    assert ("agent", {"plan": "click save"}) in kinds
-    assert ("part_updated", {"reasoning": "looks good"}) in kinds
-    assert ("part_updated", {"reasoning": "hmm"}) in kinds
+    agent_deltas = [delta for kind, delta in kinds if kind == "agent"]
+    assert len(agent_deltas) == 1
+    assert agent_deltas[0]["plan"] == "click save"
+    assert agent_deltas[0]["agent_meta"]["action"] == ""
+    reasoning_deltas = [
+        delta.get("reasoning")
+        for kind, delta in kinds
+        if kind == "part_updated" and isinstance(delta, dict)
+    ]
+    assert "looks good" in reasoning_deltas
+    assert "hmm" in reasoning_deltas
+    assert all(e.get("step") == 1 for e in events if e["type"] != "step_start")
 
 
 async def test_core_loop_click_materializes_twice_executes_once() -> None:
@@ -838,3 +877,217 @@ async def test_flush_parity_openrouter_drops_turns_chatgpt_trims_images() -> Non
     worker_mod.flush_messages(long_state)
     assert len(long_state.generator_messages[1]["content"]) == 1
     assert len(long_state.generator_messages[2]["content"]) == 2
+
+
+async def test_recording_disabled_skips_record_lifecycle() -> None:
+    """Disabled recording: only hold/release, no video, no path metadata."""
+    session = FakeSession([({"plan": "click save"}, "DONE")])
+    kwargs = _run_kwargs(session=session, config=_config(enable_recording=False))
+    accessor = kwargs["_accessor"]
+    events = _invoke(kwargs)
+    result = await run_agent_s_computeruse(**kwargs)
+    assert accessor.actions() == ["hold", "release"]
+    assert "![Computer use](" not in result.output
+    assert "recording_path" not in result.metadata
+    assert result.finish_reason == "stop"
+    assert [e["type"] for e in events] == [
+        "step_start",
+        "agent",
+        "step_finish",
+    ]
+
+
+async def test_recording_disabled_cancel_still_releases_without_stop() -> None:
+    """Disabled recording + cancel: release runs, record_stop never runs."""
+
+    class Cancelling(FakeSession):
+        async def predict(self, prompt, obs, *, record=None, sleep=None):
+            raise asyncio.CancelledError("stop")
+
+    kwargs = _run_kwargs(session=Cancelling([]), config=_config(enable_recording=False))
+    accessor = kwargs["_accessor"]
+    _invoke(kwargs)
+    with pytest.raises(asyncio.CancelledError):
+        await run_agent_s_computeruse(**kwargs)
+    assert accessor.actions() == ["hold", "release"]
+
+
+async def test_truncate_without_recording_never_invents_video() -> None:
+    """Plain truncation without a recording marker adds no phantom video."""
+    long_body = "x" * 9000
+    display, truncated = truncate_task_output(long_body, None, 8000)
+    assert truncated is True
+    assert "![Computer use](" not in display
+    assert display.endswith(f"\n…[truncated {len(long_body)} chars total]")
+
+
+async def test_truncate_ignores_unrelated_recording_path() -> None:
+    """A default path for an unrecorded run is not appended as video."""
+    from apps.harness.harness_service import computeruse_recording_path
+
+    assert computeruse_recording_path("plain output", "child-123") is None
+    display, truncated = truncate_task_output(
+        "plain output",
+        "/workspace/.opencuria/computeruse/child-123/session.mp4",
+        8000,
+    )
+    assert truncated is False
+    assert display == "plain output"
+
+
+async def test_truncate_preserves_real_recording_marker() -> None:
+    """An actually recorded child output keeps its real video on truncate."""
+    from apps.harness.harness_service import computeruse_recording_path
+
+    canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
+    recorded = f"done\n\n![Computer use]({canonical})"
+    assert computeruse_recording_path(recorded, "child-123") == canonical
+    display, truncated = truncate_task_output(
+        "x" * 9000 + f"\n\n![Computer use]({canonical})",
+        canonical,
+        8000,
+    )
+    assert truncated is True
+    assert display.count(f"![Computer use]({canonical})") == 1
+
+
+async def test_recording_marker_trust_rejects_untrusted_paths() -> None:
+    """URLs, /etc, foreign workspace paths, .., and bad extensions are None."""
+    from apps.harness.agent_s.harness import (
+        extract_recording_path,
+        is_valid_recording_path,
+    )
+    from apps.harness.agent_s.harness import truncate_task_output as _truncate
+    from apps.harness.harness_service import computeruse_recording_path
+
+    legit = "/workspace/.opencuria/computeruse/child-123/session.mp4"
+    assert is_valid_recording_path(legit) is True
+    assert extract_recording_path(f"done\n\n![Computer use]({legit})") == legit
+    assert computeruse_recording_path(f"done\n\n![Computer use]({legit})", "x") == legit
+
+    bad = [
+        "https://evil.example/r.mp4",
+        "http://evil.example/r.mp4",
+        "/etc/passwd.mp4",
+        "/etc/passwd",
+        "/workspace/other/x.mp4",
+        "/workspace/.opencuria/computeruse/../evil.mp4",
+        "/workspace/.opencuria/computeruse/child-123/evil.avi",
+        "/workspace/.opencuria/computeruse//session.mp4",
+        "rec.mp4",
+        "",
+    ]
+    for target in bad:
+        assert is_valid_recording_path(target) is False, target
+        output = f"done\n\n![Computer use]({target})"
+        assert extract_recording_path(output) is None, target
+        assert computeruse_recording_path(output, "child-123") is None, target
+        display, _ = _truncate("x" * 9000 + f"\n\n{output}", target, 8000)
+        # No marker is preserved for untrusted paths: plain truncation only.
+        assert f"![Computer use]({target})" not in display
+
+    # Unknown/valid-but-absent path: truncate drops unknown suffixes.
+    display, _ = _truncate(
+        "x" * 9000 + f"\n\n![Computer use]({legit})",
+        "/workspace/.opencuria/computeruse/other-run/session.mp4",
+        8000,
+    )
+    assert "![Computer use](" not in display
+
+
+async def test_observable_parts_plan_meta_structured_and_fallback() -> None:
+    """Structured plans parse to agent_meta; free plans fall back safely."""
+    from apps.harness.agent_s.harness import _observable_parts
+    from apps.harness.agent_s.plan_meta import parse_plan_meta
+
+    plan = (
+        "(Previous action verification)\nThe click worked.\n\n"
+        "(Screenshot Analysis)\nA dialog is open.\n\n"
+        "(Next Action)\nClick the save button.\n\n"
+        "(Grounded Action)\n```python\n"
+        'agent.click("The save button in the dialog window")\n'
+        "```"
+    )
+    events = _observable_parts({"plan": plan}, step=2)
+    assert events[0]["type"] == "agent"
+    assert events[0]["step"] == 2
+    assert events[0]["delta"]["plan"] == plan
+    meta = events[0]["delta"]["agent_meta"]
+    assert meta["verification"] == "The click worked."
+    assert meta["analysis"] == "A dialog is open."
+    assert meta["next_action"] == "Click the save button."
+    assert meta["action"] == 'click "The save button in the dialog window"'
+    assert meta["action_kind"] == "click"
+    assert "exec_code" not in str(meta)
+
+    fallback = parse_plan_meta("just do the thing")
+    assert fallback == {
+        "verification": "",
+        "analysis": "",
+        "next_action": "",
+        "action": "",
+        "action_kind": "",
+    }
+    fenced_free_form = parse_plan_meta(
+        'click the save button\n```python\nagent.click("Save")\n```'
+    )
+    assert fenced_free_form == {
+        "verification": "",
+        "analysis": "",
+        "next_action": "",
+        "action": "",
+        "action_kind": "",
+    }
+    assert parse_plan_meta("")["action"] == ""
+    legacy = _observable_parts({"plan": "click save"}, step=1)
+    assert legacy[0]["delta"]["agent_meta"]["action"] == ""
+    fenced_legacy = _observable_parts(
+        {"plan": 'click save\n```python\nagent.click("Save")\n```'}, step=1
+    )
+    assert fenced_legacy[0]["delta"]["agent_meta"]["action"] == ""
+
+
+async def test_plan_meta_type_action_redacts_typed_text() -> None:
+    """Secrets in type() plans never reach action or forwarded agent_meta."""
+    from apps.harness.agent_s.harness import _observable_parts
+    from apps.harness.agent_s.plan_meta import parse_plan_meta
+
+    secret = "S3cr3t-P@ssw0rt-123"
+    plan = (
+        "(Previous action verification)\nIt worked.\n\n"
+        "(Screenshot Analysis)\nA password field is focused.\n\n"
+        "(Next Action)\nType the password.\n\n"
+        "(Grounded Action)\n```python\n"
+        f'agent.type("Password field", "{secret}")\n'
+        "```"
+    )
+    meta = parse_plan_meta(plan)
+    assert meta["action"] == "type"
+    assert meta["action_kind"] == "type"
+    assert secret not in meta["action"]
+    assert secret not in str(meta)
+
+    events = _observable_parts({"plan": plan}, step=1)
+    forwarded = events[0]["delta"]["agent_meta"]
+    assert forwarded["action"] == "type"
+    assert forwarded["action_kind"] == "type"
+    assert secret not in str(forwarded)
+    # Full part.output stays verbatim for backcompat (collapsible raw plan).
+    assert secret in events[0]["delta"]["plan"]
+
+    single = parse_plan_meta(
+        "(Previous action verification)\nok\n"
+        "(Screenshot Analysis)\nfield\n"
+        "(Next Action)\ntype\n"
+        "(Grounded Action)\n```python\n"
+        f'agent.type("{secret}")\n'
+        "```"
+    )
+    assert single == {
+        "verification": "ok",
+        "analysis": "field",
+        "next_action": "type",
+        "action": "type",
+        "action_kind": "type",
+    }
+    assert secret not in str(single)

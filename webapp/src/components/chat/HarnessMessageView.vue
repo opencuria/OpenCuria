@@ -4,24 +4,17 @@ import { GitFork, Pencil, User, ChevronDown } from '@lucide/vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { buildRenderBlocks } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
+import { buildAgentStepViews, hasRunningAgentSequence } from '@/lib/harnessAgentSteps'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
+import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
@@ -45,14 +38,37 @@ const emit = defineEmits<{
 
 const blocks = computed(() => buildRenderBlocks(props.message.parts))
 
+const agentViews = computed(() =>
+  buildAgentStepViews(props.message.parts, {
+    streaming: props.streaming === true,
+    // Only the final (non-streaming) message outcome may turn the last
+    // step into `Failed`; while streaming no stale error may leak in.
+    ...(props.streaming === true
+      ? {}
+      : { finish: props.message.finish, messageError: props.message.error }),
+  }),
+)
+
+function agentViewFor(partId: string): (typeof agentViews.value)[number] | undefined {
+  return agentViews.value.find((view) => view.part.id === partId)
+}
+
+function isAgentBlockConnected(index: number): boolean {
+  const next = blocks.value[index + 1]
+  return next?.kind === 'agent'
+}
+
 const lastBlockIsText = computed(() => {
   const last = blocks.value[blocks.value.length - 1]
   return last?.kind === 'text'
 })
 
-/** Thinking only in idle gaps: busy turn, no live tool/subtask. */
+/** Thinking only in idle gaps: busy turn, no live tool/subtask or agent step. */
 const showThinking = computed(
-  () => props.streaming === true && !hasRunningToolOrSubtask(props.message.parts),
+  () =>
+    props.streaming === true &&
+    !hasRunningToolOrSubtask(props.message.parts) &&
+    !hasRunningAgentSequence(props.message.parts),
 )
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])
@@ -97,6 +113,9 @@ function blockKey(index: number): string {
   if (block.kind === 'compaction') {
     return `compaction-${block.part.id}`
   }
+  if (block.kind === 'agent') {
+    return `agent-${block.part.id}`
+  }
   return `${block.kind}-${block.part.id}`
 }
 
@@ -117,9 +136,7 @@ const editDraft = ref('')
 /** Local optimistic ids (`local-user-*`) have no backend row to edit/fork. */
 const isEditableMessage = computed(
   () =>
-    props.message.role === 'user' &&
-    !props.disabled &&
-    !props.message.id.startsWith('local-user-'),
+    props.message.role === 'user' && !props.disabled && !props.message.id.startsWith('local-user-'),
 )
 
 watch(
@@ -233,7 +250,9 @@ function forkFromHere(): void {
         </TooltipProvider>
       </div>
     </div>
-    <div class="flex items-center justify-center w-8 h-8 rounded-full bg-primary/10 text-primary shrink-0">
+    <div
+      class="flex items-center justify-center w-8 h-8 rounded-full bg-primary/10 text-primary shrink-0"
+    >
       <User :size="14" />
     </div>
   </div>
@@ -243,11 +262,7 @@ function forkFromHere(): void {
     <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
       <div v-if="blocks.length" class="flex flex-col gap-2">
         <template v-for="(block, index) in blocks" :key="blockKey(index)">
-          <div
-            v-if="block.kind === 'text'"
-            :data-block-kind="'text'"
-            :data-part-id="block.part.id"
-          >
+          <div v-if="block.kind === 'text'" :data-block-kind="'text'" :data-part-id="block.part.id">
             <HarnessMarkdown :text="block.part.output" />
             <span
               v-if="streaming && lastBlockIsText && index === blocks.length - 1"
@@ -261,10 +276,7 @@ function forkFromHere(): void {
           >
             <HarnessWorkRow :part="block.part" />
           </div>
-          <div
-            v-else-if="block.kind === 'group'"
-            :data-block-kind="'group'"
-          >
+          <div v-else-if="block.kind === 'group'" :data-block-kind="'group'">
             <HarnessWorkedGroup :parts="block.parts" />
           </div>
           <div
@@ -279,16 +291,22 @@ function forkFromHere(): void {
               :models="models ?? catalog"
               @open-subtask="emit('openSubtask', $event)"
             />
-            <HarnessPatchCard v-else-if="block.part.type === 'patch'" :part="block.part" />
-            <div
-              v-else
-              class="w-full overflow-x-auto rounded-xl border border-border bg-card px-3 py-2"
-            >
-              <p class="text-xs font-medium text-muted-foreground">
-                {{ block.part.title || block.part.type }}
-              </p>
-              <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">{{ block.part.output }}</pre>
-            </div>
+            <HarnessPatchCard v-else :part="block.part" />
+          </div>
+          <div
+            v-else-if="block.kind === 'agent'"
+            :data-block-kind="'agent'"
+            :data-part-id="block.part.id"
+            :class="isAgentBlockConnected(index) ? 'mb-0.5' : ''"
+          >
+            <HarnessAgentStep
+              :step="agentViewFor(block.part.id)?.step ?? null"
+              :part="block.part"
+              :status="agentViewFor(block.part.id)?.status ?? 'completed'"
+              :live="agentViewFor(block.part.id)?.live ?? false"
+              :legacy="agentViewFor(block.part.id)?.legacy ?? true"
+              :connected="isAgentBlockConnected(index)"
+            />
           </div>
           <div
             v-else-if="block.kind === 'compaction'"

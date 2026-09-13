@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
-import { buildRenderBlocks, countWorkItems, isCardPart, isWorkItem } from './harnessBlocks'
+import {
+  buildRenderBlocks,
+  countWorkItems,
+  isAgentPart,
+  isCardPart,
+  isWorkItem,
+} from './harnessBlocks'
 
 function makePart(
   type: HarnessPartType,
@@ -212,6 +218,44 @@ describe('buildRenderBlocks', () => {
     expect(blocks[0]).toMatchObject({ kind: 'single', part: { id: 'task-1' } })
   })
 
+  it('renders agent plan steps as their own timeline blocks', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('agent', { id: 'agent-1', title: 'Agent plan', output: 'plan one' }),
+      makePart('agent', { id: 'agent-2', title: 'Agent plan', output: 'plan two' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'agent', 'agent'])
+    expect(blocks[1]).toMatchObject({ kind: 'agent', part: { id: 'agent-1' } })
+    expect(blocks[2]).toMatchObject({ kind: 'agent', part: { id: 'agent-2' } })
+  })
+
+  it('keeps agent steps out of tool groups', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('agent', { id: 'agent-1', output: 'plan' }),
+      makePart('tool', { id: 'tool-3', tool: 'list' }),
+      makePart('tool', { id: 'tool-4', tool: 'read' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['group', 'agent', 'group'])
+  })
+
+  it('keeps reasoning chronological around agent steps', () => {
+    const parts = [
+      makePart('reasoning', { id: 'r1', output: 'thinking' }),
+      makePart('agent', { id: 'agent-1', output: 'plan' }),
+      makePart('reasoning', { id: 'r2', output: 'more thinking' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'agent', 'single'])
+  })
+
   it('renders compaction as its own block kind', () => {
     const parts = [
       makePart('text', { id: 't1', output: 'Before' }),
@@ -241,14 +285,17 @@ describe('buildRenderBlocks', () => {
 })
 
 describe('work item helpers', () => {
-  it('identifies groupable tools and card parts', () => {
+  it('identifies groupable tools, card parts, and agent steps', () => {
     expect(isWorkItem(makePart('tool'))).toBe(true)
     expect(isWorkItem(makePart('tool', { state: 'error' }))).toBe(false)
     expect(isWorkItem(makePart('reasoning'))).toBe(false)
     expect(isWorkItem(makePart('text'))).toBe(false)
     expect(isCardPart(makePart('subtask'))).toBe(true)
     expect(isCardPart(makePart('patch'))).toBe(true)
+    expect(isCardPart(makePart('agent'))).toBe(false)
     expect(isCardPart(makePart('tool'))).toBe(false)
+    expect(isAgentPart(makePart('agent'))).toBe(true)
+    expect(isAgentPart(makePart('tool'))).toBe(false)
   })
 
   it('counts only groupable tool parts', () => {

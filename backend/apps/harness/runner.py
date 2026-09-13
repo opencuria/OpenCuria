@@ -1149,7 +1149,9 @@ class HarnessRunner:
         behaviour is Agent-S only — no OpenCuria system-prompt composition,
         no ToolSchema/function calls, no 1000-grid tools. The runner stays a
         generic executor (provider resolution, accessor, events); all
-        Agent-S logic lives in the backend ``agent_s`` layer.
+        Agent-S logic lives in the backend ``agent_s`` layer. The run
+        config (including ``enable_recording``) is preserved verbatim so
+        the opt-in recording gate survives the pre-hold rebuild.
         """
         from .agent_s.adapters import (
             ACTION_EXECUTE_TIMEOUT_S,
@@ -1192,6 +1194,9 @@ class HarnessRunner:
                 max_trajectory_length=config.max_trajectory_length,
                 enable_reflection=config.enable_reflection,
                 enable_code_agent=config.enable_code_agent,
+                enable_recording=bool(
+                    getattr(config, "enable_recording", False)
+                ),
                 screenshot_max_dimension=config.screenshot_max_dimension,
                 action_pre_delay=config.action_pre_delay,
                 action_post_delay=config.action_post_delay,

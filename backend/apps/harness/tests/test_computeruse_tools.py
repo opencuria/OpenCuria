@@ -270,14 +270,15 @@ async def test_computeruse_subagent_model_resolution(
     assert children[0].agent_name == "computeruse"
     assert children[0].model == expected_model
     actions = [call[0] for call in accessor.desktop_calls]
+    # Recording defaults to off: only the hold/release lease runs.
     assert "hold" in actions
-    assert "record_start" in actions
-    assert "record_stop" in actions
+    assert "record_start" not in actions
+    assert "record_stop" not in actions
     assert "release" in actions
 
 
 def test_computeruse_recording_path_prefers_embedded_final_path() -> None:
-    """Embedded final record_stop path wins; fallback stays single-rooted."""
+    """Embedded final record_stop path wins; unrecorded output stays plain."""
     from apps.harness.agent_s.harness import (
         append_video_to_output,
         default_recording_path,
@@ -293,15 +294,16 @@ def test_computeruse_recording_path_prefers_embedded_final_path() -> None:
     assert fallback.endswith("/session.mp4")
     assert fallback.count("/workspace") == 1
 
-    # No embed → sanitized fallback.
-    assert computeruse_recording_path("done", child_id) == fallback
-    # Empty / unterminated embeds → sanitized fallback (never empty).
-    assert computeruse_recording_path("![Computer use]()", child_id) == fallback
-    assert computeruse_recording_path("![Computer use](abc", child_id) == fallback
+    # No embed → no recording (never invent a phantom video path).
+    assert computeruse_recording_path("done", child_id) is None
+    # Empty / unterminated embeds → no recording (never empty).
+    assert computeruse_recording_path("![Computer use]()", child_id) is None
+    assert computeruse_recording_path("![Computer use](abc", child_id) is None
 
-    # Embedded final path wins verbatim (no double /workspace prefix).
-    embedded_out = "done\n\n![Computer use](/videos/final.mp4)"
-    assert computeruse_recording_path(embedded_out, child_id) == "/videos/final.mp4"
+    # Embedded final path wins verbatim (canonical runner path).
+    canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
+    embedded_out = f"done\n\n![Computer use]({canonical})"
+    assert computeruse_recording_path(embedded_out, child_id) == canonical
 
     marker = f"![Computer use]({fallback})"
     once = append_video_to_output("done", fallback)
@@ -314,23 +316,56 @@ def test_computeruse_recording_path_prefers_embedded_final_path() -> None:
     )
     assert truncated is False
     assert display == embedded_out
-    assert display.count("![Computer use](/videos/final.mp4)") == 1
-    assert display.count("/workspace") == 0
+    assert display.count(f"![Computer use]({fallback})") == 1
 
 
-def test_computeruse_recording_path_truncation_keeps_marker_once() -> None:
-    """Long child output truncates to one marker, no doubled workspace root."""
+def test_computeruse_recording_path_truncation_adds_no_phantom_video() -> None:
+    """Long unrecorded child output truncates as plain text (no video)."""
     from apps.harness.agent_s.harness import truncate_task_output
     from apps.harness.harness_service import computeruse_recording_path
 
     child_id = "child-123"
     long_body = "x" * 9000
-    path = computeruse_recording_path(long_body, child_id)
-    assert path.count("/workspace") == 1
-    display, truncated = truncate_task_output(long_body, path, 8000)
+    assert computeruse_recording_path(long_body, child_id) is None
+    display, truncated = truncate_task_output(
+        long_body, computeruse_recording_path(long_body, child_id), 8000
+    )
     assert truncated is True
-    assert display.count(f"![Computer use]({path})") == 1
-    assert display.count(path) == 1
+    assert "![Computer use](" not in display
+
+
+def test_computeruse_recorded_output_truncation_keeps_marker_once() -> None:
+    """Long recorded child output truncates to one real marker."""
+    from apps.harness.agent_s.harness import truncate_task_output
+
+    canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
+    recorded = "x" * 9000 + f"\n\n![Computer use]({canonical})"
+    display, truncated = truncate_task_output(recorded, canonical, 8000)
+    assert truncated is True
+    assert display.count(f"![Computer use]({canonical})") == 1
+
+
+def test_computeruse_recording_marker_trust_rejects_untrusted() -> None:
+    """Untrusted markers (URL, /etc, foreign workspace, .., bad ext) are None."""
+    from apps.harness.agent_s.harness import (
+        extract_recording_path,
+        truncate_task_output,
+    )
+    from apps.harness.harness_service import computeruse_recording_path
+
+    cases = [
+        "https://evil.example/r.mp4",
+        "/etc/passwd.mp4",
+        "/workspace/other/x.mp4",
+        "/workspace/.opencuria/computeruse/../evil.mp4",
+        "/workspace/.opencuria/computeruse/child-123/evil.avi",
+    ]
+    for target in cases:
+        output = f"done\n\n![Computer use]({target})"
+        assert extract_recording_path(output) is None, target
+        assert computeruse_recording_path(output, "child-123") is None, target
+        display, _ = truncate_task_output("x" * 9000 + f"\n\n{output}", target, 8000)
+        assert f"![Computer use]({target})" not in display, target
 
 
 @pytest.mark.django_db(transaction=True)
@@ -478,3 +513,42 @@ def current_task_cancelling() -> int:
 
     task = asyncio.current_task()
     return int(task.cancelling() if task is not None else 0)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_computeruse_subagent_run_recording_opt_in(harness_workspace) -> None:
+    """enable_recording=True restores the record_start/record_stop lifecycle."""
+    from apps.harness.services import AgentSConfigService
+
+    accessor = FakeAccessor()
+    service = _computeruse_harness_service(accessor)
+    AgentSConfigService().save_config(
+        harness_workspace.runner.organization_id, {"enable_recording": True}
+    )
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="parent-model",
+    )
+    _parent_run_context(service, parent)
+    args = TaskArgs(
+        description="desktop task",
+        prompt="click save",
+        subagent_type="computeruse",
+    )
+    await service._run_subagent_tool(
+        parent=parent,
+        args=args,
+        ctx=_task_ctx(parent, str(harness_workspace.id)),
+        subtask_id="sub-cu-rec",
+        organization_id=harness_workspace.runner.organization_id,
+        computer_use_model="cu-model",
+    )
+    actions = [call[0] for call in accessor.desktop_calls]
+    assert actions.count("hold") == 1
+    assert "record_start" in actions
+    assert "record_stop" in actions
+    assert "release" in actions

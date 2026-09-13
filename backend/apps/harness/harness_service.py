@@ -1694,6 +1694,7 @@ class HarnessService:
                     "session_id": session_id,
                     "delta": {"step_start": event.get("step")},
                     "step": event.get("step"),
+                    "part_id": str(part.id),
                 },
                 workspace_id,
             )
@@ -1712,6 +1713,36 @@ class HarnessService:
                 total_tokens=usage.total_tokens,
                 cost=float(event.get("cost", 0.0) or 0.0),
             )
+            # Close the matching step-start part (DB-side; it stayed
+            # ``running`` because steps used to be frontend-only). A
+            # missing step part (e.g. legacy rows) is not an error.
+            step_part_id = (
+                self._runs.get(session_id, {}).get("step_parts", {}).pop(
+                    str(event.get("step")), None
+                )
+            )
+            if step_part_id is not None:
+                step_part = await sync_to_async(
+                    self.parts.model.objects.filter(id=step_part_id).first
+                )()
+                if step_part is not None:
+                    await sync_to_async(self.parts.mark_state)(
+                        step_part, "completed"
+                    )
+            # Close the per-step reasoning part (DB-side; the frontend
+            # already closes open reasoning parts live on step_finish).
+            # Resetting ``reasoning_part_id`` makes the next step start a
+            # fresh reasoning part so reflection stays step-attributed.
+            run_ctx = self._runs.get(session_id, {})
+            reasoning_part_id = run_ctx.pop("reasoning_part_id", None)
+            if reasoning_part_id is not None:
+                reasoning_part = await sync_to_async(
+                    self.parts.model.objects.filter(id=reasoning_part_id).first
+                )()
+                if reasoning_part is not None:
+                    await sync_to_async(self.parts.mark_state)(
+                        reasoning_part, "completed"
+                    )
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
                 type="step-finish",
@@ -1834,23 +1865,38 @@ class HarnessService:
             # plan, never the final assistant answer). Persisted as an
             # ``agent`` card part so the frontend renders it; the child
             # run's assistant message keeps only the final status text.
+            # The full plan stays in ``output`` (backcompat); safe,
+            # non-executable summaries live in ``meta["agent_meta"]`` and
+            # ride the existing live event as ``delta.agent_meta`` (the
+            # ``delta.agent`` contract is unchanged). Raw ``exec_code``
+            # and materialized coordinates are never persisted.
             delta = event.get("delta", {}) or {}
             plan = str(delta.get("plan", "") or "")
             if plan:
+                from .agent_s.plan_meta import parse_plan_meta
+
+                # Always re-parse server-side from the plan: an
+                # event-supplied ``agent_meta`` is only a transport
+                # optimization and never trusted (it could carry
+                # ``exec_code`` or other unexpected keys).
+                agent_meta = parse_plan_meta(plan)
                 part = await sync_to_async(self.parts.create)(
                     message_id=assistant.id,
                     type="agent",
                     state="completed",
                     title="Agent plan",
                     output=plan,
-                    meta={"step": event.get("step")},
+                    meta={
+                        "step": event.get("step"),
+                        "agent_meta": agent_meta,
+                    },
                 )
                 await self._emit_frontend(
                     FRONTEND_EVENT_PART,
                     {
                         "workspace_id": workspace_id,
                         "session_id": session_id,
-                        "delta": {"agent": plan},
+                        "delta": {"agent": plan, "agent_meta": agent_meta},
                         "step": event.get("step"),
                         "part_id": str(part.id),
                     },
@@ -1959,10 +2005,18 @@ class HarnessService:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Append text/reasoning deltas to the running text part."""
+        """Append text/reasoning deltas to the running text/reasoning parts.
+
+        Reasoning parts stay step-attributed via ``meta["step"]`` (normal
+        LLM reasoning without a step keeps working — ``step`` is simply
+        ``None``). ``step_finish`` closes the running reasoning part
+        DB-side and resets ``reasoning_part_id`` so the next step starts a
+        fresh one (see ``_persist_runner_event``).
+        """
         delta = event.get("delta", {}) or {}
         text = str(delta.get("text", "") or "")
         reasoning = str(delta.get("reasoning", "") or "")
+        step = event.get("step")
         key = str(session.id)
         run_ctx = self._runs.get(key, {})
         if text:
@@ -1972,6 +2026,7 @@ class HarnessService:
                     message_id=assistant.id,
                     type="text",
                     state="running",
+                    meta={"step": step},
                 )
                 run_ctx["text_part_id"] = str(part.id)
                 part_id = str(part.id)
@@ -1985,6 +2040,7 @@ class HarnessService:
                     message_id=assistant.id,
                     type="reasoning",
                     state="running",
+                    meta={"step": step},
                 )
                 run_ctx["reasoning_part_id"] = str(part.id)
                 part_id = str(part.id)
@@ -2482,7 +2538,12 @@ class HarnessService:
             )
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool="task") from exc
         if agent == "computeruse":
-            recording_path = computeruse_recording_path(output, str(child.id))
+            from .agent_s.harness import extract_recording_path
+
+            # Only a recording marker really present in the child output
+            # may be preserved — never invent one via a default path when
+            # recording was disabled (see ``truncate_task_output``).
+            recording_path = extract_recording_path(output)
             display_output, truncated = truncate_task_output(
                 output,
                 recording_path,
@@ -2533,28 +2594,19 @@ def _normalize_skill_ids(skill_ids: list[str] | None) -> list[str]:
     return normalized
 
 
-def computeruse_recording_path(output: str, child_id: str) -> str:
-    """Resolve the canonical recording path for a computer-use child.
+def computeruse_recording_path(output: str, child_id: str) -> str | None:
+    """Return the real recording path embedded in a computer-use child output.
 
     The child assistant content already embeds the final ``record_stop``
-    path — reuse the first ``![Computer use](...)`` target so the
-    parent card links the real file. Otherwise fall back to the
-    sanitized default ``session.mp4`` path for *child_id*. Exactly one
-    ``/workspace`` prefix is preserved either way; never rebuilt by
-    string-concatenating a default onto an already-embedded path.
+    path when recording was enabled — reuse the first
+    ``![Computer use](...)`` target so the parent card links the real
+    file. Returns ``None`` when no recording marker is present (recording
+    disabled): callers must not invent a video via a default path.
+    ``child_id`` is kept for backward compatibility and ignored.
     """
-    from .agent_s.harness import default_recording_path, sanitize_run_id
+    from .agent_s.harness import extract_recording_path
 
-    fallback = default_recording_path(sanitize_run_id(str(child_id)))
-    marker_prefix = "![Computer use]("
-    marker_idx = (output or "").find(marker_prefix)
-    if marker_idx == -1:
-        return fallback
-    end_idx = (output or "").find(")", marker_idx + len(marker_prefix))
-    if end_idx == -1:
-        return fallback
-    embedded = (output or "")[marker_idx + len(marker_prefix) : end_idx].strip()
-    return embedded or fallback
+    return extract_recording_path(output)
 
 
 def resolve_skill_bodies(

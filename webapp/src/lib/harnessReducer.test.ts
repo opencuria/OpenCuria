@@ -226,6 +226,91 @@ describe('harnessReducer', () => {
     })
   })
 
+  it('creates a completed agent plan part on live delta.agent without touching content', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: '(Previous action verification)\nok\n(Screenshot Analysis)\nlogin form\n(Next Action)\nclick submit\n(Grounded Action)\n```python\nagent.click("Submit")\n```',
+        agent_meta: {
+          verification: 'ok',
+          analysis: 'login form',
+          next_action: 'click submit',
+          action: 'click "Submit"',
+          action_kind: 'click',
+        },
+      },
+      { step: 3, partId: 'agent-part-3' },
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    expect(assistant.content).toBe('')
+    const agent = findPart(assistant, { partId: 'agent-part-3' })
+    expect(agent?.type).toBe('agent')
+    expect(agent?.state).toBe('completed')
+    expect(agent?.title).toBe('Agent plan')
+    expect(agent?.output).toContain('click submit')
+    expect(agent?.meta).toMatchObject({
+      step: 3,
+      agent_meta: {
+        verification: 'ok',
+        analysis: 'login form',
+        next_action: 'click submit',
+        action: 'click "Submit"',
+        action_kind: 'click',
+      },
+    })
+  })
+
+  it('updates (not duplicates) a repeated delta.agent with the same part id', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(messages, 'session-1', { agent: 'plan v1' }, { step: 2, partId: 'agent-2' })
+    applyPartDelta(messages, 'session-1', { agent: 'plan v2' }, { step: 2, partId: 'agent-2' })
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const agents = assistant.parts.filter((part) => part.type === 'agent')
+    expect(agents).toHaveLength(1)
+    expect(agents[0]!.output).toBe('plan v2')
+    expect(assistant.content).toBe('')
+  })
+
+  it('drops unknown agent_meta keys and keeps step on the live part', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: 'plan',
+        agent_meta: {
+          action: 'click',
+          action_kind: 'click',
+          exec_code: 'agent.click(1,2)',
+        } as unknown as Record<string, string>,
+      },
+      { step: 1, partId: 'agent-1' },
+    )
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const agent = findPart(assistant, { partId: 'agent-1' })
+    expect(agent?.meta?.['agent_meta']).toEqual({ action: 'click', action_kind: 'click' })
+    expect(agent?.meta?.['step']).toBe(1)
+  })
+
+  it('attributes live reasoning to the event step', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(messages, 'session-1', { reasoning: 'reflecting' }, { step: 4 })
+
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const reasoning = assistant.parts.find((part) => part.type === 'reasoning')
+    expect(reasoning?.output).toBe('reflecting')
+    expect(reasoning?.meta?.['step']).toBe(4)
+  })
+
   it('replaces the todo list on todo_updated', () => {
     const next = applyTodoUpdate(
       [{ id: 'old', content: 'old', status: 'pending', priority: 'medium', order: 0 }],
@@ -411,6 +496,346 @@ describe('harnessReducer', () => {
     expect(last!.id).toBe('server-assistant')
     expect(last!.content).toBe('Hello world')
     expect(last!.parts[0]!.output).toBe('Hello world')
+  })
+
+  it('keeps live agent and step parts when lengths are equal (busy race)', () => {
+    const stepMeta = (step: number) => ({ step })
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          {
+            id: 'text-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello',
+          },
+          {
+            id: 'agent-live-2',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'plan two',
+            meta: { ...stepMeta(2), agent_meta: { action: 'click' } },
+          },
+          {
+            id: 'start-live-2',
+            session_id: 'session-1',
+            type: 'step-start',
+            state: 'running',
+            title: 'Step 2',
+            output: '',
+            meta: stepMeta(2),
+          },
+          {
+            id: 'reason-live-2',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'thinking',
+            meta: stepMeta(2),
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          {
+            id: 'text-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello',
+          },
+          {
+            id: 'agent-server-1',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'plan one',
+            meta: stepMeta(1),
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const last = merged[merged.length - 1]!
+    const ids = last.parts.map((part) => part.id)
+    // Same-length text does not drop the live step-2 parts.
+    expect(ids).toContain('agent-server-1')
+    expect(ids).toContain('agent-live-2')
+    expect(ids).toContain('start-live-2')
+    expect(ids).toContain('reason-live-2')
+    expect(last.content).toBe('Hello')
+  })
+
+  it('does not duplicate a reconciled step part under a new server id', () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          {
+            id: 'agent-live-1',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'same plan',
+            meta: { step: 1 },
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          {
+            id: 'agent-server-1',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'same plan',
+            meta: { step: 1 },
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const last = merged[merged.length - 1]!
+    expect(last.parts.filter((part) => part.type === 'agent')).toHaveLength(1)
+    expect(last.parts[0]!.id).toBe('agent-server-1')
+  })
+
+  it('merges live agent_meta onto a server agent part missing it', () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'agent-1',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'plan one',
+            meta: { step: 1, agent_meta: { action: 'click' } },
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'agent-1',
+            session_id: 'session-1',
+            type: 'agent',
+            state: 'completed',
+            title: 'Agent plan',
+            output: 'plan one',
+            meta: { step: 1 },
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const agent = merged[merged.length - 1]!.parts[0]!
+    expect(agent.meta?.['agent_meta']).toEqual({ action: 'click' })
+  })
+
+  it('folds a live reasoning prefix into the server row (same step, server id wins)', () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'local-session-1-1',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'thinking more',
+            meta: { step: 2 },
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'server-reasoning-uuid',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'think',
+            meta: { step: 2 },
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const last = merged[merged.length - 1]!
+    const reasoning = last.parts.filter((part) => part.type === 'reasoning')
+    expect(reasoning).toHaveLength(1)
+    expect(reasoning[0]!.id).toBe('server-reasoning-uuid')
+    expect(reasoning[0]!.output).toBe('thinking more')
+  })
+
+  it('keeps same-step reasoning rows with genuinely different content', () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'local-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'local-session-1-1',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'checking the network',
+            meta: { step: 2 },
+          },
+        ],
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'go',
+        parts: [],
+      },
+      {
+        id: 'server-assistant',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [
+          {
+            id: 'server-reasoning-uuid',
+            session_id: 'session-1',
+            type: 'reasoning',
+            state: 'running',
+            title: '',
+            output: 'reviewing the screen',
+            meta: { step: 2 },
+          },
+        ],
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const last = merged[merged.length - 1]!
+    expect(last.parts.filter((part) => part.type === 'reasoning')).toHaveLength(2)
   })
 
   it('settles leftover running text and reasoning parts without touching tools', () => {

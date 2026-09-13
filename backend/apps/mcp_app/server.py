@@ -493,6 +493,7 @@ _TOOLS: list[Tool] = [
                 "max_trajectory_length": {"type": "integer"},
                 "enable_reflection": {"type": "boolean"},
                 "enable_code_agent": {"type": "boolean"},
+                "enable_recording": {"type": "boolean"},
                 "screenshot_max_dimension": {"type": "integer"},
                 "action_pre_delay": {"type": "number"},
                 "action_post_delay": {"type": "number"},

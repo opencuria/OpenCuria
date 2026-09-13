@@ -175,15 +175,14 @@ class TaskTool(Tool):
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool=self.name)
         output = result.output or ""
         if agent == "computeruse":
-            from ..agent_s.harness import (
-                default_recording_path,
-                sanitize_run_id,
-                truncate_task_output,
-            )
+            from ..agent_s.harness import extract_recording_path, truncate_task_output
 
+            # Only a recording marker really present in the child output
+            # may be preserved — never invent one via a default path when
+            # recording was disabled (see ``truncate_task_output``).
             output, truncated = truncate_task_output(
                 output,
-                default_recording_path(sanitize_run_id(child_opts.session_id)),
+                extract_recording_path(output),
                 TASK_OUTPUT_MAX_CHARS,
             )
         else:

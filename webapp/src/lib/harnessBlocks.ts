@@ -10,7 +10,8 @@ import type { HarnessPart, HarnessPartType } from '@/types/harness'
 import { isTaskToolPart } from '@/lib/harnessSubtaskActivity'
 
 const GROUPABLE_TYPES = new Set<HarnessPartType>(['tool'])
-const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch', 'agent'])
+const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch'])
+const AGENT_TYPES = new Set<HarnessPartType>(['agent'])
 const SKIP_TYPES = new Set<HarnessPartType>(['step-start', 'step-finish'])
 
 /** A simple tool call that can join a consecutive "Worked" run. */
@@ -23,10 +24,16 @@ export function isCardPart(part: HarnessPart): boolean {
   return CARD_TYPES.has(part.type)
 }
 
+/** Agent-S plan steps render as their own timeline blocks. */
+export function isAgentPart(part: HarnessPart): boolean {
+  return AGENT_TYPES.has(part.type)
+}
+
 export type TextRenderBlock = { kind: 'text'; part: HarnessPart }
 export type SingleRenderBlock = { kind: 'single'; part: HarnessPart }
 export type GroupRenderBlock = { kind: 'group'; parts: HarnessPart[] }
 export type CardRenderBlock = { kind: 'card'; part: HarnessPart }
+export type AgentRenderBlock = { kind: 'agent'; part: HarnessPart }
 export type CompactionRenderBlock = { kind: 'compaction'; part: HarnessPart }
 
 export type RenderBlock =
@@ -34,6 +41,7 @@ export type RenderBlock =
   | SingleRenderBlock
   | GroupRenderBlock
   | CardRenderBlock
+  | AgentRenderBlock
   | CompactionRenderBlock
 
 function isEmptyText(part: HarnessPart): boolean {
@@ -78,6 +86,13 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
     if (part.type === 'compaction') {
       flushRun()
       blocks.push({ kind: 'compaction', part })
+      continue
+    }
+    if (part.type === 'agent') {
+      // Agent-S plan steps break tool runs so consecutive steps stay a
+      // visible vertical sequence instead of merging into Worked groups.
+      flushRun()
+      blocks.push({ kind: 'agent', part })
       continue
     }
     if (isStandaloneWork(part)) {
