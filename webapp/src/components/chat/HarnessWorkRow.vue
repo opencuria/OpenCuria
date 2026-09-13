@@ -78,7 +78,12 @@ const icon = computed<Component>(() => toolDisplayIcon(props.part))
 
 const reasoningPreview = computed(() => {
   if (props.part.type !== 'reasoning') return ''
-  return (props.part.output || '').replace(/\s+/g, ' ').trim()
+  const lastLine = (props.part.output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1)
+  return (lastLine || '').replace(/\s+/g, ' ')
 })
 
 const detailComponent = computed<Component>(() => {

@@ -730,6 +730,29 @@ class ChatGPTAdapter(ProviderAdapter):
         state["last_key"] = str(counter)
         return str(counter)
 
+    @staticmethod
+    def _summary_boundary_prefix(
+        summary_index: Any, state: dict[str, Any]
+    ) -> str:
+        """Return a paragraph break when a new reasoning summary part starts.
+
+        Codex streams each ``summary_index`` as a short title with no
+        trailing newline. Concatenating deltas would glue
+        ``implementation`` to ``Defining``. ``summary_index > 0`` on the
+        first seen part still gets a leading break (index 0 was skipped).
+        Missing or non-int indexes leave existing streams unchanged.
+        """
+        if isinstance(summary_index, bool) or not isinstance(summary_index, int):
+            return ""
+        last = state.get("reasoning_summary_index")
+        if last is None:
+            state["reasoning_summary_index"] = summary_index
+            return "\n\n" if summary_index > 0 else ""
+        if summary_index == last:
+            return ""
+        state["reasoning_summary_index"] = summary_index
+        return "\n\n"
+
     def _parse_event(
         self, data: str, stream_state: dict[str, Any] | None = None
     ) -> Delta | None:
@@ -746,7 +769,11 @@ class ChatGPTAdapter(ProviderAdapter):
         calls stay stateless). It tracks ``args_sent`` (``item.id`` ->
         already-emitted argument chars) so the ``done`` event only carries
         the not-yet-sent suffix — the runner concatenates fragments per
-        key, and re-sending the full arguments would double them.
+        key, and re-sending the full arguments would double them. It also
+        tracks ``reasoning_summary_index`` so Codex
+        ``reasoning_summary_part`` boundaries insert ``\\n\\n`` once
+        (OpenCode splits these into separate blocks; we keep one
+        reasoning string).
         """
         try:
             event = json.loads(data)
@@ -769,13 +796,27 @@ class ChatGPTAdapter(ProviderAdapter):
             if isinstance(delta, str) and delta:
                 return Delta(text=delta)
             return None
+        if event_type == "response.reasoning_summary_part.added":
+            prefix = self._summary_boundary_prefix(
+                event.get("summary_index"),
+                stream_state if stream_state is not None else {},
+            )
+            if prefix:
+                return Delta(reasoning=prefix)
+            return None
         if event_type in (
             "response.reasoning_summary_text.delta",
             "response.reasoning_text.delta",
         ):
             delta = event.get("delta")
             if isinstance(delta, str) and delta:
-                return Delta(reasoning=delta)
+                prefix = ""
+                if event_type == "response.reasoning_summary_text.delta":
+                    prefix = self._summary_boundary_prefix(
+                        event.get("summary_index"),
+                        stream_state if stream_state is not None else {},
+                    )
+                return Delta(reasoning=f"{prefix}{delta}")
             return None
         if event_type == "response.output_item.added":
             item = event.get("item")

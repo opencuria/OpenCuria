@@ -126,6 +126,92 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning_usage() -> None:
     assert deltas[-1].finish_reason == "tool_calls"
 
 
+async def test_chat_stream_separates_reasoning_summary_parts() -> None:
+    """Each Codex summary_index becomes a paragraph, not glued titles."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            },
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "summary_index": 0,
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "summary_index": 0,
+                "delta": "First",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs_1",
+                "summary_index": 0,
+            },
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "summary_index": 1,
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "summary_index": 1,
+                "delta": "Second",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs_1",
+                "summary_index": 1,
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+    )
+    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+
+    assert "".join(d.reasoning for d in deltas) == "First\n\nSecond"
+
+
+async def test_chat_stream_separates_summary_index_without_part_added() -> None:
+    """summary_index on text deltas still inserts a paragraph break."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "First",
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 1,
+                "delta": "Second",
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+    )
+    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+
+    assert "".join(d.reasoning for d in deltas) == "First\n\nSecond"
+
+
 async def test_happy_path_toolcall_without_item_id_still_emits_index() -> None:
     """Legacy done event without item.id gets a deterministic stream key."""
     payload = _responses_sse(

@@ -50,6 +50,24 @@ describe('HarnessWorkRow', () => {
     )
   })
 
+  it('previews the last reasoning summary line', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({
+          type: 'reasoning',
+          title: '',
+          tool: undefined,
+          output:
+            'Planning sequential subagent implementation\n\nDefining session recording feature details',
+        }),
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-work-row-preview"]').text()).toBe(
+      'Defining session recording feature details',
+    )
+  })
+
   it('expands a standalone tool row to show the tool detail', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: { part: makePart() },
