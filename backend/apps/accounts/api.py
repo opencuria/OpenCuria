@@ -354,6 +354,10 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS: "Assign, activate, deactivate and rebuild image definitions on runners",
         APIKeyPermission.SKILLS_READ: "List and view skills",
         APIKeyPermission.SKILLS_WRITE: "Create, update, delete skills",
+        APIKeyPermission.PLUGINS_READ: "List and view plugins",
+        APIKeyPermission.PLUGINS_WRITE: (
+            "Create, update, delete plugins and manage activations"
+        ),
         APIKeyPermission.HARNESS_READ: "List and view harness sessions",
         APIKeyPermission.HARNESS_RUN: "Create harness sessions and send prompts",
         APIKeyPermission.HARNESS_PERMISSIONS: "Resolve harness permission requests",

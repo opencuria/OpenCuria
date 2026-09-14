@@ -21,6 +21,7 @@ import {
   Key,
   KeyRound,
   Layers,
+  Puzzle,
   Server,
   Settings2,
   Shield,
@@ -36,6 +37,7 @@ import AgentConfigTab from './AgentConfigTab.vue'
 import CredentialServicesTab from './CredentialServicesTab.vue'
 import SkillsPanel from './SkillsPanel.vue'
 import CredentialsPanel from './CredentialsPanel.vue'
+import PluginsPanel from './PluginsPanel.vue'
 import ApiKeysPanel from './ApiKeysPanel.vue'
 import CapturedImagesPanel from './CapturedImagesPanel.vue'
 import RunnersPanel from './RunnersPanel.vue'
@@ -66,6 +68,7 @@ const navItems: SettingsNavItem[] = [
   { id: 'agents', label: 'Agents', icon: Sparkles },
   { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
+  { id: 'plugins', label: 'Plugins', icon: Puzzle },
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'images', label: 'Captured Images', icon: Camera },
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
@@ -210,6 +213,7 @@ watch(isAdmin, (admin) => {
             <AgentConfigTab v-else-if="activeTab === 'agents'" />
             <SkillsPanel v-else-if="activeTab === 'skills'" />
             <CredentialsPanel v-else-if="activeTab === 'credentials'" />
+            <PluginsPanel v-else-if="activeTab === 'plugins'" />
             <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
             <CapturedImagesPanel v-else-if="activeTab === 'images'" />
             <RunnersPanel v-else-if="activeTab === 'runners' && isAdmin" />

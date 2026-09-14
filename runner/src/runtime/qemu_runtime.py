@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import io
 import ipaddress
 import json
@@ -31,6 +32,7 @@ import structlog
 from ..config import RunnerSettings
 from .base import (
     CommandExecutionError,
+    ProcessHandle,
     PtyHandle,
     RuntimeBackend,
     RuntimeStatus,
@@ -38,6 +40,7 @@ from .base import (
     ImageArtifactInfo,
     WorkspaceConfig,
 )
+from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
 
@@ -1358,6 +1361,206 @@ class QemuRuntime(RuntimeBackend):
             await process.wait_closed()
         except Exception:
             pass
+
+    # -- Generic non-TTY bidirectional process streams ---------------------
+
+    def _stream_pidfile(self) -> str:
+        """Return a fresh pidfile path for one stream process."""
+        return f"/tmp/opencuria-stream-{uuid.uuid4().hex}.pid"
+
+    def _build_stream_kill_command(self, pidfile: str) -> str:
+        """Build a static kill command for one stream pidfile (no interpolation).
+
+        Reads the session pid from the runner-generated *pidfile* and
+        delivers TERM to the process group, waits briefly, then KILLs
+        the group.  The only variable part is the pidfile path, safely
+        single-quoted.
+        """
+        quoted = "'" + pidfile.replace("'", "'\\''") + "'"
+        return (
+            f"pidfile={quoted}; "
+            "pid=\"\"; "
+            "if [ -f \"$pidfile\" ]; then "
+            "pid=$(cat \"$pidfile\" 2>/dev/null); fi; "
+            "case \"$pid\" in ''|*[!0-9]*) exit 0;; esac; "
+            "kill -TERM -\"$pid\" 2>/dev/null || "
+            "kill -TERM \"$pid\" 2>/dev/null || true; "
+            "for _ in 1 2 3 4 5 6 7 8 9 10; do "
+            "kill -0 \"$pid\" 2>/dev/null || break; "
+            "sleep 0.2; "
+            "done; "
+            "kill -KILL -\"$pid\" 2>/dev/null || "
+            "kill -KILL \"$pid\" 2>/dev/null || true; "
+            "rm -f \"$pidfile\""
+        )
+
+    async def _kill_stream_tree(self, instance_id: str, pidfile: str) -> None:
+        """Best-effort TERM/KILL of one stream process tree (separate SSH call)."""
+        try:
+            ssh = await self._get_ssh(instance_id)
+            kill_cmd = self._build_stream_kill_command(pidfile)
+            proc = await ssh.create_process(kill_cmd)
+            await proc.wait_closed()
+        except Exception:
+            logger.warning("qemu_stream_kill_failed")
+
+    async def spawn_process(
+        self,
+        instance_id: str,
+        command: list[str],
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> ProcessHandle:
+        """Spawn a non-TTY bidirectional process (stdin/stdout/stderr split)."""
+        if not command or not all(isinstance(part, str) for part in command):
+            raise ValueError("command must be a non-empty argv list of str")
+        if any("\x00" in part for part in command):
+            raise ValueError("command must not contain NUL bytes")
+        ssh = await self._get_ssh(instance_id)
+        pidfile = self._stream_pidfile()
+        argv = stream_wrapper_argv(pidfile, workdir, env, list(command))
+        # Same quoting discipline as _build_shell_command: every argv
+        # word is single-quoted so user values stay opaque to the shell.
+        cmd_str = shell_quote_argv(argv)
+        process = await ssh.create_process(
+            cmd_str,
+            stdin=asyncssh.PIPE,
+            stdout=asyncssh.PIPE,
+            stderr=asyncssh.PIPE,
+            encoding=None,  # binary mode: bytes on all three streams
+        )
+        handle = ProcessHandle(instance_id=instance_id, handle=process)
+        handle.metadata.update(
+            {
+                "pidfile": pidfile,
+                "pending_stdout": b"",
+                "pending_stderr": b"",
+            }
+        )
+        logger.info("qemu_stream_spawned", instance_id=instance_id)
+        return handle
+
+    async def _stream_read_split(
+        self, handle: ProcessHandle, stream: str, size: int
+    ) -> bytes:
+        if stream not in ("stdout", "stderr"):
+            raise ValueError(f"unknown stream: {stream!r}")
+        size = max(1, min(int(size), self.STREAM_CHUNK_SIZE))
+        pending_key = f"pending_{stream}"
+        pending: bytes = handle.metadata.get(pending_key, b"")
+        if pending:
+            out = pending[:size]
+            handle.metadata[pending_key] = pending[size:]
+            return out
+        process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        reader = process.stdout if stream == "stdout" else process.stderr
+        try:
+            if reader.at_eof():
+                return b""
+            chunk = await reader.read(size)
+        except (asyncssh.Error, OSError):
+            return b""
+        if not chunk:
+            return b""
+        data = bytes(chunk)
+        handle.metadata[pending_key] = data[size:]
+        return data[:size]
+
+    async def process_read(
+        self,
+        handle: ProcessHandle,
+        stream: str = "stdout",
+        size: int = 65536,
+    ) -> bytes:
+        """Read raw bytes from one split stream (``b""`` on EOF)."""
+        if handle.closed:
+            return b""
+        return await self._stream_read_split(handle, stream, size)
+
+    async def process_write(self, handle: ProcessHandle, data: bytes) -> None:
+        """Write raw bytes to the process stdin."""
+        if handle.closed or not data:
+            return
+        process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        try:
+            process.stdin.write(bytes(data))
+        except (asyncssh.Error, OSError, ValueError) as exc:
+            raise RuntimeError(f"stream write failed: {exc}") from exc
+
+    async def process_write_eof(self, handle: ProcessHandle) -> None:
+        """Half-close the process stdin (graceful EOF)."""
+        if handle.closed:
+            return
+        process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        try:
+            process.stdin.write_eof()
+        except (asyncssh.Error, OSError):
+            pass
+
+    async def process_wait(self, handle: ProcessHandle) -> int | None:
+        """Wait for the remote process tree to exit; return exit code.
+
+        Returns ``None`` when the handle was already closed or the exit
+        status is unknown — never a bogus exit 0 for a closed handle.
+        """
+        if handle.closed:
+            return None
+        process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        try:
+            await process.wait_closed()
+        except (asyncssh.Error, OSError):
+            pass
+        try:
+            code = process.exit_status
+        except (asyncssh.Error, OSError):
+            code = None
+        return int(code or 0)
+
+    async def process_close(self, handle: ProcessHandle) -> None:
+        """Graceful stdin EOF, TERM/KILL the tree, close handles.
+
+        Robust close order for the single-SSH-channel transport: the
+        process-group kill runs on a *separate* SSH channel
+        (``_kill_stream_tree`` opens its own connection) so it never
+        deadlocks against the closing session channel.  ``wait_closed``
+        is only awaited once *before* the kill with a short timeout and
+        never again after ``close()`` (which already implies closure) —
+        the old double-wait could hang when the channel was already
+        torn down by the kill.
+        """
+        if handle.closed:
+            return
+        handle.closed = True
+        process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        # stdin EOF first while the handle is still usable.
+        with contextlib.suppress(Exception):
+            await self.process_write_eof(handle)
+        # NOTE: process_write_eof early-returns on handle.closed, so the
+        # raw write_eof is attempted directly here as well.
+        try:
+            process.stdin.write_eof()
+        except (asyncssh.Error, OSError):
+            pass
+        try:
+            await asyncio.wait_for(process.wait_closed(), timeout=5)
+            exited_early = True
+        except (asyncio.TimeoutError, asyncssh.Error, OSError):
+            exited_early = False
+        pidfile = str(handle.metadata.get("pidfile", ""))
+        if pidfile:
+            await self._kill_stream_tree(handle.instance_id, pidfile)
+        try:
+            process.close()
+        except (asyncssh.Error, OSError):
+            pass
+        if not exited_early:
+            # Single bounded grace wait after close(); never a second
+            # unbounded wait — close() already tore the channel down.
+            try:
+                await asyncio.wait_for(process.wait_closed(), timeout=5)
+            except (asyncio.TimeoutError, asyncssh.Error, OSError):
+                pass
+        logger.info("qemu_stream_closed")
 
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:
         """Discover all opencuria VM workspaces."""

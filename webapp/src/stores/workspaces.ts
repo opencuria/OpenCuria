@@ -309,11 +309,17 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
-  async function updateWorkspace(id: string, data: WorkspaceUpdateIn): Promise<boolean> {
+  async function updateWorkspace(
+    id: string,
+    data: WorkspaceUpdateIn,
+    opts: { notify?: boolean } = {},
+  ): Promise<boolean> {
     const notifications = useNotificationStore()
 
     if (data.name !== undefined && !data.name.trim()) {
-      notifications.error('Update failed', 'Workspace name must not be empty.')
+      if (opts.notify !== false) {
+        notifications.error('Update failed', 'Workspace name must not be empty.')
+      }
       return false
     }
 
@@ -330,28 +336,32 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
       const updated = await workspacesApi.updateWorkspace(id, payload)
       applyWorkspaceUpdate(id, updated)
-      if (updated.active_operation === WorkspaceOperation.RESTARTING) {
-        notifications.info('Workspace restarting', `${getWorkspaceName(id)} is restarting to apply the new resources.`)
-      } else if (data.credential_ids !== undefined) {
-        const ws = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
-        if (ws?.status === WorkspaceStatus.RUNNING) {
-          notifications.success(
-            'Credentials updated',
-            'Secrets were applied to the running workspace.',
-          )
+      if (opts.notify !== false) {
+        if (updated.active_operation === WorkspaceOperation.RESTARTING) {
+          notifications.info('Workspace restarting', `${getWorkspaceName(id)} is restarting to apply the new resources.`)
+        } else if (data.credential_ids !== undefined) {
+          const ws = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
+          if (ws?.status === WorkspaceStatus.RUNNING) {
+            notifications.success(
+              'Credentials updated',
+              'Secrets were applied to the running workspace.',
+            )
+          } else {
+            notifications.success(
+              'Workspace updated',
+              'Credentials will be applied the next time the workspace starts.',
+            )
+          }
         } else {
-          notifications.success(
-            'Workspace updated',
-            'Credentials will be applied the next time the workspace starts.',
-          )
+          notifications.success('Workspace updated', 'The workspace settings were saved.')
         }
-      } else {
-        notifications.success('Workspace updated', 'The workspace settings were saved.')
       }
       return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update workspace'
-      notifications.error('Update failed', msg)
+      if (opts.notify !== false) {
+        notifications.error('Update failed', msg)
+      }
       return false
     }
   }

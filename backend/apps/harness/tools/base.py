@@ -112,6 +112,15 @@ class Tool(abc.ABC):
         """Return a short human-readable title for this invocation."""
         return self.name or type(self).__name__
 
+    def parameters_schema(self) -> dict[str, Any]:
+        """Return the JSON schema advertised to the provider.
+
+        Default: the Pydantic v2 ``args_schema``. MCP tools override
+        this with the original MCP ``inputSchema`` (validated at
+        discovery, never a lossy translation).
+        """
+        return self.args_schema.model_json_schema()
+
     def coerce_args(self, args: BaseModel | dict[str, Any]) -> BaseModel:
         """Validate *args* against the tool schema.
 
@@ -181,14 +190,15 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         """Return LLM function-calling schemas for all tools.
 
-        The JSON schema comes straight from each tool's pydantic v2
-        ``args_schema``, so provider payloads stay in sync with validation.
+        The JSON schema comes from each tool's ``parameters_schema()``
+        (MCP tools serve the original MCP ``inputSchema``), so provider
+        payloads stay in sync with validation.
         """
         return [
             ToolSchema(
                 name=tool.name,
                 description=tool.description,
-                parameters=tool.args_schema.model_json_schema(),
+                parameters=tool.parameters_schema(),
             )
             for tool in self._tools.values()
         ]

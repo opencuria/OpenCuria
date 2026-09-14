@@ -23,6 +23,7 @@ class CredentialServiceOut(Schema):
     env_var_name: str
     target_path: str
     label: str
+    organization_id: uuid.UUID | None = None
 
 
 class CredentialServiceCreateIn(Schema):
@@ -91,6 +92,7 @@ class CredentialServiceWithActivationOut(Schema):
     env_var_name: str
     target_path: str
     label: str
+    organization_id: uuid.UUID | None = None
     is_active: bool = False
 
 

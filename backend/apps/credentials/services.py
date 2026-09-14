@@ -43,18 +43,23 @@ class ResolvedCredentialFile:
 
 
 class CredentialServiceSvc:
-    """Business logic for the credential service catalog (read-only via API)."""
+    """Business logic for the credential service catalog."""
 
     def __init__(self) -> None:
         self.services = CredentialServiceRepository
 
-    def list_services(self):
-        """Return all credential services."""
-        return self.services.list_all()
+    def list_services(self, *, org_id: uuid.UUID | None = None):
+        """Return credential services (org-safe: global + own org)."""
+        if org_id is None:
+            return self.services.list_all()
+        return self.services.list_visible_to_org(org_id)
 
-    def get_service(self, service_id: uuid.UUID):
+    def get_service(self, service_id: uuid.UUID, *, org_id: uuid.UUID | None = None):
         """Return a single credential service or raise."""
-        svc = self.services.get_by_id(service_id)
+        if org_id is not None:
+            svc = self.services.get_visible_by_id(service_id, org_id)
+        else:
+            svc = self.services.get_by_id(service_id)
         if svc is None:
             raise NotFoundError("CredentialService", str(service_id))
         return svc
@@ -69,8 +74,13 @@ class CredentialServiceSvc:
         env_var_name: str,
         target_path: str,
         label: str,
+        organization_id: uuid.UUID | None = None,
     ):
-        """Create a credential service with validation."""
+        """Create a credential service with validation.
+
+        Global services (organization_id None) enforce a globally unique
+        slug; org-owned services enforce uniqueness per org + slug.
+        """
         name = name.strip()
         if not name:
             raise ValueError("Name is required")
@@ -78,8 +88,16 @@ class CredentialServiceSvc:
         normalized_slug = slugify(slug.strip() if slug.strip() else name)
         if not normalized_slug:
             raise ValueError("Slug cannot be empty")
-        if self.services.get_by_slug(normalized_slug):
-            raise ValueError(f"Credential service slug '{normalized_slug}' already exists")
+        if organization_id is None:
+            if self.services.get_global_by_slug(normalized_slug):
+                raise ValueError(
+                    f"Credential service slug '{normalized_slug}' already exists"
+                )
+        elif self.services.get_org_by_slug(normalized_slug, organization_id):
+            raise ValueError(
+                f"Credential service slug '{normalized_slug}' already exists "
+                "in this organization"
+            )
 
         if credential_type not in CredentialType.values:
             raise ValueError("Invalid credential type")
@@ -109,6 +127,7 @@ class CredentialServiceSvc:
             env_var_name=cleaned_env,
             target_path=cleaned_target_path,
             label=label.strip(),
+            organization_id=organization_id,
         )
 
     def _validate_target_path(self, target_path: str) -> None:
@@ -133,6 +152,59 @@ class CredentialServiceSvc:
 
         if any(part in {"", ".", ".."} for part in PurePosixPath(path_without_home).parts):
             raise ValueError("target_path must not contain empty, '.' or '..' segments")
+
+
+class OrgCredentialServiceActivationSvc:
+    """Business logic for org credential-service activations."""
+
+    def __init__(self) -> None:
+        from .repositories import OrgCredentialServiceActivationRepository
+
+        self.activations = OrgCredentialServiceActivationRepository
+
+    def activated_service_ids(self, org_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return activated service IDs for the org."""
+        return self.activations.activated_service_ids(org_id)
+
+    def set_activation(self, *, org_id: uuid.UUID, service, active: bool) -> bool:
+        """Activate/deactivate a service for the org. Returns new state.
+
+        Deactivation is blocked (409
+        ``plugin_service_activation_in_use``) while any *org-enabled*
+        plugin of this org references the service in its credential
+        requirements — the service-activation switch only gates UI
+        availability, but silently revoking it under an enabled plugin
+        would break the documented auto-activated setup. Reactivation
+        always succeeds (idempotent).
+        """
+        if active:
+            self.activations.ensure_activated(org_id, [service.id])
+            return True
+        if self._blocks_deactivation(org_id, service.id):
+            raise ConflictError(
+                "Credential service cannot be deactivated while org-enabled "
+                "plugins require it",
+                code="plugin_service_activation_in_use",
+            )
+        self.activations.deactivate(org_id, service.id)
+        return False
+
+    @staticmethod
+    def _blocks_deactivation(org_id: uuid.UUID, service_id: uuid.UUID) -> bool:
+        """Return True when an org-enabled plugin requires *service_id*."""
+        from apps.plugins.repositories import (
+            OrgPluginActivationRepository,
+            PluginCredentialRequirementRepository,
+        )
+
+        org_plugin_ids = set(
+            OrgPluginActivationRepository.enabled_plugin_ids(org_id)
+        )
+        if not org_plugin_ids:
+            return False
+        return PluginCredentialRequirementRepository.requirements_exist_for_plugins(
+            org_plugin_ids, service_id
+        )
 
 
 class CredentialSvc:
@@ -167,9 +239,14 @@ class CredentialSvc:
         name: str | None,
         value: str | None,
         user,
+        org_id: uuid.UUID | None = None,
     ):
-        """Create a personal credential owned by the user."""
-        service = self._get_service_or_raise(service_id)
+        """Create a personal credential owned by the user.
+
+        When ``org_id`` is given, the service must be visible in that org
+        (global or org-owned); otherwise any existing service resolves.
+        """
+        service = self._get_service_or_raise(service_id, org_id=org_id)
 
         if not name:
             name = f"{service.name} Credential"
@@ -201,7 +278,7 @@ class CredentialSvc:
         user,
     ):
         """Create an org-scoped credential. Caller must verify admin role."""
-        service = self._get_service_or_raise(service_id)
+        service = self._get_service_or_raise(service_id, org_id=organization_id)
 
         if not name:
             name = f"{service.name} Credential"
@@ -287,12 +364,34 @@ class CredentialSvc:
         Ownership rules:
         - Personal credential: only the owner may delete.
         - Org credential: only org admins may delete.
+
+        Deletion is blocked (409 ``plugin_credentials_in_use``) when the
+        credential is required for an *effective* plugin activation of
+        any workspace it is attached to — deleting would silently break
+        the runtime. Re-attach-free personal credentials and unused
+        credentials delete normally. Updating the value (PATCH) never
+        blocks: the attachment stays intact.
         """
+        from apps.plugins.services import PluginService as _PluginService
+
         cred = self.credentials.get_by_id(credential_id)
         if cred is None or not self._is_visible(cred, user=user, org_id=org_id):
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
+        gaps = _PluginService().blocking_plugin_gaps_for_credential(
+            cred, org_id=org_id
+        )
+        if gaps:
+            raise ConflictError(
+                "Cannot delete credential required by active workspace "
+                "plugins: "
+                + ", ".join(
+                    f"{g['workspace_id']}:{g['plugin_id']}:{g['key']}"
+                    for g in gaps
+                ),
+                code="plugin_credentials_in_use",
+            )
         self.credentials.delete(credential_id)
         logger.info("Credential deleted: %s", credential_id)
 
@@ -380,8 +479,11 @@ class CredentialSvc:
                 )
             seen_service_ids.add(credential.service_id)
 
-    def _get_service_or_raise(self, service_id: uuid.UUID):
-        service = self.service_repo.get_by_id(service_id)
+    def _get_service_or_raise(self, service_id: uuid.UUID, *, org_id=None):
+        if org_id is not None:
+            service = self.service_repo.get_visible_by_id(service_id, org_id)
+        else:
+            service = self.service_repo.get_by_id(service_id)
         if service is None:
             raise NotFoundError("CredentialService", str(service_id))
         return service

@@ -16,6 +16,9 @@ aiohttp>=3.9,<4.0
 # HTTP client (LLM provider streaming)
 httpx>=0.27,<1.0
 
+# MCP tool arg/schema validation (explicit; never rely on transitivity)
+jsonschema>=4,<5
+
 # HTML → Markdown for webfetch (OpenCode Turndown equivalent)
 markdownify>=0.14,<1.0
 beautifulsoup4>=4.9,<5.0

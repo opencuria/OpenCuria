@@ -32,8 +32,8 @@ class NotFoundError(ServiceError):
 class ConflictError(ServiceError):
     """Raised when an operation conflicts with the current resource state."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message=message, code="conflict")
+    def __init__(self, message: str, code: str = "conflict") -> None:
+        super().__init__(message=message, code=code)
 
 
 class AuthenticationError(ServiceError):

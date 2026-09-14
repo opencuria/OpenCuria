@@ -18,6 +18,7 @@ export type SettingsTabId =
   | 'agents'
   | 'skills'
   | 'credentials'
+  | 'plugins'
   | 'api-keys'
   | 'images'
   | 'runners'
@@ -42,6 +43,8 @@ export function resolveSettingsTab(tab: unknown): SettingsTabId {
       return 'skills'
     case 'credentials':
       return 'credentials'
+    case 'plugins':
+      return 'plugins'
     case 'api-keys':
     case 'apikeys':
     case 'api_keys':

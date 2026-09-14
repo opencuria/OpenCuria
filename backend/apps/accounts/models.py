@@ -69,6 +69,10 @@ class APIKeyPermission(str, enum.Enum):
     SKILLS_READ = "skills:read"
     SKILLS_WRITE = "skills:write"
 
+    # Plugins (additive; existing keys are never auto-granted these)
+    PLUGINS_READ = "plugins:read"
+    PLUGINS_WRITE = "plugins:write"
+
     # Harness (M6, additive; existing keys are never auto-granted these)
     HARNESS_READ = "harness:read"
     HARNESS_RUN = "harness:run"

@@ -939,6 +939,34 @@ async def update_workspace(
                 org_id=org_id,
                 user=request.user,
             )
+            # Guard: removing a credential still required by an active
+            # workspace plugin would silently break the setup -> 409.
+            # Only service IDs are inspected, never secret values.
+            from apps.plugins.services import PluginService as _PluginService
+
+            remaining_service_ids = {
+                cred.service_id for cred in resolved_credentials.credentials
+            }
+            ws_for_guard = await sync_to_async(service.get_workspace)(
+                workspace_id
+            )
+            gaps = await sync_to_async(
+                _PluginService().validate_workspace_credential_removal
+            )(
+                workspace=ws_for_guard,
+                org_id=org_id,
+                remaining_service_ids=remaining_service_ids,
+            )
+            if gaps:
+                raise ConflictError(
+                    "Cannot remove credentials required by active workspace "
+                    "plugins: "
+                    + ", ".join(
+                        f"{g['plugin_id']}:{g['key']}->{g['service_id']}"
+                        for g in gaps
+                    ),
+                    code="missing_plugin_credentials",
+                )
 
         workspace = await service.update_workspace(
             workspace_id,

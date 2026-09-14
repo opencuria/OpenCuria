@@ -169,6 +169,46 @@ class FileStat:
     extra: dict = field(default_factory=dict)
 
 
+class StreamClosedError(RuntimeError):
+    """Raised when a workspace byte stream is closed or fails."""
+
+
+class WorkspaceByteStream(abc.ABC):
+    """Abstract bidirectional byte stream into the workspace.
+
+    One instance backs exactly one runner ``workspace:stream_*``
+    connection (stdio process or workspace-local TCP relay).  Bytes
+    written with :meth:`send` travel as ``workspace:stream_input``;
+    runner ``workspace:stream_output`` chunks surface via
+    :meth:`receive`.  Stderr is surfaced through the optional
+    ``on_stderr`` callback (logging only — never mixed into stdout).
+    """
+
+    def __init__(self, workspace_id: str, connection_id: str) -> None:
+        self.workspace_id = workspace_id
+        self.connection_id = connection_id
+
+    @abc.abstractmethod
+    async def receive(self) -> bytes:
+        """Return the next stdout chunk; ``b""`` marks clean EOF."""
+
+    @abc.abstractmethod
+    async def send(self, data: bytes) -> None:
+        """Write raw bytes to the stream stdin (bounded chunks)."""
+
+    @abc.abstractmethod
+    async def send_eof(self) -> None:
+        """Half-close the stream stdin (graceful EOF)."""
+
+    @abc.abstractmethod
+    async def aclose(self) -> None:
+        """Close the stream (idempotent; remote close follows)."""
+
+    @abc.abstractmethod
+    async def wait_closed(self) -> int | None:
+        """Wait for the remote close; return exit code when known."""
+
+
 class WorkspaceAccessor(abc.ABC):
     """Abstract workspace access for the agent harness."""
 
@@ -290,3 +330,28 @@ class WorkspaceAccessor(abc.ABC):
         ``process_id`` accepts the process UUID or its exact name.
         Returns ``{"process_id": ..., "deleted": True}``.
         """
+
+    async def open_process(
+        self,
+        command: list[str],
+        workdir: str = HARNESS_WORKSPACE_ROOT,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> WorkspaceByteStream:
+        """Open a workspace-local stdio process stream (argv, least privilege)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support open_process"
+        )
+
+    async def open_tcp(
+        self,
+        host: str,
+        port: int,
+        tls: bool = False,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> WorkspaceByteStream:
+        """Open a workspace-local TCP stream (DNS+connect inside workspace)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support open_tcp"
+        )

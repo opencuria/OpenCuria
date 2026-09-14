@@ -60,6 +60,24 @@ class RuntimeWorkspaceInfo:
 
 
 @dataclass
+class ProcessHandle:
+    """Opaque handle for a generic non-TTY bidirectional process stream.
+
+    Created by ``spawn_process``; drive I/O with ``process_read`` /
+    ``process_write`` / ``process_close`` / ``process_wait``.
+
+    ``instance_id`` identifies the workspace instance (container ID,
+    domain name, …).  ``handle`` stores the runtime-specific I/O object.
+    ``metadata`` holds runtime-specific data (exec id, pidfile, …).
+    """
+
+    instance_id: str
+    handle: object
+    metadata: dict = field(default_factory=dict)
+    closed: bool = field(default=False, init=False)
+
+
+@dataclass
 class PtyHandle:
     """Opaque handle for an interactive PTY session.
 
@@ -215,6 +233,77 @@ class RuntimeBackend(abc.ABC):
         data: bytes,
     ) -> None:
         """Extract a tar archive stream into *path* inside the workspace."""
+
+    # --- Generic non-TTY bidirectional process streams ---------------------
+
+    # Limits shared by all runtime implementations of the generic stream
+    # transport (MCP stdio / workspace-local TCP relay).  Chunk sizes are
+    # bounded so one peer can never force unbounded buffering; frame
+    # sizes up to 16MiB are accepted (Docker may deliver large frames)
+    # and re-chunked losslessly into <=64KiB queue items by the pump.
+    STREAM_CHUNK_SIZE = 64 * 1024
+    STREAM_MAX_FRAME_SIZE = 16 * 1024 * 1024
+    STREAM_READ_TIMEOUT = 300.0
+
+    async def spawn_process(
+        self,
+        instance_id: str,
+        command: list[str],
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> ProcessHandle:
+        """Spawn a non-TTY bidirectional process inside the workspace.
+
+        Args:
+            instance_id: Runtime-specific instance identifier.
+            command: argv list (never shell-joined by the caller).
+            workdir: Working directory inside the workspace.
+            env: Extra environment for the child only (least privilege:
+                persistent workspace credentials are NOT sourced).
+
+        Returns a ``ProcessHandle`` with split stdout/stderr streams.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support spawn_process"
+        )
+
+    async def process_read(
+        self,
+        handle: ProcessHandle,
+        stream: str = "stdout",
+        size: int = 65536,
+    ) -> bytes:
+        """Read raw bytes from *stream* (``"stdout"``/``"stderr"``).
+
+        Blocks until data is available.  Returns ``b""`` on EOF.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_read"
+        )
+
+    async def process_write(self, handle: ProcessHandle, data: bytes) -> None:
+        """Write raw bytes to the process stdin."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_write"
+        )
+
+    async def process_write_eof(self, handle: ProcessHandle) -> None:
+        """Half-close the process stdin (graceful EOF)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_write_eof"
+        )
+
+    async def process_wait(self, handle: ProcessHandle) -> int | None:
+        """Wait for the process tree to exit; return the exit code."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_wait"
+        )
+
+    async def process_close(self, handle: ProcessHandle) -> None:
+        """Terminate the process tree and release resources."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_close"
+        )
 
     # --- PTY / interactive terminal -----------------------------------------
 

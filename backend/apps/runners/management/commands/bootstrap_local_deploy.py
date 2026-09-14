@@ -212,6 +212,7 @@ class Command(BaseCommand):
     def _ensure_credential_services(self) -> None:
         CredentialService.objects.get_or_create(
             slug="github-token",
+            organization=None,
             defaults={
                 "name": "GitHub Token",
                 "credential_type": "env",

@@ -79,6 +79,12 @@ const router = createRouter({
           meta: { title: 'Credentials' },
         },
         {
+          path: 'plugins',
+          name: 'plugins',
+          redirect: { path: '/', query: { settings: 'plugins' } },
+          meta: { title: 'Plugins' },
+        },
+        {
           path: 'api-keys',
           name: 'api-keys',
           redirect: { path: '/', query: { settings: 'api-keys' } },

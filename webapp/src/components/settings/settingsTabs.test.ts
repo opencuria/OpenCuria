@@ -8,6 +8,7 @@ describe('resolveSettingsTab', () => {
     expect(resolveSettingsTab('agents')).toBe('agents')
     expect(resolveSettingsTab('skills')).toBe('skills')
     expect(resolveSettingsTab('credentials')).toBe('credentials')
+    expect(resolveSettingsTab('plugins')).toBe('plugins')
     expect(resolveSettingsTab('api-keys')).toBe('api-keys')
     expect(resolveSettingsTab('images')).toBe('images')
     expect(resolveSettingsTab('runners')).toBe('runners')
