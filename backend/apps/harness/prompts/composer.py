@@ -2,8 +2,9 @@
 
 Assembles the system prompt from the agent definition, project context
 files (``AGENTS.md`` walk-up with ``CLAUDE.md`` fallback), environment
-facts (date, working directory, mode), the available tools, and the
-subagent descriptions used by the ``task`` tool.
+facts (date, isolated Linux workspace, working directory, mode), the
+available tools, and the subagent descriptions used by the ``task``
+tool.
 
 Truncation limits (documented here so callers can reason about them):
 
@@ -23,7 +24,6 @@ logic lives here on purpose.
 
 from __future__ import annotations
 
-import platform
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -188,12 +188,20 @@ async def compose_system_prompt(
     env_lines = [
         "# Environment",
         f"Date: {moment.strftime('%Y-%m-%d')}",
-        f"Platform: {platform.system()} {platform.machine()}",
+        "Platform: Linux (isolated OpenCuria workspace)",
         f"Workspace root: {HARNESS_WORKSPACE_ROOT}",
         f"Working directory: {cwd}",
         f"Mode: {mode} (plan = propose, do not mutate without approval; "
-        "build = implement Hunted changes directly)",
+        "build = implement intended changes directly)",
     ]
+    if agent.mode != "hidden":
+        env_lines.append(
+            "You are working inside an isolated OpenCuria workspace "
+            "(Linux container or VM), not on the user's machine. The "
+            "environment is disposable: investigate failures thoroughly, "
+            "use the full shell and any installed programs, and install "
+            "missing packages when your current permissions allow it."
+        )
     if mode == "plan":
         env_lines.append(
             "Plan mode: investigate read-only; "

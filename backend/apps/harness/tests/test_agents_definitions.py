@@ -61,6 +61,8 @@ def test_plan_edit_asks_and_bash_process_allowed() -> None:
     assert evaluator.evaluate("bash", "sudo reboot") == "allow"
     assert evaluator.evaluate("process", "sleep 60") == "allow"
     assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
+    assert "question tool" in agent.system_prompt
+    assert "open questions" in agent.system_prompt
 
 
 def test_explore_is_read_only() -> None:

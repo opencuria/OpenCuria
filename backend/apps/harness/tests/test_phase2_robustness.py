@@ -414,18 +414,22 @@ async def test_tool_descriptions_carry_phase2_keywords() -> None:
 
 
 async def test_composer_environment_has_platform_and_plan_reminder() -> None:
-    """Composer renders Platform + plan-mode reminder."""
+    """Composer renders isolated-workspace env + plan-mode reminder."""
     from apps.harness.agents.definitions import get_agent
     from apps.harness.prompts.composer import compose_system_prompt
 
     plan = await compose_system_prompt(agent=get_agent("plan"), mode="plan")
-    assert "Platform:" in plan.system
+    assert "Platform: Linux (isolated OpenCuria workspace)" in plan.system
     assert "Workspace root:" in plan.system
+    assert "not on the user's machine" in plan.system
     assert "Plan mode: investigate read-only" in plan.system
     assert "ask before edits" in plan.system
     build = await compose_system_prompt(agent=get_agent("build"), mode="build")
-    assert "Platform:" in build.system
+    assert "Platform: Linux (isolated OpenCuria workspace)" in build.system
+    assert "install missing packages" in build.system
     assert "Plan mode:" not in build.system
+    title = await compose_system_prompt(agent=get_agent("title"), mode="build")
+    assert "not on the user's machine" not in title.system
 
 
 @pytest.mark.parametrize(

@@ -122,8 +122,10 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "list), shell commands (bash), and background processes — "
             "running commands, servers, and test suites is allowed and "
             "encouraged while scoping. Do NOT edit files without explicit "
-            "user approval. End with a concise step-by-step plan and wait "
-            "for confirmation."
+            "user approval. Resolve every ambiguity with the question "
+            "tool before writing the plan; never leave open questions in "
+            "the plan itself. Only after all questions are answered, end "
+            "with a concise step-by-step plan and wait for confirmation."
         ),
         permissions={
             "*": "allow",
