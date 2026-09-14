@@ -76,8 +76,12 @@ describe('HarnessQuestionSheet', () => {
 
     const customs = wrapper.findAll('[data-testid="composer-question-custom"]')
     expect(customs).toHaveLength(2)
-    expect(wrapper.text()).toContain('Own answer')
-    expect(wrapper.text()).toContain('Your answer')
+    // First question has options → own-answer row with placeholder
+    const ownInput = customs[0]!.element as HTMLInputElement
+    expect(ownInput.placeholder).toContain('Own answer')
+    // Second question is free-text only → standalone input with placeholder
+    const freeInput = customs[1]!.element as HTMLInputElement
+    expect(freeInput.placeholder).toContain('Your answer')
   })
 
   it('submits custom text instead of a selected option', async () => {

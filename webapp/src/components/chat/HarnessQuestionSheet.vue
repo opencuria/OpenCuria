@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronDown, ChevronUp, MessageCircleQuestion } from '@lucide/vue'
+import { ChevronDown, ChevronUp, MessageCircleQuestion, PenLine } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { optionLetter } from '@/lib/composerSheets'
 import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
 import type { HarnessQuestionRequest } from '@/types/harness'
@@ -122,6 +120,15 @@ function isOptionSelected(requestId: string, questionIndex: number, label: strin
   return selectedOptions(requestId, questionIndex).includes(label)
 }
 
+/** Whether the custom free-text row is the "active" choice (has text and no option selected in single-select). */
+function isCustomActive(requestId: string, questionIndex: number, hasOptions: boolean, multiple?: boolean): boolean {
+  const custom = (customByRequest.value[requestId]?.[questionIndex] ?? '').trim()
+  if (!hasOptions) return false
+  if (multiple) return !!custom
+  const selected = selectedOptions(requestId, questionIndex)
+  return !!custom && selected.length === 0
+}
+
 function collectAnswers(item: HarnessQuestionRequest): string[] {
   const raw = answersByRequest.value[item.request_id] ?? []
   const customs = customByRequest.value[item.request_id] ?? []
@@ -182,6 +189,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 <template>
   <div v-if="request" data-testid="composer-question-sheet" @keydown="onKeydown">
+    <!-- Header bar -->
     <div class="flex items-center gap-2 px-4 pt-3">
       <MessageCircleQuestion :size="14" class="shrink-0 text-muted-foreground" />
       <p class="text-sm font-medium text-foreground">Questions</p>
@@ -219,6 +227,7 @@ function onKeydown(event: KeyboardEvent): void {
       </div>
     </div>
 
+    <!-- Question body -->
     <div
       class="flex flex-col gap-4 overflow-y-auto px-4 pb-1 pt-2"
       :class="request.questions.length > 2 ? 'max-h-72' : ''"
@@ -228,63 +237,116 @@ function onKeydown(event: KeyboardEvent): void {
         :key="`${request.request_id}-${qIndex}`"
         class="space-y-2"
       >
+        <!-- Optional header label -->
         <p
           v-if="question.header"
-          class="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+          class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
         >
           {{ question.header }}
         </p>
-        <p class="text-sm text-foreground">
-          <span class="mr-1.5 font-semibold tabular-nums">{{ qIndex + 1 }}.</span>
-          <span class="font-semibold">{{ question.question }}</span>
+
+        <!-- Question text — hide number prefix for single-question requests -->
+        <p class="text-sm font-medium text-foreground">
+          <span
+            v-if="request.questions.length > 1"
+            class="mr-1.5 tabular-nums text-muted-foreground"
+          >
+            {{ qIndex + 1 }}.
+          </span>
+          {{ question.question }}
         </p>
-        <div v-if="question.options?.length" class="flex flex-col gap-1.5">
-          <Button
+
+        <!-- Options list (when the question has selectable options) -->
+        <div v-if="question.options?.length" class="flex flex-col gap-1">
+          <!-- Selectable option rows -->
+          <button
             v-for="(option, oIndex) in question.options"
             :key="option.label"
             type="button"
-            size="sm"
-            :variant="
+            :disabled="submitting"
+            class="flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors"
+            :class="
+              isOptionSelected(request.request_id, qIndex, option.label)
+                ? 'border-primary bg-accent text-foreground'
+                : 'border-border bg-muted/30 text-foreground hover:bg-muted/60'
+            "
+            :data-variant="
               isOptionSelected(request.request_id, qIndex, option.label) ? 'default' : 'outline'
             "
-            class="h-auto justify-start whitespace-normal text-left"
             data-testid="composer-question-option"
             @click="
               toggleOption(request.request_id, qIndex, option.label, question.multiple ?? false)
             "
           >
             <span
-              class="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-semibold"
+              class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold"
               :class="
                 isOptionSelected(request.request_id, qIndex, option.label)
-                  ? 'bg-primary-foreground/20 text-primary-foreground'
+                  ? 'bg-primary text-primary-foreground'
                   : 'bg-muted text-muted-foreground'
               "
             >
               {{ optionLetter(oIndex) }}
             </span>
-            <span class="font-medium">{{ option.label }}</span>
-            <span v-if="option.description" class="ml-1 text-xs font-normal opacity-70">
-              — {{ option.description }}
+            <span class="min-w-0 flex-1">
+              <span class="font-medium">{{ option.label }}</span>
+              <span
+                v-if="option.description"
+                class="ml-1.5 text-xs text-muted-foreground"
+              >
+                {{ option.description }}
+              </span>
             </span>
-          </Button>
+          </button>
+
+          <!-- Own answer row — styled as the last option in the list -->
+          <div
+            class="flex items-center gap-2.5 rounded-lg border px-3 py-2 transition-colors"
+            :class="
+              isCustomActive(request.request_id, qIndex, true, question.multiple)
+                ? 'border-primary bg-accent'
+                : 'border-border bg-muted/30'
+            "
+            data-testid="composer-question-custom-row"
+          >
+            <span
+              class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md"
+              :class="
+                isCustomActive(request.request_id, qIndex, true, question.multiple)
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground'
+              "
+            >
+              <PenLine :size="11" />
+            </span>
+            <input
+              :id="`composer-question-${request.request_id}-${qIndex}`"
+              :value="customByRequest[request.request_id]?.[qIndex] ?? ''"
+              :disabled="submitting"
+              placeholder="Own answer…"
+              class="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+              data-testid="composer-question-custom"
+              @input="setCustom(request.request_id, qIndex, String(($event.target as HTMLInputElement).value ?? ''))"
+            />
+          </div>
         </div>
-        <div class="space-y-1">
-          <Label :for="`composer-question-${request.request_id}-${qIndex}`">
-            {{ question.options?.length ? 'Own answer' : 'Your answer' }}
-          </Label>
-          <Input
+
+        <!-- Free-text only (no selectable options) -->
+        <div v-else>
+          <input
             :id="`composer-question-${request.request_id}-${qIndex}`"
-            :model-value="customByRequest[request.request_id]?.[qIndex] ?? ''"
+            :value="customByRequest[request.request_id]?.[qIndex] ?? ''"
             :disabled="submitting"
-            placeholder="Type your own answer"
+            placeholder="Your answer…"
+            class="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary/30"
             data-testid="composer-question-custom"
-            @update:model-value="setCustom(request.request_id, qIndex, String($event ?? ''))"
+            @input="setCustom(request.request_id, qIndex, String(($event.target as HTMLInputElement).value ?? ''))"
           />
         </div>
       </div>
     </div>
 
+    <!-- Footer actions -->
     <div class="flex items-center justify-end gap-2 px-4 pb-3 pt-2">
       <Button
         variant="ghost"
