@@ -611,6 +611,11 @@ export enum ProcessStatus {
   FAILED = 'failed',
 }
 
+export enum ProcessKind {
+  PERSISTENT = 'persistent',
+  TEMP = 'temp',
+}
+
 export interface WorkspaceProcess {
   id: string
   workspace_id: string
@@ -622,6 +627,7 @@ export interface WorkspaceProcess {
   status: ProcessStatus | string
   exit_code: number | null
   run_count: number
+  kind: ProcessKind | string
   started_at: string
   ended_at: string | null
   updated_at: string

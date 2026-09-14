@@ -86,3 +86,10 @@ class ProcessStatus(models.TextChoices):
     EXITED = "exited", "Exited"
     KILLED = "killed", "Killed"
     FAILED = "failed", "Failed"
+
+
+class ProcessKind(models.TextChoices):
+    """Persistence scope of a workspace background process."""
+
+    PERSISTENT = "persistent", "Persistent"
+    TEMP = "temp", "Temp"

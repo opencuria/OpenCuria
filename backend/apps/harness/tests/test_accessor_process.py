@@ -47,11 +47,11 @@ class _FakeService:
         self.calls.append(("start_process", workspace_id, command, kwargs))
         return self._methods["start_process"]()
 
-    async def list_processes(self, workspace_id):
+    async def list_processes(self, workspace_id, **kwargs):
         self.calls.append(("list_processes", workspace_id))
         return self._methods["list_processes"]()
 
-    async def get_process(self, workspace_id, process_id):
+    async def get_process(self, workspace_id, process_id, **kwargs):
         self.calls.append(("get_process", workspace_id, process_id))
         return self._methods["get_process"]()
 
@@ -152,7 +152,7 @@ async def test_process_list_get_stop_roundtrip() -> None:
     stopped = await accessor.process_stop(str(PROCESS_ID))
     assert stopped["status"] == "killed"
     assert service.calls[-1][0] == "stop_process"
-    assert service.calls[-1][3] == {}
+    assert service.calls[-1][3] == {"session_id": None}
 
 
 async def test_process_get_stop_accept_name() -> None:

@@ -3415,6 +3415,7 @@ def _process_payload(process) -> dict:
     started_at = getattr(process, "started_at", None)
     ended_at = getattr(process, "ended_at", None)
     updated_at = getattr(process, "updated_at", None)
+    session_id = getattr(process, "session_id", None)
     return {
         "id": str(getattr(process, "id", "")),
         "workspace_id": str(getattr(process, "workspace_id", "")),
@@ -3426,10 +3427,38 @@ def _process_payload(process) -> dict:
         "status": str(getattr(process, "status", "") or ""),
         "exit_code": getattr(process, "exit_code", None),
         "run_count": getattr(process, "run_count", None),
+        "kind": str(getattr(process, "kind", "") or "persistent"),
+        "session_id": str(session_id) if session_id else None,
         "started_at": started_at.isoformat() if started_at else None,
         "ended_at": ended_at.isoformat() if ended_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
     }
+
+
+def _user_visible_process_payloads(processes) -> list[dict]:
+    """Filter MCP rows like the user list: persistent + running temps."""
+    visible = []
+    for process in processes:
+        if str(getattr(process, "kind", "") or "") != "temp":
+            visible.append(process)
+        elif str(getattr(process, "status", "") or "") == "running":
+            visible.append(process)
+    return [_process_payload(process) for process in visible]
+
+
+def _reject_temp_process(process, *, action: str) -> list[TextContent] | None:
+    """Return an MCP error when *process* is a user-untouchable temp row."""
+    if str(getattr(process, "kind", "") or "") == "temp":
+        if action == "restart":
+            return _error(
+                "Temporary processes cannot be restarted by users; "
+                "they live only for their agent session."
+            )
+        return _error(
+            "Temporary processes cannot be deleted by users; "
+            "stop them instead."
+        )
+    return None
 
 
 def _parse_process_args(args: dict, *required: str) -> tuple:
@@ -3467,7 +3496,7 @@ async def _call_list_processes(api_key, org_id, args: dict) -> list[TextContent]
         processes = await svc.list_processes(workspace.id)
     except Exception as exc:
         return _error(str(exc))
-    return _text([_process_payload(process) for process in processes])
+    return _text(_user_visible_process_payloads(processes))
 
 
 async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3496,6 +3525,10 @@ async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
         return _error(str(exc))
     except Exception as exc:
         return _error(str(exc))
+    if str(getattr(process, "kind", "") or "") == "temp" and str(
+        getattr(process, "status", "") or ""
+    ) != "running":
+        return _error("WorkspaceProcess not found")
     return _text(_process_payload(process))
 
 
@@ -3573,7 +3606,10 @@ async def _call_stop_process(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 async def _call_restart_process(api_key, org_id, args: dict) -> list[TextContent]:
-    """Restart a background process on the same row (new log)."""
+    """Restart a background process on the same row (new log).
+
+    Temporary processes cannot be restarted by users.
+    """
     from asgiref.sync import sync_to_async
 
     parsed, error = _parse_process_args(args, "workspace_id")
@@ -3593,6 +3629,15 @@ async def _call_restart_process(api_key, org_id, args: dict) -> list[TextContent
 
     svc = _runner_service()
     try:
+        existing = await svc.get_process(workspace.id, str(process_id))
+    except (NotFoundError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    rejected = _reject_temp_process(existing, action="restart")
+    if rejected is not None:
+        return rejected
+    try:
         process = await svc.restart_process(
             workspace.id,
             str(process_id),
@@ -3606,7 +3651,10 @@ async def _call_restart_process(api_key, org_id, args: dict) -> list[TextContent
 
 
 async def _call_delete_process(api_key, org_id, args: dict) -> list[TextContent]:
-    """Delete a background process (stops first if running)."""
+    """Delete a background process (stops first if running).
+
+    Temporary processes cannot be deleted by users (stop only).
+    """
     from asgiref.sync import sync_to_async
 
     parsed, error = _parse_process_args(args, "workspace_id")
@@ -3625,6 +3673,15 @@ async def _call_delete_process(api_key, org_id, args: dict) -> list[TextContent]
     from common.exceptions import ConflictError, NotFoundError
 
     svc = _runner_service()
+    try:
+        existing = await svc.get_process(workspace.id, str(process_id))
+    except (NotFoundError, ValueError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(str(exc))
+    rejected = _reject_temp_process(existing, action="delete")
+    if rejected is not None:
+        return rejected
     try:
         deleted_id = await svc.delete_process(
             workspace.id,

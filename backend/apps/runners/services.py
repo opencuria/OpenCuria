@@ -2606,14 +2606,53 @@ class RunnerService:
         self,
         workspace_id: uuid.UUID,
         id_or_name: uuid.UUID | str,
+        *,
+        kind: str | None = None,
+        session_id: uuid.UUID | str | None = None,
     ) -> "WorkspaceProcess":
-        """Resolve a process by id or exact name, scoped to a workspace."""
+        """Resolve a process by id or exact name, scoped to a workspace.
+
+        ``kind="temp"`` requires ``session_id``: temp rows are
+        session-scoped, so a UUID/name only resolves within the owning
+        session. ``kind=None`` keeps the agent semantics (own temp rows
+        first, then persistent rows).
+        """
+        parsed_session = self._coerce_session_id(session_id)
         resolved = await sync_to_async(self.processes.resolve_for_workspace)(
-            workspace_id, id_or_name
+            workspace_id, id_or_name, kind=kind, session_id=parsed_session
         )
         if resolved is None:
             raise WorkspaceNotFoundError(str(id_or_name))
         return resolved
+
+    @staticmethod
+    def _coerce_session_id(session_id: uuid.UUID | str | None) -> uuid.UUID | None:
+        """Parse an optional session id or raise ValueError."""
+        if session_id is None:
+            return None
+        if isinstance(session_id, uuid.UUID):
+            return session_id
+        try:
+            return uuid.UUID(str(session_id))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid session_id: {session_id}") from exc
+
+    @staticmethod
+    def _coerce_process_kind(kind: str | None) -> str:
+        """Normalize a process kind (persistent default) or raise ValueError."""
+        cleaned = (kind or "persistent").strip().lower()
+        if cleaned not in ("persistent", "temp"):
+            raise ValueError(f"Invalid process kind: {kind!r}")
+        return cleaned
+
+    @staticmethod
+    def _assert_not_temp(process: "WorkspaceProcess", *, action: str) -> None:
+        """Reject user-driven start/restart/delete of temp processes."""
+        if str(getattr(process, "kind", "") or "") == "temp":
+            raise ConflictError(
+                f"Temporary processes cannot be {action} by users; "
+                "they live only for their agent session (stop is allowed)."
+            )
 
     async def start_process(
         self,
@@ -2625,6 +2664,7 @@ class RunnerService:
         name: str,
         user=None,
         session_id: uuid.UUID | str | None = None,
+        kind: str | None = None,
     ) -> "WorkspaceProcess":
         """Start a detached background process in a workspace (upsert by name).
 
@@ -2637,12 +2677,19 @@ class RunnerService:
         fails the new run is aborted and the DB is left unchanged.
         There is no auto-restart — every run is explicit (same name).
 
+        ``kind="temp"`` creates a session-scoped row instead: the name
+        is unique per ``(workspace, name, session_id)`` and requires
+        ``session_id``. Temp rows are stopped by the harness cleanup
+        hook when the owning run finishes and are never started,
+        restarted, or deleted by users (REST/MCP reject those actions).
+
         Raises:
             WorkspaceNotFoundError: Unknown workspace.
             WorkspaceStateError: Workspace not running / pending deletion.
             RunnerOfflineError: Owning runner is offline.
             ConflictError: Runner reported an error or timed out.
-            ValueError: Empty command or name.
+            ValueError: Empty command or name, invalid kind, or temp
+                without session_id.
         """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -2654,15 +2701,19 @@ class RunnerService:
         if not cleaned_command:
             raise ValueError("command must not be empty")
         safe_workdir = (workdir or "/workspace").strip() or "/workspace"
-        if session_id is not None and not isinstance(session_id, uuid.UUID):
-            try:
-                session_id = uuid.UUID(str(session_id))
-            except (ValueError, TypeError) as exc:
-                raise ValueError(f"Invalid session_id: {session_id}") from exc
+        parsed_kind = self._coerce_process_kind(kind)
+        parsed_session = self._coerce_session_id(session_id)
+        if parsed_kind == "temp" and parsed_session is None:
+            raise ValueError("session_id is required for temporary processes")
 
-        existing = await sync_to_async(self.processes.get_by_name)(
-            workspace_id, cleaned_name
-        )
+        if parsed_kind == "temp":
+            existing = await sync_to_async(self.processes.get_temp_by_name)(
+                workspace_id, cleaned_name, parsed_session
+            )
+        else:
+            existing = await sync_to_async(self.processes.get_by_name)(
+                workspace_id, cleaned_name
+            )
         if existing is not None and existing.status == ProcessStatus.RUNNING:
             await self._stop_running_process(workspace, existing)
 
@@ -2680,7 +2731,7 @@ class RunnerService:
                 log_path="",
                 run_count=run_count,
                 created_by=user,
-                session_id=session_id,
+                session_id=parsed_session,
             )
         else:
             process_id = generate_uuid()
@@ -2693,19 +2744,25 @@ class RunnerService:
                     workdir=safe_workdir,
                     name=cleaned_name,
                     created_by=user,
-                    session_id=session_id,
+                    session_id=parsed_session,
                     run_count=run_count,
+                    kind=parsed_kind,
                 )
             except Exception as exc:
                 from django.db import IntegrityError
 
                 if not isinstance(exc, IntegrityError):
                     raise
-                # Race: a concurrent start won the (workspace, name) unique
-                # slot — retry once as a restart of the winner.
-                winner = await sync_to_async(self.processes.get_by_name)(
-                    workspace_id, cleaned_name
-                )
+                # Race: a concurrent start won the unique name slot —
+                # retry once as a restart of the winner (same kind scope).
+                if parsed_kind == "temp":
+                    winner = await sync_to_async(
+                        self.processes.get_temp_by_name
+                    )(workspace_id, cleaned_name, parsed_session)
+                else:
+                    winner = await sync_to_async(self.processes.get_by_name)(
+                        workspace_id, cleaned_name
+                    )
                 if winner is None:
                     raise
                 existing = winner
@@ -2726,7 +2783,7 @@ class RunnerService:
                     log_path="",
                     run_count=run_count,
                     created_by=user,
-                    session_id=session_id,
+                    session_id=parsed_session,
                 )
 
         log_path_abs, exit_path_abs = self._process_log_paths(
@@ -2903,17 +2960,24 @@ class RunnerService:
         Reuses the stored command/workdir (no overwrite, unlike
         :meth:`start_process` with the same name). A still-running row is
         stopped first; old logs are kept (new ``_r<run>`` log path).
+
+        Temp rows only restart from within their owning session
+        (``session_id`` must match); user-driven restarts are rejected
+        without a session scope (see :meth:`_assert_not_temp` usage in
+        the API layer — a plain restart without ``session_id`` never
+        touches temp rows).
         """
-        stored = await self._resolve_process(workspace_id, id_or_name)
+        parsed_session = self._coerce_session_id(session_id)
+        stored = await self._resolve_process(
+            workspace_id, id_or_name, session_id=parsed_session
+        )
+        if str(getattr(stored, "kind", "") or "") == "temp":
+            if parsed_session is None or stored.session_id != parsed_session:
+                raise WorkspaceNotFoundError(str(id_or_name))
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
         self._ensure_process_dispatchable(workspace)
-        if session_id is not None and not isinstance(session_id, uuid.UUID):
-            try:
-                session_id = uuid.UUID(str(session_id))
-            except (ValueError, TypeError) as exc:
-                raise ValueError(f"Invalid session_id: {session_id}") from exc
 
         current = stored
         if current.status == ProcessStatus.RUNNING:
@@ -2940,7 +3004,7 @@ class RunnerService:
             log_path="",
             run_count=run_count,
             created_by=user,
-            session_id=session_id,
+            session_id=parsed_session,
         )
 
         request_id = uuid.uuid4().hex
@@ -3026,9 +3090,13 @@ class RunnerService:
     ) -> uuid.UUID:
         """Delete a process row by id or name (stops it first if running).
 
+        Temp rows cannot be deleted (they stay in the DB as finished
+        rows); use :meth:`stop_process` instead.
+
         Returns the deleted process id. Pushes ``process:removed``.
         """
         stored = await self._resolve_process(workspace_id, id_or_name)
+        self._assert_not_temp(stored, action="deleted")
         if stored.status == ProcessStatus.RUNNING:
             workspace = await sync_to_async(self.workspaces.get_by_id)(
                 workspace_id
@@ -3053,12 +3121,23 @@ class RunnerService:
         return process_id
 
     async def list_processes(
-        self, workspace_id: uuid.UUID
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        kinds: tuple[str, ...] | None = None,
+        running_only: bool = False,
+        session_id: uuid.UUID | str | None = None,
     ) -> list["WorkspaceProcess"]:
         """Return DB processes, merged with live runner state when online.
 
         Falls back to plain DB records when the runner is offline or the
         live lookup times out.
+
+        ``session_id`` scopes temp rows to one agent session (the agent
+        only sees its own temps); persistent rows are always included.
+        ``kinds``/``running_only`` further restrict the result — the
+        user list passes ``running_only=True`` so finished temps vanish
+        from the UI while their DB rows are kept.
         """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -3091,19 +3170,37 @@ class RunnerService:
                 )
 
         queryset = await sync_to_async(self.processes.list_by_workspace)(
-            workspace_id
+            workspace_id, kinds=kinds, running_only=running_only
         )
-        return await sync_to_async(list)(queryset)
+        rows = await sync_to_async(list)(queryset)
+        parsed_session = self._coerce_session_id(session_id)
+        if parsed_session is None:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(getattr(row, "kind", "") or "") != "temp"
+            or row.session_id == parsed_session
+        ]
 
     async def get_process(
-        self, workspace_id: uuid.UUID, id_or_name: uuid.UUID | str
+        self,
+        workspace_id: uuid.UUID,
+        id_or_name: uuid.UUID | str,
+        *,
+        session_id: uuid.UUID | str | None = None,
     ) -> "WorkspaceProcess":
         """Return one process scoped to a workspace, live-merged when online.
 
         ``id_or_name`` accepts a process UUID or the exact process name
-        (resolved via :meth:`_resolve_process`).
+        (resolved via :meth:`_resolve_process`). A temp row only resolves
+        within its owning session (``session_id`` must match); a foreign
+        temp id/name raises NotFound.
         """
-        process = await self._resolve_process(workspace_id, id_or_name)
+        parsed_session = self._coerce_session_id(session_id)
+        process = await self._resolve_process(
+            workspace_id, id_or_name, session_id=parsed_session
+        )
         process_id = process.id
 
         if (
@@ -3162,14 +3259,21 @@ class RunnerService:
         self,
         workspace_id: uuid.UUID,
         id_or_name: uuid.UUID | str,
+        *,
+        session_id: uuid.UUID | str | None = None,
     ) -> "WorkspaceProcess":
         """Stop a tracked background process (SIGTERM, then SIGKILL after grace).
 
         Already-finished records are returned unchanged (idempotent).
         ``id_or_name`` accepts a process UUID or the exact process name
-        (resolved via :meth:`_resolve_process`).
+        (resolved via :meth:`_resolve_process`). Temp rows stop like any
+        other process — from the owning session via the agent, or by id
+        from the user UI; a foreign temp id/name raises NotFound.
         """
-        stored = await self._resolve_process(workspace_id, id_or_name)
+        parsed_session = self._coerce_session_id(session_id)
+        stored = await self._resolve_process(
+            workspace_id, id_or_name, session_id=parsed_session
+        )
         if stored.status != ProcessStatus.RUNNING:
             return stored
 
@@ -3178,6 +3282,68 @@ class RunnerService:
             raise WorkspaceNotFoundError(str(workspace_id))
         self._ensure_process_dispatchable(workspace)
         return await self._stop_running_process(workspace, stored)
+
+    async def stop_session_processes(
+        self,
+        workspace_id: uuid.UUID,
+        session_id: uuid.UUID | str,
+        *,
+        kind: str = "temp",
+        reason: str = "session_finished",
+    ) -> list["WorkspaceProcess"]:
+        """Stop all RUNNING rows of one agent session (cleanup hook).
+
+        Best-effort per row: each stop is attempted individually, failures
+        are logged and do not abort the remaining stops. Already-finished
+        rows are returned unchanged by :meth:`stop_process`. Finished rows
+        are kept in the DB (never deleted here). Idempotent — a second
+        call for the same session finds no RUNNING rows and is a no-op.
+
+        Returns the final records (stopped or already finished).
+        """
+        parsed_session = self._coerce_session_id(session_id)
+        if parsed_session is None:
+            raise ValueError("session_id is required")
+        parsed_kind = self._coerce_process_kind(kind)
+        rows = await sync_to_async(list)(
+            self.processes.list_running_session_processes(
+                workspace_id, parsed_session, kind=parsed_kind
+            )
+        )
+        stopped: list["WorkspaceProcess"] = []
+        for row in rows:
+            try:
+                final = await self.stop_process(
+                    workspace_id, row.id, session_id=parsed_session
+                )
+            except (ConflictError, RunnerOfflineError, RuntimeError) as exc:
+                logger.warning(
+                    "session process cleanup stop failed",
+                    workspace_id=str(workspace_id),
+                    session_id=str(parsed_session),
+                    process_id=str(row.id),
+                    reason=reason,
+                    error=str(exc),
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "session process cleanup stop failed",
+                    workspace_id=str(workspace_id),
+                    session_id=str(parsed_session),
+                    process_id=str(row.id),
+                    reason=reason,
+                )
+                continue
+            stopped.append(final)
+        if stopped:
+            logger.info(
+                "Stopped %d session process(es) for session %s (%s)",
+                len(stopped),
+                parsed_session,
+                reason,
+            )
+        return stopped
 
     def reconcile_workspace_processes(
         self,

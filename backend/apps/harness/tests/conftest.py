@@ -263,13 +263,66 @@ class FakeAccessor(WorkspaceAccessor):
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
+        *,
+        session_id: str | None = None,
+        kind: str = "persistent",
     ) -> dict[str, Any]:
         """Return a canned started-process record (upsert by name)."""
         self._maybe_fail()
         cleaned_name = (name or "").strip()
+        cleaned_kind = (kind or "persistent").strip().lower() or "persistent"
+        if cleaned_kind == "temp":
+            if not (session_id or "").strip():
+                from apps.harness.access.runner_accessor import (
+                    RunnerAccessorError as _AccessorError,
+                )
+
+                raise _AccessorError("process_start failed: session required")
+            for record in self.processes.values():
+                if (
+                    record.get("name") == cleaned_name
+                    and record.get("kind") == "temp"
+                    and str(record.get("session_id") or "") == session_id
+                ):
+                    run_count = int(record.get("run_count") or 1) + 1
+                    record.update(
+                        {
+                            "command": command,
+                            "workdir": workdir,
+                            "pid": 1234 + run_count,
+                            "log_path": (
+                                "/workspace/.opencuria/processes/"
+                                f"{record['process_id']}_r{run_count}.log"
+                            ),
+                            "status": "running",
+                            "exit_code": None,
+                            "run_count": run_count,
+                        }
+                    )
+                    return dict(record)
+            record = {
+                "process_id": f"proc-{len(self.processes) + 1}",
+                "workspace_id": self.workspace_id,
+                "name": cleaned_name,
+                "command": command,
+                "workdir": workdir,
+                "pid": 1234,
+                "log_path": (
+                    f"/workspace/.opencuria/processes/proc-{len(self.processes) + 1}.log"
+                ),
+                "status": "running",
+                "exit_code": None,
+                "run_count": 1,
+                "kind": "temp",
+                "session_id": session_id,
+            }
+            self.processes[record["process_id"]] = record
+            return dict(record)
         if cleaned_name:
             for record in self.processes.values():
-                if record.get("name") == cleaned_name:
+                if record.get("name") == cleaned_name and record.get(
+                    "kind", "persistent"
+                ) == "persistent":
                     run_count = int(record.get("run_count") or 1) + 1
                     record.update(
                         {
@@ -299,44 +352,83 @@ class FakeAccessor(WorkspaceAccessor):
             "status": "running",
             "exit_code": None,
             "run_count": 1,
+            "kind": "persistent",
+            "session_id": None,
         }
         self.processes[record["process_id"]] = record
         return dict(record)
 
-    async def process_list(self) -> list[dict[str, Any]]:
-        """Return canned process records."""
+    async def process_list(
+        self, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return canned process records (own temps + persistent)."""
         self._maybe_fail()
-        return [dict(record) for record in self.processes.values()]
+        if not session_id:
+            return [dict(record) for record in self.processes.values()]
+        return [
+            dict(record)
+            for record in self.processes.values()
+            if record.get("kind", "persistent") != "temp"
+            or str(record.get("session_id") or "") == session_id
+        ]
 
-    def _resolve_process_record(self, process_id: str) -> dict[str, Any]:
-        """Resolve a canned record by id or exact name."""
+    def _resolve_process_record(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Resolve a canned record by id or exact name (temp scoped)."""
         key = (process_id or "").strip()
         if key in self.processes:
-            return self.processes[key]
-        for record in self.processes.values():
-            if record.get("name") == key:
+            record = self.processes[key]
+            if record.get("kind") == "temp" and session_id is not None:
+                if str(record.get("session_id") or "") != session_id:
+                    raise RunnerAccessorError(
+                        f"process lookup failed: unknown process {process_id}"
+                    )
+            return record
+        cands = [
+            record
+            for record in self.processes.values()
+            if record.get("name") == key
+        ]
+        if session_id is not None:
+            for record in cands:
+                if (
+                    record.get("kind") == "temp"
+                    and str(record.get("session_id") or "") == session_id
+                ):
+                    return record
+        for record in cands:
+            if record.get("kind", "persistent") != "temp":
                 return record
+        if cands and session_id is None:
+            return cands[0]
         raise RunnerAccessorError(
             f"process lookup failed: unknown process {process_id}"
         )
 
-    async def process_get(self, process_id: str) -> dict[str, Any]:
+    async def process_get(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Return one canned process record (id or name)."""
         self._maybe_fail()
-        return dict(self._resolve_process_record(process_id))
+        return dict(self._resolve_process_record(process_id, session_id=session_id))
 
-    async def process_stop(self, process_id: str) -> dict[str, Any]:
+    async def process_stop(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Mark a canned process record stopped (id or name)."""
         self._maybe_fail()
-        record = self._resolve_process_record(process_id)
+        record = self._resolve_process_record(process_id, session_id=session_id)
         record["status"] = "exited"
         record["exit_code"] = 0
         return dict(record)
 
-    async def process_restart(self, process_id: str) -> dict[str, Any]:
+    async def process_restart(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Restart a canned record: run_count+1, new pid/log (id or name)."""
         self._maybe_fail()
-        record = self._resolve_process_record(process_id)
+        record = self._resolve_process_record(process_id, session_id=session_id)
         run_count = int(record.get("run_count") or 1) + 1
         record.update(
             {

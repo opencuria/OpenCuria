@@ -244,6 +244,9 @@ class WorkspaceAccessor(abc.ABC):
         workdir: str = HARNESS_WORKSPACE_ROOT,
         env: dict[str, str] | None = None,
         name: str = "",
+        *,
+        session_id: str | None = None,
+        kind: str = "persistent",
     ) -> dict[str, Any]:
         """Start a detached background process in the workspace.
 
@@ -252,35 +255,53 @@ class WorkspaceAccessor(abc.ABC):
         in place (stable id, new log, run count +1, command/workdir
         overwritten). Returns a JSON-serializable dict (``process_id``,
         ``status``, ``pid``, ``exit_code``, ``log_path``, ``run_count``,
-        ...). The backend assigns the process id; logs stay in the
-        workspace and are read back via ``read_file`` using the returned
-        ``log_path``.
+        ``kind``, ...). The backend assigns the process id; logs stay in
+        the workspace and are read back via ``read_file`` using the
+        returned ``log_path``.
+
+        ``kind="temp"`` starts a session-scoped row (requires
+        ``session_id``) that the harness cleanup hook stops when the
+        owning run finishes.
         """
 
     @abc.abstractmethod
-    async def process_list(self) -> list[dict[str, Any]]:
-        """List background processes of the workspace (newest first)."""
+    async def process_list(
+        self, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List background processes of the workspace (newest first).
+
+        ``session_id`` scopes temp rows to the owning agent session.
+        """
 
     @abc.abstractmethod
-    async def process_get(self, process_id: str) -> dict[str, Any]:
+    async def process_get(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Return one background process scoped to the workspace.
 
-        ``process_id`` accepts the process UUID or its exact name.
+        ``process_id`` accepts the process UUID or its exact name. Temp
+        rows only resolve within their owning session.
         """
 
     @abc.abstractmethod
-    async def process_stop(self, process_id: str) -> dict[str, Any]:
+    async def process_stop(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Stop a background process (SIGTERM, then SIGKILL after grace).
 
-        ``process_id`` accepts the process UUID or its exact name.
+        ``process_id`` accepts the process UUID or its exact name. Temp
+        rows only resolve within their owning session.
         """
 
     @abc.abstractmethod
-    async def process_restart(self, process_id: str) -> dict[str, Any]:
+    async def process_restart(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
         """Restart a background process on the same row (stable id, new log).
 
         ``process_id`` accepts the process UUID or its exact name; the
-        stored command/workdir are reused.
+        stored command/workdir are reused. Temp rows only restart from
+        within their owning session.
         """
 
     @abc.abstractmethod

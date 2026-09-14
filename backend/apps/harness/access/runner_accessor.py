@@ -207,6 +207,7 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     started_at = getattr(process, "started_at", None)
     updated_at = getattr(process, "updated_at", None)
     run_count = getattr(process, "run_count", None)
+    session_id = getattr(process, "session_id", None)
     return {
         "process_id": str(getattr(process, "id", "")),
         "workspace_id": str(getattr(process, "workspace_id", "")),
@@ -218,6 +219,8 @@ def _serialize_process(process: Any) -> dict[str, Any]:
         "status": str(getattr(process, "status", "") or ""),
         "exit_code": getattr(process, "exit_code", None),
         "run_count": int(run_count) if run_count is not None else None,
+        "kind": str(getattr(process, "kind", "") or "persistent"),
+        "session_id": str(session_id) if session_id else None,
         "started_at": started_at.isoformat() if started_at else None,
         "ended_at": ended_at.isoformat() if ended_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
@@ -991,8 +994,16 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
+        *,
+        session_id: str | None = None,
+        kind: str = "persistent",
     ) -> dict[str, Any]:
-        """Start a detached background process via RunnerService."""
+        """Start a detached background process via RunnerService.
+
+        ``kind="temp"`` starts a session-scoped row that the harness
+        cleanup hook stops when the owning run finishes (requires
+        ``session_id``); otherwise a workspace-global persistent row.
+        """
         if not (command or "").strip():
             raise ValueError("command must not be empty")
         safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
@@ -1004,6 +1015,8 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 workdir=safe_workdir,
                 env=dict(env or {}),
                 name=name or "",
+                session_id=session_id,
+                kind=kind,
             )
         except (
             RunnerOfflineError,
@@ -1014,11 +1027,19 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_start failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_list(self) -> list[dict[str, Any]]:
-        """List background processes via RunnerService (live-merged)."""
+    async def process_list(
+        self, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List background processes via RunnerService (live-merged).
+
+        ``session_id`` scopes temp rows to the owning agent session —
+        an agent only sees its own temps plus all persistent rows.
+        """
         service = self._runner_service()
         try:
-            processes = await service.list_processes(self._workspace_uuid())
+            processes = await service.list_processes(
+                self._workspace_uuid(), session_id=session_id
+            )
         except (
             RunnerOfflineError,
             ConflictError,
@@ -1028,14 +1049,21 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_list failed: {exc}") from exc
         return [_serialize_process(process) for process in processes]
 
-    async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one background process via RunnerService (UUID or name)."""
+    async def process_get(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return one background process via RunnerService (UUID or name).
+
+        Temp rows only resolve within their owning session.
+        """
         key = (process_id or "").strip()
         if not key:
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.get_process(self._workspace_uuid(), key)
+            process = await service.get_process(
+                self._workspace_uuid(), key, session_id=session_id
+            )
         except (
             RunnerOfflineError,
             ConflictError,
@@ -1045,15 +1073,20 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_get failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Stop a background process via RunnerService (UUID or name)."""
+    async def process_stop(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Stop a background process via RunnerService (UUID or name).
+
+        Temp rows only resolve within their owning session.
+        """
         key = (process_id or "").strip()
         if not key:
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
             process = await service.stop_process(
-                self._workspace_uuid(), key
+                self._workspace_uuid(), key, session_id=session_id
             )
         except (
             RunnerOfflineError,
@@ -1064,15 +1097,20 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_stop failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_restart(self, process_id: str) -> dict[str, Any]:
-        """Restart a background process via RunnerService (UUID or name)."""
+    async def process_restart(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Restart a background process via RunnerService (UUID or name).
+
+        Temp rows only restart from within their owning session.
+        """
         key = (process_id or "").strip()
         if not key:
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
             process = await service.restart_process(
-                self._workspace_uuid(), key
+                self._workspace_uuid(), key, session_id=session_id
             )
         except (
             RunnerOfflineError,

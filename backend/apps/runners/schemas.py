@@ -323,6 +323,7 @@ class ProcessOut(Schema):
     status: str
     exit_code: int | None = None
     run_count: int = 0
+    kind: str = "persistent"
     started_at: datetime
     ended_at: datetime | None = None
     updated_at: datetime

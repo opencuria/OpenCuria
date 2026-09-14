@@ -111,8 +111,15 @@ class HarnessService:
         runner_factory: Callable[..., HarnessRunner] | None = None,
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
         accessor_factory: Callable[[str], Any] | None = None,
+        process_cleanup: Callable[..., Any] | None = None,
     ) -> None:
-        """Create the service with injectable seams (tests fake them)."""
+        """Create the service with injectable seams (tests fake them).
+
+        ``process_cleanup`` stops session-scoped temp processes when a
+        run finishes (called with ``workspace_id``, ``session_id`` and
+        ``reason``); production wires the runners ``RunnerService``,
+        tests inject a fake.
+        """
         self.sessions = sessions or HarnessSessionRepository
         self.messages = messages or HarnessMessageRepository
         self.parts = parts or HarnessPartRepository
@@ -128,6 +135,7 @@ class HarnessService:
         self._event_locks: dict[str, asyncio.Lock] = {}
         # run context kept in memory: session_id -> dict
         self._runs: dict[str, dict[str, Any]] = {}
+        self._process_cleanup = process_cleanup
 
     # -- session lifecycle ------------------------------------------------
 
@@ -1514,6 +1522,17 @@ class HarnessService:
             await self._fail_open_parts(assistant, state="error", output=str(exc))
             log.exception("harness_run_failed", session_id=key)
         finally:
+            # Session-scoped temp processes die with the run: stop them
+            # before marking idle so success, error, and abort (stopped
+            # by user) all clean up. The cleanup is shielded like the
+            # Agent-S desktop lease release: an abort racing the finally
+            # must not cancel the stops, and stops are best-effort (a
+            # single failure never fails the run or swallows the abort).
+            await self._cleanup_session_processes(
+                workspace_id=str(session.workspace_id),
+                session_id=key,
+                reason="run_finished",
+            )
             self._runs.pop(key, None)
             self._tasks.pop(key, None)
             self._event_locks.pop(key, None)
@@ -1529,6 +1548,95 @@ class HarnessService:
                 ),
                 str(session.workspace_id),
             )
+
+    async def _cleanup_session_processes(
+        self,
+        *,
+        workspace_id: str,
+        session_id: str,
+        reason: str,
+    ) -> None:
+        """Stop all running temp processes of one finished session.
+
+        Solid by construction, not by subscription:
+
+        - Runs in ``_execute_run.finally`` — the single funnel every run
+          passes through, covering success, error, and abort (user stop
+          cancels the run task, which still lands here; child/subagent
+          runs have their own ``_execute_run`` frame and clean their own
+          session scope). ``delete_session``/edit reruns inherit it via
+          ``abort_run`` + this finally.
+        - Shielded + best-effort (Agent-S ``_run_cleanup_rpc`` pattern):
+          a cancellation arriving during cleanup is remembered and
+          re-raised afterwards instead of aborting the stops mid-way;
+          per-process stop failures are logged and skipped, never
+          raised, so cleanup cannot fail the run or swallow the
+          original abort.
+        - No-op safe: without a cleanup seam (unit tests) or without
+          running temps, this returns immediately. Finished rows are
+          kept in the DB (never deleted here) — the user list only
+          shows running temps, so stopped temps vanish from the UI
+          while their history stays queryable for the agent.
+        """
+        cleanup = self._process_cleanup
+        if cleanup is None:
+            return
+        parsed_workspace: uuid.UUID | None = None
+        parsed_session: uuid.UUID | None = None
+        try:
+            parsed_workspace = uuid.UUID(str(workspace_id))
+            parsed_session = uuid.UUID(str(session_id))
+        except (ValueError, TypeError, AttributeError):
+            log.warning(
+                "harness_process_cleanup_skipped",
+                workspace_id=str(workspace_id),
+                session_id=str(session_id),
+                reason="invalid_id",
+            )
+            return
+
+        async def _run() -> Any:
+            result = cleanup(
+                parsed_workspace,
+                parsed_session,
+                reason=reason,
+            )
+            if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+                return await result
+            return result
+
+        task: asyncio.Task[Any] = asyncio.ensure_future(_run())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    cancelled = True
+                    break
+                cancelled = True
+                continue
+            except Exception:
+                log.exception(
+                    "harness_process_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                    session_id=str(session_id),
+                    reason=reason,
+                )
+                return
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                log.exception(
+                    "harness_process_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                    session_id=str(session_id),
+                    reason=reason,
+                    error=str(exc),
+                )
+        if cancelled:
+            raise asyncio.CancelledError()
 
     async def _settle_open_stream_parts(self, assistant: HarnessMessage) -> None:
         """Mark leftover running text/reasoning parts completed.
@@ -2695,7 +2803,16 @@ def create_default_harness_service() -> HarnessService:
     async def accessor_factory(workspace_id: str) -> Any:
         return await create_harness_accessor(runner_service, workspace_id)
 
-    return HarnessService(accessor_factory=accessor_factory)
+    async def process_cleanup(
+        workspace_id: uuid.UUID, session_id: uuid.UUID, *, reason: str = ""
+    ) -> Any:
+        return await runner_service.stop_session_processes(
+            workspace_id, session_id, reason=reason or "run_finished"
+        )
+
+    return HarnessService(
+        accessor_factory=accessor_factory, process_cleanup=process_cleanup
+    )
 
 
 def _descendant_ids(

@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { writeClipboardText } from '@/lib/clipboard'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
-import { ProcessStatus } from '@/types'
+import { ProcessKind, ProcessStatus } from '@/types'
 import type { WorkspaceProcess } from '@/types'
 
 const emit = defineEmits<{
@@ -42,6 +42,10 @@ function statusVariant(
 
 function isRunning(process: WorkspaceProcess): boolean {
   return process.status === ProcessStatus.RUNNING
+}
+
+function isTemp(process: WorkspaceProcess): boolean {
+  return process.kind === ProcessKind.TEMP
 }
 
 function displayName(process: WorkspaceProcess): string {
@@ -157,6 +161,14 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             {{ displayName(process) }}
           </span>
           <Badge :variant="statusVariant(process.status)">{{ process.status }}</Badge>
+          <Badge
+            v-if="isTemp(process)"
+            variant="outline"
+            title="Temporary session process — stopped automatically when the agent run finishes"
+            data-testid="composer-process-temp"
+          >
+            temp
+          </Badge>
           <span
             v-if="(process.run_count ?? 0) > 1"
             class="shrink-0 text-xs text-muted-foreground"
@@ -165,7 +177,7 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             run {{ process.run_count }}
           </span>
           <Button
-            v-if="!isRunning(process)"
+            v-if="!isRunning(process) && !isTemp(process)"
             type="button"
             variant="ghost"
             size="xs"
@@ -178,6 +190,7 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             Start
           </Button>
           <Button
+            v-if="!isTemp(process)"
             type="button"
             variant="ghost"
             size="xs"
@@ -203,6 +216,7 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             Stop
           </Button>
           <Button
+            v-if="!isTemp(process)"
             type="button"
             variant="ghost"
             size="xs"

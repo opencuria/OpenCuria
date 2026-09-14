@@ -268,6 +268,12 @@ class WorkspaceProcess(models.Model):
     runs); agents read them via file tools. Processes are
     workspace-bound: stopping or removing the workspace kills them.
     There is no auto-restart — every run is explicit (same name).
+
+    Temporary processes (``kind=TEMP``) are session-scoped: they run at
+    most until the owning harness run finishes. The harness cleanup hook
+    stops all running temp processes of the finished session; the rows
+    stay in the DB (finished, non-running). Temp names are unique per
+    ``(workspace, name, session_id)`` so parallel sessions never collide.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -293,6 +299,15 @@ class WorkspaceProcess(models.Model):
         default=0,
         help_text="Number of starts of this named application.",
     )
+    kind = models.CharField(
+        max_length=20,
+        default="persistent",
+        help_text=(
+            "persistent: workspace-global app (name unique per workspace). "
+            "temp: session-scoped helper (name unique per workspace+session), "
+            "stopped automatically when the owning harness run finishes."
+        ),
+    )
     command = models.TextField(
         help_text="Shell command the process was started with.",
     )
@@ -315,7 +330,12 @@ class WorkspaceProcess(models.Model):
     session_id = models.UUIDField(
         null=True,
         blank=True,
-        help_text="Agent loop that started this process (informational, no FK).",
+        db_index=True,
+        help_text=(
+            "Agent run (harness session) that owns this process. "
+            "Informational for persistent processes; required for temp "
+            "processes (scope of the temp name + cleanup hook target)."
+        ),
     )
     started_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
@@ -324,10 +344,22 @@ class WorkspaceProcess(models.Model):
     class Meta:
         db_table = "runners_workspace_process"
         ordering = ["-started_at"]
+        indexes = [
+            models.Index(
+                fields=["workspace", "session_id", "status"],
+                name="process_ws_session_status_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["workspace", "name"],
+                condition=models.Q(kind="persistent"),
                 name="uniq_workspace_process_name",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "name", "session_id"],
+                condition=models.Q(kind="temp"),
+                name="uniq_workspace_temp_process_name",
             ),
         ]
 

@@ -32,6 +32,16 @@ class ProcessStartArgs(BaseModel):
             "log, run count +1, command/workdir overwritten)."
         )
     )
+    temporary: bool = Field(
+        default=False,
+        description=(
+            "Start a temporary session-scoped process instead of a "
+            "persistent one. Temporary processes are stopped automatically "
+            "when this agent run finishes (success, error, or abort); "
+            "use them for short-lived helpers (dev servers for tests, "
+            "watchers) that must not outlive the run."
+        ),
+    )
 
 
 class ProcessListArgs(BaseModel):
@@ -67,6 +77,9 @@ def _status_line(record: dict) -> str:
     name = str(record.get("name") or "")
     process_id = str(record.get("process_id", ""))
     head = f"{name} {process_id}".strip() if name else process_id
+    kind = str(record.get("kind") or "")
+    if kind == "temp":
+        head = f"{head} [temp]" if head else "[temp]"
     parts = [
         head,
         str(record.get("status", "unknown")),
@@ -99,6 +112,8 @@ class ProcessStartTool(Tool):
         "identity per workspace: the same name restarts the same "
         "application in place (new log, run count +1, command/workdir "
         "overwritten); a stopped process is restarted via the same name. "
+        "Pass temporary=true for a session-scoped helper that is stopped "
+        "automatically when this run finishes (success, error, or abort). "
         "Returns the process id, pid, and log path; check status with "
         "process_get, stop with process_stop, and read logs with the "
         "read tool."
@@ -110,6 +125,8 @@ class ProcessStartTool(Tool):
         """Return a short title for a process_start invocation."""
         assert isinstance(args, ProcessStartArgs)
         command = args.command.strip().splitlines()[0] if args.command else ""
+        if args.temporary:
+            return f"Start temp {command[:80]}"
         return f"Start {command[:80]}"
 
     async def execute(
@@ -135,29 +152,40 @@ class ProcessStartTool(Tool):
             env = validate_harness_env(args.env or {})
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
+        kind = "temp" if args.temporary else "persistent"
         try:
             record = await ctx.accessor.process_start(
                 args.command,
                 workdir=workdir,
                 env=env,
                 name=name,
+                session_id=ctx.session_id or None,
+                kind=kind,
             )
         except (RunnerAccessorError, TimeoutError) as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         process_id = str(record.get("process_id", ""))
         pid = record.get("pid")
         log_path = str(record.get("log_path", ""))
         run_count = _run_count(record)
+        temp_hint = (
+            " It is temporary and will be stopped automatically when "
+            "this run finishes."
+            if kind == "temp"
+            else ""
+        )
         if run_count > 1:
             output = (
                 f"Restarted background process '{name}' (run {run_count}, "
-                f"id {process_id}, pid {pid}). "
+                f"id {process_id}, pid {pid}).{temp_hint} "
                 "Status via process_get, stop via process_stop. "
                 f"Logs: read {log_path}."
             )
         else:
             output = (
-                f"Started background process {process_id} (pid {pid}). "
+                f"Started background process {process_id} (pid {pid}).{temp_hint} "
                 "Status via process_get, stop via process_stop. "
                 f"Logs: read {log_path}."
             )
@@ -170,6 +198,7 @@ class ProcessStartTool(Tool):
                 "status": str(record.get("status", "")),
                 "name": str(record.get("name", "") or name),
                 "run_count": run_count,
+                "kind": str(record.get("kind", "") or kind),
             },
         )
 
@@ -180,7 +209,8 @@ class ProcessListTool(Tool):
     name = "process_list"
     description = (
         "List background processes of the workspace with status, pid, "
-        "exit code, and command."
+        "exit code, command, and type (persistent or temporary). "
+        "Temporary rows shown are limited to this run's session."
     )
     args_schema: type[BaseModel] = ProcessListArgs
     permission_key = "process"
@@ -195,8 +225,12 @@ class ProcessListTool(Tool):
         """List background processes via the workspace accessor."""
         self.coerce_args(args)
         try:
-            records = await ctx.accessor.process_list()
+            records = await ctx.accessor.process_list(
+                session_id=ctx.session_id or None
+            )
         except (RunnerAccessorError, TimeoutError) as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         if not records:
             return ToolResult(
@@ -239,8 +273,12 @@ class ProcessGetTool(Tool):
         if not args.process_id.strip():
             raise ToolError("process_id must not be empty", tool=self.name)
         try:
-            record = await ctx.accessor.process_get(args.process_id.strip())
+            record = await ctx.accessor.process_get(
+                args.process_id.strip(), session_id=ctx.session_id or None
+            )
         except (RunnerAccessorError, TimeoutError) as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         return ToolResult(output=_status_line(record), metadata=dict(record))
 
@@ -276,9 +314,11 @@ class ProcessStopTool(Tool):
             raise ToolError("process_id must not be empty", tool=self.name)
         try:
             record = await ctx.accessor.process_stop(
-                args.process_id.strip()
+                args.process_id.strip(), session_id=ctx.session_id or None
             )
         except (RunnerAccessorError, TimeoutError) as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         process_id = str(record.get("process_id", args.process_id.strip()))
         status = str(record.get("status", ""))
@@ -324,8 +364,12 @@ class ProcessRestartTool(Tool):
             raise ToolError("process_id must not be empty", tool=self.name)
         key = args.process_id.strip()
         try:
-            record = await ctx.accessor.process_restart(key)
+            record = await ctx.accessor.process_restart(
+                key, session_id=ctx.session_id or None
+            )
         except (RunnerAccessorError, TimeoutError) as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
+        except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         process_id = str(record.get("process_id", key))
         name = str(record.get("name", "") or key)

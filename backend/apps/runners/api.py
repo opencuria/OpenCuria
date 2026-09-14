@@ -1066,10 +1066,27 @@ def _process_to_out(process) -> ProcessOut:
         status=process.status,
         exit_code=process.exit_code,
         run_count=int(getattr(process, "run_count", 0) or 0),
+        kind=str(getattr(process, "kind", "") or "persistent"),
         started_at=process.started_at,
         ended_at=process.ended_at,
         updated_at=process.updated_at,
     )
+
+
+def _user_visible_processes(processes) -> list:
+    """Filter rows for the user list: all persistent + running temps.
+
+    Finished temp rows stay in the DB (agent history) but vanish from
+    the user list as soon as they stop — a stopped temp needs no user
+    action, and temps can never be started/restarted/deleted by users.
+    """
+    visible = []
+    for process in processes:
+        if str(getattr(process, "kind", "") or "") != "temp":
+            visible.append(process)
+        elif str(getattr(process, "status", "") or "") == "running":
+            visible.append(process)
+    return visible
 
 
 @workspace_router.get(
@@ -1078,7 +1095,11 @@ def _process_to_out(process) -> ProcessOut:
     summary="List background processes",
 )
 async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
-    """List background processes of a workspace (DB + live merge)."""
+    """List background processes of a workspace (DB + live merge).
+
+    Users see all persistent processes plus running temp processes;
+    finished temps stay in the DB but are hidden here.
+    """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
     ):
@@ -1090,7 +1111,8 @@ async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
         processes = await service.list_processes(workspace_id)
-        return 200, [_process_to_out(process) for process in processes]
+        visible = _user_visible_processes(processes)
+        return 200, [_process_to_out(process) for process in visible]
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -1114,6 +1136,8 @@ async def start_process(
 
     A new ``name`` creates a fresh row (201); an existing ``name``
     restarts the same row with ``run_count + 1`` (200, stable id).
+    Users always create persistent processes; temporary session-scoped
+    processes are agent-only and cannot be started here.
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
@@ -1154,6 +1178,8 @@ async def get_process(
     """Return one background process scoped to a workspace.
 
     ``process_id`` accepts a process UUID or the exact process name.
+    Finished temp rows are hidden from users (404); running temps are
+    visible with their ``kind`` marker.
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
@@ -1166,6 +1192,8 @@ async def get_process(
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
         process = await service.get_process(workspace_id, process_id)
+        if _user_visible_processes([process]) == []:
+            return 404, ErrorOut(detail="Process not found", code="not_found")
         return 200, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -1184,6 +1212,8 @@ async def stop_process(
     """Stop a background process (SIGTERM, then SIGKILL after grace).
 
     ``process_id`` accepts a process UUID or the exact process name.
+    Stopping is the only user action allowed on running temp processes;
+    a stopped temp vanishes from the user list (its DB row is kept).
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
@@ -1226,6 +1256,8 @@ async def restart_process(
 
     Reuses the stored command/workdir; ``process_id`` accepts a process
     UUID or the exact process name. No request body required.
+    Temporary processes cannot be restarted by users (400) — they live
+    only for their agent session.
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
@@ -1237,6 +1269,15 @@ async def restart_process(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
+        existing = await service.get_process(workspace_id, process_id)
+        if str(getattr(existing, "kind", "") or "") == "temp":
+            return 400, ErrorOut(
+                detail=(
+                    "Temporary processes cannot be restarted by users; "
+                    "they live only for their agent session."
+                ),
+                code="validation_error",
+            )
         process = await service.restart_process(
             workspace_id,
             process_id,
@@ -1264,6 +1305,9 @@ async def delete_process(
     """Delete a background process row (stops it first if running).
 
     ``process_id`` accepts a process UUID or the exact process name.
+    Temporary processes cannot be deleted by users (400) — stop them
+    instead; finished temps vanish from the user list while their DB
+    rows are kept.
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
@@ -1275,6 +1319,15 @@ async def delete_process(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
+        existing = await service.get_process(workspace_id, process_id)
+        if str(getattr(existing, "kind", "") or "") == "temp":
+            return 400, ErrorOut(
+                detail=(
+                    "Temporary processes cannot be deleted by users; "
+                    "stop them instead."
+                ),
+                code="validation_error",
+            )
         await service.delete_process(workspace_id, process_id)
         return 204, None
     except NotFoundError as e:

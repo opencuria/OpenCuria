@@ -506,6 +506,7 @@ class WorkspaceProcessRepository:
         created_by=None,
         session_id: uuid.UUID | None = None,
         run_count: int = 1,
+        kind: str = "persistent",
     ) -> WorkspaceProcess:
         """Create a new process record in running state."""
         from .enums import ProcessStatus
@@ -520,6 +521,7 @@ class WorkspaceProcessRepository:
             created_by=created_by,
             session_id=session_id,
             run_count=run_count,
+            kind=kind or "persistent",
         )
 
     @staticmethod
@@ -549,12 +551,43 @@ class WorkspaceProcessRepository:
     def get_by_name(
         workspace_id: uuid.UUID,
         name: str,
+        *,
+        kind: str | None = None,
+        session_id: uuid.UUID | None = None,
     ) -> WorkspaceProcess | None:
-        """Fetch a process by exact (case-sensitive) name in a workspace."""
+        """Fetch a process by exact (case-sensitive) name in a workspace.
+
+        Without filters this prefers the persistent row; pass ``kind``
+        (plus ``session_id`` for temp rows) to scope the lookup.
+        """
+        queryset = WorkspaceProcess.objects.filter(
+            workspace_id=workspace_id,
+            name=name,
+        )
+        if kind is not None:
+            queryset = queryset.filter(kind=kind)
+            if kind == "temp":
+                queryset = queryset.filter(session_id=session_id)
+        else:
+            queryset = queryset.filter(kind="persistent")
+        return (
+            queryset.select_related("workspace", "workspace__runner", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def get_temp_by_name(
+        workspace_id: uuid.UUID,
+        name: str,
+        session_id: uuid.UUID,
+    ) -> WorkspaceProcess | None:
+        """Fetch a temp process by name scoped to one session."""
         return (
             WorkspaceProcess.objects.filter(
                 workspace_id=workspace_id,
                 name=name,
+                kind="temp",
+                session_id=session_id,
             )
             .select_related("workspace", "workspace__runner", "created_by")
             .first()
@@ -564,8 +597,15 @@ class WorkspaceProcessRepository:
     def resolve_for_workspace(
         workspace_id: uuid.UUID,
         id_or_name: str | uuid.UUID,
+        *,
+        kind: str | None = None,
+        session_id: uuid.UUID | None = None,
     ) -> WorkspaceProcess | None:
         """Resolve a process by UUID first, then by exact name.
+
+        UUID matches win regardless of kind, but a temp row only
+        resolves when its ``session_id`` matches (temp rows are
+        session-scoped). Name fallback honors the same scoping.
 
         Never raises on unparsable UUIDs — falls back to name lookup.
         """
@@ -583,7 +623,32 @@ class WorkspaceProcessRepository:
                 parsed, workspace_id
             )
             if candidate is not None:
-                return candidate
+                candidate_kind = str(getattr(candidate, "kind", "") or "")
+                if candidate_kind == "temp":
+                    if session_id is not None and candidate.session_id != session_id:
+                        candidate = None
+                    elif kind == "persistent":
+                        candidate = None
+                elif kind == "temp":
+                    candidate = None
+                if candidate is not None:
+                    return candidate
+        if kind == "temp":
+            if session_id is None:
+                return None
+            return WorkspaceProcessRepository.get_temp_by_name(
+                workspace_id, str(id_or_name), session_id
+            )
+        if kind == "persistent":
+            return WorkspaceProcessRepository.get_by_name(
+                workspace_id, str(id_or_name), kind="persistent"
+            )
+        if session_id is not None:
+            temp = WorkspaceProcessRepository.get_temp_by_name(
+                workspace_id, str(id_or_name), session_id
+            )
+            if temp is not None:
+                return temp
         return WorkspaceProcessRepository.get_by_name(
             workspace_id, str(id_or_name)
         )
@@ -626,11 +691,25 @@ class WorkspaceProcessRepository:
         return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[WorkspaceProcess]:
-        """Return all processes for a workspace, newest first."""
-        return WorkspaceProcess.objects.filter(
-            workspace_id=workspace_id
-        ).select_related("created_by")
+    def list_by_workspace(
+        workspace_id: uuid.UUID,
+        *,
+        kinds: tuple[str, ...] | None = None,
+        running_only: bool = False,
+    ) -> QuerySet[WorkspaceProcess]:
+        """Return processes for a workspace, newest first.
+
+        ``kinds`` restricts to ``persistent``/``temp`` rows; ``running_only``
+        keeps only RUNNING rows (the user-visible temp subset).
+        """
+        from .enums import ProcessStatus
+
+        queryset = WorkspaceProcess.objects.filter(workspace_id=workspace_id)
+        if kinds is not None:
+            queryset = queryset.filter(kind__in=list(kinds))
+        if running_only:
+            queryset = queryset.filter(status=ProcessStatus.RUNNING)
+        return queryset.select_related("created_by")
 
     @staticmethod
     def list_running_by_workspace(
@@ -643,6 +722,29 @@ class WorkspaceProcessRepository:
             workspace_id=workspace_id,
             status=ProcessStatus.RUNNING,
         )
+
+    @staticmethod
+    def list_running_session_processes(
+        workspace_id: uuid.UUID,
+        session_id: uuid.UUID,
+        *,
+        kind: str | None = None,
+    ) -> QuerySet[WorkspaceProcess]:
+        """Return RUNNING rows of one agent session (cleanup hook source).
+
+        ``kind="temp"`` restricts to session-scoped temp rows; ``None``
+        returns all running rows of the session.
+        """
+        from .enums import ProcessStatus
+
+        queryset = WorkspaceProcess.objects.filter(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            status=ProcessStatus.RUNNING,
+        )
+        if kind is not None:
+            queryset = queryset.filter(kind=kind)
+        return queryset.select_related("workspace", "workspace__runner")
 
     @staticmethod
     def update_status(

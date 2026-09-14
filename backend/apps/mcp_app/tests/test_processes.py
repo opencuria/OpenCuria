@@ -265,6 +265,25 @@ async def test_mcp_restart_process_happy_path(monkeypatch) -> None:
         def get_workspace_for_user(self, workspace_id, *, user, organization_id):
             return process_setup["workspace"]
 
+        async def get_process(self, workspace_id, id_or_name, **kwargs):
+            return SimpleNamespace(
+                id=process_id,
+                workspace_id=workspace_id,
+                name="web",
+                command="python server.py",
+                workdir="/workspace",
+                pid=101,
+                log_path="/workspace/.opencuria/processes/x.log",
+                status="running",
+                exit_code=None,
+                run_count=1,
+                kind="persistent",
+                session_id=None,
+                started_at=datetime.now(timezone.utc),
+                ended_at=None,
+                updated_at=datetime.now(timezone.utc),
+            )
+
         async def restart_process(self, workspace_id, id_or_name, *, user=None):
             calls.append((workspace_id, id_or_name, user))
             return SimpleNamespace(
@@ -313,6 +332,27 @@ async def test_mcp_delete_process_happy_path(monkeypatch) -> None:
     class _FakeService:
         def get_workspace_for_user(self, workspace_id, *, user, organization_id):
             return process_setup["workspace"]
+
+        async def get_process(self, workspace_id, id_or_name, **kwargs):
+            from datetime import datetime, timezone
+
+            return SimpleNamespace(
+                id=process_id,
+                workspace_id=workspace_id,
+                name="web",
+                command="python server.py",
+                workdir="/workspace",
+                pid=101,
+                log_path="/workspace/.opencuria/processes/x.log",
+                status="running",
+                exit_code=None,
+                run_count=1,
+                kind="persistent",
+                session_id=None,
+                started_at=datetime.now(timezone.utc),
+                ended_at=None,
+                updated_at=datetime.now(timezone.utc),
+            )
 
         async def delete_process(self, workspace_id, id_or_name):
             calls.append((workspace_id, id_or_name))

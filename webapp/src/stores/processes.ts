@@ -14,6 +14,7 @@ import type {
   ProcessStatusChangedEvent,
   WorkspaceProcess,
 } from '@/types'
+import { ProcessKind } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import type { ProcessStartIn } from '@/services/workspaces.api'
 import { useNotificationStore } from './notifications'
@@ -208,16 +209,24 @@ export const useProcessesStore = defineStore('processes', () => {
     const idx = list.findIndex((p) => p.id === event.process_id)
     if (idx >= 0) {
       const current = list[idx]!
-      list[idx] = {
+      const nextStatus = event.status
+      const next = {
         ...current,
-        status: event.status,
+        status: nextStatus,
         exit_code: event.exit_code,
         pid: event.pid,
         ...(event.log_path !== undefined ? { log_path: event.log_path } : {}),
         ...(event.run_count !== undefined ? { run_count: event.run_count } : {}),
-        ended_at: event.status === 'running' ? current.ended_at : (current.ended_at ?? new Date().toISOString()),
+        ended_at: nextStatus === 'running' ? current.ended_at : (current.ended_at ?? new Date().toISOString()),
         updated_at: new Date().toISOString(),
       }
+      if (next.kind === ProcessKind.TEMP && nextStatus !== 'running') {
+        // Finished temps vanish from the user list at once (DB rows are
+        // kept for the agent); the agent cleanup also stops them.
+        removeFromList(event.workspace_id, event.process_id)
+        return
+      }
+      list[idx] = next
       processesByWorkspace.value[event.workspace_id] = [...list]
       return
     }

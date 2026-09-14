@@ -6,7 +6,7 @@ import { ref } from 'vue'
 import HarnessProcessSheet from './HarnessProcessSheet.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
-import { ProcessStatus, type WorkspaceProcess } from '@/types'
+import { ProcessKind, ProcessStatus, type WorkspaceProcess } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 
 vi.mock('vue-sonner', () => ({
@@ -42,6 +42,7 @@ function makeProcess(overrides: Partial<WorkspaceProcess> = {}): WorkspaceProces
     status: overrides.status ?? ProcessStatus.RUNNING,
     exit_code: overrides.exit_code ?? null,
     run_count: overrides.run_count ?? 1,
+    kind: overrides.kind ?? ProcessKind.PERSISTENT,
     started_at: overrides.started_at ?? '2026-09-06T10:00:00.000Z',
     ended_at: overrides.ended_at ?? null,
     updated_at: overrides.updated_at ?? '2026-09-06T10:00:00.000Z',
@@ -104,6 +105,19 @@ describe('HarnessProcessSheet', () => {
     expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(true)
+  })
+
+  it('marks temp processes and allows only stop for them', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ kind: ProcessKind.TEMP, status: ProcessStatus.RUNNING }),
+    ]
+    const wrapper = mountSheet()
+    expect(wrapper.find('[data-testid="composer-process-temp"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(false)
   })
 
   it('shows the run badge only when run_count > 1', () => {

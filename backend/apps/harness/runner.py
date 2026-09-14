@@ -1740,23 +1740,26 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_start(self, command, workdir="/workspace", env=None, name=""):  # type: ignore[no-untyped-def]
+    async def process_start(  # type: ignore[no-untyped-def]
+        self, command, workdir="/workspace", env=None, name="",
+        *, session_id=None, kind="persistent",
+    ):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_list(self):  # type: ignore[no-untyped-def]
+    async def process_list(self, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_get(self, process_id):  # type: ignore[no-untyped-def]
+    async def process_get(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_stop(self, process_id):  # type: ignore[no-untyped-def]
+    async def process_stop(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_restart(self, process_id):  # type: ignore[no-untyped-def]
+    async def process_restart(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
