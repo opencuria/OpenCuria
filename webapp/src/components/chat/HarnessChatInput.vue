@@ -24,6 +24,7 @@ import type { FileNode, Skill } from '@/types'
 import { getProviderConfig } from '@/services/harness.api'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import { loadRecentModels, recentCatalogModels, useRecentModels } from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
@@ -94,6 +95,8 @@ const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
 const catalog = ref<ProviderModel[]>([])
+const { entries: recentEntries } = useRecentModels()
+const recentModels = computed(() => recentCatalogModels(catalog.value))
 const modelLoading = ref(false)
 const providerMissing = ref(false)
 const selectedSkillIds = ref<string[]>([])
@@ -193,7 +196,11 @@ async function loadProviderModels(): Promise<void> {
       if (!message.toLowerCase().includes('not found')) throw error
       return null
     })
-    const [models] = await Promise.all([loadProviderModelsCached(), harness.loadAgentConfigs()])
+    const [models] = await Promise.all([
+      loadProviderModelsCached(),
+      harness.loadAgentConfigs(),
+      loadRecentModels(),
+    ])
     catalog.value = models
     if (catalog.value.length === 0) {
       providerMissing.value = true
@@ -760,6 +767,8 @@ function onComposerKeydown(e: KeyboardEvent): void {
           :model="localModel"
           :effort="localEffort"
           :models="catalog"
+          :recent-models="recentModels"
+          :recent-efforts="recentEntries"
           :loading="modelLoading"
           :disabled="disabled"
           @update:model="setModel"

@@ -36,6 +36,7 @@ __all__ = [
     "ProviderConnection",
     "ProviderType",
     "QuestionRequest",
+    "RecentModel",
     "Todo",
 ]
 
@@ -556,3 +557,58 @@ class Todo(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the todo."""
         return f"Todo({self.status}, {self.content[:32]})"
+
+
+class RecentModel(models.Model):
+    """
+    Per-user recently used composer model (+ last effort), org-scoped.
+
+    Written on successful chat sends (fire-and-forget); read to render the
+    composer's Recent list (max. 6 in the UI). One row per (organization,
+    user, model); ``effort`` is denormalized so the picker can restore the
+    last-used effort per model without joining message history.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="recent_models",
+        help_text="Owning organization (scoping).",
+    )
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="recent_models",
+        help_text="User who used the model.",
+    )
+    model = models.CharField(
+        max_length=255,
+        help_text="Catalog model id (e.g. openrouter/provider/name).",
+    )
+    effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Last-used reasoning effort for this model.",
+    )
+    last_used_at = models.DateTimeField(
+        auto_now=True,
+        db_index=True,
+        help_text="When the model was last used (drives Recent ordering).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "harness_recent_model"
+        ordering = ["-last_used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user", "model"],
+                name="harness_recent_model_org_user_model_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the recent-model row."""
+        return f"RecentModel(org={self.organization_id}, {self.model})"

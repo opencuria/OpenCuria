@@ -320,6 +320,21 @@ class AgentConfigOut(Schema):
     effort_strategy: str = "fixed"
 
 
+class RecentModelOut(Schema):
+    """One recently used composer model with its last-used effort."""
+
+    model: str
+    effort: str = ""
+    last_used_at: datetime
+
+
+class RecentModelSaveIn(Schema):
+    """Record one model usage (called on successful send)."""
+
+    model: str
+    effort: str = ""
+
+
 class AgentSConfigIn(Schema):
     """Request schema for saving the org-wide Agent-S harness config."""
 
@@ -862,6 +877,15 @@ def _delete_org_provider_config(org_id: uuid.UUID) -> None:
     from apps.harness.services import ProviderConfigService
 
     ProviderConfigService().delete_config(org_id)
+
+
+def _recent_model_to_out(row) -> RecentModelOut:  # type: ignore[no-untyped-def]
+    """Map a RecentModel ORM row to its response schema."""
+    return RecentModelOut(
+        model=row.model or "",
+        effort=row.effort or "",
+        last_used_at=row.last_used_at,
+    )
 
 
 def _session_to_out(
@@ -1512,6 +1536,62 @@ async def resolve_harness_question(
 # ---------------------------------------------------------------------------
 # Provider config endpoints (org-scoped; workspace paths are aliases)
 # ---------------------------------------------------------------------------
+
+
+@harness_router.get(
+    "/recent-models/",
+    response={200: list[RecentModelOut], 401: dict, 403: dict, 404: dict},
+    summary="List recently used composer models",
+)
+def list_recent_models(request: HttpRequest):
+    """Return the user's recent models (newest first, capped server-side)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.repositories import RecentModelRepository
+
+        rows = RecentModelRepository.list_by_user(org_id, request.user.id)
+        return 200, [_recent_model_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/recent-models/",
+    response={200: RecentModelOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Record a used composer model",
+)
+def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
+    """Upsert one recent-model row (LRU); called after a successful send."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.repositories import RecentModelRepository
+
+        model_id = (payload.model or "").strip()
+        if not model_id:
+            return 400, {"detail": "model is required", "code": "validation_error"}
+        row = RecentModelRepository.record_usage(
+            org_id,
+            request.user,
+            model=model_id,
+            effort=(payload.effort or "").strip(),
+        )
+        if row is None:
+            return 400, {"detail": "model is required", "code": "validation_error"}
+        return 200, _recent_model_to_out(row)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
 
 
 @harness_router.get(

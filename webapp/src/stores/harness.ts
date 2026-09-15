@@ -51,6 +51,7 @@ import {
   collectRunningChildSessionIds,
 } from '@/lib/harnessSubtaskActivity'
 import { loadAgentConfigsCached } from '@/lib/agentConfigs'
+import { recordRecentModelUsage } from '@/lib/recentModels'
 import type { AgentConfig } from '@/lib/harnessAgents'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { useNotificationStore } from './notifications'
@@ -291,6 +292,7 @@ export const useHarnessStore = defineStore('harness', () => {
         },
       ]
       await fetchParts(session.id)
+      recordRecentModelUsage(model, reasoningEffort)
       return session
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
@@ -326,6 +328,7 @@ export const useHarnessStore = defineStore('harness', () => {
         parts: [],
         created_at: new Date().toISOString(),
       })
+      recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
     }

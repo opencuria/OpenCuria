@@ -25,6 +25,66 @@ const models: ProviderModel[] = [
     context_length: 0,
     max_output_tokens: 0,
   },
+  {
+    id: 'openrouter/extra-1',
+    name: 'Extra 1',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
+  {
+    id: 'openrouter/extra-2',
+    name: 'Extra 2',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
+  {
+    id: 'openrouter/extra-3',
+    name: 'Extra 3',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
+  {
+    id: 'openrouter/extra-4',
+    name: 'Extra 4',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
+  {
+    id: 'openrouter/extra-5',
+    name: 'Extra 5',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
+  {
+    id: 'openrouter/extra-6',
+    name: 'Extra 6',
+    provider: 'openrouter',
+    reasoning_efforts: ['low'],
+    default_effort: 'low',
+    supports_tools: true,
+    context_length: 0,
+    max_output_tokens: 0,
+  },
 ]
 
 const stubs = {
@@ -32,14 +92,11 @@ const stubs = {
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
   DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
+  DropdownMenuLabel: { template: '<div><slot /></div>' },
   DropdownMenuSub: { template: '<div><slot /></div>' },
   DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
   DropdownMenuSeparator: { template: '<hr />' },
-  TooltipProvider: { template: '<div><slot /></div>' },
-  Tooltip: { template: '<div><slot /></div>' },
-  TooltipTrigger: { template: '<div><slot /></div>' },
-  TooltipContent: { template: '<div><slot /></div>' },
 }
 
 describe('HarnessModelPicker', () => {
@@ -56,17 +113,20 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(true)
   })
 
-  it('shows provider labels and tooltip content', () => {
+  it('shows provider labels next to each model row', () => {
     const wrapper = mount(HarnessModelPicker, {
-      props: { model: 'openrouter/think', effort: 'high', models },
+      props: {
+        model: 'openrouter/think',
+        effort: 'high',
+        models,
+        recentModels: [models[0]!, models[1]!],
+      },
       global: { stubs },
     })
-    expect(wrapper.find('[data-testid="composer-model-provider-openrouter/think"]').text()).toBe(
-      'OpenRouter',
-    )
-    expect(wrapper.find('[data-testid="composer-model-provider-chatgpt/plain"]').text()).toBe(
-      'ChatGPT',
-    )
+    const think = wrapper.find('[data-testid="composer-model-openrouter/think"]')
+    const plain = wrapper.find('[data-testid="composer-model-chatgpt/plain"]')
+    expect(think.text()).toContain('OpenRouter')
+    expect(plain.text()).toContain('ChatGPT')
   })
 
   it('shows the model without duplicating the separately selected effort', () => {
@@ -95,7 +155,9 @@ describe('HarnessModelPicker', () => {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
-    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Select model\u2026')
+    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain(
+      'Select model\u2026',
+    )
   })
 
   it('filters the catalog by model name and provider label', async () => {
@@ -106,5 +168,74 @@ describe('HarnessModelPicker', () => {
     await wrapper.find('[data-testid="composer-model-search"]').setValue('chatgpt')
     expect(wrapper.text()).toContain('Plain')
     expect(wrapper.text()).not.toContain('Think')
+  })
+})
+
+describe('HarnessModelPicker recent/all', () => {
+  it('defaults to recent (max 6) with an All Models button', () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: 'openrouter/think', effort: 'high', models },
+      global: { stubs },
+    })
+    // 8 in catalog, only first 6 visible in Recent mode.
+    expect(wrapper.text()).toContain('Think')
+    expect(wrapper.text()).not.toContain('Extra 6')
+    const all = wrapper.find('[data-testid="composer-model-show-all"]')
+    expect(all.exists()).toBe(true)
+    expect(all.text()).toContain('All Models (8)')
+    expect(wrapper.text()).toContain('Recent')
+  })
+
+  it('shows only the passed recents first', () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: {
+        model: '',
+        effort: '',
+        models,
+        recentModels: [models[1]!],
+        recentEfforts: [{ id: 'chatgpt/plain', effort: '' }],
+      },
+      global: { stubs },
+    })
+    expect(wrapper.text()).toContain('Plain')
+    expect(wrapper.text()).not.toContain('Think')
+  })
+
+  it('reveals all models after clicking All Models', async () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: '', effort: '', models },
+      global: { stubs },
+    })
+    await wrapper.find('[data-testid="composer-model-show-all"]').trigger('click')
+    expect(wrapper.text()).toContain('Extra 6')
+    expect(wrapper.text()).toContain('All models')
+    expect(wrapper.find('[data-testid="composer-model-show-recent"]').exists()).toBe(true)
+  })
+
+  it('searches the full catalog even in recent mode', async () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: '', effort: '', models },
+      global: { stubs },
+    })
+    await wrapper.find('[data-testid="composer-model-search"]').setValue('extra-6')
+    expect(wrapper.text()).toContain('Extra 6')
+    expect(wrapper.text()).not.toContain('Think')
+    expect(wrapper.find('[data-testid="composer-model-show-all"]').exists()).toBe(false)
+  })
+
+  it('restores the last-used effort when selecting a model', async () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: {
+        model: '',
+        effort: 'low',
+        models,
+        recentModels: [models[0]!],
+        recentEfforts: [{ id: 'openrouter/think', effort: 'high' }],
+      },
+      global: { stubs },
+    })
+    await wrapper.find('[data-testid="composer-model-openrouter/think"]').trigger('click')
+    expect(wrapper.emitted('update:model')).toEqual([['openrouter/think']])
+    expect(wrapper.emitted('update:effort')).toEqual([['high']])
   })
 })

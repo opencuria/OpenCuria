@@ -7,6 +7,7 @@ import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+import { resetRecentModelsCache } from '@/lib/recentModels'
 import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 
@@ -18,6 +19,8 @@ vi.mock('@/services/harness.api', async () => {
     getProviderConfig: vi.fn(),
     listProviderModels: vi.fn(),
     listAgentConfigs: vi.fn(),
+    listRecentModels: vi.fn().mockResolvedValue([]),
+    saveRecentModel: vi.fn(),
   }
 })
 
@@ -72,6 +75,7 @@ describe('HarnessChatInput', () => {
     vi.clearAllMocks()
     resetProviderCatalogCache()
     resetAgentConfigsCache()
+    resetRecentModelsCache()
     listAgentConfigsMock.mockResolvedValue([
       { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
       { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },

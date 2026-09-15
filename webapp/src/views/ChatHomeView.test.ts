@@ -80,6 +80,15 @@ vi.mock('@/lib/providerCatalog', () => ({
   loadProviderModelsCached: vi.fn().mockResolvedValue([]),
 }))
 
+vi.mock('@/lib/recentModels', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/lib/recentModels')>('@/lib/recentModels')
+  return {
+    ...actual,
+    loadRecentModels: () => Promise.resolve([]),
+  }
+})
+
 vi.mock('@/services/socket', () => ({
   onEvent: vi.fn(() => () => {}),
   subscribeToWorkspace: vi.fn(),

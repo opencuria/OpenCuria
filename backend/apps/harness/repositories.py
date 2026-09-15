@@ -23,6 +23,7 @@ from .models import (
     ProviderConnection,
     QuestionRequest,
     QuestionRequestStatus,
+    RecentModel,
     Todo,
 )
 
@@ -246,6 +247,66 @@ class ProviderConnectionRepository:
             provider=provider,
         ).delete()
         return deleted > 0
+
+
+class RecentModelRepository:
+    """Data access for per-user recent composer models (LRU, org-scoped)."""
+
+    #: Server-side cap; the UI shows the first 6.
+    MAX_ENTRIES = 10
+
+    @staticmethod
+    def list_by_user(org_id: uuid.UUID, user_id: object) -> list[RecentModel]:
+        """List recent models for an org user, newest first."""
+        return list(
+            RecentModel.objects.filter(
+                organization_id=org_id,
+                user_id=user_id,
+            ).order_by("-last_used_at", "-created_at")[
+                : RecentModelRepository.MAX_ENTRIES
+            ]
+        )
+
+    @staticmethod
+    def record_usage(
+        org_id: uuid.UUID,
+        user,
+        *,
+        model: str,
+        effort: str = "",
+    ) -> RecentModel | None:
+        """Upsert one recent-model row (LRU); ignore blank model ids.
+
+        Oldest rows beyond MAX_ENTRIES are pruned so the table stays small.
+        """
+        model_id = (model or "").strip()
+        if not model_id:
+            return None
+        effort_token = (effort or "").strip().lower()
+        org_pk = getattr(org_id, "id", org_id)
+        row, _ = RecentModel.objects.update_or_create(
+            organization_id=org_pk,
+            user_id=getattr(user, "id", user),
+            model=model_id[:255],
+            defaults={"effort": effort_token[:50]},
+        )
+        # Bump last_used_at explicitly: update_or_create only touches `effort`.
+        RecentModel.objects.filter(pk=row.pk).update(last_used_at=timezone.now())
+        row.refresh_from_db()
+        # Prune overflow (keep newest MAX_ENTRIES).
+        keep_ids = list(
+            RecentModel.objects.filter(
+                organization_id=org_pk,
+                user_id=getattr(user, "id", user),
+            )
+            .order_by("-last_used_at", "-created_at")
+            .values_list("id", flat=True)[: RecentModelRepository.MAX_ENTRIES]
+        )
+        RecentModel.objects.filter(
+            organization_id=org_pk,
+            user_id=getattr(user, "id", user),
+        ).exclude(id__in=keep_ids).delete()
+        return row
 
 
 class HarnessSessionRepository:

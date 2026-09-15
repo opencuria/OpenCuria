@@ -272,6 +272,28 @@ export function resolveHarnessQuestion(
   )
 }
 
+export interface RecentModelUsage {
+  model: string
+  effort: string
+  last_used_at: string
+}
+
+/**
+ * List the user's recently used composer models (newest first, capped
+ * server-side). Mirrors `GET /recent-models/`.
+ */
+export function listRecentModels(): Promise<RecentModelUsage[]> {
+  return get<RecentModelUsage[]>('/recent-models/')
+}
+
+/**
+ * Record one model usage after a successful send (fire-and-forget).
+ * Mirrors `PUT /recent-models/`.
+ */
+export function saveRecentModel(model: string, effort = ''): Promise<RecentModelUsage> {
+  return put<RecentModelUsage>('/recent-models/', { model, effort })
+}
+
 export function listProviderModels(): Promise<ProviderModel[]> {
   return get<ProviderModel[]>('/provider-config/models/')
 }
