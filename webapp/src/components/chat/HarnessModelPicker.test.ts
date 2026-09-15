@@ -92,11 +92,9 @@ const stubs = {
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
   DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
-  DropdownMenuLabel: { template: '<div><slot /></div>' },
   DropdownMenuSub: { template: '<div><slot /></div>' },
   DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
-  DropdownMenuSeparator: { template: '<hr />' },
 }
 
 describe('HarnessModelPicker', () => {
