@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, Check, ChevronDown, Search, SlidersHorizontal } from '@lucide/vue'
+import { ArrowLeft, Check, ChevronDown, Search } from '@lucide/vue'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -180,112 +181,97 @@ function onOpenChange(open: boolean): void {
       class="w-56 min-w-56"
       data-testid="composer-model-menu"
     >
-      <div class="flex items-center gap-1 px-1 py-1">
-        <DropdownMenuSub v-if="effortOptions.length > 0">
-          <DropdownMenuSubTrigger
-            class="w-auto shrink-0 gap-1.5 text-xs"
-            data-testid="composer-effort-row"
+      <DropdownMenuSub v-if="effortOptions.length > 0">
+        <DropdownMenuSubTrigger class="justify-between text-xs" data-testid="composer-effort-row">
+          <span>Effort</span>
+          <span class="text-muted-foreground">{{ formatEffort(effort) }}</span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent class="min-w-40" :side-offset="8">
+          <DropdownMenuItem
+            v-for="option in effortOptions"
+            :key="option"
+            class="text-xs"
+            :data-testid="`composer-effort-${option}`"
+            @click="selectEffort(option)"
           >
-            <SlidersHorizontal :size="13" class="text-muted-foreground opacity-70" />
-            <span>{{ formatEffort(effort) }}</span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent class="min-w-40" :side-offset="8">
-            <button
-              v-for="option in effortOptions"
-              :key="option"
-              type="button"
-              class="flex w-full items-center rounded-xl px-3 py-2 text-xs outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground"
-              :data-testid="`composer-effort-${option}`"
-              @click="selectEffort(option)"
-            >
-              <span>{{ formatEffort(option) }}</span>
-              <Check v-if="effort === option" class="ml-auto size-3.5" />
-            </button>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger
-            class="min-w-0 flex-1 justify-start gap-1.5 text-xs"
-            data-testid="composer-model-row"
-          >
-            <span class="min-w-0 flex-1 truncate text-left">
-              {{ model.trim() ? (catalogModel?.name ?? model) : 'Select model…' }}
-            </span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent
-            class="w-80 p-0"
-            :side-offset="8"
-            data-testid="composer-model-list"
-          >
-            <div class="flex items-center gap-2 border-b border-border px-3 py-2.5">
-              <Search class="size-3.5 shrink-0 text-muted-foreground" />
-              <Input
-                v-model="search"
-                placeholder="Search all models…"
-                class="h-6 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-                data-testid="composer-model-search"
-                @keydown.stop
-              />
-            </div>
-            <div class="max-h-64 overflow-y-auto overflow-x-hidden p-1.5">
-              <div class="flex items-center justify-between px-2.5 pb-1 pt-1.5">
-                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  {{ listTitle }}
-                  <span v-if="!isSearching && !showAll && !hasHistory"> · suggestions</span>
-                  <span
-                    v-else-if="showAll && !isSearching"
-                    class="ml-1 normal-case tracking-normal"
-                  >
-                    · {{ models.length }}
-                  </span>
-                </p>
-                <button
-                  v-if="showAll && !isSearching"
-                  type="button"
-                  class="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                  data-testid="composer-model-show-recent"
-                  @click="backToRecent"
-                >
-                  <ArrowLeft :size="12" />
-                  Recent
-                </button>
-              </div>
-              <button
-                v-for="item in visibleModels"
-                :key="item.id"
-                type="button"
-                class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent"
-                :title="item.id"
-                :data-testid="`composer-model-${item.id}`"
-                @click="selectModel(item.id)"
-              >
-                <span class="min-w-0 flex-1">
-                  <span class="block truncate font-medium">{{ item.name }}</span>
-                  <span class="block truncate text-xs text-muted-foreground">
-                    {{ providerDisplayName(item.provider) }}
-                  </span>
+            <span>{{ formatEffort(option) }}</span>
+            <Check v-if="effort === option" class="ml-auto size-3.5" />
+          </DropdownMenuItem>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger class="justify-between text-xs" data-testid="composer-model-row">
+          <span>Model</span>
+          <span class="max-w-28 truncate text-muted-foreground">
+            {{ model.trim() ? (catalogModel?.name ?? model) : 'Select model…' }}
+          </span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent class="w-80 p-0" :side-offset="8" data-testid="composer-model-list">
+          <div class="flex items-center gap-2 border-b border-border px-3 py-2.5">
+            <Search class="size-3.5 shrink-0 text-muted-foreground" />
+            <Input
+              v-model="search"
+              placeholder="Search all models…"
+              class="h-6 flex-1 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
+              data-testid="composer-model-search"
+              @keydown.stop
+            />
+          </div>
+          <div class="max-h-64 overflow-y-auto overflow-x-hidden p-1.5">
+            <div class="flex items-center justify-between px-2.5 pb-1 pt-1.5">
+              <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                {{ listTitle }}
+                <span v-if="!isSearching && !showAll && !hasHistory"> · suggestions</span>
+                <span v-else-if="showAll && !isSearching" class="ml-1 normal-case tracking-normal">
+                  · {{ models.length }}
                 </span>
-                <Check v-if="model === item.id" class="size-4 shrink-0 text-primary" />
-              </button>
-              <p
-                v-if="visibleModels.length === 0 && !loading"
-                class="px-2.5 py-4 text-center text-xs text-muted-foreground"
-              >
-                No models match.
               </p>
               <button
-                v-if="!isSearching && !showAll && models.length > visibleModels.length"
+                v-if="showAll && !isSearching"
                 type="button"
-                class="mt-1 flex w-full items-center justify-center gap-1.5 rounded-xl border border-border bg-muted/50 px-2.5 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                data-testid="composer-model-show-all"
-                @click="openAll"
+                class="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                data-testid="composer-model-show-recent"
+                @click="backToRecent"
               >
-                All Models ({{ models.length }})
+                <ArrowLeft :size="12" />
+                Recent
               </button>
             </div>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-      </div>
+            <button
+              v-for="item in visibleModels"
+              :key="item.id"
+              type="button"
+              class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent"
+              :title="item.id"
+              :data-testid="`composer-model-${item.id}`"
+              @click="selectModel(item.id)"
+            >
+              <span class="min-w-0 flex-1">
+                <span class="block truncate font-medium">{{ item.name }}</span>
+                <span class="block truncate text-xs text-muted-foreground">
+                  {{ providerDisplayName(item.provider) }}
+                </span>
+              </span>
+              <Check v-if="model === item.id" class="size-4 shrink-0 text-primary" />
+            </button>
+            <p
+              v-if="visibleModels.length === 0 && !loading"
+              class="px-2.5 py-4 text-center text-xs text-muted-foreground"
+            >
+              No models match.
+            </p>
+            <button
+              v-if="!isSearching && !showAll && models.length > visibleModels.length"
+              type="button"
+              class="mt-1 flex w-full items-center justify-center gap-1.5 rounded-xl border border-border bg-muted/50 px-2.5 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              data-testid="composer-model-show-all"
+              @click="openAll"
+            >
+              All Models ({{ models.length }})
+            </button>
+          </div>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
     </DropdownMenuContent>
   </DropdownMenu>
 </template>
