@@ -817,3 +817,98 @@ def test_production_harness_service_wires_runner_accessor():
         assert get_harness_service() is service
     finally:
         reset_default_harness_service()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_notice_dismiss_persists_and_shows_in_parts(
+    harness_setup, fake_harness_service
+):
+    """POST notice-dismiss stores the timestamp; GET parts exposes it."""
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "mode": "build", "model": "fake-model"}),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    session_id = created.json()["id"]
+    session = HarnessSession.objects.get(id=session_id)
+    message = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="", model="fake-model"
+    )
+    HarnessMessageRepository.complete(message, finish="aborted", error="aborted by user")
+
+    dismissed = client.post(
+        f"/api/v1/harness/sessions/{session_id}/messages/{message.id}/notice-dismiss"
+    )
+    assert dismissed.status_code == 204, dismissed.content[:500]
+
+    parts = client.get(f"/api/v1/harness/sessions/{session_id}/parts")
+    assert parts.status_code == 200, parts.content[:500]
+    dismissed_row = next(
+        row for row in parts.json()["messages"] if row["id"] == str(message.id)
+    )
+    assert dismissed_row["notice_dismissed_at"] is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_notice_dismiss_rejects_foreign_message(harness_setup, fake_harness_service):
+    """Dismissing a message of another session yields 404."""
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    first = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "mode": "build", "model": "fake-model"}),
+        content_type="application/json",
+    )
+    second = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "world", "mode": "build", "model": "fake-model"}),
+        content_type="application/json",
+    )
+    other_session = HarnessSession.objects.get(id=second.json()["id"])
+    other_message = HarnessMessageRepository.create(
+        session_id=other_session.id, role="assistant", content=""
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{first.json()['id']}/messages/{other_message.id}/notice-dismiss"
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_start_run_dismisses_prior_notices(harness_setup, fake_harness_service):
+    """A follow-up send auto-clears older stopped/failed notices."""
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{harness_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "mode": "build", "model": "fake-model"}),
+        content_type="application/json",
+    )
+    session_id = created.json()["id"]
+    session = HarnessSession.objects.get(id=session_id)
+    old = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    HarnessMessageRepository.complete(old, finish="error", error="boom")
+    assert old.notice_dismissed_at is None
+
+    sent = client.post(
+        f"/api/v1/harness/sessions/{session_id}/message",
+        data=json.dumps({"prompt": "again", "model": "fake-model"}),
+        content_type="application/json",
+    )
+    assert sent.status_code == 202, sent.content[:500]
+    old.refresh_from_db()
+    assert old.notice_dismissed_at is not None

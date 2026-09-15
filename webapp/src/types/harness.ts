@@ -53,6 +53,8 @@ export interface HarnessMessage {
   tokens?: Record<string, number>
   finish?: string
   error?: string
+  /** ISO timestamp when the user dismissed the stopped/failed notice. */
+  notice_dismissed_at?: string | null
   parts: HarnessPart[]
   created_at?: string
   completed_at?: string | null

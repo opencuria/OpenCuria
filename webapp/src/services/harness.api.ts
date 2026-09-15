@@ -219,6 +219,14 @@ export function editHarnessMessage(
   })
 }
 
+/**
+ * Dismiss the stopped/failed notice of one message (persistent, per message).
+ * Mirrors `POST /harness/sessions/{id}/messages/{messageId}/notice-dismiss` (204).
+ */
+export function dismissHarnessNotice(sessionId: string, messageId: string): Promise<void> {
+  return post<void>(`/harness/sessions/${sessionId}/messages/${messageId}/notice-dismiss`)
+}
+
 export function patchHarnessSession(
   sessionId: string,
   data: HarnessSessionPatchIn,

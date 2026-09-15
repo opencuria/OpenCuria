@@ -532,6 +532,16 @@ class HarnessService:
         session = self.get_session(session_id)
         return self.sessions.mark_unread(session)
 
+    def dismiss_notice(
+        self, session_id: uuid.UUID, message_id: uuid.UUID
+    ) -> HarnessMessage:
+        """Dismiss the stopped/failed notice of one session message."""
+        session = self.get_session(session_id)
+        message = self.messages.get_by_id(message_id)
+        if message is None or message.session_id != session.id:
+            raise NotFoundError("HarnessMessage", str(message_id))
+        return self.messages.dismiss_notice(message)
+
     def unread_for_sessions(
         self, sessions: list[HarnessSession]
     ) -> dict[uuid.UUID, bool]:
@@ -880,6 +890,11 @@ class HarnessService:
             model=resolved_model,
             reasoning_effort=session.reasoning_effort or "",
             provider=resolved_provider,
+        )
+        # A new send clears older stopped/failed notices of the session;
+        # the fresh run gets its own notice only when it stops or fails.
+        await sync_to_async(self.messages.dismiss_prior_notices)(
+            session.id, exclude_ids=[assistant.id]
         )
         await sync_to_async(self.sessions.mark_status)(
             session, HarnessSessionStatus.BUSY

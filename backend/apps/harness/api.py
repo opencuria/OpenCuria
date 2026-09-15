@@ -223,6 +223,7 @@ class HarnessMessageOut(Schema):
     tokens: dict = {}
     finish: str
     error: str
+    notice_dismissed_at: datetime | None = None
     created_at: datetime
     completed_at: datetime | None = None
 
@@ -1294,6 +1295,27 @@ def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
         return 404, {"detail": exc.message, "code": exc.code}
 
 
+@harness_router.post(
+    "/harness/sessions/{session_id}/messages/{message_id}/notice-dismiss",
+    response={204: None, 403: dict, 404: dict},
+    summary="Dismiss the stopped/failed notice of a harness message",
+)
+def dismiss_harness_notice(request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID):
+    """Persist that the user dismissed one stopped/failed notice."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    org_id = _get_org_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = service.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        service.dismiss_notice(session.id, message_id)
+        return 204, None
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
 @harness_router.patch(
     "/harness/sessions/{session_id}/mode",
     response={200: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
@@ -1404,6 +1426,7 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                         tokens=dict(message.tokens or {}),
                         finish=message.finish or "",
                         error=message.error or "",
+                        notice_dismissed_at=message.notice_dismissed_at,
                         created_at=message.created_at,
                         completed_at=message.completed_at,
                     ).model_dump(mode="json"),

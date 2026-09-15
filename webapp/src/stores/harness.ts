@@ -23,6 +23,7 @@ import {
   abortHarnessSession,
   createHarnessSession,
   deleteHarnessSession,
+  dismissHarnessNotice,
   editHarnessMessage,
   forkHarnessSession,
   listHarnessParts,
@@ -81,7 +82,7 @@ export const useHarnessStore = defineStore('harness', () => {
   const agentConfigs = ref<AgentConfig[]>([])
   // True once the user manually changed model or effort.
   const composerDirty = ref(false)
-  /** Message ids whose error/abort notice the user dismissed. */
+  /** Message ids whose error/abort notice the user dismissed (optimistic local cache; server `notice_dismissed_at` is the source of truth). */
   const dismissedNoticeIds = ref<Record<string, true>>({})
 
   // --- Getters ---
@@ -638,8 +639,29 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
-  function dismissNotice(messageId: string): void {
+  async function dismissNotice(messageId: string): Promise<void> {
+    const sessionId = activeSessionId.value
     dismissedNoticeIds.value = { ...dismissedNoticeIds.value, [messageId]: true }
+    const message = sessionId
+      ? (messagesBySession.value[sessionId] ?? []).find((item) => item.id === messageId)
+      : undefined
+    if (message) message.notice_dismissed_at = new Date().toISOString()
+    if (!sessionId) return
+    // Local `local-user-*` ids never exist on the server; the local cache covers them.
+    if (messageId.startsWith('local-')) return
+    try {
+      await dismissHarnessNotice(sessionId, messageId)
+    } catch (e: unknown) {
+      const next = { ...dismissedNoticeIds.value }
+      delete next[messageId]
+      dismissedNoticeIds.value = next
+      if (message) message.notice_dismissed_at = null
+      const notifications = useNotificationStore()
+      notifications.error(
+        'Dismiss failed',
+        e instanceof Error ? e.message : 'Unknown error',
+      )
+    }
   }
 
   // Load agent configs (cached); failures yield [].

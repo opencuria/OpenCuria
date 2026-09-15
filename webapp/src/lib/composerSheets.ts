@@ -5,7 +5,9 @@ import type { MentionCandidate } from '@/lib/harnessMentions'
  * One entry of the composer sheet stack.
  *
  * Sheets are ordered by interaction priority (highest first): `mention` >
- * `question` > `permission` > `notice` > `processes` > `context` > `todos`.
+ * `processes` > `question` > `permission` > `notice` > `context` > `todos`.
+ * User-opened inputs (mention suggestions, processes panel) stay on top;
+ * agent gates (questions, permissions) follow; passive notices come last.
  * Only the topmost sheet is interactive; lower sheets render as
  * non-interactive peek edges, iOS sheet-stack style.
  */
@@ -65,10 +67,10 @@ export interface ComposerSheetInput {
 /** Priority rank: lower order renders on top of the stack. */
 const SHEET_ORDER: Record<ComposerSheetKind, number> = {
   mention: 0,
-  question: 1,
-  permission: 2,
-  notice: 3,
-  processes: 4,
+  processes: 1,
+  question: 2,
+  permission: 3,
+  notice: 4,
   context: 5,
   todos: 6,
 }

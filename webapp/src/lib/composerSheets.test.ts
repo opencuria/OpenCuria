@@ -28,7 +28,7 @@ function makeTodo(id: string): HarnessTodo {
 }
 
 describe('buildComposerSheets', () => {
-  it('orders sheets by priority: mention > question > permission > notice > processes > context > todos', () => {
+  it('orders sheets by priority: mention > processes > question > permission > notice > context > todos', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
@@ -45,11 +45,29 @@ describe('buildComposerSheets', () => {
 
     expect(sheets.map((sheet) => sheet.kind)).toEqual([
       'mention',
+      'processes',
       'question',
       'permission',
       'notice',
-      'processes',
       'context',
+      'todos',
+    ])
+  })
+
+  it('puts user-opened processes above agent gates and notices', () => {
+    const sheets = buildComposerSheets({
+      permissions: [makePermission('p1')],
+      questions: [makeQuestion('q1')],
+      notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
+      processesOpen: true,
+      todos: [makeTodo('t1')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual([
+      'processes',
+      'question',
+      'permission',
+      'notice',
       'todos',
     ])
   })
@@ -73,11 +91,12 @@ describe('buildComposerSheets', () => {
     expect(sheets.map((sheet) => sheet.kind)).toEqual(['todos'])
   })
 
-  it('orders sheets by priority: mention > question > permission > todos when context is closed', () => {
+  it('orders sheets by priority: mention > processes > question > permission > todos when context is closed', () => {
     const sheets = buildComposerSheets({
       todos: [makeTodo('t1')],
       permissions: [makePermission('p1')],
       questions: [makeQuestion('q1')],
+      processesOpen: true,
       mention: {
         candidates: [{ kind: 'file', label: 'a.ts', insert: 'file:a.ts' }],
         activeIndex: 0,
@@ -86,6 +105,7 @@ describe('buildComposerSheets', () => {
 
     expect(sheets.map((sheet) => sheet.kind)).toEqual([
       'mention',
+      'processes',
       'question',
       'permission',
       'todos',

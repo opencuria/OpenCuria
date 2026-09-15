@@ -79,9 +79,20 @@ const contextSheet = computed<ContextSheetState | null>(() => {
 
 const activeNotice = computed<NoticeSheetState | null>(() => {
   const messages = harness.activeMessages
+  // Instant auto-clear: only errors *after* the last user message count.
+  // The backend additionally dismisses priors on send (incl. edit rerun).
+  let lastUserIndex = -1
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      lastUserIndex = i
+      break
+    }
+  }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
     if (message?.role !== 'assistant' || !message.error) continue
+    if (i < lastUserIndex) break
+    if (message.notice_dismissed_at) continue
     if (harness.dismissedNoticeIds[message.id]) continue
     const aborted = message.finish === 'aborted'
     return {
@@ -187,7 +198,7 @@ function handleCloseProcesses(): void {
 }
 
 function handleDismissNotice(messageId: string): void {
-  harness.dismissNotice(messageId)
+  void harness.dismissNotice(messageId)
 }
 
 function handleContextMetrics(

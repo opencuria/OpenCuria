@@ -1101,3 +1101,29 @@ async def test_compaction_tail_start_id_drop_for_missing_message(
     assert len(compactions) == 1
     assert "tail_start_id" not in (compactions[0].meta or {})
     assert user_msg.id is not None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_copy_prefix_carries_notice_dismissal(harness_workspace) -> None:
+    """Forked prefixes keep notice_dismissed_at so dismissed notices stay gone."""
+    session = await _db_create_session(harness_workspace)
+    org_id = harness_workspace.runner.organization_id
+    other = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="dst",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    await sync_to_async(HarnessMessageRepository.complete)(
+        assistant, finish="aborted", error="aborted by user"
+    )
+    await sync_to_async(HarnessMessageRepository.dismiss_notice)(assistant)
+    HarnessMessageRepository.copy_prefix(session.id, other.id, None)
+    copied = HarnessMessageRepository.list_for_session(other.id)
+    assert len(copied) == 1
+    assert copied[0].notice_dismissed_at is not None

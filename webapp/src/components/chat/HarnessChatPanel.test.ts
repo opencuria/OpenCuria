@@ -41,6 +41,7 @@ vi.mock('@/services/harness.api', async () => {
     listRecentModels: vi.fn().mockResolvedValue([]),
     saveRecentModel: vi.fn(),
     markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),
+    dismissHarnessNotice: vi.fn().mockResolvedValue(undefined),
   }
 })
 
@@ -374,8 +375,81 @@ describe('HarnessChatPanel', () => {
 
     stack.vm.$emit('dismiss-notice', 'msg-abort')
     await wrapper.vm.$nextTick()
+    await flushPromises()
     const after = stack.props('sheets') as Array<{ kind: string }>
     expect(after.map((sheet) => sheet.kind)).not.toContain('notice')
+  })
+
+  it('hides server-dismissed notices and auto-clears on a newer user message', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'msg-user',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+      {
+        id: 'msg-abort',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: '',
+        finish: 'aborted',
+        error: 'aborted by user',
+        notice_dismissed_at: '2026-09-15T10:00:00.000Z',
+        parts: [],
+      },
+    ]
+    await wrapper.vm.$nextTick()
+
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    const dismissed = stack.props('sheets') as Array<{ kind: string }>
+    expect(dismissed.map((sheet) => sheet.kind)).not.toContain('notice')
+
+    // An error message before the latest user message is auto-cleared.
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'first',
+        parts: [],
+      },
+      {
+        id: 'msg-old-error',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: '',
+        finish: 'error',
+        error: 'boom',
+        parts: [],
+      },
+      {
+        id: 'msg-user-2',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'second',
+        parts: [],
+      },
+    ]
+    await wrapper.vm.$nextTick()
+    const cleared = stack.props('sheets') as Array<{ kind: string }>
+    expect(cleared.map((sheet) => sheet.kind)).not.toContain('notice')
   })
 
   it('includes the processes sheet when processesOpen is true', async () => {

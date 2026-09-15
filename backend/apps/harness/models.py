@@ -404,6 +404,11 @@ class HarnessMessage(models.Model):
     )
     finish = models.CharField(max_length=32, blank=True, default="")
     error = models.TextField(blank=True, default="")
+    notice_dismissed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user dismissed the stopped/failed notice for this message.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 

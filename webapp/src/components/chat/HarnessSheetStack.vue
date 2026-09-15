@@ -73,6 +73,9 @@ function peekOffset(index: number): number {
             @hover="emit('mention-hover', $event)"
           />
         </template>
+        <template v-else-if="sheets[0]?.kind === 'processes'">
+          <HarnessProcessSheet @close="emit('close-processes')" />
+        </template>
         <template v-else-if="sheets[0]?.kind === 'question' && sheets[0]?.questions">
           <HarnessQuestionSheet
             :requests="sheets[0].questions!"
@@ -93,9 +96,6 @@ function peekOffset(index: number): number {
             :notice="sheets[0].notice!"
             @dismiss="(messageId) => emit('dismiss-notice', messageId)"
           />
-        </template>
-        <template v-else-if="sheets[0]?.kind === 'processes'">
-          <HarnessProcessSheet @close="emit('close-processes')" />
         </template>
         <template v-else-if="sheets[0]?.kind === 'context' && sheets[0]?.context">
           <HarnessContextSheet :context="sheets[0].context!" @close="emit('close-context')" />

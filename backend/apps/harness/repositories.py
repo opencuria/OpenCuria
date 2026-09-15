@@ -625,6 +625,11 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
+    def get_by_id(message_id: uuid.UUID) -> HarnessMessage | None:
+        """Fetch a single message by ID."""
+        return HarnessMessage.objects.filter(id=message_id).first()
+
+    @staticmethod
     def list_ids_for_session(session_id: uuid.UUID) -> list[uuid.UUID]:
         """Return message IDs of a session in creation order."""
         return list(
@@ -700,6 +705,7 @@ class HarnessMessageRepository:
                 tokens=dict(src.tokens or {}),
                 finish=src.finish or "",
                 error=src.error or "",
+                notice_dismissed_at=src.notice_dismissed_at,
                 completed_at=src.completed_at,
             )
             id_map[src.id] = dst.id
@@ -798,6 +804,37 @@ class HarnessMessageRepository:
             message.session_id, when=message.completed_at
         )
         return message
+
+    @staticmethod
+    def dismiss_notice(message: HarnessMessage) -> HarnessMessage:
+        """Mark the stopped/failed notice of *message* as dismissed."""
+        message.notice_dismissed_at = timezone.now()
+        message.save(update_fields=["notice_dismissed_at"])
+        return message
+
+    @staticmethod
+    def dismiss_prior_notices(
+        session_id: uuid.UUID,
+        *,
+        exclude_ids: list[uuid.UUID] | None = None,
+    ) -> int:
+        """Dismiss stopped/failed notices of earlier messages in *session_id*.
+
+        Targets assistant messages with an error payload
+        (``error`` set or ``finish`` in ``aborted``/``error``) that are
+        not dismissed yet. Returns the number of updated rows.
+        """
+        from django.db.models import Q
+
+        queryset = HarnessMessage.objects.filter(
+            Q(session_id=session_id)
+            & Q(role=HarnessMessageRole.ASSISTANT)
+            & Q(notice_dismissed_at__isnull=True)
+            & (~Q(error="") | Q(finish__in=("aborted", "error")))
+        )
+        if exclude_ids:
+            queryset = queryset.exclude(id__in=list(exclude_ids))
+        return queryset.update(notice_dismissed_at=timezone.now())
 
 
 class HarnessPartRepository:
