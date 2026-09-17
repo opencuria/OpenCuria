@@ -106,6 +106,7 @@ def test_retry_delay_without_headers_keeps_backoff() -> None:
         "GoUsageLimitError: plan limit reached",
         "Monthly usage limit reached, top up",
         "switch to available balance usage",
+        "Too many tokens per day, please wait before trying again.",
     ],
 )
 def test_quota_billing_errors_are_never_retried(message: str) -> None:
@@ -253,7 +254,26 @@ def test_overflow_never_retried_despite_should_retry_hint() -> None:
         response_headers={"x-should-retry": "true"},
         response_body="prompt is too long",
     )
-    assert not is_retryable_provider_error(overflow_limit)
+    # Rate-limit types are never overflow, even with overflow-like bodies.
+    assert is_retryable_provider_error(overflow_limit)
+
+
+def test_daily_token_quota_rate_limit_is_not_retried() -> None:
+    """Bedrock daily token caps fail fast instead of retrying or compacting."""
+    from apps.harness.compaction import is_context_overflow_error
+
+    daily = ProviderRateLimitError(
+        "Too many tokens per day, please wait before trying again.",
+        status_code=429,
+        is_retryable=False,
+    )
+    assert not is_context_overflow_error(daily)
+    assert not is_retryable_provider_error(daily)
+    assert not is_retryable_provider_error(
+        ProviderRateLimitError(
+            "Too many tokens per day, please wait before trying again."
+        )
+    )
 
 
 def test_bedrock_stream_retryable_flags_pass_through() -> None:

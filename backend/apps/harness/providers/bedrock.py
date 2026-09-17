@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -169,6 +170,11 @@ def is_context_overflow(message: str) -> bool:
     validation/stream call sites.
     """
     return _shared_is_context_overflow_error(RuntimeError(message))
+
+
+def _is_daily_token_quota(message: str) -> bool:
+    """Return True when a throttle message is a daily token cap."""
+    return bool(re.search(r"tokens per day", message, re.I))
 
 
 def _is_anthropic_claude_model(model_id: str) -> bool:
@@ -822,7 +828,7 @@ class BedrockAdapter(ProviderAdapter):
                 provider=self.name,
                 status_code=429,
                 response_body=message[:2000],
-                is_retryable=True,
+                is_retryable=not _is_daily_token_quota(message),
             )
 
         for key in (
@@ -922,7 +928,7 @@ class BedrockAdapter(ProviderAdapter):
                 provider=self.name,
                 status_code=status or 429,
                 response_body=message[:2000],
-                is_retryable=True,
+                is_retryable=not _is_daily_token_quota(message),
             )
 
         if code == "ValidationException":

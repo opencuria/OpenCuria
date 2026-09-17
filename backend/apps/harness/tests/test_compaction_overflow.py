@@ -32,6 +32,9 @@ from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -110,6 +113,18 @@ def test_is_context_overflow_error_matches_phrases() -> None:
     assert not is_context_overflow_error(RuntimeError("rate limit exceeded"))
 
 
+def test_is_context_overflow_error_skips_rate_limit_auth_timeout() -> None:
+    """Typed rate-limit/auth/timeout errors are never treated as overflow."""
+    daily = "Too many tokens per day, please wait before trying again."
+    assert not is_context_overflow_error(ProviderRateLimitError(daily))
+    assert not is_context_overflow_error(
+        ProviderRateLimitError("slow", response_body="prompt is too long")
+    )
+    assert not is_context_overflow_error(ProviderAuthError("unauthorized"))
+    assert not is_context_overflow_error(ProviderTimeoutError("timed out"))
+    assert is_context_overflow_error(RuntimeError("too many tokens in request"))
+
+
 def test_is_context_overflow_error_pi_patterns() -> None:
     """Pi OVERFLOW_PATTERNS mark overflow; NON_OVERFLOW exclusions win."""
     positives = [
@@ -145,9 +160,13 @@ def test_is_context_overflow_error_pi_patterns() -> None:
         "Service unavailable: Too many tokens, try later.",
         "rate limit exceeded, slow down",
         "too many requests, retry later",
+        "Too many tokens per day, please wait before trying again.",
+        "An error occurred (ThrottlingException) when calling the "
+        "ConverseStream operation: Too many tokens per day",
     ]
     for message in negatives:
         assert not is_context_overflow_error(RuntimeError(message)), message
+    assert is_context_overflow_error(RuntimeError("too many tokens in request"))
 
 
 def test_serialize_replaces_images_with_placeholder() -> None:
@@ -454,6 +473,29 @@ def test_apply_compaction_keeps_current_user_when_older_turn_is_head() -> None:
         for message in compacted
         if message.role == "user"
     )
+
+
+class DailyQuotaRateLimitProvider(ProviderAdapter):
+    """Always fail with Bedrock daily-token throttling."""
+
+    name = "daily-quota"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts=None,
+    ) -> AsyncIterator[Delta]:
+        self.calls += 1
+        raise ProviderRateLimitError(
+            "Too many tokens per day, please wait before trying again.",
+            is_retryable=False,
+        )
+        yield  # pragma: no cover - make this an async generator
 
 
 class OverflowRetryProvider(ProviderAdapter):
@@ -782,6 +824,35 @@ async def test_overflow_retry_drops_huge_tool_output() -> None:
         message.role == "user" and message.content == "follow-up"
         for message in provider.retry_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_daily_token_quota_is_not_treated_as_overflow() -> None:
+    """Bedrock daily-token throttling is re-raised, not compacted."""
+    from apps.harness.compaction import CONTEXT_OVERFLOW_COMPACTION_ERROR
+
+    provider = DailyQuotaRateLimitProvider()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        emit=emit,
+    )
+    with pytest.raises(ProviderRateLimitError, match="tokens per day"):
+        await runner.run(
+            "hello",
+            "build",
+            "session-model",
+            "build",
+            RunOptions(auto_approve=True, context_length=1_000, max_output_tokens=100),
+        )
+    assert provider.calls == 1
+    assert not any(event.get("type") == "compaction" for event in events)
+    assert CONTEXT_OVERFLOW_COMPACTION_ERROR not in str(events)
 
 
 @pytest.mark.asyncio

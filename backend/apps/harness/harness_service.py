@@ -1855,10 +1855,11 @@ class HarnessService:
                     await sync_to_async(self.parts.mark_state)(
                         step_part, "completed"
                     )
-            # Close the per-step reasoning part (DB-side; the frontend
-            # already closes open reasoning parts live on step_finish).
-            # Resetting ``reasoning_part_id`` makes the next step start a
-            # fresh reasoning part so reflection stays step-attributed.
+            # Close the per-step reasoning and text parts (DB-side; the
+            # frontend already closes them live on step_finish). Resetting
+            # the ids makes the next step start fresh parts so the final
+            # answer stays after tools in created_at order ("Worked for"
+            # above the answer after idle fetchParts).
             run_ctx = self._runs.get(session_id, {})
             reasoning_part_id = run_ctx.pop("reasoning_part_id", None)
             if reasoning_part_id is not None:
@@ -1869,6 +1870,13 @@ class HarnessService:
                     await sync_to_async(self.parts.mark_state)(
                         reasoning_part, "completed"
                     )
+            text_part_id = run_ctx.pop("text_part_id", None)
+            if text_part_id is not None:
+                text_part = await sync_to_async(
+                    self.parts.model.objects.filter(id=text_part_id).first
+                )()
+                if text_part is not None:
+                    await sync_to_async(self.parts.mark_state)(text_part, "completed")
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
                 type="step-finish",
@@ -2135,9 +2143,9 @@ class HarnessService:
 
         Reasoning parts stay step-attributed via ``meta["step"]`` (normal
         LLM reasoning without a step keeps working — ``step`` is simply
-        ``None``). ``step_finish`` closes the running reasoning part
-        DB-side and resets ``reasoning_part_id`` so the next step starts a
-        fresh one (see ``_persist_runner_event``).
+        ``None``). ``step_finish`` closes the running text and reasoning
+        parts DB-side and resets ``text_part_id`` / ``reasoning_part_id``
+        so the next step starts fresh ones (see ``_persist_runner_event``).
         """
         delta = event.get("delta", {}) or {}
         text = str(delta.get("text", "") or "")

@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .images import IMAGE_TOKEN_ESTIMATE
-from .providers.base import LLMMessage
+from .providers.base import (
+    LLMMessage,
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
 
 #: Reserved headroom hint for future compaction selection (not used in usable).
 COMPACTION_BUFFER = 20_000
@@ -134,9 +139,13 @@ CONTEXT_OVERFLOW_PATTERNS = (
     re.compile(r"range of input length", re.I),
 )
 
-#: Non-overflow exclusions checked before overflow patterns (Pi parity).
+#: Non-overflow exclusions checked before overflow patterns (Pi parity
+#: plus boto3/AWS wording OpenCode's AI SDK prefix does not cover).
 NON_OVERFLOW_EXCLUSIONS = (
     re.compile(r"^(throttling error|service unavailable):", re.I),
+    re.compile(r"throttlingexception", re.I),
+    re.compile(r"\bthrottling\b", re.I),
+    re.compile(r"tokens per day", re.I),
     re.compile(r"rate limit", re.I),
     re.compile(r"too many requests", re.I),
 )
@@ -207,10 +216,16 @@ def preserve_recent_budget(limits: ModelLimits) -> int:
 def is_context_overflow_error(exc: BaseException) -> bool:
     """Return True when *exc* looks like a provider context-length failure.
 
+    Rate-limit, auth, and timeout errors are never overflow: Bedrock
+    ``ThrottlingException: Too many tokens per day`` must not compact.
     Both the message and an enriched ``response_body`` (see
     ``providers.base``) are classified, so overflow text hidden in the
     raw body is detected as well.
     """
+    if isinstance(
+        exc, (ProviderRateLimitError, ProviderAuthError, ProviderTimeoutError)
+    ):
+        return False
     text = str(exc)
     body = getattr(exc, "response_body", "")
     if isinstance(body, str) and body:

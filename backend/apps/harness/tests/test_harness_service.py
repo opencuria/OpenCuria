@@ -2178,6 +2178,73 @@ async def test_reasoning_part_is_per_step_and_meta_carries_step(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
+    harness_workspace,
+) -> None:
+    """Text closes DB-side on step_finish; next step gets a fresh part."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = {
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"text": "I'll look"}, "step": 1},
+    )
+    first_id = service._runs[str(session.id)].get("text_part_id")
+    assert first_id
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    assert service._runs[str(session.id)].get("text_part_id") is None
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "c1",
+            "tool": "read",
+            "title": "Read AGENTS.md",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 2}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"text": "Done"}, "step": 2},
+    )
+    second_id = service._runs[str(session.id)].get("text_part_id")
+    assert second_id and second_id != first_id
+    parts = HarnessPartRepository.list_for_session(session.id)
+    by_id = {str(part.id): part for part in parts if part.type == "text"}
+    assert by_id[first_id].state == "completed"
+    assert by_id[first_id].output == "I'll look"
+    assert by_id[first_id].meta.get("step") == 1
+    assert by_id[second_id].state == "running"
+    assert by_id[second_id].output == "Done"
+    assert by_id[second_id].meta.get("step") == 2
+    ordered = [part.type for part in parts if part.type in {"text", "tool"}]
+    assert ordered == ["text", "tool", "text"]
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
     """Normal LLM reasoning without a step keeps working (step None)."""
     service, _, events = _service()

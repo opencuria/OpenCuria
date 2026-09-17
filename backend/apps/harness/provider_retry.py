@@ -79,6 +79,8 @@ NON_RETRYABLE_MESSAGE_PATTERNS = (
     re.compile(r"GoUsageLimitError"),
     re.compile(r"Monthly usage limit reached", re.I),
     re.compile(r"available balance", re.I),
+    re.compile(r"too many tokens per day", re.I),
+    re.compile(r"tokens per day", re.I),
 )
 
 
@@ -179,24 +181,25 @@ def is_retryable_provider_error(exc: BaseException) -> bool:
     text = _error_text(exc)
     if matches_non_retryable_message(text):
         return False
-    # Overflow wins over the ``x-should-retry`` header hint below: a
-    # provider error that classifies as context overflow is never retried.
-    overflow = is_context_overflow_error(exc)
-    if overflow:
-        return False
     if isinstance(exc, ProviderAuthError):
         return False
     if isinstance(exc, ProviderTimeoutError):
         return True
     if isinstance(exc, ProviderRateLimitError):
+        # Rate-limit types are never overflow. Daily token caps are
+        # already excluded by ``matches_non_retryable_message`` above;
+        # honor an explicit ``is_retryable=False`` from the adapter.
+        if exc.is_retryable is False:
+            return False
         hint = _should_retry_hint(exc)
         if hint is not None:
-            if is_context_overflow_error(exc):
-                return False
             return hint
-        if matches_non_retryable_message(text):
-            return False
         return True
+    # Overflow wins over the ``x-should-retry`` header hint below: a
+    # provider error that classifies as context overflow is never retried.
+    overflow = is_context_overflow_error(exc)
+    if overflow:
+        return False
     if isinstance(exc, ProviderResponseError):
         hint = _should_retry_hint(exc)
         if hint is not None:

@@ -376,6 +376,29 @@ async def test_chat_stream_client_error_throttling() -> None:
         await _collect(adapter)
 
 
+async def test_chat_stream_client_error_daily_token_quota() -> None:
+    """Daily token caps stay rate-limits, are not overflow, and are not retried."""
+    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.provider_retry import is_retryable_provider_error
+
+    error = ClientError(
+        {
+            "Error": {
+                "Code": "ThrottlingException",
+                "Message": "Too many tokens per day, please wait before trying again.",
+            },
+            "ResponseMetadata": {"HTTPStatusCode": 429},
+        },
+        "ConverseStream",
+    )
+    adapter, _ = _adapter(session=_MockSession(error=error))
+    with pytest.raises(ProviderRateLimitError) as exc:
+        await _collect(adapter)
+    assert exc.value.is_retryable is False
+    assert not is_context_overflow_error(exc.value)
+    assert not is_retryable_provider_error(exc.value)
+
+
 async def test_chat_stream_connection_reset_is_retryable() -> None:
     """OS connection drops map to a retryable Connection reset by server."""
     adapter, _ = _adapter(session=_MockSession(error=ConnectionResetError()))
@@ -433,6 +456,7 @@ def test_is_context_overflow_opencode_parity() -> None:
         "Service unavailable: busy",
         "rate limit exceeded",
         "too many requests, retry later",
+        "Too many tokens per day, please wait before trying again.",
     ]
     for message in negatives:
         assert not is_context_overflow(message), message
@@ -468,6 +492,25 @@ async def test_chat_stream_throttling_stream_event_retryable() -> None:
     assert isinstance(error, ProviderRateLimitError)
     assert error.is_retryable is True
     assert not is_context_overflow_error(error)
+
+
+async def test_chat_stream_throttling_stream_event_daily_quota_not_retryable() -> None:
+    """In-stream daily token caps are rate-limits, not overflow, and fail fast."""
+    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.provider_retry import is_retryable_provider_error
+
+    adapter, _ = _adapter(session=_MockSession([]))
+    error = adapter._stream_error_from_event(
+        {
+            "throttlingException": {
+                "message": "Too many tokens per day, please wait before trying again."
+            }
+        }
+    )
+    assert isinstance(error, ProviderRateLimitError)
+    assert error.is_retryable is False
+    assert not is_context_overflow_error(error)
+    assert not is_retryable_provider_error(error)
 
 
 def test_bearer_client_uses_unsigned_and_dummy_keys() -> None:
