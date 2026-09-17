@@ -1437,7 +1437,16 @@ class QemuRuntime(RuntimeBackend):
                 "pending_stderr": b"",
             }
         )
-        logger.info("qemu_stream_spawned", instance_id=instance_id)
+        logger.info(
+            "qemu_stream_spawned",
+            instance_id=instance_id,
+            pidfile=pidfile,
+            # argv[0] only: full args may embed flags/paths that echo
+            # secret-adjacent material; the wrapper pidfile correlates
+            # with _kill_stream_tree diagnostics on failure.
+            command=next(iter(command), ""),
+            workdir=workdir or "",
+        )
         return handle
 
     async def _stream_read_split(
@@ -1532,6 +1541,12 @@ class QemuRuntime(RuntimeBackend):
             return
         handle.closed = True
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
+        pidfile = str(handle.metadata.get("pidfile", ""))
+        exit_status: int | None = None
+        try:
+            exit_status = process.exit_status
+        except (asyncssh.Error, OSError):
+            exit_status = None
         # stdin EOF first while the handle is still usable.
         with contextlib.suppress(Exception):
             await self.process_write_eof(handle)
@@ -1546,7 +1561,6 @@ class QemuRuntime(RuntimeBackend):
             exited_early = True
         except (asyncio.TimeoutError, asyncssh.Error, OSError):
             exited_early = False
-        pidfile = str(handle.metadata.get("pidfile", ""))
         if pidfile:
             await self._kill_stream_tree(handle.instance_id, pidfile)
         try:
@@ -1560,7 +1574,17 @@ class QemuRuntime(RuntimeBackend):
                 await asyncio.wait_for(process.wait_closed(), timeout=5)
             except (asyncio.TimeoutError, asyncssh.Error, OSError):
                 pass
-        logger.info("qemu_stream_closed")
+        try:
+            final_status = process.exit_status
+        except (asyncssh.Error, OSError):
+            final_status = None
+        logger.info(
+            "qemu_stream_closed",
+            pidfile=pidfile,
+            exited_early=exited_early,
+            exit_status_at_close=exit_status,
+            exit_status_final=final_status,
+        )
 
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:
         """Discover all opencuria VM workspaces."""

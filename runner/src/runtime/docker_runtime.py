@@ -579,7 +579,14 @@ class DockerRuntime(RuntimeBackend):
                 "loop": asyncio.get_running_loop(),
             }
         )
-        logger.info("stream_process_spawned", exec_id=exec_id[:12])
+        logger.info(
+            "stream_process_spawned",
+            exec_id=exec_id[:12],
+            pidfile=pidfile,
+            # argv[0] only: full args may embed flags/paths that echo
+            # secret-adjacent material.
+            command=next(iter(command), ""),
+        )
         return handle
 
     async def _stream_queue_read(
@@ -749,7 +756,13 @@ class DockerRuntime(RuntimeBackend):
         await asyncio.to_thread(_close_socket)
         if pump is not None:
             await asyncio.to_thread(pump.join, 10)
-        logger.info("stream_process_closed")
+        frame_error = bool(handle.metadata.get("frame_error"))
+        logger.info(
+            "stream_process_closed",
+            exec_id=str(handle.metadata.get("exec_id", ""))[:12],
+            pidfile=pidfile,
+            frame_error=frame_error,
+        )
 
     # -- PTY / interactive terminal --------------------------------------------
 

@@ -144,7 +144,10 @@ def test_org_provider_config_crud_roundtrip(provider_setup):
     assert deleted.status_code == 204
 
     gone = client.get(ORG_URL)
-    assert gone.status_code == 404
+    # Missing legacy rows return an empty config shape (200) instead of
+    # 404 so legacy callers stop spamming Not Found warnings.
+    assert gone.status_code == 200
+    assert gone.json()["default_model"] == ""
 
     assert (
         ProviderConfig.objects.filter(organization_id=provider_setup["org"].id).count()
@@ -212,12 +215,13 @@ def test_org_provider_config_empty_api_key_on_create_succeeds(provider_setup):
 
 @pytest.mark.django_db(transaction=True)
 def test_org_provider_config_get_missing_is_404(provider_setup):
-    """GET without a stored config yields 404."""
+    """GET without a stored config yields an empty config shape (200)."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
     )
     response = client.get(ORG_URL)
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert response.json()["default_model"] == ""
 
 
 @pytest.mark.django_db(transaction=True)

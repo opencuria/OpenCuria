@@ -1613,6 +1613,23 @@ class WebSocketInterface(Interface):
                     )
                 )
                 self._running_tasks[task_key] = pump
+                # Explicit start-ACK: the backend correlates
+                # ``sio.call``-style waits via reply events (runner
+                # handlers never return Socket.IO ACK payloads through
+                # this stack), so announce readiness with the first
+                # best-effort output event. The pump's natural-EOF
+                # ``stream_closed`` notice is unchanged.
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_output",
+                        {
+                            "connection_id": conn_echo,
+                            "workspace_id": str(workspace_id),
+                            "stream": "stdout",
+                            "data": "",
+                            "started": True,
+                        },
+                    )
                 return {
                     "ok": True,
                     "connection_id": conn_echo,
@@ -3163,11 +3180,20 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("clone_failed")
 
+
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
         """Connect to the backend and block until disconnected."""
         headers = {"Authorization": f"Bearer {self._settings.api_token}"}
+        # Daphne never forwards WebSocket handshake headers into
+        # python-engine.io's environ, so the backend cannot see
+        # ``Authorization`` on a websocket-only connect. The token
+        # additionally travels in the Socket.IO auth payload (inside
+        # the WS frames — never in URLs/logs); the header above is
+        # kept for proxies/backends that forward handshake headers.
+        url = self._settings.backend_url
+        auth = {"token": self._settings.api_token} if self._settings.api_token else None
 
         logger.info(
             "websocket_connecting",
@@ -3175,8 +3201,9 @@ class WebSocketInterface(Interface):
         )
 
         await self._sio.connect(
-            self._settings.backend_url,
+            url,
             headers=headers,
+            auth=auth,
             transports=["websocket"],
             socketio_path=self._settings.socketio_path,
         )

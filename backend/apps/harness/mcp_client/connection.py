@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -49,6 +50,39 @@ MCP_TOOL_PREFIX = "mcp_"
 
 class McpServerHealthError(RuntimeError):
     """Raised when a server cannot be discovered/used (skipped, not fatal)."""
+
+
+def _safe_diagnostics(accessor: Any) -> dict[str, Any]:
+    """Best-effort secret-free stream diagnostics (never raises)."""
+    get_diagnostics = getattr(accessor, "get_stream_diagnostics", None)
+    if not callable(get_diagnostics):
+        return {}
+    try:
+        result = get_diagnostics()
+    except Exception:  # pragma: no cover - logs must never break
+        return {}
+    return dict(result) if isinstance(result, dict) else {}
+
+
+def _safe_stderr_excerpt(accessor: Any) -> str:
+    """Best-effort sanitized stderr excerpt (never raises, never secrets)."""
+    get_excerpt = getattr(accessor, "get_stream_stderr_excerpt", None)
+    if not callable(get_excerpt):
+        return ""
+    try:
+        result = get_excerpt()
+    except Exception:  # pragma: no cover - logs must never break
+        return ""
+    if isinstance(result, str):
+        from .stdio import MAX_STDERR_EXCERPT_CHARS
+
+        return result[:MAX_STDERR_EXCERPT_CHARS]
+    try:
+        from .stdio import sanitize_stderr_excerpt
+
+        return sanitize_stderr_excerpt(result)
+    except Exception:  # pragma: no cover - defensive
+        return ""
 
 
 class _AllowExtraArgs(BaseModel):
@@ -400,29 +434,87 @@ class McpServerConnection:
         Startup is bounded by ``fail_after``: an outer timeout raises a
         health error (server skipped) while ``CancelledError`` from an
         abort propagates untouched (never converted to a health error).
+
+        The timeout scope is the *innermost* entry of the connection's
+        exit stack and is disarmed (``deadline = inf``) on successful
+        startup: the SDK session's task group pushes its own cancel
+        scope inside the timeout scope when it is entered. Until it is
+        closed (LIFO, at ``aclose``) the timeout scope is therefore not
+        the task's current scope, and exiting its ``with`` block in the
+        success path would raise ``RuntimeError: ... cancel scope`` —
+        exactly the E2E masking seen in production. The stack closes in
+        reverse entry order, so closing restores a strictly nested
+        unwind (session task group, then transport, then timeout).
         """
         if self._lock is None:
             self._lock = anyio.Lock()
         stack = AsyncExitStack()
         timeout = float(self.startup_timeout_seconds or 30.0)
+        log.info(
+            "mcp_server_open",
+            server=self.desc,
+            transport=(self.transport or "").strip().lower(),
+            timeout_s=timeout,
+        )
+        scope = stack.enter_context(anyio.fail_after(timeout))
         try:
             try:
-                with anyio.fail_after(timeout):
-                    await self._open_transport(stack, accessor)
-                    await self._open_session(stack)
-                    await self._discover()
-            except TimeoutError as exc:
-                raise McpServerHealthError(
-                    f"MCP server {self.desc} startup timed out after {timeout}s"
-                ) from exc
-            self._stack = stack
-            return list(self.tools)
-        except BaseException:
-            try:
-                await stack.aclose()
-            except Exception:  # pragma: no cover - best effort
-                pass
+                await self._open_transport(stack, accessor)
+                await self._open_session(stack)
+                await self._discover()
+            except BaseException:
+                # Close the entered scopes (SDK sessions, transport)
+                # while the timeout scope is still the outermost entry:
+                # LIFO unwind closes the inner scopes first, which keeps
+                # the original error's type and message.
+                try:
+                    await stack.aclose()
+                except (
+                    asyncio.CancelledError,
+                    anyio.get_cancelled_exc_class(),
+                ):
+                    raise
+                except Exception as close_exc:
+                    log.warning(
+                        "mcp_server_open_close_failed",
+                        server=self.desc,
+                        error=f"{type(close_exc).__name__}",
+                    )
+                raise
+        except TimeoutError as exc:
+            log.warning(
+                "mcp_server_open_timeout",
+                server=self.desc,
+                timeout_s=timeout,
+                diagnostics=_safe_diagnostics(accessor),
+            )
+            raise McpServerHealthError(
+                f"MCP server {self.desc} startup timed out after {timeout}s"
+            ) from exc
+        except McpServerHealthError as exc:
+            # Startup failure (transport/initialize/discovery): log phase
+            # + secret-free stream diagnostics + sanitized stderr tail so
+            # the next failure is diagnosable from this one line + the
+            # chained traceback (kept via ``exc_info`` in _record_skip).
+            log.warning(
+                "mcp_server_open_failed",
+                server=self.desc,
+                error=str(exc),
+                diagnostics=_safe_diagnostics(accessor),
+                stderr_excerpt=_safe_stderr_excerpt(accessor),
+            )
             raise
+        # Startup succeeded: disarm the timeout for the connection's
+        # lifetime. The scope is still exited by the stack (last, after
+        # the session/transport) exactly once in ``aclose``.
+        scope.deadline = math.inf
+        self._stack = stack
+        log.info(
+            "mcp_server_open_ok",
+            server=self.desc,
+            tools=len(self.tools),
+        )
+        return list(self.tools)
 
     async def _open_transport(self, stack: AsyncExitStack, accessor: Any) -> None:
         """Open the workspace-local transport into ``(read, write)``."""
@@ -433,7 +525,11 @@ class McpServerConnection:
                     f"MCP server {self.desc} has no stdio command"
                 )
             ctx = workspace_stdio_client(
-                accessor, list(self.command), cwd=self.cwd, env=dict(self.env)
+                accessor,
+                list(self.command),
+                cwd=self.cwd,
+                env=dict(self.env),
+                server_desc=self.desc,
             )
             read, write = await stack.enter_async_context(ctx)
             self._read, self._write = read, write

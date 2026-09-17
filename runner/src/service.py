@@ -2505,7 +2505,13 @@ class WorkspaceService:
         bogus 0.
         """
         session = self.get_stream(connection_id)
-        return await session.runtime.process_wait(session.handle)
+        code = await session.runtime.process_wait(session.handle)
+        logger.info(
+            "stream_wait_result",
+            connection_id=connection_id,
+            exit_code=code,
+        )
+        return code
 
     async def stream_close(self, connection_id: str) -> dict[str, object]:
         """Close one stream and kill its process tree (idempotent-ish).
@@ -2528,6 +2534,11 @@ class WorkspaceService:
             await session.runtime.process_close(session.handle)
         except Exception:
             logger.exception("stream_close_failed", connection_id=conn_id)
+        logger.info(
+            "stream_closed",
+            connection_id=conn_id,
+            kind=session.kind,
+        )
         return {
             "connection_id": conn_id,
             "closed": True,

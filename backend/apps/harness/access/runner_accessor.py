@@ -261,6 +261,11 @@ STREAM_QUEUE_DEPTH = 64
 #: ACK timeout for stream control events (start/input/close).
 STREAM_CALL_TIMEOUT = 15.0
 
+#: Bounded stderr capture per byte stream (newest bytes win). The newest
+#: bytes carry the crash reason; the sanitized excerpt (not verbatim
+#: content) is what failure logs and skip notes attach.
+MCP_STDERR_BUFFER_BYTES = 64 * 1024
+
 _TCP_HOST_RE = None  # compiled lazily in _validate_tcp_host
 
 
@@ -305,6 +310,10 @@ class _StreamState:
         "close_error",
         "close_event",
         "exit_code",
+        "stderr_buf",
+        "stderr_total",
+        "opened_at",
+        "stdout_bytes",
     )
 
     def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
@@ -314,6 +323,30 @@ class _StreamState:
         self.close_error: str | None = None
         self.close_event = asyncio.Event()
         self.exit_code: int | None = None
+        # Bounded stderr capture (newest bytes win) for failure
+        # diagnosis. Only the sanitized excerpt ever reaches logs —
+        # see ``get_stream_stderr_excerpt``.
+        self.stderr_buf = bytearray()
+        self.stderr_total = 0
+        self.opened_at = 0.0
+        self.stdout_bytes = 0
+
+    def append_stderr(self, data: bytes) -> None:
+        """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
+        raw = bytes(data or b"")
+        if not raw:
+            return
+        self.stderr_total += len(raw)
+        self.stderr_buf.extend(raw)
+        overflow = len(self.stderr_buf) - MCP_STDERR_BUFFER_BYTES
+        if overflow > 0:
+            del self.stderr_buf[:overflow]
+
+    def stderr_excerpt(self) -> str:
+        """Return the sanitized stderr excerpt (secret-free, bounded)."""
+        from apps.harness.mcp_client.stdio import sanitize_stderr_excerpt
+
+        return sanitize_stderr_excerpt(bytes(self.stderr_buf))
 
 
 class RunnerByteStream(WorkspaceByteStream):
@@ -1288,9 +1321,62 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             maxsize=STREAM_QUEUE_DEPTH
         )
         state = _StreamState(connection_id, queue)
+        state.opened_at = asyncio.get_running_loop().time()
         self._byte_streams[connection_id] = state
         _ACCESSORS_BY_STREAM[connection_id] = self
         return state
+
+    def get_stream_stderr_excerpt(self, connection_id: str = "") -> str:
+        """Return the sanitized stderr excerpt for *connection_id* (or last).
+
+        Secret-free and bounded (see
+        :func:`apps.harness.mcp_client.stdio.sanitize_stderr_excerpt`):
+        safe to attach to logs and skip notes. With no id, the most
+        recently registered stream wins; unknown ids yield ``""``.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return ""
+        try:
+            return state.stderr_excerpt()
+        except Exception:  # pragma: no cover - logs must never break
+            return ""
+
+    def get_stream_diagnostics(self, connection_id: str = "") -> dict[str, Any]:
+        """Return secret-free lifecycle counters for one stream (or last).
+
+        ``stderr_excerpt`` is the sanitized tail (bounded); counters
+        (bytes, age, exit) tell "spawned but silent" apart from "died
+        loudly" without touching payload content.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return {}
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:  # pragma: no cover - no running loop
+            now = state.opened_at
+        return {
+            "connection_id": state.connection_id,
+            "closed": state.closed,
+            "close_error": state.close_error,
+            "exit_code": state.exit_code,
+            "stdout_bytes": state.stdout_bytes,
+            "stderr_bytes": state.stderr_total,
+            "stderr_buffered": len(state.stderr_buf),
+            "age_s": round(max(0.0, now - (state.opened_at or now)), 2),
+            "stderr_excerpt": self.get_stream_stderr_excerpt(
+                state.connection_id
+            ),
+        }
 
     def _unregister_byte_stream(self, connection_id: str) -> None:
         """Drop all routing state for one byte stream."""
@@ -1326,6 +1412,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             return False
         raw = "".join(str(data.get("data", "")).split())
         if not raw:
+            # ``started`` open-ACK marker: no bytes, but a valid control
+            # signal — accept it (ACK True) without queueing payload.
+            if bool(data.get("started", False)):
+                return True
             log.warning(
                 "stream_output_empty", connection_id=connection_id
             )
@@ -1347,6 +1437,20 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             if state.closed:
                 return
             try:
+                # Count stdout bytes at enqueue time (secret-free size
+                # only; content never leaves the queue into logs).
+                if stream == "stdout":
+                    state.stdout_bytes += decoded_len
+                else:
+                    # Stderr is captured per stream (bounded, newest
+                    # win): it stays out of the MCP stdout framing and
+                    # is only ever surfaced as a sanitized excerpt.
+                    try:
+                        state.append_stderr(
+                            base64.b64decode(raw, validate=True)
+                        )
+                    except Exception:  # pragma: no cover - validated above
+                        pass
                 state.queue.put_nowait(
                     {"type": "chunk", "stream": stream, "data": raw}
                 )
@@ -1442,6 +1546,29 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 state.queue.put_nowait({"type": "closed"})
             except asyncio.QueueFull:
                 pass
+            # One structured line per stream close: exit code /
+            # close error plus lifecycle counters. This is the line
+            # that answers "did the server die, and when" — stderr
+            # content itself stays in the sanitized excerpt only.
+            log.info(
+                "stream_closed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                exit_code=state.exit_code,
+                close_error=state.close_error,
+                stdout_bytes=state.stdout_bytes,
+                stderr_bytes=state.stderr_total,
+                age_s=round(
+                    max(
+                        0.0,
+                        asyncio.get_running_loop().time()
+                        - (state.opened_at or 0.0),
+                    ),
+                    2,
+                )
+                if state.opened_at
+                else 0.0,
+            )
 
         self._schedule(_close)
         return True
@@ -1671,17 +1798,38 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         if any(not part or "\x00" in part for part in argv):
             raise ValueError("Invalid command argv entry")
         connection_id = uuid.uuid4().hex
-        return await self._open_byte_stream(
-            {
-                "connection_id": connection_id,
-                "workspace_id": self.workspace_id,
-                "kind": "process",
-                "command": argv,
-                "workdir": safe_workdir,
-                "env": dict(env or {}),
-            },
-            timeout,
+        log.info(
+            "stream_open",
+            connection_id=connection_id,
+            workspace_id=self.workspace_id,
+            kind="process",
+            # argv[0] only: full args may embed flags/paths that echo
+            # secrets in some setups; the runner logs nothing either.
+            command=argv[0],
+            workdir=safe_workdir,
         )
+        try:
+            return await self._open_byte_stream(
+                {
+                    "connection_id": connection_id,
+                    "workspace_id": self.workspace_id,
+                    "kind": "process",
+                    "command": argv,
+                    "workdir": safe_workdir,
+                    "env": dict(env or {}),
+                },
+                timeout,
+            )
+        except Exception as exc:
+            log.warning(
+                "stream_open_failed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                kind="process",
+                command=argv[0],
+                error=f"{type(exc).__name__}: {exc}".strip()[:300],
+            )
+            raise
 
     async def open_tcp(
         self,

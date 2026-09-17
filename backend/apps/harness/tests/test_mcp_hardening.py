@@ -1063,3 +1063,364 @@ def test_foreign_credential_attach_ignored(db, caplog):
         with pytest.raises(plugin_runtime.PluginCredentialConfigError, match="api_key"):
             plugin_runtime.resolve_runtime_credentials(snapshot, workspace=workspace)
     assert "foreign-secret" not in caplog.text
+
+
+# -- open() failure diagnosis: real error, no cancel-scope masking --------
+
+
+class _DeadStream:
+    """Byte stream double whose server died before any JSON-RPC reply."""
+
+    connection_id = "dead-beef"
+
+    def __init__(self, stderr: bytes = b"") -> None:
+        self._stderr = stderr
+        self.eof_sent = False
+        self.closed = False
+
+    async def receive(self) -> bytes:
+        # Server gone: stdout EOF immediately, like the 17:29 run where
+        # the npx process died during initialize with 0 stdout bytes.
+        return b""
+
+    async def send(self, data: bytes) -> None:  # pragma: no cover - no read
+        raise AssertionError("no writes expected after early EOF")
+
+    async def send_eof(self) -> None:
+        self.eof_sent = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _DeadAccessor:
+    """Accessor double: dead process + bounded stderr sink + diagnostics."""
+
+    def __init__(self, stderr: bytes = b"") -> None:
+        self.stream = _DeadStream(stderr)
+        self._stderr = bytes(stderr)
+
+    async def open_process(self, command, workdir="/workspace", env=None, timeout=None):
+        return self.stream
+
+    def get_stream_stderr_excerpt(self, connection_id: str = "") -> str:
+        from apps.harness.mcp_client.stdio import sanitize_stderr_excerpt
+
+        return sanitize_stderr_excerpt(self._stderr)
+
+    def get_stream_diagnostics(self, connection_id: str = "") -> dict:
+        return {
+            "connection_id": self.stream.connection_id,
+            "closed": True,
+            "close_error": None,
+            "exit_code": 1,
+            "stdout_bytes": 0,
+            "stderr_bytes": len(self._stderr),
+            "stderr_excerpt": self.get_stream_stderr_excerpt(),
+        }
+
+
+@pytest.mark.asyncio
+async def test_open_early_eof_surfaces_real_error_not_cancel_scope():
+    """Regression: early-EOF must raise the init failure, never the
+    ``RuntimeError: ... cancel scope`` masking seen in the 17:29 run."""
+    conn = _connection(server="pw", transport="stdio")
+    accessor = _DeadAccessor(stderr=b"Error: chrome not found\n")
+    with pytest.raises(McpServerHealthError) as excinfo:
+        await conn.open(accessor)
+    assert "initialize failed" in str(excinfo.value)
+    # The chained cause is the transport failure, not a scope bug.
+    chained = excinfo.value.__cause__
+    assert chained is not None
+    assert "cancel scope" not in f"{type(chained).__name__}: {chained}"
+    assert accessor.stream.closed is True
+
+
+class _NestedScopeSession:
+    """ClientSession-like double whose context manager pushes a *real*
+    nested cancel scope (task group) like the SDK session does.
+
+    ``_ScriptedSession`` below intentionally has no cancel scope; this
+    one reproduces the production nesting that masked the E2E success
+    path (``RuntimeError: ... cancel scope`` at timeout-scope exit).
+    The parked child waits on an event (not ``sleep_forever``) so the
+    teardown exit is prompt and cannot stall the suite.
+    """
+
+    def __init__(self, tools: list | None = None) -> None:
+        self._tools = list(tools or [])
+        self._tg: anyio.abc.TaskGroup | None = None
+        self._stop: asyncio.Event | None = None
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self._tg = anyio.create_task_group()
+        await self._tg.__aenter__()
+        self._stop = asyncio.Event()
+
+        async def _park() -> None:
+            assert self._stop is not None
+            await self._stop.wait()
+
+        self._tg.start_soon(_park)
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        assert self._tg is not None
+        assert self._stop is not None
+        self._stop.set()
+        await self._tg.__aexit__(exc_type, exc, tb)
+        self.exited = True
+        return False
+
+    async def initialize(self):
+        return types.InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities=types.ServerCapabilities.model_validate({}),
+            serverInfo=types.Implementation.model_validate(
+                {"name": "nested", "version": "1"}
+            ),
+        )
+
+    async def list_tools(self, cursor=None):
+        return types.ListToolsResult(tools=list(self._tools), nextCursor=None)
+
+
+@pytest.mark.asyncio
+async def test_open_success_with_real_nested_session_scope():
+    """End-to-end shape of the production bug: healthy open where the
+    SDK session keeps a real nested cancel scope open for the
+    connection's lifetime must *not* blow up at timeout-scope exit."""
+    conn = _connection(server="pw", transport="stdio")
+    session = _NestedScopeSession(
+        tools=[types.Tool(name="shot", inputSchema={"type": "object"})]
+    )
+    real_session_cls = conn_module.ClientSession
+    conn_module.ClientSession = lambda *a, **k: session  # type: ignore[assignment]
+    stream = _ProcStream([b""])
+    try:
+        tools = await conn.open(_ProcAccessor(stream))
+    finally:
+        conn_module.ClientSession = real_session_cls
+    assert session.entered is True
+    assert session.exited is False  # session lives until aclose()
+    assert conn._stack is not None
+    assert [t.name for t in tools] == ["shot"]
+    assert stream.closed is False
+    await conn.aclose()
+    assert session.exited is True  # LIFO unwind closed the session first
+    assert stream.closed is True
+    assert conn._stack is None
+
+
+class _ScriptedSession:
+    """Minimal ClientSession double: real async CM, scripted init/tools."""
+
+    def __init__(
+        self,
+        read=None,
+        write=None,
+        *,
+        init_result: dict | None = None,
+        tools: list | None = None,
+    ) -> None:
+        self._read = read
+        self._write = write
+        self._init_result = init_result or {}
+        self._tools = list(tools or [])
+        self.entered = False
+        self.exited = False
+        self.closed_as_cm = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        self.closed_as_cm = True
+        return False
+
+    async def initialize(self):
+        return types.InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities=types.ServerCapabilities.model_validate(
+                self._init_result.get("capabilities", {})
+            ),
+            serverInfo=types.Implementation.model_validate(
+                self._init_result.get(
+                    "serverInfo", {"name": "scripted", "version": "1"}
+                )
+            ),
+        )
+
+    async def list_tools(self, cursor=None):
+        return types.ListToolsResult(
+            tools=list(self._tools),
+            nextCursor=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_open_success_exits_timeout_scope_despite_nested_session_scope():
+    """Regression: a *healthy* server must not raise the cancel-scope
+    RuntimeError on the success path (E2E masking 17.09., 18:26 run).
+
+    The SDK ``ClientSession`` enters a task group (own cancel scope)
+    *inside* the startup timeout scope. It stays open for the
+    connection's lifetime, so naively exiting the timeout ``with``
+    block trips ``RuntimeError: ... cancel scope`` even though
+    initialize + discovery succeeded.
+    """
+    conn = _connection(server="pw", transport="stdio")
+    scripted = _ScriptedSession(
+        tools=[
+            types.Tool(name="shot", inputSchema={"type": "object"}),
+        ]
+    )
+    real_session_cls = conn_module.ClientSession
+    conn_module.ClientSession = lambda *a, **k: scripted  # type: ignore[assignment]
+    stream = _ProcStream([b""])
+    try:
+        tools = await conn.open(_ProcAccessor(stream))
+    finally:
+        conn_module.ClientSession = real_session_cls
+    assert scripted.entered is True
+    assert scripted.exited is False  # session lives until aclose()
+    assert conn._stack is not None
+    assert [t.name for t in tools] == ["shot"]
+    assert conn._stack is not None
+    await conn.aclose()
+    assert scripted.exited is True  # LIFO unwind closed the session
+    assert conn._stack is None
+
+
+@pytest.mark.asyncio
+async def test_open_success_then_aclose_closes_session_and_transport():
+    """Healthy open + aclose unwinds session before transport, exactly
+    once each (no double close, no scope leak)."""
+    conn = _connection(server="pw", transport="stdio")
+    scripted = _ScriptedSession(
+        tools=[types.Tool(name="shot", inputSchema={"type": "object"})]
+    )
+    real_session_cls = conn_module.ClientSession
+    conn_module.ClientSession = lambda *a, **k: scripted  # type: ignore[assignment]
+    stream = _ProcStream([b""])
+    try:
+        await conn.open(_ProcAccessor(stream))
+    finally:
+        conn_module.ClientSession = real_session_cls
+    assert stream.closed is False
+    await conn.aclose()
+    assert scripted.exited is True
+    assert stream.closed is True
+    assert stream.eof_sent is True
+    # Idempotent: second close is a no-op.
+    await conn.aclose()
+    assert conn._stack is None
+
+
+@pytest.mark.asyncio
+async def test_sanitize_stderr_excerpt_redacts_and_bounds():
+    from apps.harness.mcp_client.stdio import (
+        MAX_STDERR_EXCERPT_CHARS,
+        sanitize_stderr_excerpt,
+    )
+
+    assert sanitize_stderr_excerpt(None) == ""
+    assert sanitize_stderr_excerpt(b"") == ""
+    excerpt = sanitize_stderr_excerpt(b"Error: api_key=hunter2\n--password s3cret\nok")
+    assert "hunter2" not in excerpt
+    assert "s3cret" not in excerpt
+    assert "[redacted]" in excerpt
+    assert "ok" in excerpt
+    long = sanitize_stderr_excerpt(b"x" * (MAX_STDERR_EXCERPT_CHARS + 500))
+    assert len(long) <= MAX_STDERR_EXCERPT_CHARS + 1
+    # Binary noise cannot break logging.
+    assert sanitize_stderr_excerpt(b"\xff\xfe\x00boom\n") != ""
+
+
+@pytest.mark.asyncio
+async def test_stdio_teardown_excerpt_sanitized():
+    """The adapter teardown carries the excerpt (redacted), never verbatim."""
+    import structlog
+
+    records: list[str] = []
+
+    def _capture(_logger, _method_name, event_dict):
+        records.append(f"{event_dict!r}")
+        raise structlog.DropEvent
+
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            _capture,
+        ],
+        logger_factory=structlog.ReturnLoggerFactory(),
+    )
+    try:
+        accessor = _DeadAccessor(stderr=b"Error: token=hunter2\n")
+        async with workspace_stdio_client(accessor, ["srv"]):
+            pass
+    finally:
+        structlog.reset_defaults()
+    assert any("mcp_stdio_stderr_excerpt" in line for line in records), records
+    assert not any("hunter2" in line for line in records), records
+
+
+@pytest.mark.asyncio
+async def test_runtime_setup_skipped_carries_real_error_detail():
+    """A dying stdio server lands in ``skipped`` with the init failure,
+    not the cancel-scope RuntimeError."""
+    from apps.plugins.runtime_snapshot import (
+        EffectivePluginSnapshot,
+        PluginMcpServerSnapshot,
+        PreparedPluginRuntime,
+        WorkspacePluginSnapshot,
+    )
+
+    plugin_id = uuid.uuid4()
+    snapshot = WorkspacePluginSnapshot(
+        workspace_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        plugins=(
+            EffectivePluginSnapshot(
+                id=plugin_id,
+                name="Plug",
+                slug="plug",
+                description="",
+                organization_id=None,
+                is_global=True,
+                skills=(),
+                mcp_servers=(
+                    PluginMcpServerSnapshot(
+                        id=uuid.uuid4(),
+                        name="Pw",
+                        slug="pw",
+                        transport="stdio",
+                        command="npx",
+                    ),
+                ),
+                requirements=(),
+            ),
+        ),
+    )
+    runtime = McpRuntime()
+    prepared = PreparedPluginRuntime(
+        snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+    )
+    await runtime.setup(
+        workspace=None,
+        organization_id=snapshot.organization_id,
+        accessor=_DeadAccessor(stderr=b"Error: chrome crashed\n"),
+        snapshot=prepared,
+    )
+    assert runtime.connections == []
+    assert len(runtime.skipped) == 1
+    note = runtime.skipped[0]["error"]
+    assert "McpServerHealthError" in note
+    assert "initialize failed" in note
+    assert "cancel scope" not in note
+    await runtime.aclose()

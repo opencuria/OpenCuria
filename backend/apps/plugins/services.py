@@ -52,7 +52,7 @@ PLAYWRIGHT_MCP_ARGS = [
     "--executable-path",
     "/usr/bin/google-chrome-stable",
     "--output-dir",
-    "/workspace/.opencuria/playwright",
+    "/tmp/.opencuria/playwright",
 ]
 
 

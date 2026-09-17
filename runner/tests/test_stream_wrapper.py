@@ -18,16 +18,26 @@ class StreamWrapperTests(unittest.TestCase):
         self.assertEqual(prefix[0], "sh")
         self.assertEqual(prefix[1], "-c")
         self.assertEqual(prefix[3], "opencuria-stream")
-        self.assertIn("exec setsid", prefix[2])
+        self.assertIn("exec setsid --wait", prefix[2])
 
     def test_wrapper_writes_pidfile_from_inner_setsid_process(self) -> None:
         """pidfile must reference the setsid session leader (GNU setsid
         may fork): ``echo $$`` runs in the inner shell *after* setsid."""
         body = stream_wrapper_prefix()[2]
-        self.assertIn("exec setsid sh -c", body)
+        self.assertIn("exec setsid --wait sh -c", body)
         self.assertIn('echo $$ > "$1"', body)
         # No user interpolation: the body is fully static.
         self.assertNotIn("--stdio", body)
+
+    def test_setsid_wait_keeps_stdio_attached(self) -> None:
+        """``setsid --wait`` (not bare ``setsid``) keeps the direct child
+        alive until the server exits: bare ``setsid`` forks on
+        util-linux >= 2.35, the parent exits 0 immediately, and the
+        transport sees EOF before the server ever speaks (MCP
+        ``Connection closed``)."""
+        body = stream_wrapper_prefix()[2]
+        self.assertIn("setsid --wait", body)
+        self.assertNotIn("exec setsid sh -c", body)
 
     def test_command_appended_verbatim_as_positional_argv(self) -> None:
         evil = "x'; touch /tmp/pwned; echo '"

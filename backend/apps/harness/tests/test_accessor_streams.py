@@ -107,9 +107,7 @@ async def test_receive_send_roundtrip_with_ack() -> None:
 async def test_stderr_goes_to_callback_not_stdout() -> None:
     seen: list[bytes] = []
     transport = FakeCallTransport()
-    accessor = _accessor(
-        transport, on_stderr=lambda _conn, data: seen.append(data)
-    )
+    accessor = _accessor(transport, on_stderr=lambda _conn, data: seen.append(data))
     stream = await accessor.open_process(["cat"])
     conn = stream.connection_id
     route_stream_output(
@@ -138,9 +136,7 @@ async def test_closed_event_resolves_eof_and_wait() -> None:
     accessor = _accessor(transport)
     stream = await accessor.open_process(["cat"])
     conn = stream.connection_id
-    route_stream_closed(
-        {"connection_id": conn, "workspace_id": "ws-1", "exit_code": 0}
-    )
+    route_stream_closed({"connection_id": conn, "workspace_id": "ws-1", "exit_code": 0})
     assert await stream.receive() == b""
     assert await stream.wait_closed() == 0
     await stream.aclose()
@@ -254,9 +250,7 @@ async def test_workspace_mismatch_dropped() -> None:
         is False
     )
     # Nothing enqueued: a close notice for the live stream resolves EOF.
-    route_stream_closed(
-        {"connection_id": conn, "workspace_id": "ws-1", "exit_code": 0}
-    )
+    route_stream_closed({"connection_id": conn, "workspace_id": "ws-1", "exit_code": 0})
     assert await asyncio.wait_for(stream.receive(), timeout=2) == b""
     await stream.aclose()
 
@@ -306,10 +300,7 @@ async def test_unknown_connection_returns_false() -> None:
         is False
     )
     assert (
-        route_stream_closed(
-            {"connection_id": "nope", "workspace_id": "ws-1"}
-        )
-        is False
+        route_stream_closed({"connection_id": "nope", "workspace_id": "ws-1"}) is False
     )
 
 
@@ -376,9 +367,7 @@ async def test_queue_overflow_marks_error_and_requests_remote_close() -> None:
     async def emit_spy(event: str, payload: dict) -> None:
         emitted.append((event, payload))
 
-    async def call_ok(
-        event: str, payload: dict, timeout: float | None = None
-    ) -> dict:
+    async def call_ok(event: str, payload: dict, timeout: float | None = None) -> dict:
         return {"ok": True, **payload}
 
     accessor = RunnerWorkspaceAccessor(
@@ -433,12 +422,7 @@ async def test_route_returns_false_for_closed_stream() -> None:
         )
         is False
     )
-    assert (
-        route_stream_closed(
-            {"connection_id": conn, "workspace_id": "ws-1"}
-        )
-        is False
-    )
+    assert route_stream_closed({"connection_id": conn, "workspace_id": "ws-1"}) is False
     # Invalid stream label NACKs on a live stream.
     stream2 = await accessor.open_process(["cat"])
     conn2 = stream2.connection_id
@@ -466,7 +450,6 @@ async def test_stderr_never_logged_with_content() -> None:
     class _Handler(_logging.Handler):
         def emit(self, record: _logging.LogRecord) -> None:
             records.append(record)
-
 
     secret = b"super-secret-token-12345"
     transport = FakeCallTransport()
@@ -524,11 +507,122 @@ async def test_byte_stream_state_unregisters_routing() -> None:
     # Unknown ids fail closed on cancel; deliveries report False.
     with pytest.raises(StreamClosedError):
         await accessor.cancel_stream(conn)
-    assert route_stream_output(
+    assert (
+        route_stream_output(
+            {
+                "connection_id": conn,
+                "workspace_id": "ws-1",
+                "stream": "stdout",
+                "data": _b64(b"x"),
+            }
+        )
+        is False
+    )
+
+
+# -- MCP failure diagnosis: stderr excerpt + lifecycle counters ------------
+
+
+async def test_stderr_captured_as_sanitized_excerpt() -> None:
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["npx", "@playwright/mcp"])
+    conn = stream.connection_id
+    route_stream_output(
+        {
+            "connection_id": conn,
+            "workspace_id": "ws-1",
+            "stream": "stderr",
+            "data": _b64(b"Error: executable not found at /usr/bin/x\n"),
+        }
+    )
+    await asyncio.sleep(0.05)
+    excerpt = accessor.get_stream_stderr_excerpt(conn)
+    assert "executable not found" in excerpt
+    # Stderr never leaks into the stdout framing.
+    route_stream_output(
         {
             "connection_id": conn,
             "workspace_id": "ws-1",
             "stream": "stdout",
-            "data": _b64(b"x"),
+            "data": _b64(b"out"),
         }
-    ) is False
+    )
+    assert await stream.receive() == b"out"
+    await stream.aclose()
+
+
+async def test_stderr_excerpt_redacts_secrets() -> None:
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["srv"])
+    conn = stream.connection_id
+    route_stream_output(
+        {
+            "connection_id": conn,
+            "workspace_id": "ws-1",
+            "stream": "stderr",
+            "data": _b64(b"crash; api_key=hunter2 token=abc --password s3cret\n"),
+        }
+    )
+    await asyncio.sleep(0.05)
+    excerpt = accessor.get_stream_stderr_excerpt(conn)
+    assert "hunter2" not in excerpt
+    assert "s3cret" not in excerpt
+    assert "[redacted]" in excerpt
+    await stream.aclose()
+
+
+async def test_stream_diagnostics_counters() -> None:
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["srv"])
+    conn = stream.connection_id
+    route_stream_output(
+        {
+            "connection_id": conn,
+            "workspace_id": "ws-1",
+            "stream": "stdout",
+            "data": _b64(b"hello"),
+        }
+    )
+    route_stream_output(
+        {
+            "connection_id": conn,
+            "workspace_id": "ws-1",
+            "stream": "stderr",
+            "data": _b64(b"warn"),
+        }
+    )
+    await asyncio.sleep(0.05)
+    diag = accessor.get_stream_diagnostics(conn)
+    assert diag["stdout_bytes"] == 5
+    assert diag["stderr_bytes"] == 4
+    assert diag["closed"] is False
+    assert diag["age_s"] >= 0.0
+    route_stream_closed({"connection_id": conn, "workspace_id": "ws-1", "exit_code": 3})
+    await asyncio.sleep(0.05)
+    diag = accessor.get_stream_diagnostics(conn)
+    assert diag["closed"] is True
+    assert diag["exit_code"] == 3
+    await stream.aclose()
+
+
+async def test_open_process_sends_command_argv0_logged() -> None:
+    """open_process sends the full argv but the open path only records
+    argv[0] in its own bookkeeping (full args never persist server-side)."""
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(
+        ["npx", "-y", "@playwright/mcp@latest", "--secret-flag", "s3cret"]
+    )
+    _event, payload = transport.calls[0]
+    # Full argv still reaches the runner (it must spawn the process).
+    assert payload["command"] == [
+        "npx",
+        "-y",
+        "@playwright/mcp@latest",
+        "--secret-flag",
+        "s3cret",
+    ]
+    await stream.aclose()

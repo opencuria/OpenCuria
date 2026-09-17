@@ -118,6 +118,14 @@ def get_sio_server() -> socketio.AsyncServer:
             # DAPHNE_WEBSOCKET_MAX_MESSAGE/FRAME_SIZE (settings) and the
             # daphne CLI flags in entrypoint.sh at the same 200 MiB value.
             max_http_buffer_size=200 * 1024 * 1024,
+            # The runner answers server->client events with Socket.IO
+            # ACKs (``sio.call``); without an active Engine.IO monitor
+            # task, a stalled socket is never pinged/closed and ACKs can
+            # hang until the caller's timeout. Keep the monitor enabled
+            # explicitly so control calls fail fast instead of hanging.
+            monitor_clients=True,
+            ping_interval=25,
+            ping_timeout=20,
         )
         _register_event_handlers(_sio)
         _register_frontend_handlers(_sio)
@@ -179,8 +187,21 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         """
         service = get_runner_service()
 
-        # Extract token from Authorization header
+        # Extract token from the Authorization header. Under Daphne,
+        # WebSocket handshake headers never reach engine.io's environ,
+        # so a websocket-only connect carries the token in the
+        # Socket.IO auth payload instead (inside the WS frames, never
+        # in URLs/logs). The header path still wins when present
+        # (proxies/backends that forward handshake headers).
         token = _extract_bearer_token(environ)
+        if not token and isinstance(auth, dict):
+            # WebSocket-only connect under Daphne: handshake headers
+            # never reach engine.io's environ, so the runner passes
+            # the token via the Socket.IO auth payload (never via URL;
+            # the payload travels inside the WS frames, not in logs).
+            candidate = str(auth.get("token") or "").strip()
+            if candidate:
+                token = candidate
         if not token:
             logger.warning("Connection rejected: no Bearer token (sid=%s)", sid)
             raise socketio.exceptions.ConnectionRefusedError(
@@ -1029,9 +1050,8 @@ def _extract_bearer_token(environ: dict) -> str | None:
     Extract the Bearer token from the ASGI/WSGI environ.
 
     Only the standard ``Authorization: Bearer <token>`` HTTP header is
-    accepted.  Query-string tokens are intentionally NOT supported because
-    they would appear in web-server access logs, browser history, and HTTP
-    Referer headers, exposing a long-lived secret in cleartext.
+    accepted here; see :func:`_extract_query_token` for the documented
+    opt-in query fallback (runner WebSocket upgrades under Daphne).
     """
     auth_header = environ.get("HTTP_AUTHORIZATION", "")
     if auth_header.startswith("Bearer "):

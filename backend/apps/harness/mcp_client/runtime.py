@@ -23,10 +23,23 @@ log = structlog.get_logger(__name__)
 def _record_skip(
     skipped: list[dict[str, str]], *, plugin: str, server: str, error: Exception
 ) -> None:
-    """Record a server skip with a bounded, secret-free error note."""
-    note = f"{type(error).__name__}: skipped"
+    """Record a server skip with a bounded, secret-free error note.
+
+    The note keeps the exception *type* plus a short sanitized hint so
+    operators can tell a runner timeout from a bad binary path without
+    leaking payloads (stdout/stderr may carry secrets). The chained
+    traceback stays attached via ``exc_info`` for debugging.
+    """
+    detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
+    note = f"{type(error).__name__}: skipped" + (f" ({detail})" if detail else "")
     skipped.append({"plugin": plugin, "server": server, "error": note})
-    log.warning("mcp_server_skipped", plugin=plugin, server=server, error=note)
+    log.warning(
+        "mcp_server_skipped",
+        plugin=plugin,
+        server=server,
+        error=note,
+        exc_info=error,
+    )
 
 
 class McpRuntime:
@@ -72,13 +85,13 @@ class McpRuntime:
         and skipped; the run itself never fails for a collision).
         """
         prepared: PreparedPluginRuntime | None = snapshot
-        if prepared is not None and not isinstance(
-            prepared, PreparedPluginRuntime
-        ):
+        if prepared is not None and not isinstance(prepared, PreparedPluginRuntime):
             # Bare snapshot (tests/legacy): wrap it; credentials resolve
             # exactly once below.
             prepared = PreparedPluginRuntime(
-                snapshot=prepared, workspace=workspace, plaintexts={}  # type: ignore[arg-type]
+                snapshot=prepared,
+                workspace=workspace,
+                plaintexts={},  # type: ignore[arg-type]
             )
         if prepared is None:
             if workspace is None:
@@ -156,6 +169,26 @@ class McpRuntime:
                         raise
                     except Exception as exc:
                         connection.healthy = False
+                        diagnostics: dict[str, Any] = {}
+                        get_diagnostics = getattr(
+                            accessor, "get_stream_diagnostics", None
+                        )
+                        if callable(get_diagnostics):
+                            try:
+                                result = get_diagnostics()
+                                if isinstance(result, dict):
+                                    diagnostics = result
+                            except Exception:  # pragma: no cover - logs only
+                                diagnostics = {}
+                        log.warning(
+                            "mcp_server_setup_skipped",
+                            plugin=plugin.slug,
+                            server=server.slug,
+                            transport=(server.transport or "").strip().lower(),
+                            error=f"{type(exc).__name__}: "
+                            f"{str(exc).strip().splitlines()[0][:200]}".strip(),
+                            diagnostics=diagnostics,
+                        )
                         _record_skip(
                             self.skipped,
                             plugin=plugin.slug,

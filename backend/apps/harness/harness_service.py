@@ -833,6 +833,20 @@ class HarnessService:
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
+        if str(session.status) != HarnessSessionStatus.IDLE:
+            # Self-heal a stale busy flag: no live task exists, so a
+            # previous run died without reaching its finally block
+            # (e.g. question answered after the waiter was gone) and the
+            # session would otherwise reject every new prompt with 409.
+            log.warning(
+                "harness_stale_busy_reset",
+                session_id=key,
+                status=str(session.status),
+            )
+            await sync_to_async(self.sessions.mark_status)(
+                session, HarnessSessionStatus.IDLE
+            )
+            session.status = HarnessSessionStatus.IDLE
         org_id = organization_id or session.organization_id
         if skill_ids is not None and user_id is not None:
             session = await sync_to_async(self.update_skill_ids)(
@@ -1036,11 +1050,32 @@ class HarnessService:
             status=status,
         )
         future = self._pending_questions.pop(str(question_id), None)
+        resumed = False
         if future is not None and not future.done():
             if reject:
                 future.set_exception(ValueError("Question rejected by user"))
             else:
                 future.set_result(list(answers or []))
+            resumed = True
+        if resumed:
+            log.info(
+                "harness_question_resumed",
+                session_id=str(session.id),
+                request_id=str(question_id),
+                status=status,
+            )
+        else:
+            # No live waiter: the run task is gone (abort/cancel race or
+            # process restart dropped the in-memory future). The DB row is
+            # resolved, but nothing will wake up — log loudly instead of
+            # silently returning 200 while the session stays busy.
+            log.warning(
+                "harness_question_no_waiter",
+                session_id=str(session.id),
+                request_id=str(question_id),
+                status=status,
+                running=self.is_running(session.id),
+            )
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
             {
@@ -1050,7 +1085,11 @@ class HarnessService:
             },
             str(session.workspace_id),
         )
-        return {"request_id": str(question_id), "status": status}
+        return {
+            "request_id": str(question_id),
+            "status": status,
+            "resumed": resumed,
+        }
 
     # -- internals ----------------------------------------------------------
 
@@ -1732,6 +1771,25 @@ class HarnessService:
         )
         try:
             return await future
+        except asyncio.CancelledError:
+            # Abort while waiting: mark the gate so it never stays
+            # pending after the run is gone. resolve_question() would
+            # 404 on it otherwise, and the question sheet would linger.
+            await sync_to_async(QuestionRequestRepository.resolve)(
+                request,
+                answers=[],
+                status="rejected",
+            )
+            await self._emit_frontend(
+                FRONTEND_EVENT_QUESTION,
+                {
+                    **(await self._gate_ids(session)),
+                    "request_id": str(request.id),
+                    "status": "rejected",
+                },
+                str(session.workspace_id),
+            )
+            raise
         finally:
             self._pending_questions.pop(str(request.id), None)
 

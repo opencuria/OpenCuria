@@ -35,6 +35,14 @@ import shlex
 #: Implemented with a sentinel ("--") so env values containing spaces
 #: survive intact: everything before the first "--" after $2 is env.
 #:
+#: ``setsid --wait`` (not bare ``setsid``): plain ``setsid`` forks on
+#: util-linux >= 2.35 and the forking parent exits immediately with
+#: status 0 — the transport (SSH exec channel, Docker exec socket)
+#: then sees EOF and the stdio pipes die before the real server ever
+#: speaks (MCP ``initialize`` -> ``Connection closed``).  ``--wait``
+#: keeps the direct child alive until the server exits and propagates
+#: its exit status, so stdin/stdout/stderr stay attached.
+#:
 #: PID discipline: ``echo $$`` runs in the *inner* shell *after* setsid
 #: so the pidfile always references the new session leader — even when
 #: GNU setsid forks (``--wait`` variant).  ``command`` travels exclusively
@@ -48,7 +56,7 @@ while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
 done
 if [ "$1" = "--" ]; then shift; fi
 if [ "$#" -eq 0 ]; then echo "opencuria-stream: no command" >&2; exit 127; fi
-exec setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' opencuria-stream-inner "$pidfile" "$@"
+exec setsid --wait sh -c 'echo $$ > "$1"; shift; exec "$@"' opencuria-stream-inner "$pidfile" "$@"
 """
 
 
