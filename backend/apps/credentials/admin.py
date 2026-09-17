@@ -12,16 +12,19 @@ class CredentialServiceAdmin(admin.ModelAdmin):
     list_display = [
         "name",
         "slug",
+        "organization",
         "credential_type",
         "env_var_name",
         "target_path",
         "created_at",
     ]
+    list_filter = ["credential_type", "organization"]
     search_fields = ["name", "slug"]
     prepopulated_fields = {"slug": ("name",)}
     fields = [
         "name",
         "slug",
+        "organization",
         "description",
         "credential_type",
         "env_var_name",

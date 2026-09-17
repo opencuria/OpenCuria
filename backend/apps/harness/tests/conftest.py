@@ -451,6 +451,14 @@ class FakeAccessor(WorkspaceAccessor):
         removed = self.processes.pop(record["process_id"])
         return {"process_id": removed["process_id"], "deleted": True}
 
+    async def open_process(self, command, workdir="/workspace", env=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Not supported by the in-memory fake (no runner transport)."""
+        raise NotImplementedError("FakeAccessor does not support open_process")
+
+    async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Not supported by the in-memory fake (no runner transport)."""
+        raise NotImplementedError("FakeAccessor does not support open_tcp")
+
 
 @pytest.fixture
 def fake_accessor() -> FakeAccessor:

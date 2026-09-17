@@ -10,10 +10,15 @@ from ninja import NinjaAPI
 
 from apps.accounts.api import auth_router
 from apps.accounts.api_auth import APIKeyBearer, APIKeyInHeader, JWTAuth
-from apps.credentials.api import credential_router, credential_service_router, org_credential_service_router
+from apps.credentials.api import (
+    credential_router,
+    credential_service_router,
+    org_credential_service_router,
+)
 from apps.harness.api import harness_router
-from apps.skills.api import skill_router
 from apps.organizations.api import org_router
+from apps.plugins.api import plugin_router, workspace_plugin_router
+from apps.skills.api import skill_router
 from apps.runners.api import (
     git_router,
     image_artifact_router,
@@ -54,6 +59,8 @@ api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
+api.add_router("/plugins/", plugin_router)
+api.add_router("/workspaces/", workspace_plugin_router)
 
 urlpatterns = [
     path("admin/", admin.site.urls),

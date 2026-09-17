@@ -209,6 +209,24 @@ def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
         return str(args.get("url", ""))
     if key == "task":
         return str(args.get("description", ""))
+    if key.startswith("mcp_"):
+        # MCP tools never derive the action from args: raw call values
+        # may carry user secrets and must never reach the permission
+        # UI/DB. The module-level fallback is empty; the instance path
+        # below substitutes the tool's ``original_name``.
+        return ""
+    return ""
+
+
+def _action_for_registered_tool(tool: Any, tool_name: str) -> str:
+    """Return the permission action for an already-registered tool.
+
+    MCP tools report their original MCP tool name; everything else
+    reports no action (never raw args).
+    """
+    original = str(getattr(tool, "original_name", "") or "").strip()
+    if original and str(tool_name or "").strip().lower().startswith("mcp_"):
+        return original
     return ""
 
 
@@ -337,9 +355,7 @@ class HarnessRunner:
             raise ValueError("HarnessRunner requires provider or model_resolver")
         self.tools = tools
         if evaluator is None:
-            evaluator = PermissionEvaluator(
-                global_rules=dict(DEFAULT_GLOBAL_RULES)
-            )
+            evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
         self.evaluator = evaluator
         self.accessor = accessor
         self.chat_options = chat_options or ChatOptions()
@@ -393,7 +409,7 @@ class HarnessRunner:
                 ToolSchema(
                     name=tool.name,
                     description=tool.description,
-                    parameters=tool.args_schema.model_json_schema(),
+                    parameters=tool.parameters_schema(),
                 )
             )
         return schemas
@@ -423,9 +439,7 @@ class HarnessRunner:
         agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
         if doom_loop:
             return _combine_decisions(
-                self.evaluator.evaluate(
-                    key, action, mode=mode, doom_loop=True
-                ),
+                self.evaluator.evaluate(key, action, mode=mode, doom_loop=True),
                 agent_eval.evaluate(key, action, mode=mode, doom_loop=True),
             )
         if external_directory:
@@ -433,9 +447,7 @@ class HarnessRunner:
                 self.evaluator.evaluate(
                     key, action, mode=mode, external_directory=True
                 ),
-                agent_eval.evaluate(
-                    key, action, mode=mode, external_directory=True
-                ),
+                agent_eval.evaluate(key, action, mode=mode, external_directory=True),
             )
         return _combine_decisions(
             self.evaluator.evaluate(key, action, mode=mode),
@@ -536,6 +548,14 @@ class HarnessRunner:
     ) -> _ToolCallOutcome:
         """Permission-gate and execute one tool call (safe to run concurrently)."""
         action = _action_for_tool(call.name, call.arguments)
+        try:
+            registered = self.tools.get(call.name)
+        except KeyError:
+            registered = None
+        if registered is not None:
+            registered_action = _action_for_registered_tool(registered, call.name)
+            if registered_action:
+                action = registered_action
         title = self._tool_title(call.name, call.arguments)
         tool_key = (call.name or "").strip().lower()
         if tool_key == "task" and depth >= max_depth:
@@ -692,9 +712,7 @@ class HarnessRunner:
             # travel via the tool_completed event into HarnessPart.meta.
             message=LLMMessage(
                 role="tool",
-                content=build_tool_message_content(
-                    result.output, result.attachments
-                ),
+                content=build_tool_message_content(result.output, result.attachments),
                 tool_call_id=call.call_id,
             ),
             result=result,
@@ -1194,9 +1212,7 @@ class HarnessRunner:
                 max_trajectory_length=config.max_trajectory_length,
                 enable_reflection=config.enable_reflection,
                 enable_code_agent=config.enable_code_agent,
-                enable_recording=bool(
-                    getattr(config, "enable_recording", False)
-                ),
+                enable_recording=bool(getattr(config, "enable_recording", False)),
                 screenshot_max_dimension=config.screenshot_max_dimension,
                 action_pre_delay=config.action_pre_delay,
                 action_post_delay=config.action_post_delay,
@@ -1325,14 +1341,17 @@ class HarnessRunner:
                 compacted, schemas, is_last_step
             )
             try:
-                text, calls, usage, finish = (
-                    await self._provider_step_with_transient_retry(
-                        model=model,
-                        messages=retry_messages,
-                        schemas=retry_schemas,
-                        step=step,
-                        chat_options=retry_opts,
-                    )
+                (
+                    text,
+                    calls,
+                    usage,
+                    finish,
+                ) = await self._provider_step_with_transient_retry(
+                    model=model,
+                    messages=retry_messages,
+                    schemas=retry_schemas,
+                    step=step,
+                    chat_options=retry_opts,
                 )
             except Exception as retry_exc:
                 if is_context_overflow_error(retry_exc):
@@ -1410,10 +1429,7 @@ class HarnessRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if (
-                    not is_retryable_provider_error(exc)
-                    or attempt >= RETRY_MAX_RETRIES
-                ):
+                if not is_retryable_provider_error(exc) or attempt >= RETRY_MAX_RETRIES:
                     raise
                 attempt += 1
                 delay = retry_delay(attempt, error=exc)
@@ -1764,6 +1780,14 @@ class _MissingAccessor(WorkspaceAccessor):
         raise RuntimeError("No workspace accessor configured")
 
     async def process_delete(self, process_id):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def open_process(self, command, workdir="/workspace", env=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 

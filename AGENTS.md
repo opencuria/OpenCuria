@@ -465,7 +465,52 @@ Two types are supported:
 
 `CredentialService` records are admin-managed catalog entries (one type per service). `Credential` records are org-scoped instances with an encrypted value.
 
-When a workspace is created or resumed, `CredentialSvc.resolve_credentials()` decrypts attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars`/`files`/`ssh_keys`. The backend sends them to the runner in the create/resume payload. Editing a running workspace replaces the on-disk set immediately via `task:inject_credentials` (full replace: remove previous material, then write the new set or nothing). Stopped workspaces only update the DB attachment; the next resume applies them. The runner persists secrets on the workspace disk (env file, SSH keys, credential files) for the whole running lifetime. A controlled stop removes them **before** the VM/container is stopped. `Workspace.credentials_present` records whether secrets are still on disk. Heartbeat reconciles missing injects (attached but not on disk) and leftover disk material (on disk but no longer attached). Heartbeat/external stops do **not** clear the flag. Image capture is rejected while `credentials_present` is true. Already-open terminals do not pick up new environment variables; new harness execs and new terminals source `/root/.opencuria-env.sh`.
+When a workspace is created or resumed, `CredentialSvc.resolve_credentials()` decrypts attached credentials and returns a `ResolvedCredentials` dataclass with `env_vars`/`files`/`ssh_keys`. The runner persists secrets on the workspace disk (env file, SSH keys, credential files) for the whole running lifetime. A controlled stop removes them **before** the VM/container is stopped. `Workspace.credentials_present` records whether secrets are still on disk. Heartbeat reconciles missing injects (attached but not on disk) and leftover disk material (on disk but no longer attached). Heartbeat/external stops do **not** clear the flag. Image capture is rejected while `credentials_present` is true. Already-open terminals do not pick up new environment variables; new harness execs and new terminals source `/root/.opencuria-env.sh`.
+
+### 5.9 Plugin System (`apps/plugins/`)
+
+Plugins bundle skills (prompt fragments), MCP servers (stdio /
+Streamable HTTP / SSE), and credential requirements
+(`{{credential.KEY}}` placeholders rendered server-side from
+workspace-attached credentials).
+
+- **Scope:** `Plugin.organization = NULL` is global (staff/Django-admin
+  only); otherwise org-owned (admin CRUD). Slugs are unique globally
+  (global) or per org; nested create/PATCH is atomic; seeds never
+  auto-activate.
+- **Activation:** org admins enable org-wide (`OrgPluginActivation`;
+  enabling needs `enabled` + `published`, disabling always works);
+  workspace owners then opt in per workspace
+  (`WorkspacePluginActivation`). Org deactivation only makes workspace
+  rows ineffective — re-enabling restores them. Runtime resolves only
+  effective (visible + enabled + published + org + workspace) plugins.
+- **Credentials:** requirements reference global or org-owned
+  `CredentialService` rows (fresh services are auto-created +
+  auto-activated per org and marked `plugin_owned_service`). Secrets
+  stay Fernet-encrypted in `Credential`, render only into stdio env /
+  HTTP headers at run start, and are never returned or logged. Missing
+  required credentials fail activation/run with machine-readable codes
+  (`missing_plugin_credentials`, `plugin_not_available`,
+  `plugin_credentials_in_use`, `plugin_service_activation_in_use`).
+  Deleting a service-backed plugin is blocked while ANY credential
+  (personal or org) references its services; credential deletes check
+  every attached workspace under its real org.
+- **Harness wiring:** one `PreparedPluginRuntime` per run carries the
+  snapshot + decrypted plaintexts (repr-hidden); `McpRuntime` opens one
+  connection per server, registers namespaced tools (`mcp_<plugin>_
+  <server>_<tool>`, max 64 chars, original schema preserved, jsonschema
+  validated). Plugin skills come first (deduped); build/plan/general
+  see MCP tools + skills, explore sees skills only, computeruse sees
+  neither. Permission action is the original MCP tool name (never args).
+- **Workspace-local transport:** stdio argv runs as a workspace process
+  (no shell join); HTTP/SSE goes through `WorkspaceByteStream`/
+  `open_tcp` so DNS/TCP/TLS happen in the workspace namespace
+  (`localhost` = workspace-localhost). The runner only exposes generic
+  `workspace:stream_*` byte streams (`StreamSession`) and stays a dumb
+  executor with no plugin knowledge.
+- **Surfaces:** Settings → Plugins tab (catalog, org activation, full
+  editor); workspace edit dialog (activation + credentials, staged
+  save); inbound MCP mirrors REST under `plugins:read`/`plugins:write`.
 
 ---
 

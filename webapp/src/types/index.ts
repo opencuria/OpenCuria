@@ -458,6 +458,158 @@ export interface SkillUpdateIn {
   body?: string
 }
 
+// --- Plugins ---
+
+export type PluginMcpTransport = 'stdio' | 'streamable_http' | 'sse'
+
+export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key'
+
+export interface PluginSkill {
+  id: string
+  name: string
+  slug: string
+  body: string
+  position: number
+}
+
+export interface PluginSkillIn {
+  name: string
+  slug?: string
+  body: string
+  position?: number
+}
+
+export interface PluginMcpServer {
+  id: string
+  name: string
+  slug: string
+  transport: PluginMcpTransport
+  command: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+  url: string
+  headers: Record<string, string>
+  startup_timeout_seconds: number
+  request_timeout_seconds: number
+}
+
+export interface PluginMcpServerIn {
+  name: string
+  slug?: string
+  transport?: PluginMcpTransport
+  command?: string
+  args?: string[]
+  cwd?: string
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  startup_timeout_seconds?: number
+  request_timeout_seconds?: number
+}
+
+export interface PluginCredentialServiceIn {
+  slug?: string
+  name?: string
+  description?: string
+  credential_type?: PluginCredentialServiceType
+  env_var_name?: string
+  target_path?: string
+  label?: string
+  service_id?: string | null
+}
+
+export interface PluginCredentialRequirementIn {
+  key: string
+  description?: string
+  required?: boolean
+  credential_service: PluginCredentialServiceIn
+}
+
+export interface PluginCredentialRequirement {
+  id: string
+  key: string
+  description: string
+  required: boolean
+  service_id: string
+  service_name: string
+  service_slug: string
+  credential_type: PluginCredentialServiceType
+  plugin_owned_service: boolean
+}
+
+export interface PluginCredentialReadiness {
+  required_service_ids: string[]
+  missing_required_service_ids: string[]
+  ready: boolean
+}
+
+export interface Plugin {
+  id: string
+  name: string
+  slug: string
+  description: string
+  enabled: boolean
+  published: boolean
+  organization_id: string | null
+  is_global: boolean
+  org_enabled: boolean
+  skills: PluginSkill[]
+  mcp_servers: PluginMcpServer[]
+  credential_requirements: PluginCredentialRequirement[]
+  credential_readiness: PluginCredentialReadiness | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PluginCreateIn {
+  name: string
+  slug?: string
+  description?: string
+  enabled?: boolean
+  published?: boolean
+  skills?: PluginSkillIn[]
+  mcp_servers?: PluginMcpServerIn[]
+  credential_requirements?: PluginCredentialRequirementIn[]
+}
+
+export interface PluginUpdateIn {
+  name?: string
+  slug?: string
+  description?: string
+  enabled?: boolean
+  published?: boolean
+  skills?: PluginSkillIn[] | null
+  mcp_servers?: PluginMcpServerIn[] | null
+  credential_requirements?: PluginCredentialRequirementIn[] | null
+}
+
+export interface PluginActivationIn {
+  active: boolean
+}
+
+export interface WorkspacePluginMissingCredential {
+  key: string
+  service_id: string
+  service_slug: string
+}
+
+export interface WorkspacePlugin {
+  id: string
+  name: string
+  slug: string
+  description: string
+  organization_id: string | null
+  is_global: boolean
+  workspace_enabled: boolean
+  missing_required_credentials: WorkspacePluginMissingCredential[]
+  ready: boolean
+}
+
+export interface WorkspacePluginsUpdateIn {
+  plugin_ids: string[]
+}
+
 // --- API Keys ---
 
 export interface APIKeyPermissionInfo {

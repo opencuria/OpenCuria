@@ -29,6 +29,10 @@ Tools and their required permissions
 - delete_build_job → image_definitions:manage_runners
 - get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
+- list_plugins           → plugins:read
+- toggle_org_plugin_activation → plugins:write (admin only)
+- list_workspace_plugins → plugins:read
+- set_workspace_plugins  → plugins:write
 - get_provider_config → harness:read
 - list_provider_models → harness:read
 - save_provider_config → harness:run
@@ -382,7 +386,71 @@ _TOOLS: list[Tool] = [
     Tool(
         name="list_credentials",
         description="List credentials (metadata only, no secrets) for the current user.",
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="list_plugins",
+        description=(
+            "List plugins visible in the active organization (global + "
+            "org-owned) with components and org credential readiness "
+            "(metadata only, no secrets)."
+        ),
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+    ),
+    Tool(
+        name="toggle_org_plugin_activation",
+        description=(
+            "Enable/disable a visible plugin org-wide (admin only). "
+            "Enabling requires an enabled+published definition."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plugin_id": {"type": "string", "description": "Plugin UUID."},
+                "active": {"type": "boolean"},
+            },
+            "required": ["plugin_id", "active"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="list_workspace_plugins",
+        description=(
+            "List org-enabled plugins for a workspace with activation "
+            "state and credential gaps (metadata only, no secrets)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."}
+            },
+            "required": ["workspace_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="set_workspace_plugins",
+        description=(
+            "Replace workspace plugin activations atomically. Required "
+            "credential services must be attached to the workspace."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "plugin_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Desired plugin UUIDs (empty clears all).",
+                },
+            },
+            "required": ["workspace_id", "plugin_ids"],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="get_provider_config",
@@ -1008,6 +1076,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
+    "list_plugins": APIKeyPermission.PLUGINS_READ,
+    "toggle_org_plugin_activation": APIKeyPermission.PLUGINS_WRITE,
+    "list_workspace_plugins": APIKeyPermission.PLUGINS_READ,
+    "set_workspace_plugins": APIKeyPermission.PLUGINS_WRITE,
     "get_provider_config": APIKeyPermission.HARNESS_READ,
     "list_provider_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
@@ -1981,6 +2053,183 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
         for c in creds
     ]
     return _text(result)
+
+
+def _plugin_payload(payload: dict) -> dict:
+    """Serialize a plugin payload for MCP (metadata only, no secrets)."""
+    readiness = payload.get("credential_readiness") or {}
+    return {
+        "id": str(payload["id"]),
+        "name": payload["name"],
+        "slug": payload["slug"],
+        "description": payload.get("description", ""),
+        "enabled": bool(payload.get("enabled", True)),
+        "published": bool(payload.get("published", True)),
+        "organization_id": (
+            str(payload["organization_id"])
+            if payload.get("organization_id") is not None
+            else None
+        ),
+        "is_global": bool(payload.get("is_global", False)),
+        "org_enabled": bool(payload.get("org_enabled", False)),
+        "skills": [
+            {"id": str(s["id"]), "name": s["name"], "slug": s["slug"]}
+            for s in payload.get("skills", [])
+        ],
+        "mcp_servers": [
+            {
+                "id": str(m["id"]),
+                "name": m["name"],
+                "slug": m["slug"],
+                "transport": m["transport"],
+            }
+            for m in payload.get("mcp_servers", [])
+        ],
+        "credential_requirements": [
+            {
+                "id": str(r["id"]),
+                "key": r["key"],
+                "required": bool(r["required"]),
+                "service_id": str(r["service_id"]),
+                "service_slug": r["service_slug"],
+            }
+            for r in payload.get("credential_requirements", [])
+        ],
+        "credential_readiness": {
+            "ready": bool(readiness.get("ready", True)),
+            "missing_required_service_ids": [
+                str(sid)
+                for sid in readiness.get("missing_required_service_ids", [])
+            ],
+        },
+    }
+
+
+def _call_list_plugins(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from apps.plugins.services import PluginService
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    payloads = PluginService().list_visible(org_id=org_id)
+    return _text([_plugin_payload(p) for p in payloads])
+
+
+def _call_toggle_org_plugin_activation(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    import uuid as _uuid
+
+    from apps.organizations.services import OrganizationService
+    from apps.plugins.services import PluginService
+    from common.exceptions import ConflictError, NotFoundError
+
+    org_service = OrganizationService()
+    org_service.require_membership(api_key.user, org_id)
+    if org_service.get_user_role(api_key.user, org_id) != "admin":
+        return _error("Admin role required")
+    plugin_id_str = args.get("plugin_id")
+    if not plugin_id_str:
+        return _error("plugin_id is required")
+    try:
+        plugin_id = _uuid.UUID(str(plugin_id_str))
+    except ValueError:
+        return _error("Invalid plugin_id UUID")
+    if not isinstance(args.get("active"), bool):
+        return _error("active must be a boolean")
+    try:
+        updated = PluginService().set_org_activation(
+            plugin_id, org_id=org_id, user=api_key.user, active=args["active"]
+        )
+    except NotFoundError:
+        return _error("Plugin not found")
+    except ConflictError as exc:
+        return _error(str(exc))
+    return _text(_plugin_payload(updated))
+
+
+def _call_list_workspace_plugins(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    import uuid as _uuid
+
+    from apps.plugins.services import PluginService
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = _uuid.UUID(str(workspace_id_str))
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+    payloads = PluginService().list_workspace_plugins(
+        workspace=workspace, org_id=org_id
+    )
+    return _text(
+        [
+            {
+                "id": str(p["id"]),
+                "name": p["name"],
+                "slug": p["slug"],
+                "workspace_enabled": bool(p["workspace_enabled"]),
+                "ready": bool(p["ready"]),
+                "missing_required_credentials": [
+                    {
+                        "key": g["key"],
+                        "service_id": str(g["service_id"]),
+                    }
+                    for g in p.get("missing_required_credentials", [])
+                ],
+            }
+            for p in payloads
+        ]
+    )
+
+
+def _call_set_workspace_plugins(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from apps.plugins.services import PluginService
+    from common.exceptions import ConflictError, NotFoundError
+
+    workspace_id_str = args.get("workspace_id")
+    plugin_ids = args.get("plugin_ids")
+    if not workspace_id_str or not isinstance(plugin_ids, list):
+        return _error("workspace_id and plugin_ids are required")
+    try:
+        workspace_id = _uuid.UUID(str(workspace_id_str))
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+    try:
+        desired = [_uuid.UUID(str(pid)) for pid in plugin_ids]
+    except ValueError:
+        return _error("Invalid plugin_id UUID in plugin_ids")
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+    try:
+        payloads = PluginService().set_workspace_plugins(
+            workspace=workspace,
+            org_id=org_id,
+            user=api_key.user,
+            plugin_ids=desired,
+        )
+    except NotFoundError:
+        return _error("Plugin not found")
+    except ConflictError as exc:
+        return _error(str(exc))
+    return _text(
+        [
+            {
+                "id": str(p["id"]),
+                "workspace_enabled": bool(p["workspace_enabled"]),
+                "ready": bool(p["ready"]),
+            }
+            for p in payloads
+        ]
+    )
 
 
 def _get_harness_service():
@@ -3697,9 +3946,9 @@ async def _call_delete_process(api_key, org_id, args: dict) -> list[TextContent]
 def _call_list_org_credential_services(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
-    from apps.credentials.models import (
-        CredentialService,
-        OrgCredentialServiceActivation,
+    from apps.credentials.repositories import (
+        CredentialServiceRepository,
+        OrgCredentialServiceActivationRepository,
     )
 
     try:
@@ -3707,12 +3956,10 @@ def _call_list_org_credential_services(
     except PermissionError as exc:
         return _error(str(exc))
 
-    activated_ids = set(
-        OrgCredentialServiceActivation.objects.filter(
-            organization_id=org_id
-        ).values_list("credential_service_id", flat=True)
+    activated_ids = OrgCredentialServiceActivationRepository.activated_service_ids(
+        org_id
     )
-    services = CredentialService.objects.all().order_by("name")
+    services = CredentialServiceRepository.list_visible_to_org(org_id)
     return _text(
         [
             {
@@ -3733,10 +3980,8 @@ def _call_list_org_credential_services(
 def _call_toggle_org_credential_service_activation(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
-    from apps.credentials.models import (
-        CredentialService,
-        OrgCredentialServiceActivation,
-    )
+    from apps.credentials.repositories import CredentialServiceRepository
+    from apps.credentials.services import OrgCredentialServiceActivationSvc
 
     try:
         _require_org_admin(api_key.user, org_id)
@@ -3746,20 +3991,13 @@ def _call_toggle_org_credential_service_activation(
         if "active" not in args:
             raise ValueError("active is required")
         active = bool(args.get("active"))
-        service = CredentialService.objects.filter(id=service_id).first()
+        service = CredentialServiceRepository.get_visible_by_id(service_id, org_id)
         if service is None:
             return _error("Credential service not found")
 
-        if active:
-            OrgCredentialServiceActivation.objects.get_or_create(
-                organization_id=org_id,
-                credential_service=service,
-            )
-        else:
-            OrgCredentialServiceActivation.objects.filter(
-                organization_id=org_id,
-                credential_service=service,
-            ).delete()
+        OrgCredentialServiceActivationSvc().set_activation(
+            org_id=org_id, service=service, active=active
+        )
 
         return _text(
             {
@@ -3805,6 +4043,10 @@ _TOOL_HANDLERS = {
     "delete_build_job": _call_delete_build_job,
     "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
+    "list_plugins": _call_list_plugins,
+    "toggle_org_plugin_activation": _call_toggle_org_plugin_activation,
+    "list_workspace_plugins": _call_list_workspace_plugins,
+    "set_workspace_plugins": _call_set_workspace_plugins,
     "get_provider_config": _call_get_provider_config,
     "list_provider_models": _call_list_provider_models,
     "save_provider_config": _call_save_provider_config,

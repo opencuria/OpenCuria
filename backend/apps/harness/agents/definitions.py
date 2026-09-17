@@ -169,6 +169,11 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "write": "deny",
             "process": "deny",
             "bash": dict(EXPLORE_BASH_RULES),
+            # MCP tools can mutate through third-party servers and their
+            # read/write annotations are not reliable: deny them all for
+            # the read-only explore agent (fnmatch ``*`` matches all
+            # ``mcp_``-prefixed namespaced tools).
+            "mcp_*": "deny",
             **QUESTION_DENY,
         },
         color="green",

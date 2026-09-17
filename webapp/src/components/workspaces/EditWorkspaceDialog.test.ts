@@ -1,14 +1,19 @@
 import { nextTick } from 'vue'
-import { shallowMount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { mount, shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { RuntimeType, WorkspaceStatus, type Workspace, type WorkspacePlugin } from '@/types'
 
 const routerPush = vi.fn()
 const fetchCredentials = vi.fn()
 const fetchRunners = vi.fn()
 const updateWorkspace = vi.fn()
+const fetchWorkspacePlugins = vi.fn()
+const setWorkspacePlugins = vi.fn()
+const resyncWorkspacePlugins = vi.fn()
+const fetchPlugins = vi.fn()
 
 const credentialStore = {
   credentials: [
@@ -76,8 +81,42 @@ const runnerStore = {
   runnerById: (id: string) => runnerStore.runners.find((runner) => runner.id === id),
 }
 
+const fetchWorkspaceDetail = vi.fn(async (_id: string) => {})
+
 const workspaceStore = {
   updateWorkspace,
+  fetchWorkspaceDetail,
+}
+
+function makeWorkspacePlugin(overrides: Partial<WorkspacePlugin> = {}): WorkspacePlugin {
+  return {
+    id: 'plugin-1',
+    name: 'Playwright',
+    slug: 'playwright',
+    description: 'Browser automation',
+    organization_id: null,
+    is_global: true,
+    workspace_enabled: false,
+    missing_required_credentials: [
+      { key: 'api_key', service_id: 'service-github', service_slug: 'github' },
+    ],
+    ready: false,
+    ...overrides,
+  }
+}
+
+const pluginStore = {
+  plugins: [] as Array<{
+    id: string
+    credential_requirements: Array<{ required: boolean; service_id: string }>
+  }>,
+  workspacePlugins: {} as Record<string, WorkspacePlugin[]>,
+  workspacePluginsLoading: {} as Record<string, boolean>,
+  workspacePluginsError: {} as Record<string, string | null>,
+  fetchWorkspacePlugins,
+  setWorkspacePlugins,
+  resyncWorkspacePlugins,
+  fetchPlugins,
 }
 
 vi.mock('vue-router', () => ({
@@ -96,6 +135,30 @@ vi.mock('@/stores/workspaces', () => ({
 
 vi.mock('@/stores/runners', () => ({
   useRunnerStore: () => runnerStore,
+}))
+
+const notificationStoreMock = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
+  info: vi.fn(),
+}))
+
+vi.mock('@/stores/plugins', () => ({
+  usePluginStore: () => pluginStore,
+}))
+
+vi.mock('vue-sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}))
+
+vi.mock('@/stores/notifications', () => ({
+  useNotificationStore: () => notificationStoreMock,
 }))
 
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
@@ -129,46 +192,95 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   }
 }
 
+type Vm = {
+  handleOpen: () => Promise<void>
+  handleSubmit: () => Promise<void>
+  toggleCredential: (id: string) => void
+  togglePlugin: (id: string) => void
+  name: string
+  qemuMemoryMb: number
+  desktopWidth: number
+  desktopHeight: number
+  selectedCredentialIds: string[]
+  selectedPluginIds: string[]
+  open: boolean
+}
+
+function vmOf(wrapper: ReturnType<typeof shallowMount>): Vm {
+  return wrapper.vm as unknown as Vm
+}
+
+const dialogStubs = {
+  Dialog: { template: '<div><slot /></div>', props: ['open'] },
+  DialogContent: { template: '<div><slot /></div>' },
+  DialogHeader: { template: '<div><slot /></div>' },
+  DialogTitle: { template: '<div><slot /></div>' },
+  DialogDescription: { template: '<div><slot /></div>' },
+  DialogBody: { template: '<div><slot /></div>' },
+  DialogFooter: { template: '<div><slot /></div>' },
+  DialogTrigger: { template: '<div><slot /></div>' },
+}
+
+function mountDialog(workspace: Workspace) {
+  setActivePinia(createPinia())
+  return mount(EditWorkspaceDialog, {
+    props: { workspace },
+    global: { stubs: dialogStubs },
+  })
+}
+
+function mountShallowDialog(workspace: Workspace) {
+  setActivePinia(createPinia())
+  return shallowMount(EditWorkspaceDialog, {
+    props: { workspace },
+  })
+}
+
 describe('EditWorkspaceDialog', () => {
   beforeEach(() => {
     routerPush.mockReset()
     fetchCredentials.mockReset()
     fetchRunners.mockReset()
+    fetchWorkspacePlugins.mockReset()
+    setWorkspacePlugins.mockReset()
+    resyncWorkspacePlugins.mockReset()
+    fetchPlugins.mockReset()
     updateWorkspace.mockReset()
     updateWorkspace.mockResolvedValue(true)
+    fetchWorkspaceDetail.mockReset()
+    fetchWorkspaceDetail.mockResolvedValue(undefined)
+    pluginStore.plugins = []
+    pluginStore.workspacePlugins = {}
+    pluginStore.workspacePluginsLoading = {}
+    pluginStore.workspacePluginsError = {}
   })
 
   it('omits unchanged QEMU resources when saving non-resource edits', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
+    pluginStore.workspacePlugins = { 'workspace-1': [] }
+    const wrapper = mountShallowDialog(makeWorkspace())
 
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { name: string }).name = 'Renamed workspace'
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).name = 'Renamed workspace'
     await nextTick()
 
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
+    await vmOf(wrapper).handleSubmit()
 
     expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
       name: 'Renamed workspace',
       credential_ids: ['cred-1'],
     })
+    expect(setWorkspacePlugins).not.toHaveBeenCalled()
   })
 
   it('includes only the QEMU resource fields that changed', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
+    pluginStore.workspacePlugins = { 'workspace-1': [] }
+    const wrapper = mountShallowDialog(makeWorkspace())
 
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { qemuMemoryMb: number }).qemuMemoryMb = 8192
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).qemuMemoryMb = 8192
     await nextTick()
 
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
+    await vmOf(wrapper).handleSubmit()
 
     expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
       name: 'Workspace',
@@ -178,33 +290,25 @@ describe('EditWorkspaceDialog', () => {
   })
 
   it('replaces the selected credential when another credential from the same service is chosen', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
+    pluginStore.workspacePlugins = { 'workspace-1': [] }
+    const wrapper = mountShallowDialog(makeWorkspace())
 
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { toggleCredential: (id: string) => void }).toggleCredential('cred-2')
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).toggleCredential('cred-2')
 
-    expect(
-      (wrapper.vm as typeof wrapper.vm & { selectedCredentialIds: string[] }).selectedCredentialIds,
-    ).toEqual(['cred-2'])
+    expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-2'])
   })
 
   it('includes changed desktop size when saving', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
+    pluginStore.workspacePlugins = { 'workspace-1': [] }
+    const wrapper = mountShallowDialog(makeWorkspace())
 
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { desktopWidth: number }).desktopWidth = 1280
-    ;(wrapper.vm as typeof wrapper.vm & { desktopHeight: number }).desktopHeight = 720
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).desktopWidth = 1280
+    vmOf(wrapper).desktopHeight = 720
     await nextTick()
 
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
+    await vmOf(wrapper).handleSubmit()
 
     expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
       name: 'Workspace',
@@ -212,5 +316,199 @@ describe('EditWorkspaceDialog', () => {
       desktop_width: 1280,
       desktop_height: 720,
     })
+  })
+
+  it('loads credentials and workspace plugins on open and preselects enabled plugins', async () => {
+    pluginStore.workspacePlugins = {
+      'workspace-1': [makeWorkspacePlugin({ workspace_enabled: true })],
+    }
+    const wrapper = mountDialog(makeWorkspace())
+
+    await vmOf(wrapper).handleOpen()
+
+    expect(fetchCredentials).toHaveBeenCalled()
+    expect(fetchWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
+    expect(vmOf(wrapper).selectedPluginIds).toEqual(['plugin-1'])
+    expect(wrapper.find('[data-testid="workspace-plugin-plugin-1"]').exists()).toBe(true)
+  })
+
+  it('blocks save when a selected plugin misses credentials until attach', async () => {
+    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin()] }
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
+
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="workspace-plugin-missing-plugin-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
+
+    await vmOf(wrapper).handleSubmit()
+    expect(updateWorkspace).not.toHaveBeenCalled()
+    expect(setWorkspacePlugins).not.toHaveBeenCalled()
+
+    // Attaching a matching credential clears the gate.
+    await wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(false)
+
+    updateWorkspace.mockResolvedValue(true)
+    setWorkspacePlugins.mockResolvedValue([makeWorkspacePlugin({ workspace_enabled: true })])
+    await vmOf(wrapper).handleSubmit()
+    expect(updateWorkspace).toHaveBeenCalled()
+    expect(setWorkspacePlugins).toHaveBeenCalledWith('workspace-1', ['plugin-1'])
+  })
+
+  it('saves deactivation → credential patch → final activation in order', async () => {
+    const calls: string[] = []
+    setWorkspacePlugins.mockImplementation(async (_id: string, ids: string[]) => {
+      calls.push(`plugins:${ids.join(',')}`)
+      return []
+    })
+    updateWorkspace.mockImplementation(async () => {
+      calls.push('workspace')
+      return true
+    })
+    pluginStore.workspacePlugins = {
+      'workspace-1': [
+        makeWorkspacePlugin({
+          workspace_enabled: true,
+          missing_required_credentials: [],
+          ready: true,
+        }),
+      ],
+    }
+    const wrapper = mountShallowDialog(makeWorkspace())
+
+    await vmOf(wrapper).handleOpen()
+    // Deselect the only enabled plugin.
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+    await vmOf(wrapper).handleSubmit()
+
+    expect(calls).toEqual(['plugins:', 'workspace', 'plugins:'])
+    expect(updateWorkspace).toHaveBeenCalledWith(
+      'workspace-1',
+      expect.objectContaining({ credential_ids: ['cred-1'] }),
+      expect.objectContaining({ notify: false }),
+    )
+    expect(vmOf(wrapper).open).toBe(false)
+  })
+
+  it('keeps the dialog open and resyncs when a step fails', async () => {
+    setWorkspacePlugins.mockResolvedValue(null)
+    pluginStore.workspacePlugins = {
+      'workspace-1': [
+        makeWorkspacePlugin({
+          workspace_enabled: true,
+          missing_required_credentials: [],
+          ready: true,
+        }),
+      ],
+    }
+    const wrapper = mountShallowDialog(makeWorkspace())
+
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+    await vmOf(wrapper).handleSubmit()
+
+    expect(updateWorkspace).not.toHaveBeenCalled()
+    expect(resyncWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
+    expect(vmOf(wrapper).open).toBe(true)
+  })
+
+  it('attach is idempotent: an attached credential shows Attached and stays selected', async () => {
+    pluginStore.workspacePlugins = {
+      'workspace-1': [makeWorkspacePlugin({ workspace_enabled: false })],
+    }
+    pluginStore.plugins = []
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
+
+    await vmOf(wrapper).handleOpen()
+    await nextTick()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+
+    // Gap offers Attach for the missing credential…
+    const attach = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]')
+    expect(attach.exists()).toBe(true)
+    expect(attach.text()).toContain('Attach')
+    await attach.trigger('click')
+    await nextTick()
+    expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
+
+    // …and once attached the button is disabled/idempotent (no detach).
+    const attached = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]')
+    if (attached.exists()) {
+      expect(attached.attributes('disabled')).toBeDefined()
+      await attached.trigger('click')
+      expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
+    } else {
+      // Gap resolved via catalog requirements: still selected.
+      expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
+    }
+  })
+
+  it('disables plugin toggles but still saves workspace fields when the plugin list fails to load', async () => {
+    pluginStore.workspacePlugins = {}
+    pluginStore.workspacePluginsError = { 'workspace-1': 'boom' }
+    const wrapper = mountDialog(makeWorkspace())
+
+    await vmOf(wrapper).handleOpen()
+    expect(wrapper.find('[data-testid="workspace-plugins-error"]').text()).toContain(
+      'Plugin changes are disabled',
+    )
+    expect(wrapper.find('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeUndefined()
+
+    vmOf(wrapper).name = 'Renamed'
+    await nextTick()
+    await vmOf(wrapper).handleSubmit()
+
+    expect(updateWorkspace).toHaveBeenCalledWith(
+      'workspace-1',
+      expect.objectContaining({ name: 'Renamed' }),
+    )
+    expect(setWorkspacePlugins).not.toHaveBeenCalled()
+  })
+
+  it('warns (no success toast) when the workspace patch succeeds but final activation fails', async () => {
+    updateWorkspace.mockResolvedValue(true)
+    fetchWorkspaceDetail.mockResolvedValue(undefined)
+    notificationStoreMock.warning.mockClear()
+    notificationStoreMock.success.mockClear()
+    setWorkspacePlugins.mockResolvedValue(null)
+    pluginStore.workspacePlugins = {
+      'workspace-1': [
+        makeWorkspacePlugin({
+          workspace_enabled: false,
+          missing_required_credentials: [],
+          ready: true,
+        }),
+      ],
+    }
+    pluginStore.plugins = [
+      {
+        id: 'plugin-1',
+        credential_requirements: [],
+      },
+    ]
+    const wrapper = mountShallowDialog(makeWorkspace({ credential_ids: ['cred-1'] }))
+
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+    await vmOf(wrapper).handleSubmit()
+
+    expect(updateWorkspace).toHaveBeenCalledWith(
+      'workspace-1',
+      expect.anything(),
+      expect.objectContaining({ notify: false }),
+    )
+    expect(notificationStoreMock.warning).toHaveBeenCalledWith('Partially saved', expect.any(String))
+    expect(notificationStoreMock.success).not.toHaveBeenCalledWith('Workspace updated', expect.anything())
+    expect(vmOf(wrapper).open).toBe(true)
+    expect(fetchWorkspaceDetail).toHaveBeenCalledWith('workspace-1')
+    expect(resyncWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
   })
 })

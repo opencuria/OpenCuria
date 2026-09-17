@@ -113,6 +113,12 @@ class RunnerService:
         # Runner harness:process_* handlers only emit *_result events (no
         # Socket.IO ACK), so correlation uses request_id futures.
         self._process_pending: dict[str, asyncio.Future] = {}
+        # In-flight reply-awaited Socket.IO calls: event ->
+        # request_id/connection_id -> Future. Runner handlers never
+        # return Socket.IO ACK payloads (they emit ``*_result`` events),
+        # so ``sio.call`` would always time out; correlation uses the
+        # reply events instead (see ``_call_reply_waiter``).
+        self._call_pending: dict[str, dict[str, asyncio.Future]] = {}
         # In-flight git RPCs: request_id -> _PendingGitRequest. Runner
         # git:operation handlers only emit git:operation_result events
         # (no Socket.IO ACK), so correlation uses request_id futures plus
@@ -121,6 +127,313 @@ class RunnerService:
         # Per workspace/repo serialisation guards for git operations.
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Generic byte streams (workspace:stream_* transport, no plugin/MCP
+    # domain knowledge — generic bidirectional process/TCP streams only)
+    # ------------------------------------------------------------------
+
+    #: ACK timeout for stream control events (start/input/close).
+    _STREAM_CALL_TIMEOUT_SECONDS = 15.0
+
+    #: Max raw bytes per stream chunk in either direction.
+    _STREAM_CHUNK_SIZE = 64 * 1024
+
+    _STREAM_RESULT_EVENTS = frozenset(
+        {
+            "workspace:stream_output",
+            "workspace:stream_closed",
+        }
+    )
+
+    @staticmethod
+    def _is_stream_event(event: str) -> bool:
+        """Return True for runner->backend stream events."""
+        return event in RunnerService._STREAM_RESULT_EVENTS
+
+    def _validate_stream_payload(
+        self, event: str, data: dict
+    ) -> tuple[str, str] | None:
+        """Fail-closed validation for stream events (ids + ownership).
+
+        Returns ``(workspace_id, connection_id)`` when the payload is
+        well-formed and owned by the sending runner; otherwise logs and
+        returns ``None``.  Never raises, never touches the frontend bus.
+        """
+        if not isinstance(data, dict):
+            logger.warning("%s rejected: malformed payload", event)
+            return None
+        workspace_id = data.get("workspace_id", "")
+        connection_id = data.get("connection_id", "")
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            logger.warning("%s rejected: missing workspace_id", event)
+            return None
+        if not isinstance(connection_id, str) or not connection_id.strip():
+            logger.warning("%s rejected: missing connection_id", event)
+            return None
+        try:
+            uuid.UUID(workspace_id)
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "%s rejected: invalid workspace_id %s",
+                event,
+                workspace_id,
+            )
+            return None
+        return workspace_id, connection_id
+
+    def _validate_stream_chunk_payload(self, data: dict) -> bool:
+        """Validate one ``workspace:stream_output`` chunk (bounded base64).
+
+        A ``started`` marker (empty data, sent by the runner right after
+        ``stream_start`` as the open-ACK) is valid control traffic: it
+        carries no bytes and must pass validation so the start waiter
+        resolves and the live byte stream still accepts it.
+        """
+        if bool(data.get("started", False)):
+            return True
+        stream = data.get("stream", "")
+        if stream not in ("stdout", "stderr"):
+            return False
+        content = data.get("data", "")
+        if not isinstance(content, str) or not content:
+            return False
+        import base64 as _b64
+
+        try:
+            clean = "".join(content.split())
+            decoded = _b64.b64decode(clean, validate=True)
+        except Exception:
+            return False
+        return 0 < len(decoded) <= self._STREAM_CHUNK_SIZE
+
+    def handle_stream_reply(
+        self,
+        event: str,
+        data: dict,
+        runner_id: str | None = None,
+    ) -> bool:
+        """Route a workspace:stream_* reply to its byte stream (sync).
+
+        Called from Socket.IO handlers via ``sync_to_async``.  Validates
+        workspace ownership like harness replies, then correlates by
+        ``connection_id``.  Stream events never reach the frontend bus.
+
+        Returns ``True`` (accepted) when the payload reached a live byte
+        stream; ``False`` for unknown events, malformed/foreign payloads,
+        or unknown/mismatched/invalid/closed streams.  The runner treats
+        a negative result as a signal to close its side.
+        """
+        if event not in self._STREAM_RESULT_EVENTS:
+            return False
+        validated = self._validate_stream_payload(event, data)
+        if validated is None:
+            return False
+        workspace_id, connection_id = validated
+        if runner_id:
+            try:
+                workspace_uuid = uuid.UUID(workspace_id)
+            except (ValueError, TypeError):
+                return False
+            if not self._validate_harness_workspace_runner(
+                workspace_uuid, runner_id
+            ):
+                logger.warning(
+                    "%s rejected: workspace %s does not belong to runner %s",
+                    event,
+                    workspace_id,
+                    runner_id,
+                )
+                return False
+        else:
+            try:
+                workspace_uuid = uuid.UUID(workspace_id)
+            except (ValueError, TypeError):
+                return False
+            if self.workspaces.get_runner_id(workspace_uuid) is None:
+                logger.warning(
+                    "%s rejected: workspace %s not found",
+                    event,
+                    workspace_id,
+                )
+                return False
+        if event == "workspace:stream_output":
+            if not self._validate_stream_chunk_payload(
+                data if isinstance(data, dict) else {}
+            ):
+                logger.warning(
+                    "%s rejected: invalid chunk payload for connection %s",
+                    event,
+                    connection_id,
+                )
+                return False
+        # Reply-awaited ``sio.call`` replacement: resolve the pending
+        # control-call future first (stream_start/input/close carry no
+        # other reply channel).
+        self._resolve_call_reply(event, data)
+        from apps.harness.access.runner_accessor import (
+            route_stream_closed,
+            route_stream_output,
+        )
+
+        if event == "workspace:stream_output":
+            return route_stream_output(data)
+        return route_stream_closed(data)
+
+    # -- reply-awaited Socket.IO calls (``sio.call`` replacement) ---------
+
+    #: Control events awaited via reply events (not Socket.IO ACKs):
+    #: ``workspace:stream_start`` is answered by an explicit ``started``
+    #: output marker from the runner (plus ``stream_closed`` carrying an
+    #: ``error`` on failure). ``input``/``close`` are only rejected
+    #: explicitly; success stays silent, so waiters resolve on
+    #: timeout-free completion via a short settle delay (see below).
+    _CALL_REPLY_EVENTS: dict[str, tuple[str, ...]] = {
+        "workspace:stream_start": (
+            "workspace:stream_output",
+            "workspace:stream_closed",
+        ),
+    }
+
+    def _call_reply_key(self, event: str, payload: dict) -> str | None:
+        """Return the correlation id for a reply-awaited call event."""
+        if event == "workspace:stream_start":
+            candidate = payload.get("connection_id", "")
+            key = str(candidate or "").strip()
+            return key or None
+        return None
+
+    def _call_reply_waiter(
+        self, event: str, payload: dict
+    ) -> tuple[str, asyncio.Future] | None:
+        """Register a reply future for *event* (sync-safe creation).
+
+        The waiter is registered *after* the ``sio.call`` ACK timed out
+        (the runner is slow but alive): the late runner reply still
+        arrives as a ``workspace:stream_output`` started-marker or
+        ``workspace:stream_closed`` error, which then resolves the
+        future. Registration needs the caller's running loop.
+        """
+        key = self._call_reply_key(event, payload)
+        if key is None:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        future: asyncio.Future = loop.create_future()
+        self._call_pending.setdefault(event, {})[key] = future
+        return key, future
+
+    def _discard_call_reply_waiter(self, event: str, key: str) -> None:
+        """Drop a reply waiter (timeout/cancel/answer path)."""
+        pending = self._call_pending.get(event)
+        if pending is not None:
+            future = pending.pop(key, None)
+            if future is not None and not future.done():
+                future.cancel()
+            if not pending:
+                self._call_pending.pop(event, None)
+
+    def _resolve_call_reply(self, event: str, data: dict) -> bool:
+        """Resolve a pending call waiter from a reply event (sync-safe).
+
+        Called from Socket.IO reply handlers (``sync_to_async`` worker
+        threads) — resolves thread-safely like
+        :meth:`_resolve_process_future`.
+        """
+        if not isinstance(data, dict):
+            return False
+        for call_event, reply_events in self._CALL_REPLY_EVENTS.items():
+            if event not in reply_events:
+                continue
+            pending = self._call_pending.get(call_event)
+            if not pending:
+                continue
+            raw_key = data.get("connection_id", "")
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            future = pending.get(key)
+            if future is None or future.done():
+                continue
+            if event == "workspace:stream_output" and not bool(
+                data.get("started", False)
+            ):
+                # Payload chunks are data plane traffic, not the
+                # open-ACK — only the explicit ``started`` marker (or a
+                # failed ``stream_closed``) resolves the start waiter.
+                continue
+            result: dict = {"ok": True, "connection_id": key}
+            if event == "workspace:stream_closed":
+                if data.get("error"):
+                    result = {
+                        "ok": False,
+                        "connection_id": key,
+                        "error": str(data.get("error")),
+                    }
+                else:
+                    # Plain EOF/close notice without output first is not
+                    # a start-ACK (late close of an older stream); only
+                    # resolve when it carries an explicit error.
+                    continue
+
+            def _set() -> None:
+                if not future.done():
+                    future.set_result(result)
+
+            try:
+                loop = future.get_loop()
+            except RuntimeError:
+                loop = None
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if loop is not None and loop.is_running() and running is not loop:
+                loop.call_soon_threadsafe(_set)
+            else:
+                _set()
+            return True
+        return False
+
+    async def call_stream_event(
+        self,
+        runner: "Runner",
+        event: str,
+        payload: dict,
+        timeout: float | None = None,
+    ) -> dict:
+        """ACKed call for stream control events (start/input/close)."""
+        return await self._call_runner(
+            runner,
+            event,
+            payload,
+            timeout=int(timeout or self._STREAM_CALL_TIMEOUT_SECONDS),
+        )
+
+    def fail_streams_for_runner(self, runner_id: str) -> None:
+        """Fail all byte streams owned by a disconnecting runner (sync)."""
+        from apps.harness.access import runner_accessor as _accessor_mod
+
+        try:
+            claimed = uuid.UUID(str(runner_id))
+        except (ValueError, TypeError, AttributeError):
+            logger.warning(
+                "stream fail rejected: invalid runner_id %s", runner_id
+            )
+            return
+        for accessor in list(_accessor_mod._ACCESSORS_BY_STREAM.values()):
+            try:
+                owner_id = self.workspaces.get_runner_id(
+                    uuid.UUID(str(accessor.workspace_id))
+                )
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if owner_id == claimed:
+                accessor.fail_all_streams(
+                    f"runner {runner_id} disconnected"
+                )
 
     # ------------------------------------------------------------------
     # Git operations (productive git integration)
@@ -330,6 +643,14 @@ class RunnerService:
 
         self.runners.set_offline(runner)
         logger.info("Runner unregistered: %s", runner.id)
+        # Fail any open byte streams so harness waiters surface offline
+        # instead of hanging until their timeout.
+        try:
+            self.fail_streams_for_runner(str(runner.id))
+        except Exception:
+            logger.exception(
+                "Failed failing streams for runner %s", runner.id
+            )
 
         # Notify frontend about runner going offline so it can update display.
         self._forward_runner_status_to_frontend(runner, "offline")
@@ -1113,6 +1434,11 @@ class RunnerService:
                     runner = workspace.runner
                     if not runner.is_online:
                         raise RunnerOfflineError(str(runner.id))
+                    # Reconfigure restarts the VM: fail workspace streams
+                    # so harness waiters surface it instead of hanging.
+                    self.mark_processes_killed(
+                        str(workspace_id), reason="workspace_reconfigured"
+                    )
 
                     task_id = generate_uuid()
                     task = await sync_to_async(self.tasks.create)(
@@ -3456,6 +3782,20 @@ class RunnerService:
             workspace_id,
             reason,
         )
+        # Streams are workspace-bound too: fail them so harness waiters
+        # surface the lifecycle event instead of hanging.
+        try:
+            from apps.harness.access import runner_accessor as _accessor_mod
+
+            for accessor in list(_accessor_mod._ACCESSORS_BY_STREAM.values()):
+                if str(accessor.workspace_id) == str(workspace_id):
+                    accessor.fail_all_streams(
+                        f"workspace {workspace_id} lifecycle: {reason}"
+                    )
+        except Exception:
+            logger.exception(
+                "Failed failing streams for workspace %s", workspace_id
+            )
         return len(running)
 
     # ------------------------------------------------------------------
@@ -4525,7 +4865,12 @@ class RunnerService:
 
             if runner_status is None:
                 # Workspace exists in backend but not on runner —
-                # container was removed externally.
+                # container was removed externally. Terminal states
+                # (FAILED/REMOVED/...) are steady: never touch them here
+                # (a reconnecting runner whose cache is still syncing
+                # would otherwise flip FAILED back and forth, and a
+                # FAILED workspace must stay usable for its sessions
+                # until the user deletes it).
                 if ws.status in (
                     WorkspaceStatus.RUNNING,
                     WorkspaceStatus.STOPPED,
@@ -4801,16 +5146,42 @@ class RunnerService:
         *,
         timeout: int = 15,
     ) -> dict:
-        """Send request/response Socket.IO call to a specific runner."""
+        """Send request/response call to a specific runner.
+
+        Runner handlers answer two ways: newer handlers return a
+        Socket.IO ACK payload (``sio.call``), older fire-and-forget
+        handlers emit ``*_result`` events. Prefer ``sio.call`` and fall
+        back to reply-event correlation only when no ACK arrives — but
+        only for events with a registered reply waiter (stream control).
+        """
         if self.sio is None:
             raise RuntimeError("No Socket.IO server configured")
         if not runner.sid:
             raise RunnerOfflineError(str(runner.id))
 
         try:
-            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
-        except SocketIOTimeoutError as exc:
-            raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
+            response = await self.sio.call(
+                event, data, to=runner.sid, timeout=timeout
+            )
+        except SocketIOTimeoutError:
+            # No ACK from the runner handler: try reply-event
+            # correlation for stream control events, otherwise surface
+            # the timeout.
+            waiter = self._call_reply_waiter(event, data)
+            if waiter is None:
+                raise RuntimeError(
+                    f"Runner call timed out for event '{event}'"
+                )
+            request_id, future = waiter
+            try:
+                try:
+                    response = await asyncio.wait_for(future, timeout)
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"Runner call timed out for event '{event}'"
+                    ) from exc
+            finally:
+                self._discard_call_reply_waiter(event, request_id)
         if response is None:
             return {}
         if isinstance(response, dict):

@@ -57,10 +57,10 @@ class OrganizationService:
 
     @staticmethod
     def _seed_activations(org) -> None:
-        """Activate all credential services for a new org."""
+        """Activate all global credential services for a new org."""
         from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 
-        all_services = CredentialService.objects.all()
+        all_services = CredentialService.objects.filter(organization__isnull=True)
         svc_activations = [
             OrgCredentialServiceActivation(organization=org, credential_service=svc)
             for svc in all_services

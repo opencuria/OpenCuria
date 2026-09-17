@@ -18,12 +18,24 @@ from .models import Credential, CredentialService
 
 
 class CredentialServiceRepository:
-    """Data access for CredentialService (global catalog) records."""
+    """Data access for CredentialService (global + org-owned) records."""
 
     @staticmethod
     def list_all() -> QuerySet[CredentialService]:
-        """Return all credential services ordered by name."""
+        """Return all credential services ordered by name (legacy helper)."""
         return CredentialService.objects.all()
+
+    @staticmethod
+    def list_visible_to_org(org_id: uuid.UUID) -> QuerySet[CredentialService]:
+        """Return global + org-owned services visible in the given org."""
+        return CredentialService.objects.filter(
+            Q(organization__isnull=True) | Q(organization_id=org_id)
+        ).order_by("name")
+
+    @staticmethod
+    def list_org_owned(org_id: uuid.UUID) -> QuerySet[CredentialService]:
+        """Return org-owned services of the given org."""
+        return CredentialService.objects.filter(organization_id=org_id)
 
     @staticmethod
     def get_by_id(service_id: uuid.UUID) -> CredentialService | None:
@@ -31,9 +43,34 @@ class CredentialServiceRepository:
         return CredentialService.objects.filter(id=service_id).first()
 
     @staticmethod
+    def get_visible_by_id(
+        service_id: uuid.UUID, org_id: uuid.UUID
+    ) -> CredentialService | None:
+        """Fetch a service visible in the org (global or org-owned)."""
+        return (
+            CredentialService.objects.filter(id=service_id)
+            .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+            .first()
+        )
+
+    @staticmethod
     def get_by_slug(slug: str) -> CredentialService | None:
-        """Fetch a credential service by slug."""
+        """Fetch a credential service by slug (legacy helper)."""
         return CredentialService.objects.filter(slug=slug).first()
+
+    @staticmethod
+    def get_global_by_slug(slug: str) -> CredentialService | None:
+        """Fetch a global service by slug."""
+        return CredentialService.objects.filter(
+            slug=slug, organization__isnull=True
+        ).first()
+
+    @staticmethod
+    def get_org_by_slug(slug: str, org_id: uuid.UUID) -> CredentialService | None:
+        """Fetch an org-owned service of this org by slug."""
+        return CredentialService.objects.filter(
+            slug=slug, organization_id=org_id
+        ).first()
 
     @staticmethod
     def create(
@@ -45,6 +82,7 @@ class CredentialServiceRepository:
         env_var_name: str,
         target_path: str,
         label: str,
+        organization_id: uuid.UUID | None = None,
     ) -> CredentialService:
         """Create a credential service catalog entry."""
         return CredentialService.objects.create(
@@ -55,7 +93,20 @@ class CredentialServiceRepository:
             env_var_name=env_var_name,
             target_path=target_path,
             label=label,
+            organization_id=organization_id,
         )
+
+    @staticmethod
+    def delete_org_services(
+        org_id: uuid.UUID, service_ids: list[uuid.UUID]
+    ) -> int:
+        """Delete org-owned service definitions of one org."""
+        if not service_ids:
+            return 0
+        count, _ = CredentialService.objects.filter(
+            id__in=service_ids, organization_id=org_id
+        ).delete()
+        return count
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +224,78 @@ class CredentialRepository:
             .filter(Q(organization_id=org_id) | Q(user_id=user_id))
             .select_related("service")
         )
+
+    @staticmethod
+    def exists_for_service_ids(service_ids: list[uuid.UUID]) -> bool:
+        """Return True if any credential references the given services."""
+        if not service_ids:
+            return False
+        return Credential.objects.filter(service_id__in=service_ids).exists()
+
+    @staticmethod
+    def service_ids_with_credentials(
+        service_ids: list[uuid.UUID],
+    ) -> set[uuid.UUID]:
+        """Return the subset of service IDs still referenced by credentials."""
+        if not service_ids:
+            return set()
+        return set(
+            Credential.objects.filter(service_id__in=service_ids).values_list(
+                "service_id", flat=True
+            )
+        )
+
+    @staticmethod
+    def org_service_ids_with_credentials(
+        org_id: uuid.UUID, service_ids: list[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Return org-credential service IDs (no secret values inspected)."""
+        if not service_ids:
+            return set()
+        return set(
+            Credential.objects.filter(
+                organization_id=org_id, service_id__in=service_ids
+            ).values_list("service_id", flat=True)
+        )
+
+class OrgCredentialServiceActivationRepository:
+    """Data access for OrgCredentialServiceActivation records."""
+
+    @staticmethod
+    def activated_service_ids(org_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return activated service IDs for the org."""
+        from .models import OrgCredentialServiceActivation
+
+        return set(
+            OrgCredentialServiceActivation.objects.filter(
+                organization_id=org_id
+            ).values_list("credential_service_id", flat=True)
+        )
+
+    @staticmethod
+    def ensure_activated(org_id: uuid.UUID, service_ids: list[uuid.UUID]) -> None:
+        """Activate services for the org (idempotent)."""
+        from .models import OrgCredentialServiceActivation
+
+        if not service_ids:
+            return
+        OrgCredentialServiceActivation.objects.bulk_create(
+            [
+                OrgCredentialServiceActivation(
+                    organization_id=org_id,
+                    credential_service_id=service_id,
+                )
+                for service_id in service_ids
+            ],
+            ignore_conflicts=True,
+        )
+
+    @staticmethod
+    def deactivate(org_id: uuid.UUID, service_id: uuid.UUID) -> None:
+        """Deactivate a service for the org."""
+        from .models import OrgCredentialServiceActivation
+
+        OrgCredentialServiceActivation.objects.filter(
+            organization_id=org_id,
+            credential_service_id=service_id,
+        ).delete()

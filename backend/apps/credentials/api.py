@@ -17,8 +17,7 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from apps.runners.schemas import ErrorOut
-from common.exceptions import AuthenticationError, NotFoundError
-
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from .schemas import (
     CredentialCreateIn,
     CredentialOut,
@@ -86,6 +85,7 @@ def _credential_service_to_out(service, *, is_active: bool | None = None):
         env_var_name=service.env_var_name,
         target_path=service.target_path,
         label=service.label,
+        organization_id=getattr(service, "organization_id", None),
     )
     if is_active is None:
         return CredentialServiceOut(**payload)
@@ -105,7 +105,7 @@ credential_service_router = Router(tags=["credential-services"])
     summary="List credential services",
 )
 def list_credential_services(request: HttpRequest):
-    """Return all credential services."""
+    """Return credential services visible in the active org (global + own)."""
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_READ):
         return 403, ErrorOut(
             detail="API key lacks permission: credentials:read",
@@ -116,7 +116,7 @@ def list_credential_services(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     svc = CredentialServiceSvc()
-    services = svc.list_services()
+    services = svc.list_services(org_id=org_id)
 
     return [_credential_service_to_out(s) for s in services]
 
@@ -188,6 +188,7 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
                 name=payload.name or None,
                 value=payload.value,
                 user=request.user,
+                org_id=org_id,
             )
         return 201, _credential_to_out(cred)
     except NotFoundError as e:
@@ -265,7 +266,7 @@ def update_credential(
 
 @credential_router.delete(
     "/{credential_id}/",
-    response={204: None, 403: ErrorOut, 404: ErrorOut},
+    response={204: None, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Delete a credential",
 )
 def delete_credential(request: HttpRequest, credential_id: uuid.UUID):
@@ -273,6 +274,8 @@ def delete_credential(request: HttpRequest, credential_id: uuid.UUID):
 
     Personal credentials: only owner may delete.
     Org credentials: only org admins may delete.
+    Returns 409 ``plugin_credentials_in_use`` when the credential backs
+    an effective plugin activation of an attached workspace.
     """
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_WRITE):
         return 403, ErrorOut(detail="API key lacks permission: credentials:write", code="permission_denied")
@@ -294,6 +297,8 @@ def delete_credential(request: HttpRequest, credential_id: uuid.UUID):
         return 404, ErrorOut(detail=e.message, code=e.code)
     except AuthenticationError as e:
         return 403, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 # ===========================================================================
@@ -309,8 +314,9 @@ org_credential_service_router = Router(tags=["org-credential-services"])
     summary="List all credential services with activation status (admin only)",
 )
 def list_org_credential_services(request: HttpRequest):
-    """Return all credential services with their activation status for the org."""
-    from .models import CredentialService, OrgCredentialServiceActivation
+    """Return visible credential services with activation status for the org."""
+    from .repositories import CredentialServiceRepository
+    from .services import OrgCredentialServiceActivationSvc
 
     if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ)
@@ -320,13 +326,11 @@ def list_org_credential_services(request: HttpRequest):
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    activated_ids = set(
-        OrgCredentialServiceActivation.objects.filter(
-            organization_id=org_id
-        ).values_list("credential_service_id", flat=True)
+    activated_ids = OrgCredentialServiceActivationSvc().activated_service_ids(
+        org_id
     )
 
-    services = CredentialService.objects.all().order_by("name")
+    services = CredentialServiceRepository.list_visible_to_org(org_id)
     return 200, [
         _credential_service_to_out(s, is_active=s.id in activated_ids)
         for s in services
@@ -340,7 +344,7 @@ def list_org_credential_services(request: HttpRequest):
 )
 def create_org_credential_service(request: HttpRequest, payload: CredentialServiceCreateIn):
     """Create a new credential service and activate it for the current organization."""
-    from .models import OrgCredentialServiceActivation
+    from .services import OrgCredentialServiceActivationSvc
 
     if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
@@ -369,16 +373,20 @@ def create_org_credential_service(request: HttpRequest, payload: CredentialServi
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="validation_error")
 
-    OrgCredentialServiceActivation.objects.get_or_create(
-        organization_id=org_id,
-        credential_service=service,
+    OrgCredentialServiceActivationSvc().set_activation(
+        org_id=org_id, service=service, active=True
     )
     return 201, _credential_service_to_out(service, is_active=True)
 
 
 @org_credential_service_router.post(
     "/{service_id}/activation/",
-    response={200: CredentialServiceWithActivationOut, 403: ErrorOut, 404: ErrorOut},
+    response={
+        200: CredentialServiceWithActivationOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Toggle activation of a credential service for the org",
 )
 def toggle_org_credential_service_activation(
@@ -386,8 +394,13 @@ def toggle_org_credential_service_activation(
     service_id: uuid.UUID,
     payload: CredentialServiceActivationToggleIn,
 ):
-    """Activate or deactivate a credential service for the organization."""
-    from .models import CredentialService, OrgCredentialServiceActivation
+    """Activate or deactivate a visible credential service for the org.
+
+    Deactivation returns 409 ``plugin_service_activation_in_use`` while
+    an org-enabled plugin of this org requires the service.
+    """
+    from .repositories import CredentialServiceRepository
+    from .services import OrgCredentialServiceActivationSvc
 
     if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
@@ -402,19 +415,15 @@ def toggle_org_credential_service_activation(
             code="forbidden",
         )
 
-    svc = CredentialService.objects.filter(id=service_id).first()
+    svc = CredentialServiceRepository.get_visible_by_id(service_id, org_id)
     if svc is None:
         return 404, ErrorOut(detail="Credential service not found", code="not_found")
 
-    if payload.active:
-        OrgCredentialServiceActivation.objects.get_or_create(
-            organization_id=org_id, credential_service=svc
+    try:
+        is_active = OrgCredentialServiceActivationSvc().set_activation(
+            org_id=org_id, service=svc, active=payload.active
         )
-        is_active = True
-    else:
-        OrgCredentialServiceActivation.objects.filter(
-            organization_id=org_id, credential_service=svc
-        ).delete()
-        is_active = False
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
     return 200, _credential_service_to_out(svc, is_active=is_active)

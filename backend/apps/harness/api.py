@@ -186,6 +186,7 @@ class HarnessQuestionOut(Schema):
 
     request_id: uuid.UUID
     status: str
+    resumed: bool = True
 
 
 class HarnessSessionOut(Schema):
@@ -822,10 +823,29 @@ def _agent_config_to_out(row: dict) -> AgentConfigOut:
 
 
 def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
-    """Load the org provider config and map to the public response."""
+    """Load the org provider config and map to the public response.
+
+    Missing legacy rows are normal (defaults were never saved): return
+    an empty config shape instead of 404 so old frontend calls and
+    gating fetches stop spamming ``Not Found`` warnings.
+    """
     from apps.harness.services import ProviderConfigService
 
-    config = ProviderConfigService().get_config(org_id)
+    service = ProviderConfigService()
+    try:
+        config = service.get_config(org_id)
+    except NotFoundError:
+        return ProviderConfigOut(
+            base_url=DEFAULT_BASE_URL,
+            default_model="",
+            small_model="",
+            computer_use_model="",
+            default_effort="",
+            small_effort="",
+            computer_use_effort="",
+            has_api_key=_openrouter_connection_view(org_id)[0],
+            api_key_hint=_openrouter_connection_view(org_id)[1],
+        )
     return _provider_config_to_out(config, org_id)
 
 
@@ -1549,6 +1569,7 @@ async def resolve_harness_question(
         return 200, HarnessQuestionOut(
             request_id=question_id,
             status=outcome["status"],
+            resumed=bool(outcome.get("resumed", True)),
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

@@ -25,20 +25,32 @@ from .enums import CredentialType
 
 class CredentialService(models.Model):
     """
-    A global catalog entry for an external service that accepts credentials.
+    A catalog entry for an external service that accepts credentials.
 
     Each service defines exactly one credential type and injection method.
-    Managed by platform admins via the Django admin.
+    Global services (``organization`` null) are managed by platform staff;
+    org-owned services are created through the plugin API and are only
+    visible inside their organization.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="credential_services",
+        help_text=(
+            "Null for global services; set for org-owned services "
+            "(e.g. created for a plugin)."
+        ),
+    )
     name = models.CharField(
         max_length=255,
         help_text="Human-readable service name (e.g. 'GitHub').",
     )
     slug = models.SlugField(
         max_length=255,
-        unique=True,
         help_text="URL-safe identifier (e.g. 'github').",
     )
     description = models.TextField(
@@ -81,6 +93,18 @@ class CredentialService(models.Model):
     class Meta:
         db_table = "credentials_service"
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(organization__isnull=True),
+                name="unique_global_credential_service_slug",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "slug"],
+                condition=models.Q(organization__isnull=False),
+                name="unique_org_credential_service_slug",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name

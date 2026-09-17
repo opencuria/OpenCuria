@@ -346,6 +346,17 @@ class WorkspaceRepository:
         )
 
     @staticmethod
+    def list_ids_for_credential(
+        credential_id: uuid.UUID,
+    ) -> list[uuid.UUID]:
+        """Return workspace IDs with *credential_id* attached (org-agnostic)."""
+        return list(
+            Workspace.objects.filter(credentials__id=credential_id).values_list(
+                "id", flat=True
+            )
+        )
+
+    @staticmethod
     def list_by_user(user_id: int) -> QuerySet[Workspace]:
         """Return all workspaces created by a specific user."""
         return (

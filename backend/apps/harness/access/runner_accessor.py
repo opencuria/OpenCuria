@@ -76,7 +76,9 @@ from .base import (
     ExecResult,
     FileContent,
     FileStat,
+    StreamClosedError,
     WorkspaceAccessor,
+    WorkspaceByteStream,
     guess_mime_type,
     sanitize_exec_workdir,
     sanitize_harness_path,
@@ -146,8 +148,7 @@ def route_harness_chunk(data: dict[str, Any]) -> bool:
             request_id=data.get("request_id", ""),
         )
         return False
-    accessor._deliver_chunk(data)
-    return True
+    return accessor._deliver_chunk(data)
 
 
 def route_harness_done(data: dict[str, Any]) -> bool:
@@ -159,8 +160,7 @@ def route_harness_done(data: dict[str, Any]) -> bool:
             request_id=data.get("request_id", ""),
         )
         return False
-    accessor._deliver_done(data)
-    return True
+    return accessor._deliver_done(data)
 
 
 def route_harness_result(data: dict[str, Any]) -> bool:
@@ -172,8 +172,7 @@ def route_harness_result(data: dict[str, Any]) -> bool:
             request_id=data.get("request_id", ""),
         )
         return False
-    accessor._deliver_result(data)
-    return True
+    return accessor._deliver_result(data)
 
 
 def route_harness_file_chunk(data: dict[str, Any]) -> bool:
@@ -185,8 +184,37 @@ def route_harness_file_chunk(data: dict[str, Any]) -> bool:
             request_id=data.get("request_id", ""),
         )
         return False
-    accessor._deliver_file_chunk(data)
-    return True
+    return accessor._deliver_file_chunk(data)
+
+
+#: Runner -> backend stream events route by connection_id instead of
+#: request_id.  The owning accessor is resolved through the byte-stream
+#: registry (connection ids are globally unique per backend process).
+_ACCESSORS_BY_STREAM: dict[str, RunnerWorkspaceAccessor] = {}
+
+
+def route_stream_output(data: dict[str, Any]) -> bool:
+    """Deliver a ``workspace:stream_output`` chunk to its byte stream."""
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is None:
+        log.warning(
+            "stream_output_unknown_connection",
+            connection_id=data.get("connection_id", ""),
+        )
+        return False
+    return accessor._deliver_stream_output(data)
+
+
+def route_stream_closed(data: dict[str, Any]) -> bool:
+    """Deliver a ``workspace:stream_closed`` notice to its byte stream."""
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is None:
+        log.warning(
+            "stream_closed_unknown_connection",
+            connection_id=data.get("connection_id", ""),
+        )
+        return False
+    return accessor._deliver_stream_closed(data)
 
 
 def _normalize_command(command: list[str] | str) -> list[str] | str:
@@ -227,6 +255,140 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     }
 
 
+#: Max raw bytes per stream chunk in either direction.
+STREAM_CHUNK_SIZE = 64 * 1024
+
+#: Bounded per-stream queue depth (chunks of at most 64KiB each).
+STREAM_QUEUE_DEPTH = 64
+
+#: ACK timeout for stream control events (start/input/close).
+STREAM_CALL_TIMEOUT = 15.0
+
+#: Bounded stderr capture per byte stream (newest bytes win). The newest
+#: bytes carry the crash reason; the sanitized excerpt (not verbatim
+#: content) is what failure logs and skip notes attach.
+MCP_STDERR_BUFFER_BYTES = 64 * 1024
+
+_TCP_HOST_RE = None  # compiled lazily in _validate_tcp_host
+
+
+def _validate_tcp_host(host: str) -> str:
+    """Validate a workspace-local TCP host (fail-closed, no shell use)."""
+    import ipaddress as _ip
+    import re as _re
+
+    cleaned = (host or "").strip()
+    if not cleaned or len(cleaned) > 255 or "\x00" in cleaned or "\n" in cleaned:
+        raise ValueError(f"Invalid host: {host!r}")
+    if cleaned in ("localhost", "127.0.0.1", "::1"):
+        return cleaned
+    try:
+        _ip.ip_address(cleaned)
+        return cleaned
+    except ValueError:
+        pass
+    if not _re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?", cleaned):
+        raise ValueError(f"Invalid host: {host!r}")
+    return cleaned
+
+
+def _validate_tcp_port(port: object) -> int:
+    """Validate a workspace-local TCP port (1..65535)."""
+    try:
+        number = int(port)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid port: {port!r}") from exc
+    if isinstance(port, bool) or not 1 <= number <= 65535:
+        raise ValueError(f"Invalid port: {port!r}")
+    return number
+
+
+class _StreamState:
+    """Bookkeeping for one open :class:`RunnerByteStream`."""
+
+    __slots__ = (
+        "connection_id",
+        "queue",
+        "closed",
+        "close_error",
+        "close_event",
+        "exit_code",
+        "stderr_buf",
+        "stderr_total",
+        "opened_at",
+        "stdout_bytes",
+    )
+
+    def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
+        self.connection_id = connection_id
+        self.queue = queue
+        self.closed = False
+        self.close_error: str | None = None
+        self.close_event = asyncio.Event()
+        self.exit_code: int | None = None
+        # Bounded stderr capture (newest bytes win) for failure
+        # diagnosis. Only the sanitized excerpt ever reaches logs —
+        # see ``get_stream_stderr_excerpt``.
+        self.stderr_buf = bytearray()
+        self.stderr_total = 0
+        self.opened_at = 0.0
+        self.stdout_bytes = 0
+
+    def append_stderr(self, data: bytes) -> None:
+        """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
+        raw = bytes(data or b"")
+        if not raw:
+            return
+        self.stderr_total += len(raw)
+        self.stderr_buf.extend(raw)
+        overflow = len(self.stderr_buf) - MCP_STDERR_BUFFER_BYTES
+        if overflow > 0:
+            del self.stderr_buf[:overflow]
+
+    def stderr_excerpt(self) -> str:
+        """Return the sanitized stderr excerpt (secret-free, bounded)."""
+        from apps.harness.mcp_client.stdio import sanitize_stderr_excerpt
+
+        return sanitize_stderr_excerpt(bytes(self.stderr_buf))
+
+
+class RunnerByteStream(WorkspaceByteStream):
+    """Runner-backed byte stream (one ``workspace:stream_*`` connection)."""
+
+    def __init__(
+        self,
+        accessor: RunnerWorkspaceAccessor,
+        workspace_id: str,
+        connection_id: str,
+    ) -> None:
+        super().__init__(workspace_id, connection_id)
+        self._accessor = accessor
+        self._closed_locally = False
+
+    async def receive(self) -> bytes:
+        """Return the next stdout chunk; ``b""`` marks clean EOF."""
+        return await self._accessor._stream_receive(self.connection_id)
+
+    async def send(self, data: bytes) -> None:
+        """Write raw bytes to the stream stdin (bounded chunks)."""
+        await self._accessor._stream_send(self.connection_id, data)
+
+    async def send_eof(self) -> None:
+        """Half-close the stream stdin (graceful EOF)."""
+        await self._accessor._stream_send_eof(self.connection_id)
+
+    async def aclose(self) -> None:
+        """Close the stream (idempotent; remote close follows)."""
+        if self._closed_locally:
+            return
+        self._closed_locally = True
+        await self._accessor._stream_close(self.connection_id)
+
+    async def wait_closed(self) -> int | None:
+        """Wait for the remote close; return exit code when known."""
+        return await self._accessor._stream_wait_closed(self.connection_id)
+
+
 class RunnerWorkspaceAccessor(WorkspaceAccessor):
     """Workspace accessor that forwards operations to a runner.
 
@@ -242,13 +404,24 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         emit: EmitFn,
         default_timeout: float = DEFAULT_TIMEOUT,
         desktop_geometry: Callable[[], Awaitable[tuple[int, int]]] | None = None,
+        call: Callable[[str, dict[str, Any], float | None], Awaitable[dict[str, Any]]]
+        | None = None,
+        on_stderr: Callable[[str, bytes], None] | None = None,
     ) -> None:
         super().__init__(workspace_id)
         self._emit = emit
         self._default_timeout = default_timeout
         self._desktop_geometry = desktop_geometry
+        # Optional request/response transport for stream control events
+        # (``workspace:stream_start/input/close`` need Socket.IO ACKs).
+        # Falls back to :meth:`_emit_no_ack` when the service only offers
+        # fire-and-forget emit — stream opens then fail closed on ACK wait.
+        self._call = call
+        self._on_stderr = on_stderr
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Byte-stream state: connection_id -> _StreamState (bounded queues).
+        self._byte_streams: dict[str, _StreamState] = {}
         # Bounded reassembly for chunked harness reads (request_id -> state).
         # Entries expire via the read timeout and are dropped on
         # timeout/error/cancel so partial transfers never linger.
@@ -282,16 +455,17 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     # -- reply routing (called from Socket.IO handlers) -------------------
 
-    def _deliver_result(self, data: dict[str, Any]) -> None:
+    def _deliver_result(self, data: dict[str, Any]) -> bool:
         """Resolve the pending unary request future for *data*."""
         request_id = str(data.get("request_id", ""))
         future = self._pending.get(request_id)
         if future is None or future.done():
             log.warning("harness_result_no_pending", request_id=request_id)
-            return
+            return False
         self._schedule(_resolve_future, future, data)
+        return True
 
-    def _deliver_file_chunk(self, data: dict[str, Any]) -> None:
+    def _deliver_file_chunk(self, data: dict[str, Any]) -> bool:
         """Buffer one ``harness:read_file_chunk`` slice for *data*.
 
         The first chunk pins a strictly validated ``total_chunks``
@@ -306,7 +480,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         state = self._file_chunks.get(request_id)
         if future is None or future.done() or state is None:
             log.warning("harness_file_chunk_no_pending", request_id=request_id)
-            return
+            return False
 
         def _store() -> None:
             try:
@@ -371,14 +545,15 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 _resolve_future_exception(future, exc)
 
         self._schedule(_store)
+        return True
 
-    def _deliver_chunk(self, data: dict[str, Any]) -> None:
+    def _deliver_chunk(self, data: dict[str, Any]) -> bool:
         """Push a stream chunk into the queue for *data*."""
         request_id = str(data.get("request_id", ""))
         queue = self._streams.get(request_id)
         if queue is None:
             log.warning("harness_chunk_no_stream", request_id=request_id)
-            return
+            return False
         self._schedule(
             queue.put_nowait,
             {
@@ -387,15 +562,17 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 "data": str(data.get("data", "")),
             },
         )
+        return True
 
-    def _deliver_done(self, data: dict[str, Any]) -> None:
+    def _deliver_done(self, data: dict[str, Any]) -> bool:
         """Push the terminal stream message into the queue for *data*."""
         request_id = str(data.get("request_id", ""))
         queue = self._streams.get(request_id)
         if queue is None:
             log.warning("harness_done_no_stream", request_id=request_id)
-            return
+            return False
         self._schedule(queue.put_nowait, {"type": "done", "payload": data})
+        return True
 
     # -- internals --------------------------------------------------------
 
@@ -1142,6 +1319,582 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"process_delete failed: {exc}") from exc
         return {"process_id": str(deleted_id), "deleted": True}
 
+    # -- Generic byte streams (workspace:stream_* transport) ---------------
+
+    async def _emit_no_ack(self, event: str, payload: dict[str, Any]) -> None:
+        """Fire-and-forget emit used when no ACK transport is wired."""
+        await self._emit(event, payload)
+
+    async def _stream_call(
+        self,
+        event: str,
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        """Send a stream control event and wait for the runner ACK."""
+        timeout_s = self._resolve_timeout(timeout)
+        if self._call is not None:
+            try:
+                result = await asyncio.wait_for(
+                    self._call(event, payload, timeout_s), timeout_s
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Harness request '{event}' timed out "
+                    f"after {timeout_s:.1f}s"
+                ) from exc
+            if isinstance(result, dict):
+                return result
+            return {"ok": True, "result": result}
+        # No ACK transport: emit without ACK and fail closed (the runner
+        # cannot confirm the open; callers must not assume success).
+        await self._emit_no_ack(event, payload)
+        raise RunnerAccessorError(
+            f"{event} failed: no acknowledgement transport configured"
+        )
+
+    def _register_byte_stream(self, connection_id: str) -> _StreamState:
+        """Register bounded queue state for one open byte stream."""
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=STREAM_QUEUE_DEPTH
+        )
+        state = _StreamState(connection_id, queue)
+        state.opened_at = asyncio.get_running_loop().time()
+        self._byte_streams[connection_id] = state
+        _ACCESSORS_BY_STREAM[connection_id] = self
+        return state
+
+    def get_stream_stderr_excerpt(self, connection_id: str = "") -> str:
+        """Return the sanitized stderr excerpt for *connection_id* (or last).
+
+        Secret-free and bounded (see
+        :func:`apps.harness.mcp_client.stdio.sanitize_stderr_excerpt`):
+        safe to attach to logs and skip notes. With no id, the most
+        recently registered stream wins; unknown ids yield ``""``.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return ""
+        try:
+            return state.stderr_excerpt()
+        except Exception:  # pragma: no cover - logs must never break
+            return ""
+
+    def get_stream_diagnostics(self, connection_id: str = "") -> dict[str, Any]:
+        """Return secret-free lifecycle counters for one stream (or last).
+
+        ``stderr_excerpt`` is the sanitized tail (bounded); counters
+        (bytes, age, exit) tell "spawned but silent" apart from "died
+        loudly" without touching payload content.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return {}
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:  # pragma: no cover - no running loop
+            now = state.opened_at
+        return {
+            "connection_id": state.connection_id,
+            "closed": state.closed,
+            "close_error": state.close_error,
+            "exit_code": state.exit_code,
+            "stdout_bytes": state.stdout_bytes,
+            "stderr_bytes": state.stderr_total,
+            "stderr_buffered": len(state.stderr_buf),
+            "age_s": round(max(0.0, now - (state.opened_at or now)), 2),
+            "stderr_excerpt": self.get_stream_stderr_excerpt(
+                state.connection_id
+            ),
+        }
+
+    def _unregister_byte_stream(self, connection_id: str) -> None:
+        """Drop all routing state for one byte stream."""
+        self._byte_streams.pop(connection_id, None)
+        if _ACCESSORS_BY_STREAM.get(connection_id) is self:
+            _ACCESSORS_BY_STREAM.pop(connection_id, None)
+
+    def _deliver_stream_output(self, data: dict[str, Any]) -> bool:
+        """Enqueue one ``workspace:stream_output`` chunk (bounded).
+
+        Returns ``True`` (accepted) when the chunk was validated and
+        queued; ``False`` for unknown/closed/mismatched/invalid streams —
+        the runner treats a negative ACK as a signal to close its side.
+        """
+        connection_id = str(data.get("connection_id", ""))
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            log.warning(
+                "stream_output_no_stream", connection_id=connection_id
+            )
+            return False
+        if str(data.get("workspace_id", "")) != self.workspace_id:
+            log.warning(
+                "stream_output_workspace_mismatch",
+                connection_id=connection_id,
+            )
+            return False
+        stream = str(data.get("stream", "stdout"))
+        if stream not in ("stdout", "stderr"):
+            log.warning(
+                "stream_output_bad_stream", connection_id=connection_id
+            )
+            return False
+        raw = "".join(str(data.get("data", "")).split())
+        if not raw:
+            # ``started`` open-ACK marker: no bytes, but a valid control
+            # signal — accept it (ACK True) without queueing payload.
+            if bool(data.get("started", False)):
+                return True
+            log.warning(
+                "stream_output_empty", connection_id=connection_id
+            )
+            return False
+        try:
+            decoded_len = len(base64.b64decode(raw, validate=True))
+        except Exception:
+            log.warning(
+                "stream_output_bad_base64", connection_id=connection_id
+            )
+            return False
+        if decoded_len > STREAM_CHUNK_SIZE:
+            log.warning(
+                "stream_output_oversize", connection_id=connection_id
+            )
+            return False
+
+        def _put() -> None:
+            if state.closed:
+                return
+            try:
+                # Count stdout bytes at enqueue time (secret-free size
+                # only; content never leaves the queue into logs).
+                if stream == "stdout":
+                    state.stdout_bytes += decoded_len
+                else:
+                    # Stderr is captured per stream (bounded, newest
+                    # win): it stays out of the MCP stdout framing and
+                    # is only ever surfaced as a sanitized excerpt.
+                    try:
+                        state.append_stderr(
+                            base64.b64decode(raw, validate=True)
+                        )
+                    except Exception:  # pragma: no cover - validated above
+                        pass
+                state.queue.put_nowait(
+                    {"type": "chunk", "stream": stream, "data": raw}
+                )
+            except asyncio.QueueFull:
+                # Overflow: mark the failure AND best-effort remote close
+                # so no process keeps running without a consumer — but
+                # keep the error visible: the waiting consumer still gets
+                # StreamClosedError (close_error is never cleared).
+                state.closed = True
+                state.close_error = "stream queue overflow"
+                state.close_event.set()
+                # Drain one slot for the terminal marker so a
+                # blocked receiver wakes up instead of hanging.
+                with contextlib.suppress(Exception):
+                    try:
+                        state.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    state.queue.put_nowait({"type": "closed"})
+                log.warning(
+                    "stream_output_queue_full",
+                    connection_id=connection_id,
+                )
+                self._request_remote_close(connection_id)
+
+        self._schedule(_put)
+        return True
+
+    def _request_remote_close(self, connection_id: str) -> None:
+        """Best-effort remote close without touching consumer state.
+
+        Fire-and-forget ``workspace:stream_close`` (shielded, no ACK
+        wait): the local ``close_error`` is preserved so the waiting
+        consumer still observes the original failure instead of a
+        silent EOF.
+        """
+
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    self._emit(
+                        "workspace:stream_close",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": self.workspace_id,
+                        },
+                    )
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(_close())
+        elif self._loop is not None and self._loop.is_running():
+            with contextlib.suppress(RuntimeError):
+                asyncio.run_coroutine_threadsafe(
+                    _close(), self._loop
+                )
+
+    def _deliver_stream_closed(self, data: dict[str, Any]) -> bool:
+        """Resolve one byte stream with the runner close notice."""
+        connection_id = str(data.get("connection_id", ""))
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            log.warning(
+                "stream_closed_no_stream", connection_id=connection_id
+            )
+            return False
+        if str(data.get("workspace_id", "")) != self.workspace_id:
+            log.warning(
+                "stream_closed_workspace_mismatch",
+                connection_id=connection_id,
+            )
+            return False
+
+        def _close() -> None:
+            state.closed = True
+            error = data.get("error")
+            if error:
+                state.close_error = str(error)
+            else:
+                try:
+                    code = data.get("exit_code")
+                    state.exit_code = (
+                        int(code) if code is not None else None
+                    )
+                except (TypeError, ValueError):
+                    state.exit_code = None
+            state.close_event.set()
+            try:
+                state.queue.put_nowait({"type": "closed"})
+            except asyncio.QueueFull:
+                pass
+            # One structured line per stream close: exit code /
+            # close error plus lifecycle counters. This is the line
+            # that answers "did the server die, and when" — stderr
+            # content itself stays in the sanitized excerpt only.
+            log.info(
+                "stream_closed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                exit_code=state.exit_code,
+                close_error=state.close_error,
+                stdout_bytes=state.stdout_bytes,
+                stderr_bytes=state.stderr_total,
+                age_s=round(
+                    max(
+                        0.0,
+                        asyncio.get_running_loop().time()
+                        - (state.opened_at or 0.0),
+                    ),
+                    2,
+                )
+                if state.opened_at
+                else 0.0,
+            )
+
+        self._schedule(_close)
+        return True
+
+    def fail_all_streams(self, error: str) -> None:
+        """Fail every open byte stream (runner disconnect path)."""
+
+        def _fail() -> None:
+            for state in list(self._byte_streams.values()):
+                state.closed = True
+                state.close_error = error
+                state.close_event.set()
+                with contextlib.suppress(asyncio.QueueFull):
+                    state.queue.put_nowait({"type": "closed"})
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if self._loop is not None and running is not self._loop:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(_fail)
+                return
+        _fail()
+
+    async def cancel_stream(self, connection_id: str) -> None:
+        """Cancel one open byte stream (timeout/owner-gone path).
+
+        Sends best-effort remote close and unregisters routing state so
+        a later harness-run ``aclose`` is a no-op. Fail-closed: unknown
+        ids raise ``StreamClosedError``.
+        """
+        if connection_id not in self._byte_streams:
+            raise StreamClosedError(
+                f"stream {connection_id!r} is not open"
+            )
+        await self._stream_close(connection_id)
+
+    async def _stream_receive(self, connection_id: str) -> bytes:
+        """Return the next stdout chunk for *connection_id* (``b""`` = EOF).
+
+        No idle timeout: MCP connections may stay idle for a long time.
+        Startup/request timeouts are enforced by the later MCP layer, not
+        here.  Cancellation still propagates (and the caller closes the
+        stream remotely via :meth:`RunnerByteStream.aclose`).
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            raise StreamClosedError(f"stream {connection_id!r} is not open")
+        while True:
+            item = await state.queue.get()
+            kind = item.get("type")
+            if kind == "closed":
+                if state.close_error:
+                    raise StreamClosedError(
+                        f"stream {connection_id!r} closed: "
+                        f"{state.close_error}"
+                    )
+                return b""
+            if item.get("stream") == "stderr":
+                if self._on_stderr is not None:
+                    try:
+                        raw = "".join(
+                            str(item.get("data", "")).split()
+                        )
+                        self._on_stderr(
+                            connection_id,
+                            base64.b64decode(raw, validate=True),
+                        )
+                    except Exception:
+                        log.warning(
+                            "stream_stderr_callback_failed",
+                            connection_id=connection_id,
+                        )
+                else:
+                    log.debug(
+                        "stream_stderr_dropped",
+                        connection_id=connection_id,
+                    )
+                continue
+            try:
+                return base64.b64decode(
+                    "".join(str(item.get("data", "")).split()),
+                    validate=True,
+                )
+            except Exception as exc:
+                raise StreamClosedError(
+                    f"stream {connection_id!r}: invalid chunk"
+                ) from exc
+
+    async def _stream_send(self, connection_id: str, data: bytes) -> None:
+        """Write bounded bytes to one stream (ACK each input event)."""
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            raise StreamClosedError(f"stream {connection_id!r} is not open")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise ValueError("data must be non-empty bytes")
+        if len(data) > STREAM_CHUNK_SIZE:
+            raise ValueError(
+                "stream write exceeds "
+                f"{STREAM_CHUNK_SIZE} byte chunk limit"
+            )
+        payload = {
+            "connection_id": connection_id,
+            "workspace_id": self.workspace_id,
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+        }
+        try:
+            result = await self._stream_call(
+                "workspace:stream_input", payload, None
+            )
+        except StreamClosedError:
+            raise
+        except (TimeoutError, RunnerAccessorError) as exc:
+            raise StreamClosedError(
+                f"stream {connection_id!r} send failed: {exc}"
+            ) from exc
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise StreamClosedError(
+                f"stream {connection_id!r} send rejected: "
+                f"{result.get('error', 'unknown error')}"
+            )
+
+    async def _stream_send_eof(self, connection_id: str) -> None:
+        """Half-close one stream stdin (graceful EOF, best effort)."""
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.shield(
+                self._stream_call(
+                    "workspace:stream_close",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": self.workspace_id,
+                        "eof": True,
+                    },
+                    None,
+                )
+            )
+
+    async def _stream_close(self, connection_id: str) -> None:
+        """Close one stream remotely (best effort, always unregisters)."""
+        try:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    self._stream_call(
+                        "workspace:stream_close",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": self.workspace_id,
+                        },
+                        None,
+                    )
+                )
+        finally:
+            self._unregister_byte_stream(connection_id)
+
+    async def _stream_wait_closed(self, connection_id: str) -> int | None:
+        """Wait for the runner close notice (exit code when known).
+
+        No default timeout: waits until the runner closes the stream,
+        the stream fails, or the waiter is cancelled (cancel still
+        triggers a remote close via the stream's ``aclose``).
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            return None
+        await state.close_event.wait()
+        if state.close_error:
+            raise StreamClosedError(
+                f"stream {connection_id!r} closed: {state.close_error}"
+            )
+        return state.exit_code
+
+    async def _open_byte_stream(
+        self,
+        start_payload: dict[str, Any],
+        timeout: float | None,
+    ) -> RunnerByteStream:
+        """Register state, ACK the open, and return the byte stream.
+
+        On any open failure (runner timeout/reject) the local state is
+        rolled back *and* a best-effort remote close is sent so a slow
+        runner that accepted the spawn late does not leak the process.
+        """
+        connection_id = str(start_payload.get("connection_id", ""))
+        if not connection_id:
+            raise ValueError("connection_id must not be empty")
+        if connection_id in self._byte_streams:
+            raise ValueError(f"Duplicate connection_id: {connection_id!r}")
+        state = self._register_byte_stream(connection_id)
+        try:
+            result = await self._stream_call(
+                "workspace:stream_start", start_payload, timeout
+            )
+        except Exception:
+            self._request_remote_close(connection_id)
+            self._unregister_byte_stream(connection_id)
+            raise
+        if not isinstance(result, dict) or result.get("ok") is False:
+            self._request_remote_close(connection_id)
+            self._unregister_byte_stream(connection_id)
+            error = (
+                result.get("error", "unknown error")
+                if isinstance(result, dict)
+                else "unknown error"
+            )
+            raise StreamClosedError(
+                f"stream {connection_id!r} open rejected: {error}"
+            )
+        _ = state
+        return RunnerByteStream(self, self.workspace_id, connection_id)
+
+    async def open_process(
+        self,
+        command: list[str],
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> WorkspaceByteStream:
+        """Open a workspace-local stdio process stream."""
+        safe_workdir = sanitize_exec_workdir(workdir)
+        if not isinstance(command, list) or not command:
+            raise ValueError("command must be a non-empty argv list")
+        argv = [str(part) for part in command]
+        if any(not part or "\x00" in part for part in argv):
+            raise ValueError("Invalid command argv entry")
+        connection_id = uuid.uuid4().hex
+        log.info(
+            "stream_open",
+            connection_id=connection_id,
+            workspace_id=self.workspace_id,
+            kind="process",
+            # argv[0] only: full args may embed flags/paths that echo
+            # secrets in some setups; the runner logs nothing either.
+            command=argv[0],
+            workdir=safe_workdir,
+        )
+        try:
+            return await self._open_byte_stream(
+                {
+                    "connection_id": connection_id,
+                    "workspace_id": self.workspace_id,
+                    "kind": "process",
+                    "command": argv,
+                    "workdir": safe_workdir,
+                    "env": dict(env or {}),
+                },
+                timeout,
+            )
+        except Exception as exc:
+            log.warning(
+                "stream_open_failed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                kind="process",
+                command=argv[0],
+                error=f"{type(exc).__name__}: {exc}".strip()[:300],
+            )
+            raise
+
+    async def open_tcp(
+        self,
+        host: str,
+        port: int,
+        tls: bool = False,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> WorkspaceByteStream:
+        """Open a workspace-local TCP stream (DNS+connect in workspace)."""
+        clean_host = _validate_tcp_host(host)
+        clean_port = _validate_tcp_port(port)
+        connection_id = uuid.uuid4().hex
+        return await self._open_byte_stream(
+            {
+                "connection_id": connection_id,
+                "workspace_id": self.workspace_id,
+                "kind": "tcp",
+                "host": clean_host,
+                "port": clean_port,
+                "tls": bool(tls),
+                "server_hostname": (server_hostname or "").strip()
+                or clean_host,
+            },
+            timeout,
+        )
+
 
 def _resolve_future(
     future: asyncio.Future[dict[str, Any]], data: dict[str, Any]
@@ -1226,9 +1979,42 @@ async def create_harness_accessor(
             return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
         return int(current.desktop_width), int(current.desktop_height)
 
+    async def _call(
+        event: str, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
+        """ACKed call to the workspace's current runner (stream control)."""
+        current = await sync_to_async(service.workspaces.get_by_id)(
+            _uuid.UUID(workspace_id)
+        )
+        if current is None:
+            raise RunnerAccessorError(
+                f"{event} failed: workspace {workspace_id} not found"
+            )
+        live_runner = current.runner
+        if not live_runner.is_online or not live_runner.sid:
+            raise RunnerAccessorError(
+                f"{event} failed: runner {live_runner.id} is offline"
+            )
+        try:
+            return await service.call_stream_event(
+                live_runner, event, payload, timeout=STREAM_CALL_TIMEOUT
+            )
+        except RunnerOfflineError as exc:
+            raise RunnerAccessorError(f"{event} failed: {exc}") from exc
+
+    def _on_stderr(connection_id: str, data: bytes) -> None:
+        """Record relay stderr volume (never content — may hold secrets)."""
+        log.info(
+            "stream_stderr",
+            connection_id=connection_id,
+            byte_count=len(data),
+        )
+
     return RunnerWorkspaceAccessor(
         workspace_id,
         emit=_emit,
         default_timeout=default_timeout,
         desktop_geometry=_desktop_geometry,
+        call=_call,
+        on_stderr=_on_stderr,
     )

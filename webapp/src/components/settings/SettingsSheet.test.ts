@@ -71,6 +71,26 @@ vi.mock('@/stores/skills', () => ({
   useSkillStore: () => skillStoreMock,
 }))
 
+vi.mock('@/stores/plugins', () => ({
+  usePluginStore: () => ({
+    plugins: [],
+    globalPlugins: [],
+    orgPlugins: [],
+    orgEnabledPlugins: [],
+    loading: false,
+    error: null,
+    togglingId: null,
+    reload: vi.fn(),
+    fetchPlugins: vi.fn(),
+    createPlugin: vi.fn(),
+    updatePlugin: vi.fn(),
+    deletePlugin: vi.fn(),
+    toggleActivation: vi.fn(),
+    fetchWorkspacePlugins: vi.fn(),
+    setWorkspacePlugins: vi.fn(),
+    resyncWorkspacePlugins: vi.fn(),
+  }),
+}))
 vi.mock('@/stores/credentials', () => ({
   useCredentialStore: () => ({
     credentials: [],
@@ -195,6 +215,7 @@ describe('SettingsSheet', () => {
       'agents',
       'skills',
       'credentials',
+      'plugins',
       'api-keys',
       'images',
       'runners',
@@ -205,11 +226,12 @@ describe('SettingsSheet', () => {
     }
   })
 
-  it('hides the runners nav item for non-admins', () => {
+  it('hides the runners nav item for non-admins but keeps plugins visible', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
     expect(wrapper.find('[data-testid="settings-nav-runners"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="settings-nav-general"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="settings-nav-plugins"]').exists()).toBe(true)
     authMock.isAdmin = true
   })
 
@@ -276,6 +298,15 @@ describe('SettingsSheet', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
     authMock.isAdmin = true
+  })
+
+  it('opens the plugins tab via event', async () => {
+    const wrapper = mountSheet()
+
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'plugins' } }))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Plugins')
   })
 
   it('pins the 80rem dialog width with the Tailwind v4 important modifier', () => {

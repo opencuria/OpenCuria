@@ -508,6 +508,18 @@ class WebSocketInterface(Interface):
         @sio.event
         async def disconnect() -> None:
             logger.warning("websocket_disconnected")
+            # Backend is gone: fail all generic streams closed so no MCP
+            # process tree lingers without a consumer.
+            with contextlib.suppress(Exception):
+                await self._service.close_all_streams(
+                    reason="backend_disconnect"
+                )
+            # Cancel stream pumps too: they would otherwise linger until
+            # their next read raises (the service sessions are already
+            # gone, so every pump is just spinning on ValueError->EOF).
+            for task_key, task in list(self._running_tasks.items()):
+                if task_key.startswith("stream:") and not task.done():
+                    task.cancel()
             # Stop heartbeat on disconnect (will be restarted on reconnect)
             if self._heartbeat_task and not self._heartbeat_task.done():
                 self._heartbeat_task.cancel()
@@ -1270,8 +1282,454 @@ class WebSocketInterface(Interface):
 
         # -- harness workspace-access RPC ----------------------------------------
 
+        #: Generic stream chunk cap (raw bytes per workspace:stream_output).
+        STREAM_OUTPUT_CHUNK = 64 * 1024
+        #: ACK timeout for one workspace:stream_output event.
+        STREAM_OUTPUT_ACK_TIMEOUT = 15.0
+
+        class _StreamOutputRejected(RuntimeError):
+            """Raised when the backend NACKs a stream output chunk."""
+
         async def _harness_result(event: str, data: dict) -> None:
             await sio.emit(event, data)
+
+        async def _emit_stream_output(
+            *,
+            connection_id: str,
+            workspace_id: str,
+            stream: str,
+            payload_b64: str,
+        ) -> None:
+            """Emit one stream output chunk via ACK/backpressure.
+
+            Uses ``sio.call`` so the backend ACKs every chunk; an ACK
+            timeout fails the stream (cleanup) instead of buffering
+            unbounded fire-and-forget output.
+            """
+            from socketio.exceptions import (
+                TimeoutError as _SIOTimeoutError,
+            )
+
+            try:
+                ack = await sio.call(
+                    "workspace:stream_output",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": workspace_id,
+                        "stream": stream,
+                        "data": payload_b64,
+                    },
+                    timeout=STREAM_OUTPUT_ACK_TIMEOUT,
+                )
+            except _SIOTimeoutError as exc:
+                raise TimeoutError(
+                    "workspace:stream_output ACK timed out"
+                ) from exc
+            # Backend ACKs every chunk with {ok: bool}: a negative ACK
+            # (unknown/mismatch/invalid/closed stream) closes the runner
+            # side instead of retrying forever.
+            if isinstance(ack, dict) and ack.get("ok") is False:
+                raise _StreamOutputRejected(
+                    f"stream {connection_id!r} output rejected: "
+                    f"{ack.get('error', 'not accepted')}"
+                )
+
+        def _stream_echo(
+            data: object,
+        ) -> tuple[str, str]:
+            """Return best-effort ``(workspace_id, connection_id)`` echo."""
+            raw = data if isinstance(data, dict) else {}
+            ws = raw.get("workspace_id", "")
+            conn = raw.get("connection_id", "")
+            return (
+                ws if isinstance(ws, str) else "",
+                conn if isinstance(conn, str) else "",
+            )
+
+        def _decode_stream_data(raw: object) -> bytes:
+            """Strictly validate a base64 stream input chunk (max 64KiB raw)."""
+            import base64 as _b64
+
+            if not isinstance(raw, str) or not raw:
+                raise ValueError("data must be non-empty base64")
+            try:
+                decoded = _b64.b64decode(raw, validate=True)
+            except Exception as exc:
+                raise ValueError("invalid base64 stream data") from exc
+            if not decoded or len(decoded) > STREAM_OUTPUT_CHUNK:
+                raise ValueError("stream data exceeds 64KiB chunk limit")
+            return decoded
+
+        async def _pump_stream_to_backend(
+            *,
+            connection_id: str,
+            workspace_id: str,
+        ) -> None:
+            """Forward stream stdout/stderr chunks until EOF, then closed.
+
+            Both runtime streams are pumped *concurrently* (two reader
+            tasks): a stderr-only process must never block on an idle
+            stdout, and vice versa.  Chunks are emitted in arrival order
+            via a single bounded sender queue.  ``stream_close`` (full
+            close) cancels this pump; a natural EOF instead reads the
+            exit code and then removes/closes the service session — no
+            entry is left in ``_streams`` and no double-cancel can race
+            (the task key is popped exactly once, by whoever finishes
+            first, guarded by ``done()`` checks).
+            """
+            import base64 as _b64
+
+            task_key = f"stream:{connection_id}"
+            sender_queue: asyncio.Queue[tuple[str, bytes] | None] = (
+                asyncio.Queue(maxsize=128)
+            )
+
+            async def _read_loop(stream_name: str) -> None:
+                """Pump one runtime stream into the sender queue."""
+                try:
+                    while True:
+                        try:
+                            chunk = await self._service.stream_read_once(
+                                connection_id, stream_name, STREAM_OUTPUT_CHUNK
+                            )
+                        except ValueError:
+                            # Session gone (full close raced us): stop.
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "stream_read_failed",
+                                connection_id=connection_id,
+                                stream=stream_name,
+                            )
+                            break
+                        if not chunk:
+                            break
+                        try:
+                            await sender_queue.put((stream_name, bytes(chunk)))
+                        except asyncio.CancelledError:
+                            raise
+                finally:
+                    # EOF marker per reader; retry briefly if the sender
+                    # queue is momentarily full (sender is alive and
+                    # draining in the success path). Never block forever:
+                    # on cancel/timeout the outer handler tears down.
+                    for _ in range(100):
+                        try:
+                            sender_queue.put_nowait(None)
+                            break
+                        except asyncio.QueueFull:
+                            await asyncio.sleep(0.01)
+
+            async def _sender_loop() -> None:
+                """Emit queued chunks with ACK/backpressure; EOF after both."""
+                eofs = 0
+                while True:
+                    item = await sender_queue.get()
+                    if item is None:
+                        eofs += 1
+                        if eofs >= 2:
+                            return
+                        continue
+                    stream_name, payload = item
+                    await _emit_stream_output(
+                        connection_id=connection_id,
+                        workspace_id=workspace_id,
+                        stream=stream_name,
+                        payload_b64=_b64.b64encode(payload).decode("ascii"),
+                    )
+
+            readers: list[asyncio.Task] = []
+            sender: asyncio.Task | None = None
+            try:
+                readers = [
+                    asyncio.create_task(_read_loop("stdout")),
+                    asyncio.create_task(_read_loop("stderr")),
+                ]
+                sender = asyncio.create_task(_sender_loop())
+                # Wait until both readers hit EOF AND the sender drained.
+                await asyncio.gather(*readers)
+                await sender
+                exit_code: int | None = None
+                try:
+                    exit_code = await self._service.stream_wait(connection_id)
+                except ValueError:
+                    exit_code = None
+                except Exception:
+                    logger.exception(
+                        "stream_wait_failed", connection_id=connection_id
+                    )
+                # Natural EOF: remove + close the service session now
+                # that the exit code is known.  Pop the task key first
+                # so a concurrent full close cannot double-cancel.
+                self._running_tasks.pop(task_key, None)
+                with contextlib.suppress(Exception):
+                    await self._service.stream_close(connection_id)
+                await sio.emit(
+                    "workspace:stream_closed",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": workspace_id,
+                        **(
+                            {"exit_code": int(exit_code)}
+                            if exit_code is not None
+                            else {}
+                        ),
+                    },
+                )
+            except asyncio.CancelledError:
+                # Our own teardown (full close / disconnect / shutdown):
+                # clean up silently with a plain closed event (no error),
+                # then re-raise so task bookkeeping stays correct.
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                try:
+                    await self._service.stream_close(connection_id)
+                except Exception:
+                    pass
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                        },
+                    )
+                raise
+            except TimeoutError:
+                # A genuine ACK timeout from _emit_stream_output: close
+                # the stream and report it so the backend can correlate
+                # the failed stream.
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                try:
+                    await self._service.stream_close(connection_id)
+                except Exception:
+                    pass
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                            "error": "stream output ACK timed out",
+                        },
+                    )
+                raise
+            except Exception as exc:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                try:
+                    await self._service.stream_close(connection_id)
+                except Exception:
+                    pass
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                            "error": str(exc),
+                        },
+                    )
+                logger.exception(
+                    "stream_pump_failed", connection_id=connection_id
+                )
+            finally:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                self._running_tasks.pop(task_key, None)
+
+        @sio.on("workspace:stream_start")
+        async def on_workspace_stream_start(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+            kind = raw.get("kind", "")
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                if not isinstance(conn_echo, str) or not conn_echo.strip():
+                    raise ValueError("connection_id must not be empty")
+                task_key = f"stream:{conn_echo}"
+                existing = self._running_tasks.get(task_key)
+                if existing is not None and not existing.done():
+                    raise ValueError(
+                        f"Duplicate connection_id: {conn_echo!r}"
+                    )
+                if kind == "process":
+                    command = raw.get("command", raw.get("args", []))
+                    await self._service.stream_start_process(
+                        workspace_id,
+                        conn_echo,
+                        command,
+                        workdir=raw.get("workdir", raw.get("cwd", "/workspace")),
+                        env=raw.get("env", {}),
+                    )
+                elif kind == "tcp":
+                    await self._service.stream_start_tcp(
+                        workspace_id,
+                        conn_echo,
+                        raw.get("host", ""),
+                        raw.get("port", 0),
+                        tls=bool(raw.get("tls", False)),
+                        server_hostname=raw.get("server_hostname"),
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown stream kind: {kind!r} "
+                        "(expected 'process' or 'tcp')"
+                    )
+                pump = asyncio.create_task(
+                    _pump_stream_to_backend(
+                        connection_id=conn_echo,
+                        workspace_id=str(workspace_id),
+                    )
+                )
+                self._running_tasks[task_key] = pump
+                # Explicit start-ACK: the backend correlates
+                # ``sio.call``-style waits via reply events (runner
+                # handlers never return Socket.IO ACK payloads through
+                # this stack), so announce readiness with the first
+                # best-effort output event. The pump's natural-EOF
+                # ``stream_closed`` notice is unchanged.
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_output",
+                        {
+                            "connection_id": conn_echo,
+                            "workspace_id": str(workspace_id),
+                            "stream": "stdout",
+                            "data": "",
+                            "started": True,
+                        },
+                    )
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_start_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "error": str(exc),
+                }
+
+        @sio.on("workspace:stream_input")
+        async def on_workspace_stream_input(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                session = self._service.get_stream(conn_echo)
+                if session.workspace_id != workspace_id:
+                    raise ValueError("workspace mismatch for stream")
+                decoded = _decode_stream_data(raw.get("data", ""))
+                await self._service.stream_write(conn_echo, decoded)
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_input_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "error": str(exc),
+                }
+
+        @sio.on("workspace:stream_close")
+        async def on_workspace_stream_close(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                if conn_echo:
+                    try:
+                        session = self._service.get_stream(conn_echo)
+                    except ValueError:
+                        session = None
+                    if session is not None and (
+                        session.workspace_id != workspace_id
+                    ):
+                        raise ValueError("workspace mismatch for stream")
+                if raw.get("eof") and conn_echo:
+                    # Half-close: deliver stdin EOF but NEVER cancel the
+                    # output pump — the process reply still follows.
+                    with contextlib.suppress(Exception):
+                        await self._service.stream_write_eof(conn_echo)
+                    return {
+                        "ok": True,
+                        "connection_id": conn_echo,
+                        "workspace_id": str(workspace_id),
+                        "eof": True,
+                    }
+                # Full close: stop the pump exactly once (guard against
+                # a concurrently finishing natural-EOF pump), then kill
+                # the process tree.
+                task = self._running_tasks.pop(f"stream:{conn_echo}", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                result = await self._service.stream_close(conn_echo)
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                    "closed": bool(result.get("closed", True)),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_close_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "error": str(exc),
+                }
 
         @sio.on("harness:exec_stream")
         async def on_harness_exec_stream(data: dict) -> None:
@@ -1925,6 +2383,20 @@ class WebSocketInterface(Interface):
                     },
                 )
                 logger.exception("harness_process_stop_failed")
+
+        @sio.on("workspace:stream_cancel")
+        async def on_workspace_stream_cancel(data: dict) -> None:
+            raw = data if isinstance(data, dict) else {}
+            conn = raw.get("connection_id", "")
+            if not isinstance(conn, str) or not conn.strip():
+                logger.warning("stream_cancel_missing_connection_id")
+                return
+            task = self._running_tasks.pop(f"stream:{conn}", None)
+            if task is not None and not task.done():
+                task.cancel()
+                logger.info("stream_cancelled", connection_id=conn)
+            with contextlib.suppress(Exception):
+                await self._service.stream_close(conn)
 
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
@@ -2708,11 +3180,20 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("clone_failed")
 
+
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
         """Connect to the backend and block until disconnected."""
         headers = {"Authorization": f"Bearer {self._settings.api_token}"}
+        # Daphne never forwards WebSocket handshake headers into
+        # python-engine.io's environ, so the backend cannot see
+        # ``Authorization`` on a websocket-only connect. The token
+        # additionally travels in the Socket.IO auth payload (inside
+        # the WS frames — never in URLs/logs); the header above is
+        # kept for proxies/backends that forward handshake headers.
+        url = self._settings.backend_url
+        auth = {"token": self._settings.api_token} if self._settings.api_token else None
 
         logger.info(
             "websocket_connecting",
@@ -2720,8 +3201,9 @@ class WebSocketInterface(Interface):
         )
 
         await self._sio.connect(
-            self._settings.backend_url,
+            url,
             headers=headers,
+            auth=auth,
             transports=["websocket"],
             socketio_path=self._settings.socketio_path,
         )
@@ -2731,6 +3213,8 @@ class WebSocketInterface(Interface):
 
     async def stop(self) -> None:
         """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
+        with contextlib.suppress(Exception):
+            await self._service.close_all_streams(reason="runner_shutdown")
         # Cancel heartbeat
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
