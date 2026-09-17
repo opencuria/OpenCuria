@@ -16,6 +16,7 @@ import {
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
 import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
+import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
@@ -123,7 +124,65 @@ const composerSheets = computed(() =>
 const chatInputRef = ref<{
   chooseMention: (candidate: MentionCandidate) => void
   setPrompt: (text: string) => void
+  uploadChatFiles: (files: File[] | FileList) => Promise<void>
 } | null>(null)
+
+/**
+ * Chat-wide drop zone: files dropped anywhere over history + composer
+ * upload into `/workspace/.opencuria/user-uploaded` and insert an `@file:`
+ * token. Subtle composer highlight only (no overlay). Ignored while the
+ * workspace is not ready for prompts (`inputDisabled` covers stopped,
+ * offline and busy sessions).
+ */
+const chatDragCounter = ref(0)
+const chatDragActive = ref(false)
+const uploadDragState = computed(() => ({
+  active: chatDragActive.value,
+  uploading: false,
+}))
+
+const dropEnabled = computed(() => !inputDisabled.value && !isSubagentSession.value)
+
+function resetChatDrag(): void {
+  chatDragCounter.value = 0
+  chatDragActive.value = false
+}
+
+function onChatDragEnter(event: DragEvent): void {
+  if (!dropEnabled.value || !isFileDrag(event)) return
+  event.preventDefault()
+  chatDragCounter.value += 1
+  chatDragActive.value = true
+}
+
+function onChatDragLeave(event: DragEvent): void {
+  if (!chatDragActive.value) return
+  event.preventDefault()
+  chatDragCounter.value -= 1
+  if (chatDragCounter.value <= 0) resetChatDrag()
+}
+
+function onChatDragOver(event: DragEvent): void {
+  if (!dropEnabled.value || !isFileDrag(event)) return
+  event.preventDefault()
+}
+
+function onChatDrop(event: DragEvent): void {
+  // The composer card handles its own drops and stops propagation; if the
+  // event still reaches us marked as handled, ignore it to avoid a second
+  // upload of the same files (double `@file:` reference).
+  if (event.defaultPrevented) return
+  const wasActive = chatDragActive.value
+  resetChatDrag()
+  if (!dropEnabled.value) return
+  // Only handle drops that started inside this panel (prevents double
+  // uploads when nested composer handlers also match).
+  if (!wasActive && !isFileDrag(event)) return
+  event.preventDefault()
+  const files = getDroppedFiles(event)
+  if (files.length === 0) return
+  void chatInputRef.value?.uploadChatFiles(files)
+}
 
 /** Composer section container, used to locate the FLIP morph anchor card. */
 const composerMorphEl = ref<HTMLElement | null>(null)
@@ -529,7 +588,14 @@ async function handleForkMessage(messageId: string): Promise<void> {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 w-full flex-col overflow-x-hidden">
+  <div
+    class="flex h-full min-h-0 w-full flex-col overflow-x-hidden"
+    data-testid="harness-chat-dropzone"
+    @dragenter="onChatDragEnter"
+    @dragleave="onChatDragLeave"
+    @dragover="onChatDragOver"
+    @drop="onChatDrop"
+  >
     <HarnessChatContainer
       :messages="harness.activeMessages"
       :loading="harness.loading"
@@ -578,6 +644,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :skill-options="skillStore.skills"
           :context-used="contextUsed"
           :context-open="contextOpen"
+          :upload-drag="uploadDragState"
           mention-controlled
           :mention-active-index="mentionActiveIndex"
           @update:mode="composerMode = $event"

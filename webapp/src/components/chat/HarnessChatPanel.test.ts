@@ -56,7 +56,7 @@ const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template:
     '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
-  props: ['disabled', 'workspaceId', 'sessionId'],
+  props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag'],
   emits: ['prefill'],
   methods: {
     setPrompt(prompt: string) {
@@ -64,6 +64,9 @@ const HarnessChatInputStub = {
         'prefill',
         prompt,
       )
+    },
+    uploadChatFiles(_files: File[] | FileList) {
+      return Promise.resolve()
     },
   },
 }
@@ -710,5 +713,123 @@ describe('HarnessChatPanel', () => {
 
     expect(editSpy).not.toHaveBeenCalled()
     expect(forkSpy).not.toHaveBeenCalled()
+  })
+
+  function makeDropEvent(files: File[]): DragEvent {
+    const list = {
+      length: files.length,
+      item: (index: number) => files[index] ?? null,
+    } as unknown as FileList & { [index: number]: File }
+    for (let i = 0; i < files.length; i++) {
+      list[i] = files[i]!
+    }
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: list as FileList, types: ['Files'] },
+    })
+    return event
+  }
+
+  it('forwards dropped files to the chat input upload', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    const uploadSpy = vi.spyOn(
+      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+      'uploadChatFiles',
+    ).mockResolvedValue(undefined)
+    const zone = wrapper.find('[data-testid="harness-chat-dropzone"]')
+    expect(zone.exists()).toBe(true)
+    zone.element.dispatchEvent(makeDropEvent([new File(['hi'], 'drop.txt')]))
+    await flushPromises()
+
+    expect(uploadSpy).toHaveBeenCalledTimes(1)
+    const forwarded = uploadSpy.mock.calls[0]![0] as File[]
+    expect(forwarded).toHaveLength(1)
+    expect(forwarded[0]!.name).toBe('drop.txt')
+    uploadSpy.mockRestore()
+  })
+
+  it('ignores drops already handled by the composer card (no double upload)', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    const uploadSpy = vi.spyOn(
+      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+      'uploadChatFiles',
+    ).mockResolvedValue(undefined)
+    const zone = wrapper.find('[data-testid="harness-chat-dropzone"]')
+    // The composer card calls preventDefault + stopPropagation on drops it
+    // handles; such an event bubbling up must not upload a second time.
+    const event = makeDropEvent([new File(['hi'], 'drop.txt')])
+    event.preventDefault()
+    zone.element.dispatchEvent(event)
+    await flushPromises()
+    expect(uploadSpy).not.toHaveBeenCalled()
+    uploadSpy.mockRestore()
+  })
+
+  it('mirrors the drag state as a composer highlight prop and ignores drops when not ready', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const zone = wrapper.find('[data-testid="harness-chat-dropzone"]')
+    const enter = new Event('dragenter', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(enter, 'dataTransfer', { value: { types: ['Files'] } })
+    zone.element.dispatchEvent(enter)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(HarnessChatInputStub).props('uploadDrag')).toEqual({
+      active: true,
+      uploading: false,
+    })
+
+    const leave = new Event('dragleave', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(leave, 'dataTransfer', { value: { types: ['Files'] } })
+    zone.element.dispatchEvent(leave)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(HarnessChatInputStub).props('uploadDrag')).toEqual({
+      active: false,
+      uploading: false,
+    })
+
+    await wrapper.setProps({ canPrompt: false })
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    const uploadSpy = vi.spyOn(
+      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+      'uploadChatFiles',
+    ).mockResolvedValue(undefined)
+    zone.element.dispatchEvent(makeDropEvent([new File(['hi'], 'drop.txt')]))
+    await flushPromises()
+    expect(uploadSpy).not.toHaveBeenCalled()
+    uploadSpy.mockRestore()
   })
 })

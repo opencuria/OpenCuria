@@ -10,6 +10,26 @@ import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { resetRecentModelsCache } from '@/lib/recentModels'
 import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { sendFilesUpload } from '@/services/socket'
+import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
+
+vi.mock('@/services/socket', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
+  return {
+    ...actual,
+    sendFilesUpload: vi.fn(),
+  }
+})
+
+vi.mock('vue-sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}))
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -407,5 +427,288 @@ describe('HarnessChatInput', () => {
     expect(stop.classes()).toContain('bg-primary')
     expect(stop.classes()).toContain('text-primary-foreground')
     expect(stop.classes()).not.toContain('bg-destructive')
+  })
+
+  it('opens the native file dialog when the paperclip is clicked', async () => {
+    const wrapper = mountInput()
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    expect(input.exists()).toBe(true)
+    expect((input.element as HTMLInputElement).multiple).toBe(true)
+    const clickSpy = vi.spyOn(input.element as HTMLInputElement, 'click').mockImplementation(() => {})
+    await wrapper.find('[data-testid="composer-attach"]').trigger('click')
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+    clickSpy.mockRestore()
+  })
+
+  it('disables the paperclip when the workspace is not ready', () => {
+    const wrapper = mountInput({ disabled: true })
+    const attach = wrapper.find('[data-testid="composer-attach"]')
+    expect(attach.attributes('disabled')).toBeDefined()
+  })
+})
+
+/** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */
+function makeFileList(files: File[]): FileList {
+  const list = {
+    length: files.length,
+    item: (index: number) => files[index] ?? null,
+  } as unknown as FileList & { [index: number]: File }
+  for (let i = 0; i < files.length; i++) {
+    list[i] = files[i]!
+  }
+  return list as FileList
+}
+
+describe('HarnessChatInput chat upload', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    sessionStorage.clear()
+    vi.clearAllMocks()
+    vi.useRealTimers()
+    resetProviderCatalogCache()
+    resetAgentConfigsCache()
+    resetRecentModelsCache()
+    listAgentConfigsMock.mockResolvedValue([
+      { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
+      { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
+    ])
+    getProviderConfigMock.mockResolvedValue({
+      base_url: 'https://openrouter.ai/api/v1',
+      default_model: 'openrouter/model-big',
+      small_model: 'openrouter/model-small',
+      computer_use_model: 'openrouter/model-cu',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: '',
+      has_api_key: true,
+      api_key_hint: '',
+    })
+    listProviderModelsMock.mockResolvedValue(catalog)
+  })
+
+  /** Resolve the tracked upload the way a backend `files:upload_result` would. */
+  function succeedUpload(requestId: string, path = CHAT_UPLOAD_DIR): void {
+    useFileExplorerStore().handleUploadResult(requestId, path, 'success', 'ws-1')
+  }
+
+  function uploadRequest(index = 0) {
+    const calls = vi.mocked(sendFilesUpload).mock.calls
+    return {
+      requestId: calls[index]![1] as string,
+      path: calls[index]![2] as string,
+      filename: calls[index]![3] as string,
+    }
+  }
+
+  it('uploads a picked file and inserts an @file: token', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([file]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+
+    const { requestId, path, filename } = uploadRequest()
+    expect(path).toBe(CHAT_UPLOAD_DIR)
+    expect(filename).toBe('my_notes.txt')
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(wrapper.find('textarea').element.value).toContain(
+        `@file:${CHAT_UPLOAD_DIR}/my_notes.txt `,
+      )
+    })
+  })
+
+  it('deduplicates against existing upload-dir files instead of overwriting', async () => {
+    const store = useFileExplorerStore()
+    store.setTree('/workspace', [
+      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
+    ])
+    store.setTree('/workspace/.opencuria', [
+      { name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 },
+    ])
+    store.setTree(CHAT_UPLOAD_DIR, [
+      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
+    ])
+    const fetchSpy = vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([new File(['x'], 'a.txt', { type: 'text/plain' })]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+
+    const { requestId, filename } = uploadRequest()
+    expect(filename).toBe('a_1.txt')
+    expect(fetchSpy).not.toHaveBeenCalledWith('ws-1', CHAT_UPLOAD_DIR)
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(wrapper.find('textarea').element.value).toContain(`@file:${CHAT_UPLOAD_DIR}/a_1.txt `)
+    })
+  })
+
+  it('uploads dropped files on the composer card', async () => {    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    const wrapper = mountInput()
+    const card = wrapper.find('[data-testid="composer-card"]')
+
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: makeFileList([file]), types: ['Files'] },
+    })
+    card.element.dispatchEvent(event)
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+
+    const { requestId } = uploadRequest()
+    expect(vi.mocked(sendFilesUpload).mock.calls[0]![2]).toBe(CHAT_UPLOAD_DIR)
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(wrapper.find('textarea').element.value).toContain(
+        `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
+      )
+    })
+  })
+
+  it('uploads a doubly-handled drop only once (composer card + parent zone)', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    // Keep the tracked upload pending so the second batch runs strictly
+    // while the first is still in flight (reproduces the double drop).
+    const pending: Array<(data: unknown) => void> = []
+    const trackSpy = vi.spyOn(store, 'trackAndUpload').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          const wrapped = (data: unknown) => {
+            const ok =
+              data !== null && typeof data === 'object' && (data as { ok?: boolean }).ok === true
+            if (ok) resolve()
+          }
+          pending.push(wrapped)
+        }),
+    )
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as {
+      uploadChatFiles: (files: File[] | FileList) => Promise<void>
+    }
+
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const files = makeFileList([file])
+    // Simulate the drop bubbling: the composer card handler runs first,
+    // then — before it finishes — the parent panel/home forwarder calls
+    // `uploadChatFiles` again with the same files.
+    const first = vm.uploadChatFiles(files)
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+    const second = vm.uploadChatFiles(files)
+    // Let the serialized second batch start before resolving the upload.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    pending.forEach((done) => done({ ok: true }))
+    await Promise.all([first, second])
+    // The second batch was serialized behind the first and skips the
+    // already-tracked upload, so the file is sent exactly once.
+    expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    expect(trackSpy).toHaveBeenCalledTimes(1)
+
+    await vi.waitFor(() => {
+      expect(wrapper.find('textarea').element.value).toContain(
+        `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
+      )
+    })
+    const value = wrapper.find('textarea').element.value as string
+    expect(value.match(/@file:/g)).toHaveLength(1)
+  })
+
+  it('ignores drops while the workspace is not ready', async () => {
+    const wrapper = mountInput({ disabled: true })
+    const card = wrapper.find('[data-testid="composer-card"]')
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: makeFileList([file]), types: ['Files'] },
+    })
+    card.element.dispatchEvent(event)
+    await wrapper.vm.$nextTick()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(wrapper.find('textarea').element.value).toBe('')
+  })
+
+  it('skips >10 MiB files before arrayBuffer() with a visible toast and no send', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    const wrapper = mountInput()
+    const big = new File(['x'], 'big.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(big, 'size', { value: 10 * 1024 * 1024 + 1 })
+    const arrayBufferSpy = vi.spyOn(big, 'arrayBuffer')
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([big]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(arrayBufferSpy).not.toHaveBeenCalled()
+    })
+    // The size guard runs before any tracked upload; the only send would be
+    // the best-effort upload-dir prefetch (mocked), never an upload itself.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(wrapper.find('textarea').element.value).toBe('')
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('10 MB') }),
+    )
+  })
+
+  it('a synchronous sendFilesUpload throw fails visibly without inserting a token', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    vi.mocked(sendFilesUpload).mockImplementationOnce(() => {
+      throw new Error('Upload exceeds the 10 MB limit.')
+    })
+    const failSpy = vi.spyOn(store, 'failUpload')
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([new File(['hi'], 'a.txt', { type: 'text/plain' })]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(failSpy).toHaveBeenCalledTimes(1)
+    })
+    expect(failSpy.mock.calls[0]![1]).toContain('10 MB')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(wrapper.find('textarea').element.value).toBe('')
+  })
+
+  it('highlights the composer card while an external file drag is active', async () => {
+    const wrapper = mountInput({ uploadDrag: { active: true, uploading: false } })
+    const card = wrapper.find('[data-testid="composer-card"]')
+    expect(card.classes()).toContain('border-primary')
+    expect(card.classes()).toContain('ring-2')
+    await wrapper.setProps({ uploadDrag: { active: false, uploading: false } })
+    expect(card.classes()).toContain('border-border')
   })
 })

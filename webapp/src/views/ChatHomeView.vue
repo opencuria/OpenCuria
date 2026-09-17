@@ -23,6 +23,7 @@ import {
   armComposerTransition,
   prefersReducedMotion,
 } from '@/lib/composerTransition'
+import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import type { HarnessSessionMode } from '@/types/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
@@ -47,6 +48,62 @@ const createOpen = ref(false)
 /** Drives the exit animation of the greeting block while sending. */
 const leaving = ref(false)
 const composerWrapRef = ref<HTMLElement | null>(null)
+const homeChatInputRef = ref<{
+  uploadChatFiles: (files: File[] | FileList) => Promise<void>
+} | null>(null)
+
+/**
+ * Home-composer drop zone: same behaviour as the workspace chat panel —
+ * files dropped anywhere over the home column upload into
+ * `/workspace/.opencuria/user-uploaded` and insert an `@file:` token.
+ * Subtle composer highlight only (no overlay); ignored while no workspace
+ * is ready for prompts.
+ */
+const homeDragCounter = ref(0)
+const homeDragActive = ref(false)
+const homeUploadDragState = computed(() => ({
+  active: homeDragActive.value,
+  uploading: false,
+}))
+
+function resetHomeDrag(): void {
+  homeDragCounter.value = 0
+  homeDragActive.value = false
+}
+
+function onHomeDragEnter(event: DragEvent): void {
+  if (!canPrompt.value || !isFileDrag(event)) return
+  event.preventDefault()
+  homeDragCounter.value += 1
+  homeDragActive.value = true
+}
+
+function onHomeDragLeave(event: DragEvent): void {
+  if (!homeDragActive.value) return
+  event.preventDefault()
+  homeDragCounter.value -= 1
+  if (homeDragCounter.value <= 0) resetHomeDrag()
+}
+
+function onHomeDragOver(event: DragEvent): void {
+  if (!canPrompt.value || !isFileDrag(event)) return
+  event.preventDefault()
+}
+
+function onHomeDrop(event: DragEvent): void {
+  // Same dedup guard as the workspace chat panel: the composer card handles
+  // its own drops (stopPropagation + preventDefault), so a handled event
+  // reaching us must not upload a second time.
+  if (event.defaultPrevented) return
+  const wasActive = homeDragActive.value
+  resetHomeDrag()
+  if (!canPrompt.value) return
+  if (!wasActive && !isFileDrag(event)) return
+  event.preventDefault()
+  const files = getDroppedFiles(event)
+  if (files.length === 0) return
+  void homeChatInputRef.value?.uploadChatFiles(files)
+}
 
 function isWorkspaceAvailable(workspace: {
   status: WorkspaceStatus
@@ -237,7 +294,14 @@ onMounted(async () => {
       </header>
     </template>
 
-    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
+    <div
+      class="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      data-testid="chat-home"
+      @dragenter="onHomeDragEnter"
+      @dragleave="onHomeDragLeave"
+      @dragover="onHomeDragOver"
+      @drop="onHomeDrop"
+    >
       <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
         <div
           class="transition-all duration-200 ease-in"
@@ -281,6 +345,7 @@ onMounted(async () => {
 
         <div v-else ref="composerWrapRef" class="mt-6">
           <HarnessChatInput
+            ref="homeChatInputRef"
             :workspace-id="selectedWorkspaceId ?? undefined"
             :session-id="null"
             :mode="composerMode"
@@ -290,6 +355,7 @@ onMounted(async () => {
             :disabled="inputDisabled"
             :sending="sending"
             :busy-message="busyMessage"
+            :upload-drag="homeUploadDragState"
             class="text-left"
             data-testid="chat-home-composer"
             @update:mode="composerMode = $event"

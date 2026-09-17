@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useProcessesStore } from './processes'
-import { ProcessStatus, type WorkspaceProcess } from '@/types'
+import { ProcessKind, ProcessStatus, type WorkspaceProcess } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { toast } from 'vue-sonner'
 
@@ -39,6 +39,7 @@ function makeProcess(overrides: Partial<WorkspaceProcess> = {}): WorkspaceProces
     status: overrides.status ?? ProcessStatus.RUNNING,
     exit_code: overrides.exit_code ?? null,
     run_count: overrides.run_count ?? 1,
+    kind: overrides.kind ?? ProcessKind.PERSISTENT,
     started_at: overrides.started_at ?? '2026-09-06T10:00:00.000Z',
     ended_at: overrides.ended_at ?? null,
     updated_at: overrides.updated_at ?? '2026-09-06T10:00:00.000Z',
