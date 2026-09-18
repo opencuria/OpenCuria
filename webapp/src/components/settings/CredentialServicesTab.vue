@@ -4,6 +4,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { get, post } from '@/services/api'
+import { slugify } from '@/lib/pluginForms'
 import { useAuthStore } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -64,13 +65,11 @@ const toggleLoading = ref<string | null>(null)
 const showCreateServiceModal = ref(false)
 const createServiceLoading = ref(false)
 const serviceName = ref('')
-const serviceSlug = ref('')
 const serviceDescription = ref('')
 const serviceCredentialType = ref<'env' | 'file' | 'ssh_key'>('env')
 const serviceEnvVarName = ref('')
 const serviceTargetPath = ref('')
 const serviceLabel = ref('')
-const serviceSlugTouched = ref(false)
 
 const credentialTypeOptions = [
   { value: 'env', label: 'Environment Variable' },
@@ -78,21 +77,11 @@ const credentialTypeOptions = [
   { value: 'ssh_key', label: 'SSH Key Pair' },
 ]
 
-const generatedServiceSlug = computed(() => {
-  return serviceName.value
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s-]/g, '')
-    .replace(/[\s_]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-})
-
-const normalizedServiceSlug = computed(() => serviceSlug.value.trim() || generatedServiceSlug.value)
-
 const isCreateServiceValid = computed(() => {
   if (!serviceName.value.trim()) return false
-  if (!normalizedServiceSlug.value) return false
+  // The backend derives the slug from the name; a name like `!!!`
+  // would yield an empty slug and fail server-side (400).
+  if (!slugify(serviceName.value)) return false
   if (serviceCredentialType.value === 'env') {
     return !!serviceEnvVarName.value.trim().match(/^[A-Z_][A-Z0-9_]*$/)
   }
@@ -159,13 +148,11 @@ function openCreateCredentialService(): void {
 
 function resetCreateServiceForm(): void {
   serviceName.value = ''
-  serviceSlug.value = ''
   serviceDescription.value = ''
   serviceCredentialType.value = 'env'
   serviceEnvVarName.value = ''
   serviceTargetPath.value = ''
   serviceLabel.value = ''
-  serviceSlugTouched.value = false
 }
 
 function closeCreateCredentialService(force = false): void {
@@ -174,12 +161,6 @@ function closeCreateCredentialService(force = false): void {
   resetCreateServiceForm()
 }
 
-watch(serviceName, () => {
-  if (!serviceSlugTouched.value) {
-    serviceSlug.value = generatedServiceSlug.value
-  }
-})
-
 async function createCredentialService(): Promise<void> {
   if (!isCreateServiceValid.value || createServiceLoading.value) return
 
@@ -187,7 +168,8 @@ async function createCredentialService(): Promise<void> {
   error.value = null
   const payload: CredentialServiceCreateIn = {
     name: serviceName.value.trim(),
-    slug: normalizedServiceSlug.value,
+    // The backend derives the slug from the name.
+    slug: '',
     description: serviceDescription.value.trim(),
     credential_type: serviceCredentialType.value,
     env_var_name:
@@ -319,36 +301,22 @@ async function createCredentialService(): Promise<void> {
             <Input id="service-name" v-model="serviceName" placeholder="GitHub Enterprise" />
           </div>
 
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div class="space-y-2">
-              <Label for="service-slug">Slug</Label>
-              <Input
-                id="service-slug"
-                v-model="serviceSlug"
-                placeholder="github-enterprise"
-                @update:model-value="serviceSlugTouched = true"
-              />
-              <p class="text-xs text-muted-foreground">
-                Used as a stable identifier. Auto-generated from the name.
-              </p>
-            </div>
-            <div class="space-y-2">
-              <Label>Credential Type</Label>
-              <Select v-model="serviceCredentialType">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select credential type" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="option in credentialTypeOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+          <div class="space-y-2">
+            <Label>Credential Type</Label>
+            <Select v-model="serviceCredentialType">
+              <SelectTrigger>
+                <SelectValue placeholder="Select credential type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="option in credentialTypeOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div v-if="serviceCredentialType === 'env'" class="space-y-2">

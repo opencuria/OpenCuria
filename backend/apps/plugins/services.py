@@ -378,7 +378,12 @@ class PluginService:
         if name is not None:
             fields["name"] = validate_name(name, field="Plugin name")
         if slug is not None:
-            normalized = normalize_slug(slug, field="Plugin slug")
+            # An empty slug means "derive from the (new) name": the webapp
+            # never sends user-editable slugs and always ships `slug: ''`
+            # so renames re-generate the slug. `None` (field omitted) keeps
+            # the stored slug untouched for API clients.
+            slug_source = slug.strip() or fields.get("name") or plugin.name
+            normalized = normalize_slug(slug_source, field="Plugin slug")
             existing = self.plugins.get_org_by_slug(normalized, org_id)
             if existing is not None and existing.id != plugin.id:
                 raise ConflictError(
@@ -864,10 +869,15 @@ class PluginService:
                     raise NotFoundError("CredentialService", str(service_id))
                 plugin_owned = False
             else:
+                # Empty slugs mean "derive from the service name" (the
+                # webapp sends `slug: ''`); fall back to the requirement
+                # key only when no service name was given.
+                service_name = (svc_input.get("name") or key).strip() or key
+                service_slug = (svc_input.get("slug") or "").strip() or service_name
                 try:
                     service = credential_svc.create_service(
-                        name=(svc_input.get("name") or key).strip() or key,
-                        slug=(svc_input.get("slug") or key).strip() or key,
+                        name=service_name,
+                        slug=service_slug,
                         description=(svc_input.get("description") or "").strip(),
                         credential_type=(svc_input.get("credential_type") or "env"),
                         env_var_name=svc_input.get("env_var_name", ""),

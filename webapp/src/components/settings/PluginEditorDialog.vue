@@ -80,16 +80,12 @@ const serviceTypeOptions: Array<{ value: PluginServiceTypeOption; label: string 
   { value: 'ssh_key', label: 'SSH Key Pair' },
 ]
 
-const generatedSlug = computed(() => slugify(form.name))
-const effectiveSlug = computed(() => form.slug.trim() || generatedSlug.value)
 const validationErrors = computed(() => validatePluginForm(form))
 const canSubmit = computed(() => validationErrors.value.length === 0 && !submitting.value)
 
 function resetForm(): void {
   const fresh = props.plugin ? pluginToForm(props.plugin) : emptyPluginForm()
   form.name = fresh.name
-  form.slug = fresh.slug
-  form.slugTouched = fresh.slugTouched
   form.description = fresh.description
   form.enabled = fresh.enabled
   form.published = fresh.published
@@ -116,15 +112,6 @@ watch(
   { immediate: true },
 )
 
-watch(
-  () => form.name,
-  () => {
-    if (!form.slugTouched) {
-      form.slug = slugify(form.name)
-    }
-  },
-)
-
 function syncRequirementService(reqUid: string, serviceId: string): void {
   const req = form.requirements.find((r) => r.uid === reqUid)
   if (!req) return
@@ -132,9 +119,8 @@ function syncRequirementService(reqUid: string, serviceId: string): void {
   const svc = credentialStore.services.find((s) => s.id === serviceId)
   if (svc) {
     req.serviceName = svc.name
-    req.serviceSlug = svc.slug
     if (!req.reqKey.trim()) {
-      req.reqKey = slugify(svc.slug).replace(/-/g, '_')
+      req.reqKey = slugify(svc.name).replace(/-/g, '_')
     }
   }
 }
@@ -207,30 +193,15 @@ async function handleSubmit(): Promise<void> {
           <!-- Metadata -->
           <section class="space-y-3" aria-label="Metadata">
             <h3 class="text-sm font-semibold text-foreground">Metadata</h3>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div class="space-y-2">
-                <Label for="plugin-name">Name</Label>
-                <Input
-                  id="plugin-name"
-                  v-model="form.name"
-                  placeholder="Playwright Helper"
-                  data-testid="plugin-name"
-                  :disabled="submitting"
-                  @update:model-value="() => { if (!form.slugTouched) form.slug = slugify(form.name) }"
-                />
-              </div>
-              <div class="space-y-2">
-                <Label for="plugin-slug">Slug</Label>
-                <Input
-                  id="plugin-slug"
-                  v-model="form.slug"
-                  :placeholder="generatedSlug || 'playwright-helper'"
-                  data-testid="plugin-slug"
-                  :disabled="submitting"
-                  @update:model-value="() => { form.slugTouched = true }"
-                />
-                <p class="text-xs text-muted-foreground">Stable identifier; auto-generated from the name.</p>
-              </div>
+            <div class="space-y-2">
+              <Label for="plugin-name">Name</Label>
+              <Input
+                id="plugin-name"
+                v-model="form.name"
+                placeholder="Playwright Helper"
+                data-testid="plugin-name"
+                :disabled="submitting"
+              />
             </div>
             <div class="space-y-2">
               <Label for="plugin-description">Description</Label>
@@ -299,16 +270,12 @@ async function handleSubmit(): Promise<void> {
                   <Trash2 />
                 </Button>
               </div>
-              <div v-if="expandedSkill === skill.uid || expandedSkill === null" class="grid gap-3 sm:grid-cols-2">
+              <div v-if="expandedSkill === skill.uid || expandedSkill === null" class="space-y-3">
                 <div class="space-y-2">
                   <Label :for="`skill-name-${skill.uid}`">Name</Label>
                   <Input :id="`skill-name-${skill.uid}`" v-model="skill.name" placeholder="Playwright basics" :disabled="submitting" />
                 </div>
                 <div class="space-y-2">
-                  <Label :for="`skill-slug-${skill.uid}`">Slug (optional)</Label>
-                  <Input :id="`skill-slug-${skill.uid}`" v-model="skill.slug" :placeholder="slugify(skill.name) || 'playwright-basics'" :disabled="submitting" />
-                </div>
-                <div class="space-y-2 sm:col-span-2">
                   <Label :for="`skill-body-${skill.uid}`">Body (Markdown)</Label>
                   <Textarea :id="`skill-body-${skill.uid}`" v-model="skill.body" :rows="5" placeholder="Use the browser tool to…" :disabled="submitting" />
                 </div>
@@ -364,15 +331,9 @@ async function handleSubmit(): Promise<void> {
                 </Button>
               </div>
               <div v-if="expandedMcp === mcp.uid || expandedMcp === null" class="space-y-3">
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <div class="space-y-2">
-                    <Label :for="`mcp-name-${mcp.uid}`">Name</Label>
-                    <Input :id="`mcp-name-${mcp.uid}`" v-model="mcp.name" placeholder="Playwright" :disabled="submitting" />
-                  </div>
-                  <div class="space-y-2">
-                    <Label :for="`mcp-slug-${mcp.uid}`">Slug (optional)</Label>
-                    <Input :id="`mcp-slug-${mcp.uid}`" v-model="mcp.slug" :placeholder="slugify(mcp.name) || 'playwright'" :disabled="submitting" />
-                  </div>
+                <div class="space-y-2">
+                  <Label :for="`mcp-name-${mcp.uid}`">Name</Label>
+                  <Input :id="`mcp-name-${mcp.uid}`" v-model="mcp.name" placeholder="Playwright" :disabled="submitting" />
                 </div>
                 <div class="space-y-2">
                   <Label>Transport</Label>
@@ -535,7 +496,7 @@ async function handleSubmit(): Promise<void> {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="svc in credentialStore.services" :key="svc.id" :value="svc.id">
-                        {{ svc.name }} ({{ svc.slug }})
+                        {{ svc.name }}
                       </SelectItem>
                     </SelectContent>
                   </Select>
@@ -544,10 +505,6 @@ async function handleSubmit(): Promise<void> {
                   <div class="space-y-2">
                     <Label :for="`req-svc-name-${req.uid}`">Service name</Label>
                     <Input :id="`req-svc-name-${req.uid}`" v-model="req.serviceName" placeholder="Playwright Auth" :disabled="submitting" />
-                  </div>
-                  <div class="space-y-2">
-                    <Label :for="`req-svc-slug-${req.uid}`">Service slug</Label>
-                    <Input :id="`req-svc-slug-${req.uid}`" v-model="req.serviceSlug" :placeholder="slugify(req.serviceName) || 'playwright-auth'" :disabled="submitting" />
                   </div>
                   <div class="space-y-2">
                     <Label>Type</Label>
@@ -584,7 +541,6 @@ async function handleSubmit(): Promise<void> {
               <li v-for="err in validationErrors" :key="err">{{ err }}</li>
             </ul>
           </div>
-          <p v-else class="text-xs text-muted-foreground">Effective slug: <code class="font-mono">{{ effectiveSlug || '—' }}</code></p>
         </form>
       </DialogBody>
 

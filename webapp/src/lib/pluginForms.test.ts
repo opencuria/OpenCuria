@@ -106,7 +106,6 @@ describe('pluginForms', () => {
       mode: 'new',
       serviceId: '',
       serviceName: 'Demo Auth',
-      serviceSlug: '',
       credentialType: 'env',
       envVarName: 'demo_token',
       targetPath: '',
@@ -125,7 +124,6 @@ describe('pluginForms', () => {
     form.mcps.push({
       uid: 'm1',
       name: 'Runner',
-      slug: '',
       transport: 'stdio',
       command: '',
       argsText: '',
@@ -144,7 +142,6 @@ describe('pluginForms', () => {
       mode: 'existing',
       serviceId: '',
       serviceName: '',
-      serviceSlug: '',
       credentialType: 'env',
       envVarName: '',
       targetPath: '',
@@ -168,7 +165,6 @@ describe('pluginForms', () => {
       mode: 'existing',
       serviceId: 'svc-1',
       serviceName: '',
-      serviceSlug: '',
       credentialType: 'env',
       envVarName: '',
       targetPath: '',
@@ -177,7 +173,6 @@ describe('pluginForms', () => {
     form.mcps.push({
       uid: 'm1',
       name: 'Runner',
-      slug: '',
       transport: 'stdio',
       command: 'npx',
       argsText: '-y',
@@ -210,29 +205,23 @@ describe('pluginForms', () => {
   it('rejects unknown placeholders, bad templates, duplicates, and unsafe values', () => {
     const form = emptyPluginForm()
     form.name = 'Demo'
-    form.slug = 'Bad Slug!'
-    form.slugTouched = true
-    expect(validatePluginForm(form).some((e) => e.includes('slug must be URL-safe'))).toBe(true)
-    form.slug = ''
-    form.slugTouched = false
     form.requirements.push(
       {
         uid: 'r1', reqKey: 'api_key', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-1', serviceName: '', serviceSlug: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        serviceId: 'svc-1', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
       },
       {
         uid: 'r2', reqKey: 'api_key', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-2', serviceName: '', serviceSlug: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        serviceId: 'svc-2', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
       },
       {
         uid: 'r3', reqKey: 'bad key!', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-3', serviceName: '', serviceSlug: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        serviceId: 'svc-3', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
       },
     )
     form.mcps.push({
       uid: 'm1',
       name: 'Runner',
-      slug: '',
       transport: 'stdio',
       command: 'npx --yes; rm -rf',
       argsText: '',
@@ -258,11 +247,19 @@ describe('pluginForms', () => {
     const urlForm = emptyPluginForm()
     urlForm.name = 'Demo'
     urlForm.mcps.push({
-      uid: 'm1', name: 'Runner', slug: '', transport: 'streamable_http', command: '', argsText: '',
+      uid: 'm1', name: 'Runner', transport: 'streamable_http', command: '', argsText: '',
       cwd: '/workspace', env: [], headers: [],
       url: 'https://user:pass@mcp.example.com/mcp#frag',
       startupTimeout: 30, requestTimeout: 60,
     })
     expect(validatePluginForm(urlForm).some((e) => e.includes('userinfo or a fragment'))).toBe(true)
+  })
+
+  it('rejects names without identifier characters (empty derived slug)', () => {
+    const form = emptyPluginForm()
+    form.name = '!!!'
+    expect(validatePluginForm(form).some((e) => e.includes('identifier can be derived'))).toBe(true)
+    form.name = 'Demo'
+    expect(validatePluginForm(form).filter((e) => e.includes('identifier'))).toEqual([])
   })
 })

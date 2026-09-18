@@ -1,9 +1,12 @@
 /**
  * Form models + (de)serialization helpers for the plugin editor.
  *
- * Keeps `PluginEditorDialog.vue` thin: slug auto-generation, conversion
- * between `Plugin` API objects and editable form rows, payload
- * normalization for create/update, and client-side validation.
+ * Keeps `PluginEditorDialog.vue` thin: conversion between `Plugin` API
+ * objects and editable form rows, payload normalization for
+ * create/update, and client-side validation.
+ *
+ * Slugs are never user-editable: payloads send empty slugs and the
+ * backend derives them from the names (also on rename).
  */
 
 import type {
@@ -35,14 +38,12 @@ export interface KeyValueRow {
 export interface PluginSkillForm {
   uid: string
   name: string
-  slug: string
   body: string
 }
 
 export interface PluginMcpForm {
   uid: string
   name: string
-  slug: string
   transport: PluginMcpTransportOption
   command: string
   argsText: string
@@ -62,7 +63,6 @@ export interface PluginRequirementForm {
   mode: 'existing' | 'new'
   serviceId: string
   serviceName: string
-  serviceSlug: string
   credentialType: PluginServiceTypeOption
   envVarName: string
   targetPath: string
@@ -71,8 +71,6 @@ export interface PluginRequirementForm {
 
 export interface PluginFormModel {
   name: string
-  slug: string
-  slugTouched: boolean
   description: string
   enabled: boolean
   published: boolean
@@ -105,14 +103,13 @@ export function emptyKeyValueRow(): KeyValueRow {
 }
 
 export function emptySkillForm(): PluginSkillForm {
-  return { uid: newUid('skill'), name: '', slug: '', body: '' }
+  return { uid: newUid('skill'), name: '', body: '' }
 }
 
 export function emptyMcpForm(): PluginMcpForm {
   return {
     uid: newUid('mcp'),
     name: '',
-    slug: '',
     transport: 'stdio',
     command: '',
     argsText: '',
@@ -134,7 +131,6 @@ export function emptyRequirementForm(): PluginRequirementForm {
     mode: 'existing',
     serviceId: '',
     serviceName: '',
-    serviceSlug: '',
     credentialType: 'env',
     envVarName: '',
     targetPath: '',
@@ -145,8 +141,6 @@ export function emptyRequirementForm(): PluginRequirementForm {
 export function emptyPluginForm(): PluginFormModel {
   return {
     name: '',
-    slug: '',
-    slugTouched: false,
     description: '',
     enabled: true,
     published: true,
@@ -183,18 +177,15 @@ function dictToRows(dict: Record<string, string> | undefined, prefix: string): K
 export function pluginToForm(plugin: Plugin): PluginFormModel {
   return {
     name: plugin.name,
-    slug: plugin.slug,
-    slugTouched: true,
     description: plugin.description ?? '',
     enabled: plugin.enabled,
     published: plugin.published,
     skills: [...(plugin.skills ?? [])]
       .sort((a, b) => a.position - b.position)
-      .map((s) => ({ uid: newUid('skill'), name: s.name, slug: s.slug, body: s.body })),
+      .map((s) => ({ uid: newUid('skill'), name: s.name, body: s.body })),
     mcps: (plugin.mcp_servers ?? []).map((m) => ({
       uid: newUid('mcp'),
       name: m.name,
-      slug: m.slug,
       transport: toTransport(m.transport),
       command: m.command ?? '',
       argsText: (m.args ?? []).join('\n'),
@@ -213,7 +204,6 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
       mode: 'existing' as const,
       serviceId: r.service_id,
       serviceName: r.service_name,
-      serviceSlug: r.service_slug,
       credentialType: toServiceType(r.credential_type),
       envVarName: '',
       targetPath: '',
@@ -244,7 +234,8 @@ export function rowsToDict(rows: KeyValueRow[]): Record<string, string> {
 function skillToIn(skill: PluginSkillForm, index: number): PluginSkillIn {
   return {
     name: skill.name.trim(),
-    slug: skill.slug.trim(),
+    // Backend derives the slug from the name (also on rename).
+    slug: '',
     body: skill.body,
     position: index,
   }
@@ -255,7 +246,8 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
   const request = Number(mcp.requestTimeout)
   const base = {
     name: mcp.name.trim(),
-    slug: mcp.slug.trim(),
+    // Backend derives the slug from the name (also on rename).
+    slug: '',
     transport: mcp.transport,
     cwd: mcp.cwd.trim() || '/workspace',
     startup_timeout_seconds: Number.isFinite(startup) ? Math.trunc(startup) : 30,
@@ -286,7 +278,8 @@ function requirementToIn(req: PluginRequirementForm): PluginCredentialRequiremen
     required: req.required,
     credential_service: {
       name: req.serviceName.trim(),
-      slug: req.serviceSlug.trim(),
+      // Backend derives the slug from the service name.
+      slug: '',
       description: '',
       credential_type: req.credentialType,
       env_var_name: req.envVarName.trim().toUpperCase(),
@@ -296,11 +289,13 @@ function requirementToIn(req: PluginRequirementForm): PluginCredentialRequiremen
   }
 }
 
-/** Normalize the form into a create payload (backend fills empty slugs). */
+/** Normalize the form into a create payload (backend derives slugs from names). */
 export function formToCreateIn(form: PluginFormModel): PluginCreateIn {
   return {
     name: form.name.trim(),
-    slug: form.slug.trim(),
+    // Explicitly empty: the backend generates the slug from the name.
+    // (Omitted/`None` would keep the old slug on update and skip rename.)
+    slug: '',
     description: form.description.trim(),
     enabled: form.enabled,
     published: form.published,
@@ -328,6 +323,14 @@ export function formToUpdateIn(form: PluginFormModel): PluginUpdateIn {
 const ENV_VAR_RE = /^[A-Z_][A-Z0-9_]*$/
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const KEY_RE = /^[a-z0-9_]+(?:[a-z0-9_-]*[a-z0-9_])?$/i
+/**
+ * A name is slug-derivable when `slugify` maps it to a valid URL slug.
+ * Guards names like `!!!` whose derived slug would be empty (backend 400).
+ */
+function isDerivableSlug(name: string): boolean {
+  const slug = slugify(name)
+  return !!slug && slug.length <= 255 && SLUG_RE.test(slug)
+}
 /** A stdio command must be a single executable (no whitespace/shell metacharacters). */
 function hasCommandMetacharacters(command: string): boolean {
   if (/\s/.test(command)) return true
@@ -345,10 +348,8 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     errors.push('Plugin name is required.')
   } else if (form.name.trim().length > 255) {
     errors.push('Plugin name must be at most 255 characters.')
-  }
-  const slug = form.slug.trim() || slugify(form.name)
-  if (form.name.trim() && (!slug || slug.length > 255 || !SLUG_RE.test(slug))) {
-    errors.push('Plugin slug must be URL-safe (lowercase, digits, dashes).')
+  } else if (!isDerivableSlug(form.name)) {
+    errors.push('Plugin name must contain letters or digits so an identifier can be derived.')
   }
   if (form.description.trim().length > 10000) {
     errors.push('Plugin description is too long (max 10000 characters).')
@@ -358,9 +359,8 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     const label = `Skill #${i + 1}`
     if (!skill.name.trim()) errors.push(`${label}: name is required.`)
     else if (skill.name.trim().length > 255) errors.push(`${label}: name is too long.`)
-    const skillSlug = skill.slug.trim() || slugify(skill.name)
-    if (skill.name.trim() && (!skillSlug || !SLUG_RE.test(skillSlug))) {
-      errors.push(`${label}: slug must be URL-safe (lowercase, digits, dashes).`)
+    else if (!isDerivableSlug(skill.name)) {
+      errors.push(`${label}: name must contain letters or digits so an identifier can be derived.`)
     }
     if (!skill.body.trim()) errors.push(`${label}: body (Markdown) is required.`)
     else if (skill.body.length > 200000) errors.push(`${label}: body is too long.`)
@@ -372,9 +372,8 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     const label = mcp.name.trim() ? `MCP server "${mcp.name.trim()}"` : `MCP server #${i + 1}`
     if (!mcp.name.trim()) errors.push(`${label}: name is required.`)
     else if (mcp.name.trim().length > 255) errors.push(`${label}: name is too long.`)
-    const mcpSlug = mcp.slug.trim() || slugify(mcp.name)
-    if (mcp.name.trim() && (!mcpSlug || !SLUG_RE.test(mcpSlug))) {
-      errors.push(`${label}: slug must be URL-safe (lowercase, digits, dashes).`)
+    else if (!isDerivableSlug(mcp.name)) {
+      errors.push(`${label}: name must contain letters or digits so an identifier can be derived.`)
     }
     if (mcp.transport === 'stdio') {
       const command = mcp.command.trim()
@@ -445,6 +444,9 @@ export function validatePluginForm(form: PluginFormModel): string[] {
       }
     } else {
       if (!req.serviceName.trim()) errors.push(`${label}: new service name is required.`)
+      else if (!isDerivableSlug(req.serviceName)) {
+        errors.push(`${label}: new service name must contain letters or digits so an identifier can be derived.`)
+      }
       if (req.credentialType === 'env' && !ENV_VAR_RE.test(req.envVarName.trim().toUpperCase())) {
         errors.push(`${label}: environment variable name must look like OPENAI_API_KEY.`)
       }

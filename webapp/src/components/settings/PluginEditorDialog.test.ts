@@ -115,9 +115,8 @@ describe('PluginEditorDialog', () => {
     await flushPromises()
 
     await wrapper.find('[data-testid="plugin-name"]').setValue('Demo Plugin')
-    expect((wrapper.find('[data-testid="plugin-slug"]').element as HTMLInputElement).value).toBe(
-      'demo-plugin',
-    )
+    // No slug input is shown anymore; the backend derives the slug.
+    expect(wrapper.find('[data-testid="plugin-slug"]').exists()).toBe(false)
 
     await wrapper.find('[data-testid="plugin-add-skill"]').trigger('click')
     await flushPromises()
@@ -130,7 +129,7 @@ describe('PluginEditorDialog', () => {
     const mcp = wrapper.find('[data-testid="plugin-mcp-0"]')
     const inputs = mcp.findAll('input')
     await inputs[0]!.setValue('Runner')
-    await inputs[2]!.setValue('npx')
+    await inputs[1]!.setValue('npx')
 
     await wrapper.find('#plugin-editor-form').trigger('submit')
     await flushPromises()
@@ -138,7 +137,8 @@ describe('PluginEditorDialog', () => {
     expect(pluginStoreMock.createPlugin).toHaveBeenCalled()
     const payload = pluginStoreMock.createPlugin.mock.calls[0]![0]
     expect(payload.name).toBe('Demo Plugin')
-    expect(payload.slug).toBe('demo-plugin')
+    // The backend derives slugs from names; payloads carry empty slugs.
+    expect(payload.slug).toBe('')
     expect(payload.skills[0]).toMatchObject({ name: 'Basics', body: 'Use it well.', position: 0 })
     expect(payload.mcp_servers[0]).toMatchObject({ name: 'Runner', command: 'npx' })
     // stdio payloads must not carry stale http fields.
@@ -200,8 +200,6 @@ describe('PluginEditorDialog', () => {
     mcp.url = 'https://mcp.example.com/mcp'
     const payload = formToCreateIn({
       name: 'Demo',
-      slug: '',
-      slugTouched: false,
       description: '',
       enabled: true,
       published: true,
