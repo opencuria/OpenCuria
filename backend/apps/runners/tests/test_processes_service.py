@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -200,6 +201,7 @@ class TestStopProcess:
         """Stop should RPC the runner and mark the record killed."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         pushes: list[tuple] = []
@@ -232,7 +234,6 @@ class TestStopProcess:
 
     @pytest.mark.asyncio
     async def test_stop_idempotent_for_finished(self, service, workspace):
-        """Stopping an already-finished process returns it unchanged."""
         process = _make_process(service, workspace)
         service.processes.mark_finished(
             process.id, status=ProcessStatus.EXITED, exit_code=0
@@ -243,6 +244,161 @@ class TestStopProcess:
         result = await service.stop_process(workspace.id, process.id)
         assert result.status == ProcessStatus.EXITED
         emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_verifies_then_retries_on_running(
+        self, service, runner, workspace
+    ):
+        """A 'not found' stop reattaches live processes and retries the stop."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        state: dict = {"first_stop_id": None}
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                _feed_reply(
+                    service,
+                    "harness:process_verify_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "processes": [
+                            {
+                                "process_id": str(process.id),
+                                "status": "running",
+                                "exit_code": None,
+                                "pid": 4242,
+                            }
+                        ]
+                    },
+                )
+            elif event == "harness:process_stop":
+                if state["first_stop_id"] is None:
+                    state["first_stop_id"] = payload["request_id"]
+                if payload["request_id"] == state["first_stop_id"]:
+                    _feed_reply(
+                        service,
+                        "harness:process_stop_result",
+                        runner_arg,
+                        workspace.id,
+                        payload["request_id"],
+                        {
+                            "process_id": str(process.id),
+                            "stopped": False,
+                            "error": "Background process abc not found for workspace",
+                        },
+                    )
+                else:
+                    _feed_reply(
+                        service,
+                        "harness:process_stop_result",
+                        runner_arg,
+                        workspace.id,
+                        payload["request_id"],
+                        {
+                            "process_id": str(process.id),
+                            "stopped": True,
+                            "status": "killed",
+                            "exit_code": None,
+                            "pid": 4242,
+                        },
+                    )
+
+        service._emit_to_runner.side_effect = _emit
+
+        stopped = await service.stop_process(workspace.id, process.id)
+        assert stopped.status == ProcessStatus.KILLED
+        events = [
+            call.args[1] for call in service._emit_to_runner.call_args_list
+        ]
+        assert events.count("harness:process_stop") == 2
+        assert "harness:process_verify" in events
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_with_confirmed_exit_marks_exited(
+        self, service, runner, workspace
+    ):
+        """A 'not found' stop with verify=exited marks the row EXITED."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                _feed_reply(
+                    service,
+                    "harness:process_verify_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "processes": [
+                            {
+                                "process_id": str(process.id),
+                                "status": "exited",
+                                "exit_code": 3,
+                                "pid": 4242,
+                            }
+                        ]
+                    },
+                )
+            else:
+                _feed_reply(
+                    service,
+                    "harness:process_stop_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "process_id": str(process.id),
+                        "stopped": False,
+                        "error": "Background process abc not found for workspace",
+                    },
+                )
+
+        service._emit_to_runner.side_effect = _emit
+
+        stopped = await service.stop_process(workspace.id, process.id)
+        assert stopped.status == ProcessStatus.EXITED
+        assert stopped.exit_code == 3
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_with_verify_timeout_stays_running(
+        self, service, runner, workspace
+    ):
+        """A failed verify (timeout) keeps the row RUNNING (fail-open)."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                return  # never reply -> live-timeout -> ConflictError
+            _feed_reply(
+                service,
+                "harness:process_stop_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {
+                    "process_id": str(process.id),
+                    "stopped": False,
+                    "error": "Background process abc not found for workspace",
+                },
+            )
+
+        service._emit_to_runner.side_effect = _emit
+
+        with patch.object(service, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05):
+            result = await service.stop_process(workspace.id, process.id)
+        assert result.status == ProcessStatus.RUNNING
+        result.refresh_from_db()
+        assert result.status == ProcessStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_stop_unknown_process(self, service, workspace):
@@ -272,9 +428,10 @@ class TestReconcile:
         """Exited reports update the DB record and push to the frontend."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
         with patch.object(service, "_forward_to_frontend") as forward:
-            changed = service.reconcile_workspace_processes(
+            changed, vanished = service.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -287,6 +444,7 @@ class TestReconcile:
             )
 
         assert changed == [process.id]
+        assert vanished == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.EXITED
         assert process.exit_code == 3
@@ -294,26 +452,30 @@ class TestReconcile:
         forward.assert_called_once()
         assert forward.call_args[0][0] == "process:status_changed"
 
-    def test_runner_restart_empty_list_marks_exited(self, service, runner, workspace):
-        """A missing process (e.g. after runner restart) becomes exited."""
+    def test_runner_restart_empty_list_defers_to_verify(self, service, runner, workspace):
+        """A missing process is a vanished candidate, not immediately exited."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
-
-        changed = service.reconcile_workspace_processes(str(workspace.id), [])
-
-        assert changed == [process.id]
         process.refresh_from_db()
-        assert process.status == ProcessStatus.EXITED
-        assert process.exit_code is None
-        assert process.ended_at is not None
+
+        changed, vanished = service.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
+
+        assert changed == []
+        assert [row.id for row in vanished] == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert process.ended_at is None
 
     def test_running_processes_stay_running(self, service, runner, workspace):
         """Processes the runner still tracks stay running without pushes."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
         with patch.object(service, "_forward_to_frontend") as forward:
-            changed = service.reconcile_workspace_processes(
+            changed, vanished = service.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -326,23 +488,28 @@ class TestReconcile:
             )
 
         assert changed == []
+        assert vanished == []
         forward.assert_not_called()
 
     def test_pending_start_without_pid_is_skipped(self, service, runner, workspace):
         """Records without a confirmed pid are skipped until the runner ACKs."""
         process = _make_process(service, workspace)
         # pid stays None: start RPC not yet acknowledged.
-        changed = service.reconcile_workspace_processes(str(workspace.id), [])
+        changed, vanished = service.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
         assert changed == []
+        assert vanished == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
 
-    def test_heartbeat_reconcile_marks_vanished_processes(
+    def test_heartbeat_stashes_vanished_for_async_verify(
         self, service, runner, workspace
     ):
-        """Heartbeat handler should reconcile processes from the payload."""
+        """Heartbeat must not mark vanished rows exited (sync has no RPC)."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
         with patch.object(
             service, "auto_stop_inactive_workspaces", new=AsyncMock(return_value=None)
@@ -360,7 +527,144 @@ class TestReconcile:
             )
 
         process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert [row.id for row in service._pending_process_verify[str(workspace.id)]] == [
+            process.id
+        ]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestReverifyVanished:
+    def _running_process(self, service, workspace, pid=4242):
+        process = _make_process(service, workspace)
+        # Refresh the in-memory instance: update_status writes via
+        # QuerySet.update (no in-memory sync), and the verify payload is
+        # built from these attributes (pid must be set).
+        service.processes.update_status(process.id, status="running", pid=pid)
+        process.refresh_from_db()
+        return process
+
+    def _verify_reply(self, service, runner, workspace, statuses):
+        async def _emit(runner_arg, event, payload):
+            assert event == "harness:process_verify"
+            _feed_reply(
+                service,
+                "harness:process_verify_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {"processes": statuses},
+            )
+
+        service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+
+    @pytest.mark.asyncio
+    async def test_verify_running_revives_row(self, service, runner, workspace):
+        """A reattached 'running' answer keeps the row RUNNING with fresh pid."""
+        process = self._running_process(service, workspace)
+        self._verify_reply(
+            service,
+            runner,
+            workspace,
+            [
+                {
+                    "process_id": str(process.id),
+                    "status": "running",
+                    "exit_code": None,
+                    "pid": 9999,
+                }
+            ],
+        )
+        with patch.object(service, "_forward_to_frontend"):
+            changed = await service.reverify_vanished_processes(
+                workspace.id, [process]
+            )
+        assert changed == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert process.pid == 9999
+        assert process.ended_at is None
+
+    @pytest.mark.asyncio
+    async def test_verify_exited_marks_exited(self, service, runner, workspace):
+        """A confirmed 'exited' answer marks the row EXITED with the code."""
+        process = self._running_process(service, workspace)
+        self._verify_reply(
+            service,
+            runner,
+            workspace,
+            [
+                {
+                    "process_id": str(process.id),
+                    "status": "exited",
+                    "exit_code": 3,
+                    "pid": 4242,
+                }
+            ],
+        )
+        changed = await service.reverify_vanished_processes(
+            workspace.id, [process]
+        )
+        assert changed == [process.id]
+        process.refresh_from_db()
         assert process.status == ProcessStatus.EXITED
+        assert process.exit_code == 3
+
+    @pytest.mark.asyncio
+    async def test_verify_timeout_keeps_running(self, service, runner, workspace):
+        """A verify timeout leaves the row RUNNING (fail-open, DB fallback)."""
+        process = self._running_process(service, workspace)
+
+        async def _emit(runner_arg, event, payload):
+            return  # never reply -> timeout
+
+        service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+        with patch.object(service, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05):
+            changed = await service.reverify_vanished_processes(
+                workspace.id, [process]
+            )
+        assert changed == []
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+
+    @pytest.mark.asyncio
+    async def test_reconcile_vanished_drains_stash(self, service, runner, workspace):
+        """The heartbeat stash is drained even when the runner is offline."""
+        process = self._running_process(service, workspace)
+        service._pending_process_verify[str(workspace.id)] = [process]
+        # Runner lost its sid -> offline path, rows stay RUNNING.
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+        changed = await service.reconcile_vanished_processes(runner)
+        assert changed == []
+        assert service._pending_process_verify == {}
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+
+
+@pytest.mark.django_db
+class TestSweepUnconfirmed:
+    def test_stale_pid_none_row_is_failed(self, service, workspace):
+        """A stale RUNNING row without pid becomes FAILED (never RUNNING forever)."""
+        from django.utils import timezone as tz
+
+        process = _make_process(service, workspace)
+        assert process.pid is None
+        old = tz.now() - timedelta(seconds=3600)
+        type(process).objects.filter(id=process.id).update(started_at=old)
+        with patch.object(service, "_forward_to_frontend"):
+            changed = service.sweep_unconfirmed_processes(str(workspace.id))
+        assert changed == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.FAILED
+
+    def test_fresh_pid_none_row_is_kept(self, service, workspace):
+        """A fresh pid=None row (start in flight) is kept RUNNING."""
+        process = _make_process(service, workspace)
+        changed = service.sweep_unconfirmed_processes(str(workspace.id))
+        assert changed == []
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
 
 
 @pytest.mark.django_db
@@ -368,6 +672,7 @@ class TestWorkspaceLifecycleKillsProcesses:
     def _running_process(self, service, workspace):
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
         return process
 
     def test_mark_processes_killed(self, service, workspace):

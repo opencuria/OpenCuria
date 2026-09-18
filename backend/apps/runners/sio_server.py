@@ -591,6 +591,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:process_stop_result", data, runner_id=runner_id
         )
 
+    @sio.on("harness:process_verify_result")
+    async def on_harness_process_verify_result(sid: str, data: dict):
+        """Route process verify results to the owning process waiter."""
+        runner_id = await _require_runner_id(sio, sid, "harness:process_verify_result")
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_process_reply)(
+            "harness:process_verify_result", data, runner_id=runner_id
+        )
+
     # --- Generic stream events from runner (never to frontend) ---
 
     @sio.on("workspace:stream_output")
@@ -1041,6 +1052,18 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner=runner,
             workspaces=data.get("workspaces", []),
         )
+        # Async verify pass for heartbeat-vanished process rows: the
+        # sync heartbeat only stashes candidates (no RPCs allowed
+        # there); this resolves them against the runner — live rows
+        # reattach as RUNNING, confirmed-gone rows become EXITED,
+        # unverifiable rows stay RUNNING.
+        try:
+            await service.reconcile_vanished_processes(runner)
+        except Exception:
+            logger.exception(
+                "reconcile_vanished_processes failed for runner %s",
+                runner_id,
+            )
         if credential_sync_ids:
             await service.dispatch_credential_reconcile(credential_sync_ids)
 

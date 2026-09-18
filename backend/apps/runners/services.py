@@ -124,6 +124,11 @@ class RunnerService:
         # (no Socket.IO ACK), so correlation uses request_id futures plus
         # fail-closed workspace_id/operation matching (trust boundary).
         self._git_pending: dict[str, _PendingGitRequest] = {}
+        # Heartbeat-vanished process rows awaiting async verify against
+        # the runner (workspace_id -> rows). Stashed by the sync
+        # ``handle_heartbeat`` (which cannot do RPCs) and drained by
+        # ``reconcile_vanished_processes`` (async, Socket.IO handler).
+        self._pending_process_verify: dict[str, list] = {}
         # Per workspace/repo serialisation guards for git operations.
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
@@ -2734,8 +2739,19 @@ class RunnerService:
             "harness:process_list_result",
             "harness:process_get_result",
             "harness:process_stop_result",
+            "harness:process_verify_result",
         }
     )
+
+    #: Max vanished candidates sent in one process_verify RPC. Mirrors the
+    #: runner-side cap (``_BACKGROUND_VERIFY_MAX_ENTRIES``); larger sets
+    #: are chunked into multiple RPCs.
+    _PROCESS_VERIFY_BATCH_SIZE = 100
+
+    #: Max age of a RUNNING row that never got a pid (start RPC never
+    #: acknowledged, e.g. backend restart during start). Older rows are
+    #: swept to FAILED so they cannot stay RUNNING forever.
+    _PROCESS_UNCONFIRMED_MAX_AGE_SECONDS = 2 * _PROCESS_RPC_TIMEOUT_SECONDS
 
     def _resolve_process_future(self, request_id: str, payload: dict) -> bool:
         """Resolve the pending process RPC future for *request_id* (sync).
@@ -3224,24 +3240,71 @@ class RunnerService:
         error = result.get("error")
         if error:
             if "not found" in str(error).lower():
-                await sync_to_async(self.processes.mark_finished)(
-                    process_id,
-                    status=ProcessStatus.EXITED,
-                    exit_code=None,
+                # The runner lost tracking (e.g. restart) but the OS
+                # process may still live: verify once — a reattached
+                # "running" answer means the stop must be retried
+                # against the revived entry instead of marking EXITED.
+                verified = await self._verify_process_candidates(
+                    workspace, [stored]
                 )
-                self._push_process_status(
-                    workspace_id=str(workspace_id),
-                    process_id=str(process_id),
-                    status=ProcessStatus.EXITED,
-                    pid=stored.pid,
-                    run_count=stored.run_count,
-                )
-                refreshed = await sync_to_async(
-                    self.processes.get_for_workspace
-                )(process_id, workspace_id)
-                return refreshed or stored
+                live_status = str((verified.get(str(process_id)) or {}).get(
+                    "status") or "")
+                if live_status == "running":
+                    logger.info(
+                        "Process %s reattached on runner during stop, "
+                        "retrying stop",
+                        process_id,
+                    )
+                    retry_request_id = uuid.uuid4().hex
+                    result = await self._await_process_result(
+                        request_id=retry_request_id,
+                        event="harness:process_stop",
+                        payload={
+                            "request_id": retry_request_id,
+                            "workspace_id": str(workspace_id),
+                            "process_id": str(process_id),
+                        },
+                        runner=workspace.runner,
+                        timeout=self._PROCESS_RPC_TIMEOUT_SECONDS,
+                    )
+                    retry_error = result.get("error")
+                    if retry_error:
+                        if "not found" in str(retry_error).lower():
+                            return await self._mark_process_vanished(
+                                workspace, stored
+                            )
+                        raise ConflictError(
+                            f"Runner failed to stop process: {retry_error}"
+                        )
+                    return await self._mark_process_stopped(
+                        workspace, stored, result
+                    )
+                # Verify confirms the process is gone (exited/unknown)
+                # or the verify itself failed: fall through to EXITED
+                # only when the process is really gone; a verify
+                # timeout keeps the row RUNNING (fail-open, DB fallback).
+                if live_status in ("exited", "unknown"):
+                    return await self._mark_process_vanished(
+                        workspace,
+                        stored,
+                        exit_code=(verified.get(str(process_id)) or {}).get(
+                            "exit_code"
+                        ),
+                    )
+                return stored
             raise ConflictError(f"Runner failed to stop process: {error}")
 
+        return await self._mark_process_stopped(workspace, stored, result)
+
+    async def _mark_process_stopped(
+        self,
+        workspace: "Workspace",
+        stored: "WorkspaceProcess",
+        result: dict,
+    ) -> "WorkspaceProcess":
+        """Persist a successful stop reply (EXITED vs KILLED mapping)."""
+        workspace_id = workspace.id
+        process_id = stored.id
         live_exit = result.get("exit_code")
         exit_code = int(live_exit) if live_exit is not None else None
         status = (
@@ -3272,6 +3335,255 @@ class RunnerService:
             process_id, workspace_id
         )
         return refreshed or stored
+
+    async def _mark_process_vanished(
+        self,
+        workspace: "Workspace",
+        stored: "WorkspaceProcess",
+        *,
+        exit_code: int | None = None,
+    ) -> "WorkspaceProcess":
+        """Mark a RUNNING row EXITED after the runner confirmed it is gone."""
+        workspace_id = workspace.id
+        process_id = stored.id
+        await sync_to_async(self.processes.mark_finished)(
+            process_id,
+            status=ProcessStatus.EXITED,
+            exit_code=exit_code,
+        )
+        self._push_process_status(
+            workspace_id=str(workspace_id),
+            process_id=str(process_id),
+            status=ProcessStatus.EXITED,
+            exit_code=exit_code,
+            pid=stored.pid,
+            run_count=stored.run_count,
+        )
+        refreshed = await sync_to_async(self.processes.get_for_workspace)(
+            process_id, workspace_id
+        )
+        return refreshed or stored
+
+    @staticmethod
+    def _process_verify_candidates(
+        processes: list["WorkspaceProcess"],
+    ) -> list[dict]:
+        """Build ``expected`` payloads for a process_verify RPC."""
+        candidates: list[dict] = []
+        for process in processes:
+            if process.pid is None:
+                continue
+            try:
+                process_uuid = uuid.UUID(str(process.id))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            log_path_abs, exit_path_abs = RunnerService._process_log_paths(
+                process_uuid, process.run_count or 1
+            )
+            candidates.append(
+                {
+                    "process_id": str(process.id),
+                    "pid": process.pid,
+                    "log_path": process.log_path or log_path_abs,
+                    "exit_path": exit_path_abs,
+                    "command": process.command or "",
+                    "workdir": process.workdir or "/workspace",
+                    "name": process.name or "",
+                }
+            )
+        return candidates
+
+    async def _verify_process_candidates(
+        self,
+        workspace: "Workspace",
+        processes: list["WorkspaceProcess"],
+    ) -> dict[str, dict]:
+        """Verify vanished candidates via ``harness:process_verify`` RPC.
+
+        Returns ``{process_id: verify_result}``. An empty dict means the
+        verify failed (timeout/offline/error) — callers must keep the DB
+        rows RUNNING in that case (fail-open, never mark EXITED on a
+        failed verify).
+        """
+        candidates = self._process_verify_candidates(processes)
+        if not candidates:
+            return {}
+        runner = workspace.runner
+        merged: dict[str, dict] = {}
+        try:
+            for offset in range(0, len(candidates), self._PROCESS_VERIFY_BATCH_SIZE):
+                batch = candidates[offset:offset + self._PROCESS_VERIFY_BATCH_SIZE]
+                request_id = uuid.uuid4().hex
+                result = await self._await_process_result(
+                    request_id=request_id,
+                    event="harness:process_verify",
+                    payload={
+                        "request_id": request_id,
+                        "workspace_id": str(workspace.id),
+                        "expected": batch,
+                    },
+                    runner=runner,
+                    timeout=self._PROCESS_LIVE_TIMEOUT_SECONDS,
+                )
+                if result.get("error"):
+                    logger.warning(
+                        "Process verify failed for workspace %s: %s",
+                        workspace.id,
+                        result.get("error"),
+                    )
+                    return {}
+                reported = result.get("processes") or []
+                if not isinstance(reported, list):
+                    return {}
+                for entry in reported:
+                    if isinstance(entry, dict) and entry.get("process_id"):
+                        merged[str(entry["process_id"])] = entry
+        except (ConflictError, RunnerOfflineError, RuntimeError) as exc:
+            logger.debug(
+                "Process verify unavailable for workspace %s: %s",
+                workspace.id,
+                exc,
+            )
+            return {}
+        return merged
+
+    async def reverify_vanished_processes(
+        self,
+        workspace_id: uuid.UUID,
+        vanished: list["WorkspaceProcess"],
+    ) -> list[uuid.UUID]:
+        """Verify vanished rows and apply the outcome (async, RPC path).
+
+        Rows the runner reattached as ``running`` are revived to RUNNING
+        (pid/log_path refreshed, frontend push); rows confirmed
+        ``exited``/``unknown`` become EXITED; rows the verify could not
+        confirm stay RUNNING (fail-open). Returns IDs of changed rows.
+        """
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        if not vanished:
+            return []
+        verified = await self._verify_process_candidates(workspace, vanished)
+        changed: list[uuid.UUID] = []
+        for process in vanished:
+            key = str(process.id)
+            live = verified.get(key)
+            if live is None:
+                continue
+            live_status = str(live.get("status") or "")
+            if live_status == "running":
+                live_pid = live.get("pid")
+                try:
+                    pid = int(live_pid) if live_pid is not None else process.pid
+                except (TypeError, ValueError):
+                    pid = process.pid
+                await sync_to_async(self.processes.update_status)(
+                    process.id,
+                    status=ProcessStatus.RUNNING,
+                    pid=pid,
+                )
+                refreshed = await sync_to_async(self.processes.get_by_id)(
+                    process.id
+                )
+                current = refreshed or process
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=key,
+                    status=ProcessStatus.RUNNING,
+                    pid=current.pid,
+                    log_path=current.log_path or None,
+                    run_count=current.run_count,
+                )
+                logger.info(
+                    "Process %s reattached on runner (pid=%s)",
+                    process.id,
+                    current.pid,
+                )
+                changed.append(process.id)
+            elif live_status in ("exited", "unknown"):
+                live_exit = live.get("exit_code")
+                try:
+                    exit_code = (
+                        int(live_exit) if live_exit is not None else None
+                    )
+                except (TypeError, ValueError):
+                    exit_code = None
+                # "unknown" without an exit code means the runner probed
+                # and found nothing — the process is gone.
+                await sync_to_async(self.processes.mark_finished)(
+                    process.id,
+                    status=ProcessStatus.EXITED,
+                    exit_code=exit_code,
+                )
+                self._push_process_status(
+                    workspace_id=str(workspace_id),
+                    process_id=key,
+                    status=ProcessStatus.EXITED,
+                    exit_code=exit_code,
+                    pid=process.pid,
+                )
+                logger.info(
+                    "Process %s vanished from runner report, marking exited",
+                    process.id,
+                )
+                changed.append(process.id)
+        return changed
+
+    def sweep_unconfirmed_processes(
+        self,
+        workspace_id: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> list[uuid.UUID]:
+        """Fail stale RUNNING rows that never got a pid (sync).
+
+        A row without pid means the start RPC was never acknowledged
+        (e.g. backend restart mid-start). Such rows are skipped by
+        :meth:`reconcile_workspace_processes` forever; this sweeper
+        fails them once they are older than *max_age_seconds* so they
+        cannot stay RUNNING indefinitely. Pushes frontend updates per
+        change. Returns IDs of changed processes.
+        """
+        from django.utils import timezone as tz
+
+        try:
+            workspace_uuid = uuid.UUID(str(workspace_id))
+        except (ValueError, TypeError):
+            return []
+        limit = (
+            self._PROCESS_UNCONFIRMED_MAX_AGE_SECONDS
+            if max_age_seconds is None
+            else max_age_seconds
+        )
+        cutoff = tz.now() - timedelta(seconds=limit)
+        changed: list[uuid.UUID] = []
+        running = list(
+            self.processes.list_running_by_workspace(workspace_uuid)
+        )
+        for process in running:
+            if process.pid is not None:
+                continue
+            started_at = getattr(process, "started_at", None)
+            if started_at is not None and started_at >= cutoff:
+                continue
+            self.processes.mark_finished(
+                process.id,
+                status=ProcessStatus.FAILED,
+                exit_code=None,
+            )
+            self._push_process_status(
+                workspace_id=str(workspace_id),
+                process_id=str(process.id),
+                status=ProcessStatus.FAILED,
+                pid=None,
+            )
+            logger.info(
+                "Process %s never confirmed start (pid=None), marking failed",
+                process.id,
+            )
+            changed.append(process.id)
+        return changed
 
     async def restart_process(
         self,
@@ -3485,8 +3797,19 @@ class RunnerService:
                 if not result.get("error"):
                     reported = result.get("processes") or []
                     if isinstance(reported, list):
-                        await sync_to_async(self.reconcile_workspace_processes)(
-                            str(workspace_id), reported
+                        _, vanished = await sync_to_async(
+                            self.reconcile_workspace_processes
+                        )(str(workspace_id), reported)
+                        # Vanished rows may still live on the runner
+                        # (restart wiped tracking): verify once — live
+                        # rows reattach as RUNNING, dead rows become
+                        # EXITED, unverifiable rows stay RUNNING.
+                        if vanished:
+                            await self.reverify_vanished_processes(
+                                workspace_id, vanished
+                            )
+                        await sync_to_async(self.sweep_unconfirmed_processes)(
+                            str(workspace_id)
                         )
             except (ConflictError, RunnerOfflineError, RuntimeError):
                 logger.debug(
@@ -3675,28 +3998,34 @@ class RunnerService:
         self,
         workspace_id: str,
         reported: list[dict],
-    ) -> list[uuid.UUID]:
+    ) -> tuple[list[uuid.UUID], list["WorkspaceProcess"]]:
         """Reconcile DB running processes with a runner heartbeat list (sync).
 
         *reported* holds ``{process_id, status, exit_code, pid}`` dicts.
-        Running records the runner reports as exited become exited; running
-        records missing from the report (e.g. after a runner restart that
-        wiped in-memory tracking) become exited with unknown exit code.
+        Running records the runner reports as exited become exited.
+        Running records missing from the report (e.g. after a runner
+        restart that wiped in-memory tracking) are **not** marked
+        finished here — they are returned as *vanished* candidates so
+        the async caller can verify them against the runner via
+        ``harness:process_verify`` (which reattaches live processes).
+        See :meth:`reverify_vanished_processes`.
         Records without a confirmed pid are skipped — the runner has not
-        acknowledged their start yet. Pushes frontend updates per change.
+        acknowledged their start yet (see :meth:`sweep_unconfirmed_processes`
+        for the stale-row sweeper). Pushes frontend updates per change.
 
-        Returns IDs of changed processes.
+        Returns ``(changed_ids, vanished_processes)``.
         """
         try:
             workspace_uuid = uuid.UUID(str(workspace_id))
         except (ValueError, TypeError):
-            return []
+            return [], []
         by_id: dict[str, dict] = {}
         for entry in reported or []:
             if isinstance(entry, dict) and entry.get("process_id"):
                 by_id[str(entry["process_id"])] = entry
 
         changed: list[uuid.UUID] = []
+        vanished: list["WorkspaceProcess"] = []
         running = list(
             self.processes.list_running_by_workspace(workspace_uuid)
         )
@@ -3705,22 +4034,11 @@ class RunnerService:
                 continue
             live = by_id.get(str(process.id))
             if live is None:
-                self.processes.mark_finished(
-                    process.id,
-                    status=ProcessStatus.EXITED,
-                    exit_code=None,
-                )
-                self._push_process_status(
-                    workspace_id=str(workspace_id),
-                    process_id=str(process.id),
-                    status=ProcessStatus.EXITED,
-                    pid=process.pid,
-                )
-                logger.info(
-                    "Process %s vanished from runner report, marking exited",
-                    process.id,
-                )
-                changed.append(process.id)
+                # Vanished from the runner report: do NOT mark exited
+                # here (runner restart wipes in-memory tracking while
+                # the OS process lives on). The async caller verifies
+                # these candidates via harness:process_verify.
+                vanished.append(process)
                 continue
             live_status = str(live.get("status") or "")
             live_exit = live.get("exit_code")
@@ -3746,7 +4064,7 @@ class RunnerService:
                     exit_code,
                 )
                 changed.append(process.id)
-        return changed
+        return changed, vanished
 
     def mark_processes_killed(
         self, workspace_id: str, *, reason: str = "workspace_stopped"
@@ -4831,6 +5149,11 @@ class RunnerService:
             )
 
         credential_sync_ids: list[uuid.UUID] = []
+        # Vanished process rows collected during the sync reconcile pass.
+        # The heartbeat itself is sync (no RPC allowed), so verification
+        # against the runner happens in ``reconcile_vanished_processes``
+        # (async, called by the Socket.IO handler after this returns).
+        pending_vanished: dict[str, list["WorkspaceProcess"]] = {}
         for ws in backend_workspaces:
             ws_id_str = str(ws.id)
             cleanup_key = (runner_id_str, ws_id_str)
@@ -4932,8 +5255,11 @@ class RunnerService:
                     credential_sync_ids.append(ws.id)
 
                 # Reconcile background processes with the reported list.
-                # Only while the workspace is running: a missing process
-                # means it is gone (runner restart wipes in-memory state).
+                # Only while the workspace is running. Vanished rows are
+                # NOT marked exited here: the heartbeat is sync (no RPC),
+                # so they are collected for the async
+                # ``reconcile_vanished_processes`` pass after verify.
+                # Live-exited rows are marked EXITED immediately.
                 reported_processes = runner_payload.get("processes")
                 if isinstance(reported_processes, list) and (
                     new_status == WorkspaceStatus.RUNNING
@@ -4943,9 +5269,14 @@ class RunnerService:
                     )
                 ):
                     try:
-                        self.reconcile_workspace_processes(
+                        _, vanished = self.reconcile_workspace_processes(
                             ws_id_str, reported_processes
                         )
+                        self.sweep_unconfirmed_processes(ws_id_str)
+                        if vanished:
+                            pending_vanished.setdefault(ws_id_str, []).extend(
+                                vanished
+                            )
                     except Exception:
                         logger.exception(
                             "Failed reconciling processes for workspace %s",
@@ -4960,7 +5291,75 @@ class RunnerService:
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
+        # Stash vanished candidates for the async verify pass: the sync
+        # heartbeat cannot do RPCs, so ``reconcile_vanished_processes``
+        # (called by the Socket.IO handler) picks them up. Merged per
+        # workspace id so repeated heartbeats before the async pass
+        # cannot duplicate rows.
+        for ws_id_str, rows in pending_vanished.items():
+            known = {
+                str(process.id)
+                for process in self._pending_process_verify.get(ws_id_str, [])
+            }
+            bucket = self._pending_process_verify.setdefault(ws_id_str, [])
+            for process in rows:
+                if str(process.id) not in known:
+                    bucket.append(process)
+                    known.add(str(process.id))
         return credential_sync_ids
+
+    async def reconcile_vanished_processes(
+        self,
+        runner: "Runner",
+    ) -> list[uuid.UUID]:
+        """Verify heartbeat-vanished process rows against the runner.
+
+        Called by the Socket.IO heartbeat handler after the sync
+        :meth:`handle_heartbeat` stashed candidates in
+        ``_pending_process_verify``. Live rows reattach as RUNNING,
+        confirmed-gone rows become EXITED, unverifiable rows stay
+        RUNNING (fail-open). The stash is always drained, even on
+        failure, so one bad workspace cannot wedge later heartbeats.
+        Returns IDs of changed processes.
+        """
+        pending = self._pending_process_verify
+        self._pending_process_verify = {}
+        changed: list[uuid.UUID] = []
+        for ws_id_str, rows in pending.items():
+            try:
+                workspace_uuid = uuid.UUID(str(ws_id_str))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            workspace = await sync_to_async(self.workspaces.get_by_id)(
+                workspace_uuid
+            )
+            if workspace is None:
+                continue
+            # Only verify while the workspace is still running and the
+            # runner still owns it; anything else leaves rows untouched
+            # (workspace lifecycle handlers own those transitions).
+            if workspace.status != WorkspaceStatus.RUNNING:
+                continue
+            try:
+                owner_id = await sync_to_async(self.workspaces.get_runner_id)(
+                    workspace_uuid
+                )
+            except Exception:
+                continue
+            if owner_id is None or owner_id != runner.id:
+                continue
+            try:
+                changed.extend(
+                    await self.reverify_vanished_processes(
+                        workspace_uuid, rows
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed verifying vanished processes for workspace %s",
+                    ws_id_str,
+                )
+        return changed
 
     def handle_unknown_workspace_cleanup_result(
         self,

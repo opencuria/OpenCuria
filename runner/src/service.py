@@ -190,6 +190,11 @@ _BACKGROUND_PROCESS_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _BACKGROUND_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _BACKGROUND_STOP_GRACE_S = 2.0
 _BACKGROUND_STOP_POLL_S = 0.2
+#: Max candidate entries accepted by a single process_verify request.
+#: Bounds per-request exec probes (one kill -0 + at most one cat per
+#: candidate) so a hostile/misbehaving backend cannot fan out
+#: unbounded workspace execs.
+_BACKGROUND_VERIFY_MAX_ENTRIES = 100
 
 
 def _collapse_xdotool_token(token: str) -> str:
@@ -522,6 +527,17 @@ class WorkspaceService:
         # The runner owns liveness (in-memory); the backend owns list/history.
         self._background_processes: dict[uuid.UUID, dict[str, BackgroundProcess]] = {}
         self._background_lock = asyncio.Lock()
+        # Serialises concurrent starts of the same process_id so two
+        # parallel starts cannot orphan each other's PID (last-writer-wins
+        # on the tracking dict would leak the loser's process). Entries are
+        # retained for the runner lifetime (bounded by ever-seen
+        # workspace/process ids, cleared on restart) — same rationale as
+        # the desktop locks: dropping a lock object while a holder waits
+        # would hand the next caller a different lock.
+        self._background_start_locks: dict[
+            tuple[uuid.UUID, str], asyncio.Lock
+        ] = {}
+        self._background_start_locks_guard = asyncio.Lock()
         # Git operations: serialised per workspace/repo so concurrent
         # snapshot + mutation requests cannot interleave mid-sequence.
         self._git_locks: dict[tuple[uuid.UUID, str], asyncio.Lock] = {}
@@ -670,6 +686,285 @@ class WorkspaceService:
             workdir="/workspace",
         )
 
+    async def _background_start_lock(
+        self, workspace_id: uuid.UUID, process_id: str
+    ) -> asyncio.Lock:
+        """Return the serialising lock for one workspace/process_id pair."""
+        key = (workspace_id, process_id)
+        async with self._background_start_locks_guard:
+            lock = self._background_start_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._background_start_locks[key] = lock
+            return lock
+
+    async def _stop_background_pid_graceful(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        pid: int,
+    ) -> None:
+        """Best-effort stop of one background PID (TERM -> grace -> KILL)."""
+        try:
+            if not await self._probe_background_pid(runtime, instance_id, pid):
+                return
+            await self._kill_background_pid(runtime, instance_id, pid, "TERM")
+            elapsed = 0.0
+            while elapsed <= _BACKGROUND_STOP_GRACE_S:
+                if not await self._probe_background_pid(runtime, instance_id, pid):
+                    return
+                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
+                elapsed += _BACKGROUND_STOP_POLL_S
+            if await self._probe_background_pid(runtime, instance_id, pid):
+                await self._kill_background_pid(runtime, instance_id, pid, "KILL")
+        except Exception:
+            logger.exception(
+                "background_process_restart_stop_failed",
+                old_pid=pid,
+            )
+
+    async def verify_and_reattach_background_processes(
+        self,
+        workspace_id: uuid.UUID,
+        expected: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Verify untracked ("vanished") processes and reattach live ones.
+
+        The backend sends candidate ``{process_id, pid, log_path,
+        exit_path, command?, workdir?, name?}`` dicts for DB-RUNNING rows
+        that no longer appear in the runner report (typically after a
+        runner restart wiped in-memory tracking). For each candidate:
+
+        - already tracked -> normal live status (no state change);
+        - untracked but PID alive -> reattach into
+          ``_background_processes`` (idempotent) and report ``running``;
+        - untracked and PID dead but exit file readable -> ``exited``
+          with the recorded code (no tracking);
+        - otherwise -> ``unknown`` (no tracking).
+
+        A runtime/workspace failure yields a per-candidate error entry
+        instead of failing the whole batch. Paths outside
+        ``BACKGROUND_PROCESS_DIR`` (or with a failing process_id) are
+        rejected fail-closed as ``unknown`` so a hostile payload can
+        neither reattach nor probe arbitrary files.
+        """
+        results: list[dict[str, Any]] = []
+        if not isinstance(expected, list):
+            raise ValueError("expected must be a list")
+        if len(expected) > _BACKGROUND_VERIFY_MAX_ENTRIES:
+            raise ValueError(
+                f"expected must hold at most {_BACKGROUND_VERIFY_MAX_ENTRIES} entries"
+            )
+        try:
+            info = self._get_cached(workspace_id)
+            runtime = self._get_runtime(workspace_id)
+            if not info.instance_id:
+                raise RuntimeError("Workspace has no instance assigned")
+        except Exception as exc:
+            for candidate in expected:
+                raw_id = (
+                    candidate.get("process_id")
+                    if isinstance(candidate, dict)
+                    else None
+                )
+                results.append(
+                    {
+                        "process_id": str(raw_id or ""),
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": None,
+                        "error": str(exc),
+                    }
+                )
+            return results
+
+        for candidate in expected:
+            if not isinstance(candidate, dict):
+                results.append(
+                    {
+                        "process_id": "",
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": None,
+                        "error": "invalid candidate entry",
+                    }
+                )
+                continue
+            raw_process_id = candidate.get("process_id", "")
+            try:
+                cleaned_process_id = self._sanitize_process_id(
+                    str(raw_process_id or "")
+                )
+            except ValueError as exc:
+                results.append(
+                    {
+                        "process_id": str(raw_process_id or ""),
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": None,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            raw_pid = candidate.get("pid")
+            try:
+                pid = int(raw_pid)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                results.append(
+                    {
+                        "process_id": cleaned_process_id,
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": None,
+                        "error": f"Invalid pid: {raw_pid!r}",
+                    }
+                )
+                continue
+            if pid <= 0:
+                results.append(
+                    {
+                        "process_id": cleaned_process_id,
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": pid,
+                        "error": f"Invalid pid: {raw_pid!r}",
+                    }
+                )
+                continue
+            log_path = self._sanitize_background_file_path(
+                candidate.get("log_path"), ".log"
+            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log")
+            exit_path = self._sanitize_background_file_path(
+                candidate.get("exit_path"), ".exit"
+            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit")
+            try:
+                async with self._background_lock:
+                    tracked = self._background_processes.get(
+                        workspace_id, {}
+                    ).get(cleaned_process_id)
+                if tracked is not None:
+                    status = await self._background_status_locked(
+                        runtime, info.instance_id, tracked
+                    )
+                    results.append(status)
+                    continue
+                if await self._probe_background_pid(
+                    runtime, info.instance_id, pid
+                ):
+                    command = candidate.get("command", "")
+                    if not isinstance(command, str):
+                        command = ""
+                    workdir = candidate.get("workdir", "/workspace")
+                    try:
+                        safe_workdir = self._sanitize_exec_workdir(workdir)
+                    except ValueError:
+                        safe_workdir = "/workspace"
+                    name = candidate.get("name", "")
+                    if not isinstance(name, str):
+                        name = ""
+                    entry = BackgroundProcess(
+                        process_id=cleaned_process_id,
+                        workspace_id=workspace_id,
+                        pid=pid,
+                        command=command.strip() if command else "",
+                        workdir=safe_workdir,
+                        log_path=log_path,
+                        exit_path=exit_path,
+                        name=name,
+                    )
+                    async with self._background_lock:
+                        existing = self._background_processes.get(
+                            workspace_id, {}
+                        ).get(cleaned_process_id)
+                        if existing is None:
+                            self._background_processes.setdefault(
+                                workspace_id, {}
+                            )[cleaned_process_id] = entry
+                        else:
+                            # A concurrent start won the slot while the
+                            # probes were in flight: report the winner's
+                            # live status instead of overwriting it.
+                            winner = existing
+                    if existing is not None:
+                        status = await self._background_status_locked(
+                            runtime, info.instance_id, winner
+                        )
+                        results.append(status)
+                        continue
+                    logger.info(
+                        "background_process_reattached",
+                        workspace_id=str(workspace_id),
+                        process_id=cleaned_process_id,
+                        pid=pid,
+                    )
+                    results.append(
+                        {
+                            "process_id": cleaned_process_id,
+                            "status": "running",
+                            "exit_code": None,
+                            "pid": pid,
+                        }
+                    )
+                    continue
+                exit_code = await self._read_background_exit_code(
+                    runtime, info.instance_id, exit_path
+                )
+                if exit_code is None:
+                    results.append(
+                        {
+                            "process_id": cleaned_process_id,
+                            "status": "unknown",
+                            "exit_code": None,
+                            "pid": pid,
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "process_id": cleaned_process_id,
+                            "status": "exited",
+                            "exit_code": exit_code,
+                            "pid": pid,
+                        }
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "background_process_verify_failed",
+                    workspace_id=str(workspace_id),
+                    process_id=cleaned_process_id,
+                )
+                results.append(
+                    {
+                        "process_id": cleaned_process_id,
+                        "status": "unknown",
+                        "exit_code": None,
+                        "pid": pid,
+                        "error": str(exc),
+                    }
+                )
+        return results
+
+    async def _drop_background_tracking(
+        self, workspace_id: uuid.UUID, *, reason: str
+    ) -> int:
+        """Drop in-memory tracking after the VM/container was rebooted.
+
+        RAM processes are dead by definition, so PID entries can never
+        be valid again; keeping them would report stale ``exited`` rows
+        and risk signalling a reused foreign PID.
+        """
+        async with self._background_lock:
+            entries = self._background_processes.pop(workspace_id, None)
+        count = len(entries) if entries else 0
+        if count:
+            logger.info(
+                "background_processes_dropped_after_restart",
+                workspace_id=str(workspace_id),
+                count=count,
+                reason=reason,
+            )
+        return count
+
     async def start_background_process(
         self,
         workspace_id: uuid.UUID,
@@ -723,72 +1018,56 @@ class WorkspaceService:
             self._sanitize_background_file_path(exit_path, ".exit")
             or legacy_exit_path
         )
-        # Restart safety: if the same process_id still tracks a living PID,
-        # best-effort stop it (TERM -> grace -> KILL) before starting the
-        # new run. The tracking entry itself is replaced below after start.
-        old_entry = self._background_processes.get(workspace_id, {}).get(
-            cleaned_process_id
+        # Restart safety: serialised per process_id so two concurrent
+        # starts cannot orphan each other's PID (the tracking dict would
+        # otherwise keep only the last writer and leak the loser's
+        # process). A living old PID is best-effort stopped (TERM ->
+        # grace -> KILL) before the new run starts; the tracking entry
+        # itself is replaced below after start.
+        start_lock = await self._background_start_lock(
+            workspace_id, cleaned_process_id
         )
-        if old_entry is not None:
-            try:
-                if await self._probe_background_pid(
-                    runtime, info.instance_id, old_entry.pid
-                ):
-                    await self._kill_background_pid(
-                        runtime, info.instance_id, old_entry.pid, "TERM"
-                    )
-                    elapsed = 0.0
-                    while elapsed <= _BACKGROUND_STOP_GRACE_S:
-                        if not await self._probe_background_pid(
-                            runtime, info.instance_id, old_entry.pid
-                        ):
-                            break
-                        await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
-                        elapsed += _BACKGROUND_STOP_POLL_S
-                    if await self._probe_background_pid(
-                        runtime, info.instance_id, old_entry.pid
-                    ):
-                        await self._kill_background_pid(
-                            runtime, info.instance_id, old_entry.pid, "KILL"
-                        )
-            except Exception:
-                logger.exception(
-                    "background_process_restart_stop_failed",
-                    workspace_id=str(workspace_id),
-                    process_id=cleaned_process_id,
-                    old_pid=old_entry.pid,
+        async with start_lock:
+            async with self._background_lock:
+                old_entry = self._background_processes.get(
+                    workspace_id, {}
+                ).get(cleaned_process_id)
+            old_pid = old_entry.pid if old_entry is not None else None
+            if old_pid is not None:
+                await self._stop_background_pid_graceful(
+                    runtime, info.instance_id, old_pid
                 )
-        start_shell = self._build_background_start_shell(
-            command.strip(), resolved_log_path, resolved_exit_path, extra_env
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["sh", "-lc", start_shell],
-            workdir=safe_workdir,
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to start background process: {output}")
-        try:
-            pid = int(output.strip().split()[-1])
-        except (IndexError, ValueError) as exc:
-            raise RuntimeError(
-                f"Failed to parse background process pid: {output!r}"
-            ) from exc
+            start_shell = self._build_background_start_shell(
+                command.strip(), resolved_log_path, resolved_exit_path, extra_env
+            )
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                command=["sh", "-lc", start_shell],
+                workdir=safe_workdir,
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to start background process: {output}")
+            try:
+                pid = int(output.strip().split()[-1])
+            except (IndexError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Failed to parse background process pid: {output!r}"
+                ) from exc
 
-        entry = BackgroundProcess(
-            process_id=cleaned_process_id,
-            workspace_id=workspace_id,
-            pid=pid,
-            command=command.strip(),
-            workdir=safe_workdir,
-            log_path=resolved_log_path,
-            exit_path=resolved_exit_path,
-            name=name or "",
-        )
-        async with self._background_lock:
-            self._background_processes.setdefault(workspace_id, {})[
-                cleaned_process_id
-            ] = entry
+            entry = BackgroundProcess(
+                process_id=cleaned_process_id,
+                workspace_id=workspace_id,
+                pid=pid,
+                command=command.strip(),
+                workdir=safe_workdir,
+                log_path=resolved_log_path,
+                exit_path=resolved_exit_path,
+                name=name or "",
+            )
+            async with self._background_lock:
+                self._background_processes.setdefault(workspace_id, {})[
+                    cleaned_process_id
+                ] = entry
         logger.info(
             "background_process_started",
             workspace_id=str(workspace_id),
@@ -946,6 +1225,18 @@ class WorkspaceService:
             await self._kill_background_pid(
                 runtime, info.instance_id, entry.pid, "KILL"
             )
+            # Same grace poll as after TERM: the wrapper's exit file is
+            # only written once the shell actually dies, so wait for the
+            # PID to disappear before reading it (avoids "unknown" with
+            # a lost exit code on fast kills).
+            elapsed = 0.0
+            while elapsed <= _BACKGROUND_STOP_GRACE_S:
+                if not await self._probe_background_pid(
+                    runtime, info.instance_id, entry.pid
+                ):
+                    break
+                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
+                elapsed += _BACKGROUND_STOP_POLL_S
             stopped = True
         exit_code = await self._read_background_exit_code(
             runtime, info.instance_id, entry.exit_path
@@ -974,18 +1265,30 @@ class WorkspaceService:
         *,
         reason: str,
     ) -> None:
-        """Best-effort kill of every tracked process for a workspace."""
+        """Best-effort kill of every tracked process for a workspace.
+
+        Mirrors the single-stop protocol per PID: SIGTERM, a grace poll,
+        then SIGKILL for survivors, followed by one verification probe.
+        Tracking is dropped only after the kill attempt ran; when the
+        workspace/runtime is gone there is nothing left to signal, so
+        tracking is dropped as well (only a runtime stop/remove can
+        guarantee death in that case — both callers do exactly that).
+        """
         async with self._background_lock:
             entries = list(self._background_processes.get(workspace_id, {}).values())
         if not entries:
             return
-        try:
-            info = self._cache.get(workspace_id)
-            if info is None:
-                return
-            runtime = self._runtimes.get(info.runtime_type)
-            if runtime is None or not info.instance_id:
-                return
+        kill_attempted = False
+        info = self._cache.get(workspace_id)
+        runtime = self._runtimes.get(info.runtime_type) if info else None
+        if info is None or runtime is None or not info.instance_id:
+            logger.warning(
+                "background_processes_kill_skipped",
+                workspace_id=str(workspace_id),
+                reason=reason,
+            )
+        else:
+            kill_attempted = True
             for entry in entries:
                 try:
                     if await self._probe_background_pid(
@@ -1001,6 +1304,28 @@ class WorkspaceService:
                         process_id=entry.process_id,
                         reason=reason,
                     )
+            # Grace between TERM and KILL (the single-stop protocol).
+            elapsed = 0.0
+            while elapsed <= _BACKGROUND_STOP_GRACE_S:
+                try:
+                    alive = [
+                        entry
+                        for entry in entries
+                        if await self._probe_background_pid(
+                            runtime, info.instance_id, entry.pid
+                        )
+                    ]
+                except Exception:
+                    logger.exception(
+                        "background_process_kill_failed",
+                        workspace_id=str(workspace_id),
+                        reason=reason,
+                    )
+                    alive = list(entries)
+                if not alive:
+                    break
+                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
+                elapsed += _BACKGROUND_STOP_POLL_S
             for entry in entries:
                 try:
                     if await self._probe_background_pid(
@@ -1016,14 +1341,36 @@ class WorkspaceService:
                         process_id=entry.process_id,
                         reason=reason,
                     )
-        finally:
-            async with self._background_lock:
-                self._background_processes.pop(workspace_id, None)
+            # Final verification: log survivors instead of silently
+            # dropping them — a setsid grandchild with its own session
+            # can escape even the group kill.
+            for entry in entries:
+                try:
+                    if await self._probe_background_pid(
+                        runtime, info.instance_id, entry.pid
+                    ):
+                        logger.warning(
+                            "background_process_survived_kill_all",
+                            workspace_id=str(workspace_id),
+                            process_id=entry.process_id,
+                            pid=entry.pid,
+                            reason=reason,
+                        )
+                except Exception:
+                    logger.exception(
+                        "background_process_kill_failed",
+                        workspace_id=str(workspace_id),
+                        process_id=entry.process_id,
+                        reason=reason,
+                    )
+        async with self._background_lock:
+            self._background_processes.pop(workspace_id, None)
         logger.info(
             "background_processes_killed",
             workspace_id=str(workspace_id),
             count=len(entries),
             reason=reason,
+            kill_attempted=kill_attempted,
         )
 
     # -- cache management --------------------------------------------------
@@ -1769,6 +2116,12 @@ class WorkspaceService:
             qemu_disk_size_gb=qemu_disk_size_gb,
             restart=True,
         )
+        # The VM rebooted: every RAM process is dead, so drop tracking.
+        # Keeping entries would report stale exited rows and risk
+        # signalling a reused foreign PID after the reboot.
+        await self._drop_background_tracking(
+            workspace_id, reason="reconfigure_resources"
+        )
         info.status = "running"
 
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
@@ -1982,6 +2335,12 @@ class WorkspaceService:
                                     ws_id, reason="self_healing_restart"
                                 )
                                 await runtime.restart_workspace(info.instance_id)
+                                # The VM rebooted: drop background tracking
+                                # (RAM processes are dead; stale PIDs must
+                                # never be signalled after a reboot).
+                                await self._drop_background_tracking(
+                                    ws_id, reason="self_healing_restart"
+                                )
                                 # Reset status and clear the failure timer.
                                 if ws_id in self._cache:
                                     self._cache[ws_id].status = "running"
