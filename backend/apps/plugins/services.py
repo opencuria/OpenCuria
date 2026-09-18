@@ -43,10 +43,12 @@ _MAX_MAPPING_VALUE_LEN = 4096
 _MAX_URL_LEN = 2048
 
 PLAYWRIGHT_PLUGIN_SLUG = "playwright"
+#: Headed Chromium on the shared workspace desktop (KasmVNC :1) so the
+#: browser is visible in the desktop viewer. ``--headless`` must stay
+#: out: headed is the playwright-mcp default and needs DISPLAY.
 PLAYWRIGHT_MCP_ARGS = [
     "-y",
     "@playwright/mcp@latest",
-    "--headless",
     "--isolated",
     "--no-sandbox",
     "--executable-path",
@@ -54,6 +56,13 @@ PLAYWRIGHT_MCP_ARGS = [
     "--output-dir",
     "/tmp/.opencuria/playwright",
 ]
+#: DISPLAY is allowed through the stream env sanitizer (not in the
+#: blocked HOME/PATH/LD_… set); XAUTHORITY pins the runner-owned file
+#: so X11 clients resolve auth instead of depending on ambient state.
+PLAYWRIGHT_MCP_ENV = {
+    "DISPLAY": ":1",
+    "XAUTHORITY": "/root/.Xauthority",
+}
 
 
 # ---------------------------------------------------------------------------

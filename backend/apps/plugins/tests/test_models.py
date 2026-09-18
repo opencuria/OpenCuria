@@ -22,6 +22,7 @@ from apps.plugins.models import (
 )
 from apps.plugins.services import (
     PLAYWRIGHT_MCP_ARGS,
+    PLAYWRIGHT_MCP_ENV,
     PluginService,
     normalize_mcp_payload,
 )
@@ -206,6 +207,10 @@ def test_playwright_seed_shape():
     assert server.command == "npx"
     for required_arg in PLAYWRIGHT_MCP_ARGS:
         assert required_arg in list(server.args or [])
+    # Headed on the shared desktop: no --headless, DISPLAY/XAUTHORITY set.
+    assert "--headless" not in list(server.args or [])
+    for key, value in PLAYWRIGHT_MCP_ENV.items():
+        assert dict(server.env or {}).get(key) == value
     assert PluginSkill.objects.filter(plugin=plugin).exists()
     # Explicit opt-in: no org activations created by the seed.
     assert not OrgPluginActivation.objects.filter(plugin=plugin).exists()

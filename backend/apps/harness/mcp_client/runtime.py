@@ -108,6 +108,11 @@ class McpRuntime:
         self._prepared = prepared
         if prepared_is_empty(prepared):
             return prepared.snapshot
+        # Headed Playwright needs the shared desktop (KasmVNC :1) before
+        # the browser spawns — otherwise it lands on no display. Ensure
+        # it once per run (idempotent, best effort: a missing/foreign
+        # accessor simply keeps the old headless-safe behaviour).
+        await self._ensure_headed_desktop(accessor, prepared)
         if not prepared.plaintexts:
             prepared.plaintexts.update(
                 plugin_runtime.resolve_runtime_credentials(
@@ -240,6 +245,41 @@ class McpRuntime:
                 pass
             self.connections = []
             raise
+
+    @staticmethod
+    async def _ensure_headed_desktop(
+        accessor: Any, prepared: PreparedPluginRuntime
+    ) -> None:
+        """Start the shared desktop when a headed browser MCP needs it.
+
+        Only servers whose env carries an explicit ``DISPLAY`` opt in —
+        headless servers (no DISPLAY) keep the old behaviour. Failures
+        never fail the run: the MCP open below still reports them.
+        """
+        try:
+            servers = [
+                server
+                for plugin in prepared.snapshot.plugins
+                for server in plugin.mcp_servers
+            ]
+        except Exception:  # pragma: no cover - defensive
+            return
+        needs_display = any(
+            str((server.env or {}).get("DISPLAY", "")).strip()
+            for server in servers
+        )
+        if not needs_display:
+            return
+        desktop_action = getattr(accessor, "desktop_action", None)
+        if not callable(desktop_action):
+            return
+        try:
+            await desktop_action("ensure", {})
+        except Exception as exc:  # pragma: no cover - best effort
+            log.warning(
+                "mcp_headed_desktop_ensure_failed",
+                error=f"{type(exc).__name__}",
+            )
 
     @staticmethod
     def _tools_for_connection(connection: McpServerConnection) -> list[McpTool]:
