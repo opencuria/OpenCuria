@@ -10,10 +10,12 @@ import {
 } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
 import HarnessMarkdown from './HarnessMarkdown.vue'
+import HarnessQuestionCard from './HarnessQuestionCard.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import HarnessPatchCard from './HarnessPatchCard.vue'
+import { isQuestionToolPart } from '@/lib/harnessBlocks'
 
 const props = defineProps<{
   blocks: RenderBlock[]
@@ -98,6 +100,10 @@ function blockKey(index: number): string {
           @open-subtask="emit('openSubtask', $event)"
         />
         <HarnessPatchCard v-else-if="block.part.type === 'patch'" :part="block.part" />
+        <HarnessQuestionCard
+          v-else-if="block.part.type === 'tool' && isQuestionToolPart(block.part)"
+          :part="block.part"
+        />
         <div
           v-else
           class="w-full overflow-x-auto rounded-xl border border-border bg-card px-3 py-2"

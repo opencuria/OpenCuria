@@ -6,6 +6,8 @@ import {
   countWorkItems,
   isAgentPart,
   isCardPart,
+  isPendingQuestionPart,
+  isQuestionToolPart,
   isWorkItem,
   wrapFinishedWork,
 } from './harnessBlocks'
@@ -335,6 +337,93 @@ describe('buildRenderBlocks', () => {
       kind: 'single',
       part: { id: 'edit-1' },
     })
+  })
+
+  it('renders an answered question as a card and never as a work item', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        title: 'Which mode?',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'card', 'single'])
+    expect(blocks[1]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
+  })
+
+  it('skips a pending question while keeping the surrounding run intact', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'q-1', tool: 'question', state: 'running' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.kind).toBe('group')
+    if (blocks[0]?.kind === 'group') {
+      expect(blocks[0].parts.map((part) => part.id)).toEqual(['tool-1', 'tool-2'])
+    }
+  })
+
+  it('renders a failed question as a card', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        state: 'error',
+        title: 'Which mode?',
+        output: "Tool 'question' failed: Question rejected by user",
+      }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['card'])
+    expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
+  })
+
+  it('wraps an answered question into the workedFor shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Hello' }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'workedFor', 'text'])
+    const shell = wrapped[1]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['card'])
+  })
+})
+
+describe('question helpers', () => {
+  it('detects question tool parts and pending state', () => {
+    expect(isQuestionToolPart(makePart('tool', { tool: 'question' }))).toBe(true)
+    expect(isQuestionToolPart(makePart('tool', { tool: 'ask_user' }))).toBe(true)
+    expect(isQuestionToolPart(makePart('tool', { tool: 'read' }))).toBe(false)
+    expect(isQuestionToolPart(makePart('patch'))).toBe(false)
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'running' }))).toBe(
+      true,
+    )
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'pending' }))).toBe(
+      true,
+    )
+    expect(
+      isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'completed' })),
+    ).toBe(false)
+    expect(isWorkItem(makePart('tool', { tool: 'question' }))).toBe(false)
   })
 })
 

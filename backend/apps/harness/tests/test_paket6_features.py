@@ -135,6 +135,17 @@ def test_question_tool_documents_always_available_freetext() -> None:
     assert "other" in options_desc
 
 
+def test_question_tool_documents_multi_select_flag() -> None:
+    """Question schema tells the model when/how to use multiple:true."""
+    from apps.harness.tools.question import QuestionItem, QuestionTool
+
+    tool = QuestionTool()
+    assert "multiple" in tool.description.lower()
+    multiple_desc = (QuestionItem.model_fields["multiple"].description or "").lower()
+    assert "more than one" in multiple_desc
+    assert "several" in multiple_desc or "select all" in multiple_desc
+
+
 @pytest.mark.asyncio
 async def test_question_timeout_is_tool_error() -> None:
     """Question tool fails when on_question never resolves."""

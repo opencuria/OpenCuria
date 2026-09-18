@@ -13,7 +13,6 @@ import HarnessMarkdown from './HarnessMarkdown.vue'
 import ToolDetailBash from './tools/ToolDetailBash.vue'
 import ToolDetailComputerUse from './tools/ToolDetailComputerUse.vue'
 import ToolDetailDefault from './tools/ToolDetailDefault.vue'
-import ToolDetailQuestion from './tools/ToolDetailQuestion.vue'
 import ToolDetailRead from './tools/ToolDetailRead.vue'
 import ToolDetailSearch from './tools/ToolDetailSearch.vue'
 import ToolDetailTodos from './tools/ToolDetailTodos.vue'
@@ -48,8 +47,6 @@ const DETAIL_BY_TOOL: Record<string, Component> = {
   list: ToolDetailSearch,
   webfetch: ToolDetailWebfetch,
   todowrite: ToolDetailTodos,
-  question: ToolDetailQuestion,
-  ask_user: ToolDetailQuestion,
 }
 
 const props = withDefaults(
