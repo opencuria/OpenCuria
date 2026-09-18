@@ -40,14 +40,48 @@ async def test_process_start_happy_path(fake_accessor) -> None:
     )
     assert "proc-1" in result.output
     assert "read /workspace/.opencuria/processes/proc-1.log" in result.output
+    assert "work process" in result.output
     assert result.metadata["process_id"] == "proc-1"
     assert result.metadata["pid"] == 1234
     assert result.metadata["status"] == "running"
     assert result.metadata["name"] == "web"
     assert result.metadata["run_count"] == 1
+    assert result.metadata["kind"] == "temp"
     assert tool.title(tool.coerce_args({"command": "python server.py", "name": "web"})) == (
         "Start python server.py"
     )
+
+
+def test_process_start_schema_defaults_to_work_process() -> None:
+    """Omitting for_user is the common path: a session work process."""
+    schema = ProcessStartTool().parameters_schema()
+    properties = schema.get("properties") or {}
+    assert "temporary" not in properties
+    assert properties["for_user"]["default"] is False
+    assert "for_user" not in (schema.get("required") or [])
+    args = ProcessStartTool().coerce_args(
+        {"command": "python server.py", "name": "web"}
+    )
+    assert args.for_user is False
+
+
+async def test_process_start_for_user_is_persistent(fake_accessor) -> None:
+    """for_user=true starts a process that outlives the run for the user."""
+    tool = ProcessStartTool()
+    result = await tool.execute(
+        {"command": "python server.py", "name": "web", "for_user": True},
+        _ctx(fake_accessor),
+    )
+    assert result.metadata["kind"] == "persistent"
+    assert "user can use it" in result.output
+    assert "work process" not in result.output
+    listed = await ProcessListTool().execute({}, _ctx(fake_accessor))
+    assert "[user]" in listed.output
+    assert tool.title(
+        tool.coerce_args(
+            {"command": "python server.py", "name": "web", "for_user": True}
+        )
+    ) == "Keep python server.py"
 
 
 async def test_process_start_same_name_restarts_in_place(fake_accessor) -> None:
@@ -121,11 +155,14 @@ async def test_process_list_happy_path_and_empty() -> None:
     assert result.metadata == {"count": 0, "processes": []}
 
     accessor = FakeAccessor()
-    await accessor.process_start("sleep 60", name="web")
+    await ProcessStartTool().execute(
+        {"command": "sleep 60", "name": "web"}, _ctx(accessor)
+    )
     result = await ProcessListTool().execute({}, _ctx(accessor))
     assert "proc-1" in result.output
     assert "web" in result.output
     assert "sleep 60" in result.output
+    assert "[user]" not in result.output
     assert result.metadata["count"] == 1
 
 

@@ -32,14 +32,12 @@ class ProcessStartArgs(BaseModel):
             "log, run count +1, command/workdir overwritten)."
         )
     )
-    temporary: bool = Field(
+    for_user: bool = Field(
         default=False,
         description=(
-            "Start a temporary session-scoped process instead of a "
-            "persistent one. Temporary processes are stopped automatically "
-            "when this agent run finishes (success, error, or abort); "
-            "use them for short-lived helpers (dev servers for tests, "
-            "watchers) that must not outlive the run."
+            "Leave this running after you finish so the user can use it "
+            "(e.g. an app they will test). Default false: this is your "
+            "work process and is stopped when the run ends."
         ),
     )
 
@@ -78,8 +76,8 @@ def _status_line(record: dict) -> str:
     process_id = str(record.get("process_id", ""))
     head = f"{name} {process_id}".strip() if name else process_id
     kind = str(record.get("kind") or "")
-    if kind == "temp":
-        head = f"{head} [temp]" if head else "[temp]"
+    if kind == "persistent":
+        head = f"{head} [user]" if head else "[user]"
     parts = [
         head,
         str(record.get("status", "unknown")),
@@ -108,15 +106,11 @@ class ProcessStartTool(Tool):
 
     name = "process_start"
     description = (
-        "Start a background process in the workspace. The name is the "
-        "identity per workspace: the same name restarts the same "
-        "application in place (new log, run count +1, command/workdir "
-        "overwritten); a stopped process is restarted via the same name. "
-        "Pass temporary=true for a session-scoped helper that is stopped "
-        "automatically when this run finishes (success, error, or abort). "
-        "Returns the process id, pid, and log path; check status with "
-        "process_get, stop with process_stop, and read logs with the "
-        "read tool."
+        "Start a background process for your work; it is stopped when "
+        "this run finishes. Set for_user=true only when the user should "
+        "keep using it after you finish. The name is the identity per "
+        "workspace (same name restarts in place). Returns id, pid, and "
+        "log path; status via process_get, logs via read."
     )
     args_schema: type[BaseModel] = ProcessStartArgs
     permission_key = "process"
@@ -125,8 +119,8 @@ class ProcessStartTool(Tool):
         """Return a short title for a process_start invocation."""
         assert isinstance(args, ProcessStartArgs)
         command = args.command.strip().splitlines()[0] if args.command else ""
-        if args.temporary:
-            return f"Start temp {command[:80]}"
+        if args.for_user:
+            return f"Keep {command[:80]}"
         return f"Start {command[:80]}"
 
     async def execute(
@@ -152,7 +146,7 @@ class ProcessStartTool(Tool):
             env = validate_harness_env(args.env or {})
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
-        kind = "temp" if args.temporary else "persistent"
+        kind = "persistent" if args.for_user else "temp"
         try:
             record = await ctx.accessor.process_start(
                 args.command,
@@ -170,22 +164,22 @@ class ProcessStartTool(Tool):
         pid = record.get("pid")
         log_path = str(record.get("log_path", ""))
         run_count = _run_count(record)
-        temp_hint = (
-            " It is temporary and will be stopped automatically when "
-            "this run finishes."
-            if kind == "temp"
-            else ""
+        lifetime_hint = (
+            " It will keep running after this run so the user can use it."
+            if kind == "persistent"
+            else " It is a work process and will be stopped when this run finishes."
         )
         if run_count > 1:
             output = (
                 f"Restarted background process '{name}' (run {run_count}, "
-                f"id {process_id}, pid {pid}).{temp_hint} "
+                f"id {process_id}, pid {pid}).{lifetime_hint} "
                 "Status via process_get, stop via process_stop. "
                 f"Logs: read {log_path}."
             )
         else:
             output = (
-                f"Started background process {process_id} (pid {pid}).{temp_hint} "
+                f"Started background process {process_id} (pid {pid})."
+                f"{lifetime_hint} "
                 "Status via process_get, stop via process_stop. "
                 f"Logs: read {log_path}."
             )
@@ -209,8 +203,7 @@ class ProcessListTool(Tool):
     name = "process_list"
     description = (
         "List background processes of the workspace with status, pid, "
-        "exit code, command, and type (persistent or temporary). "
-        "Temporary rows shown are limited to this run's session."
+        "exit code, and command. for_user processes are marked [user]."
     )
     args_schema: type[BaseModel] = ProcessListArgs
     permission_key = "process"
