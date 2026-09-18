@@ -20,6 +20,7 @@ from apps.credentials.services import (
     ResolvedCredentials,
 )
 from apps.runners.enums import (
+    ProcessStatus,
     RunnerStatus,
     TaskStatus,
     TaskType,
@@ -2093,6 +2094,57 @@ class TestWorkspaceOperationState:
 
         assert updated is not None
         assert updated.active_operation == WorkspaceOperation.RESTARTING
+
+    @pytest.mark.asyncio
+    async def test_running_qemu_update_kills_processes_without_async_unsafe(
+        self, service, workspace, monkeypatch
+    ):
+        """QEMU reconfigure must wrap process ORM off the event loop."""
+        import os
+
+        from django.core.exceptions import SynchronousOnlyOperation
+
+        workspace.runtime_type = "qemu"
+        workspace.qemu_vcpus = 2
+        workspace.qemu_memory_mb = 4096
+        workspace.qemu_disk_size_gb = 50
+        workspace.save(
+            update_fields=[
+                "runtime_type",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
+        process = service.processes.create(
+            process_id=uuid.uuid4(),
+            workspace=workspace,
+            command="sleep 60",
+            workdir="/workspace",
+            name="sleeper",
+        )
+
+        monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+        try:
+            updated = await service.update_workspace(
+                workspace.id,
+                qemu_vcpus=4,
+                qemu_memory_mb=8192,
+                qemu_disk_size_gb=60,
+            )
+        except SynchronousOnlyOperation:
+            pytest.fail(
+                "update_workspace called Django ORM from an async context"
+            )
+        finally:
+            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+        assert updated is not None
+        assert updated.active_operation == WorkspaceOperation.RESTARTING
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.KILLED
+        assert process.ended_at is not None
 
     @pytest.mark.asyncio
     async def test_running_qemu_update_skips_restart_for_unchanged_resources(

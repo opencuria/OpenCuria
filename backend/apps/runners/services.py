@@ -1436,7 +1436,7 @@ class RunnerService:
                         raise RunnerOfflineError(str(runner.id))
                     # Reconfigure restarts the VM: fail workspace streams
                     # so harness waiters surface it instead of hanging.
-                    self.mark_processes_killed(
+                    await sync_to_async(self.mark_processes_killed)(
                         str(workspace_id), reason="workspace_reconfigured"
                     )
 
