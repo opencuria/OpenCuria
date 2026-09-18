@@ -38,7 +38,8 @@ __all__ = [
 # Output truncation for bash, mirroring OpenCode's max_lines/max_bytes.
 BASH_MAX_LINES = MAX_LINES
 BASH_MAX_BYTES = MAX_BYTES
-BASH_DEFAULT_TIMEOUT = 60.0
+BASH_DEFAULT_TIMEOUT = 180.0
+BASH_MAX_TIMEOUT = 1200.0
 
 # Safety caps for search-style tools (OpenCode grep/glob limit).
 GLOB_MAX_RESULTS = 100
@@ -135,7 +136,15 @@ class BashArgs(BaseModel):
 
     command: str = Field(description="Shell command to run.")
     workdir: str = Field(default=HARNESS_WORKSPACE_ROOT)
-    timeout: float = Field(default=BASH_DEFAULT_TIMEOUT, gt=0, le=600)
+    timeout: float = Field(
+        default=BASH_DEFAULT_TIMEOUT,
+        gt=0,
+        le=BASH_MAX_TIMEOUT,
+        description=(
+            f"Timeout in seconds. Defaults to {BASH_DEFAULT_TIMEOUT:.0f} "
+            f"and may not exceed {BASH_MAX_TIMEOUT:.0f}."
+        ),
+    )
     env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -167,7 +176,8 @@ class BashTool(Tool):
     description = (
         "Run a shell command in the workspace. Returns exit code, "
         "stdout, and stderr; non-zero exits raise a tool error. "
-        "Default timeout is 60s (max 600s). Output is tail-truncated "
+        f"Default timeout is {BASH_DEFAULT_TIMEOUT:.0f}s "
+        f"(max {BASH_MAX_TIMEOUT:.0f}s). Output is tail-truncated "
         "(last lines kept; full output spilled to a file when clipped). "
         "Independent bash calls in one step run in parallel."
     )

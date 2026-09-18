@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import pytest
+from pydantic import ValidationError
 
 from apps.harness.access.base import ExecResult
 from apps.harness.access.runner_accessor import RunnerAccessorError
@@ -23,7 +24,12 @@ from apps.harness.tools import (
 )
 from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.files import ReadArgs
-from apps.harness.tools.shell import truncate_output
+from apps.harness.tools.shell import (
+    BASH_DEFAULT_TIMEOUT,
+    BASH_MAX_TIMEOUT,
+    BashArgs,
+    truncate_output,
+)
 from apps.harness.tools.todos import InMemoryTodoRepository
 
 
@@ -357,6 +363,24 @@ async def test_bash_timeout_propagates() -> None:
     accessor = FakeAccessor(error=TimeoutError("slow"))
     with pytest.raises(ToolError, match="timed out"):
         await BashTool().execute({"command": "sleep 9"}, _ctx(accessor))
+
+
+def test_bash_timeout_defaults_to_three_minutes() -> None:
+    """Omitted timeout uses the 3-minute default."""
+    args = BashArgs(command="echo hi")
+    assert args.timeout == BASH_DEFAULT_TIMEOUT == 180.0
+
+
+def test_bash_timeout_accepts_twenty_minute_max() -> None:
+    """The agent may request the 20-minute ceiling."""
+    args = BashArgs(command="echo hi", timeout=BASH_MAX_TIMEOUT)
+    assert args.timeout == 1200.0
+
+
+def test_bash_timeout_rejects_above_max() -> None:
+    """Timeouts above 20 minutes fail schema validation."""
+    with pytest.raises(ValidationError):
+        BashArgs(command="echo hi", timeout=BASH_MAX_TIMEOUT + 1)
 
 
 async def test_bash_runner_error_propagates() -> None:
