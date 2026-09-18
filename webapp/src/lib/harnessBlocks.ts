@@ -3,7 +3,9 @@
  *
  * Parts stay in chronological order. Consecutive simple tool calls collapse
  * into a "Worked" group. Reasoning and failed tools break the run and render
- * as standalone rows. Subtasks and patches stay as top-level cards.
+ * as standalone rows. Subtasks, patches, and answered questions stay as
+ * top-level cards. Pending questions stay invisible (they live in the
+ * composer sheet) and only appear as cards once answered.
  * After a turn finishes, wrapFinishedWork scoops work blocks into one
  * "Worked for" shell; text, compaction, and Agent-S plan steps stay outside.
  */
@@ -17,9 +19,25 @@ const CARD_TYPES = new Set<HarnessPartType>(['subtask', 'patch'])
 const AGENT_TYPES = new Set<HarnessPartType>(['agent'])
 const SKIP_TYPES = new Set<HarnessPartType>(['step-start', 'step-finish'])
 const PATCHED_FILE_TOOLS = new Set(['edit', 'write'])
+const QUESTION_TOOLS = new Set(['question', 'ask_user'])
+
+/**
+ * A question tool call (`question` / `ask_user`). Pending ones stay
+ * invisible (composer sheet owns them); answered ones render as cards.
+ */
+export function isQuestionToolPart(part: HarnessPart): boolean {
+  if (part.type !== 'tool') return false
+  return QUESTION_TOOLS.has(resolveToolName(part).toLowerCase())
+}
+
+/** True while the question is still open (no answers yet). */
+export function isPendingQuestionPart(part: HarnessPart): boolean {
+  return isQuestionToolPart(part) && (part.state === 'running' || part.state === 'pending')
+}
 
 /** A simple tool call that can join a consecutive "Worked" run. */
 export function isWorkItem(part: HarnessPart): boolean {
+  if (isQuestionToolPart(part)) return false
   return GROUPABLE_TYPES.has(part.type) && part.state !== 'error'
 }
 
@@ -57,6 +75,7 @@ function isEmptyText(part: HarnessPart): boolean {
 }
 
 function isStandaloneWork(part: HarnessPart): boolean {
+  if (isQuestionToolPart(part)) return false
   return part.type === 'reasoning' || (part.type === 'tool' && part.state === 'error')
 }
 
@@ -107,6 +126,16 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
       continue
     }
     if (hasSubtask && isTaskToolPart(part)) {
+      continue
+    }
+    if (isPendingQuestionPart(part)) {
+      // Still open: the composer sheet owns the interaction, no chat row.
+      continue
+    }
+    if (isQuestionToolPart(part)) {
+      // Answered/skipped/failed: compact Q/A card on patch level.
+      flushRun()
+      blocks.push({ kind: 'card', part })
       continue
     }
     if (part.type === 'text') {

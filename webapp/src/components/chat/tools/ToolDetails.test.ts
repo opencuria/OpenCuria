@@ -5,7 +5,6 @@ import type { HarnessPart } from '@/types/harness'
 import ImageLightbox from '../ImageLightbox.vue'
 import ToolDetailBash from './ToolDetailBash.vue'
 import ToolDetailDefault from './ToolDetailDefault.vue'
-import ToolDetailQuestion from './ToolDetailQuestion.vue'
 import ToolDetailRead from './ToolDetailRead.vue'
 import ToolDetailSearch from './ToolDetailSearch.vue'
 import ToolDetailTodos from './ToolDetailTodos.vue'
@@ -283,24 +282,6 @@ describe('tool detail components', () => {
     })
     expect(wrapper.text()).toContain('markdown')
     expect(wrapper.get('a').attributes('href')).toBe('https://example.com')
-  })
-
-  it('pairs questions with answers and handles missing answers', () => {
-    const wrapper = mount(ToolDetailQuestion, {
-      props: {
-        part: makePart({
-          tool: 'question',
-          output: '{"answers":["Build"]}',
-          input: {
-            arguments: JSON.stringify({
-              questions: [{ question: 'Which mode?' }],
-            }),
-          },
-        }),
-      },
-    })
-    expect(wrapper.text()).toContain('Which mode?')
-    expect(wrapper.get('[data-testid="tool-detail-question-answer"]').text()).toBe('Build')
   })
 
   it('renders todo rows from output and a cleared list', () => {

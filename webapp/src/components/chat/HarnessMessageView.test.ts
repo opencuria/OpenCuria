@@ -820,6 +820,36 @@ describe('HarnessMessageView', () => {
     ).toBe(false)
   })
 
+  it('shows an answered question card inside Worked for', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'One question' }),
+          makePart({
+            id: 'q-1',
+            type: 'tool',
+            tool: 'question',
+            title: 'Which mode?',
+            output: '{"answers":["Build"]}',
+            input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+          }),
+        ]),
+      },
+    })
+
+    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'text',
+      'workedFor',
+    ])
+    // The card is hidden until Worked for is expanded, like patch cards.
+    expect(wrapper.find('[data-testid="harness-question-card"]').exists()).toBe(false)
+    await expandWorkedFor(wrapper)
+    const card = wrapper.get('[data-testid="harness-question-card"]')
+    expect(card.text()).toContain('Which mode?')
+    expect(card.get('[data-testid="harness-question-card-answer"]').text()).toBe('Build')
+    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+  })
+
   it('does not render message errors inline', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
