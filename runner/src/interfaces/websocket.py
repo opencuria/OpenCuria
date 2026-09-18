@@ -2384,6 +2384,53 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_process_stop_failed")
 
+        @sio.on("harness:process_verify")
+        async def on_harness_process_verify(data: dict) -> None:
+            raw = data if isinstance(data, dict) else {}
+            request_id = raw.get("request_id", "")
+            try:
+                workspace_id = uuid.UUID(raw["workspace_id"])
+            except (KeyError, ValueError, TypeError, AttributeError) as exc:
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(raw.get("workspace_id", "")),
+                        "request_id": request_id
+                        if isinstance(request_id, str)
+                        else "",
+                        "processes": [],
+                        "error": f"Invalid workspace_id: {exc}",
+                    },
+                )
+                logger.warning("harness_process_verify_invalid_workspace")
+                return
+            try:
+                raw_expected = raw.get("expected", [])
+                if not isinstance(raw_expected, list):
+                    raise ValueError("expected must be a list")
+                processes = await self._service.verify_and_reattach_background_processes(
+                    workspace_id, raw_expected
+                )
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": processes,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": [],
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_verify_failed")
+
         @sio.on("workspace:stream_cancel")
         async def on_workspace_stream_cancel(data: dict) -> None:
             raw = data if isinstance(data, dict) else {}
