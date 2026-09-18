@@ -130,4 +130,47 @@ describe('HarnessQuestionSheet', () => {
     await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
     expect(wrapper.emitted('submit')).toEqual([['q-1', ['Option A', '']]])
   })
+
+  it('hints single vs multi choice per question', () => {
+    const single = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+    expect(single.find('[data-testid="composer-question-hint"]').text()).toContain('Select one')
+    expect(
+      single.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role'),
+    ).toBe('radio')
+
+    const multi = mount(HarnessQuestionSheet, {
+      props: {
+        requests: [
+          makeRequest({
+            questions: [
+              {
+                question: 'Pick some',
+                multiple: true,
+                options: [
+                  { label: 'Option A', description: 'first' },
+                  { label: 'Option B', description: 'second' },
+                ],
+              },
+            ],
+          }),
+        ],
+      },
+    })
+    expect(multi.find('[data-testid="composer-question-hint"]').text()).toContain(
+      'Select all that apply',
+    )
+    expect(
+      multi.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role'),
+    ).toBe('checkbox')
+  })
+
+  it('keeps multiple option selections in single questions exclusive', async () => {
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+
+    const options = wrapper.findAll('[data-testid="composer-question-option"]')
+    await options[0]!.trigger('click')
+    await options[1]!.trigger('click')
+    await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([['q-1', ['Option B', '']]])
+  })
 })

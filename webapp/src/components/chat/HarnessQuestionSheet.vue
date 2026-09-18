@@ -258,12 +258,21 @@ function onKeydown(event: KeyboardEvent): void {
 
         <!-- Options list (when the question has selectable options) -->
         <div v-if="question.options?.length" class="flex flex-col gap-1">
+          <!-- Selection hint: single vs multi choice -->
+          <p
+            class="text-xs text-muted-foreground"
+            data-testid="composer-question-hint"
+          >
+            {{ question.multiple ? 'Select all that apply' : 'Select one' }}
+          </p>
           <!-- Selectable option rows -->
           <button
             v-for="(option, oIndex) in question.options"
             :key="option.label"
             type="button"
             :disabled="submitting"
+            :role="question.multiple ? 'checkbox' : 'radio'"
+            :aria-checked="isOptionSelected(request.request_id, qIndex, option.label)"
             class="flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors"
             :class="
               isOptionSelected(request.request_id, qIndex, option.label)
@@ -280,6 +289,8 @@ function onKeydown(event: KeyboardEvent): void {
           >
             <span
               class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold"
+              :data-type="question.multiple ? 'checkbox' : 'radio'"
+              :data-picked="isOptionSelected(request.request_id, qIndex, option.label)"
               :class="
                 isOptionSelected(request.request_id, qIndex, option.label)
                   ? 'bg-primary text-primary-foreground'

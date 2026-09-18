@@ -32,7 +32,11 @@ class QuestionItem(BaseModel):
     )
     multiple: bool = Field(
         default=False,
-        description="Allow selecting more than one option.",
+        description=(
+            "Allow selecting more than one option. Set to true when the user "
+            "may pick several options (e.g. 'which languages', 'select all "
+            "that apply'); leave false for exactly-one-choice questions."
+        ),
     )
 
 
@@ -53,7 +57,10 @@ class QuestionTool(Tool):
         "Ask the user one or more structured questions and pause until they "
         "answer. Use when a decision or clarification is required mid-run. "
         "The user can always answer with custom free text, even when options "
-        "are provided."
+        "are provided. Answers are returned as one string per question; for "
+        "multi-select questions (multiple: true) the selected option labels "
+        "are joined into that string. Set multiple: true when the user may "
+        "pick several options."
     )
     args_schema: type[BaseModel] = QuestionArgs
     permission_key = "question"
