@@ -42,6 +42,9 @@ def test_all_agents_defined() -> None:
 def test_build_allows_everything() -> None:
     """Build grants allow on the wildcard (deny-tools are not filtered)."""
     assert get_agent("build").permissions == {"*": "allow"}
+    prompt = get_agent("build").system_prompt
+    assert "verify the change for real" in prompt
+    assert "embed it" in prompt
 
 
 def test_plan_edit_asks_and_bash_process_allowed() -> None:

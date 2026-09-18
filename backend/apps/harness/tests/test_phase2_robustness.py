@@ -424,12 +424,16 @@ async def test_composer_environment_has_platform_and_plan_reminder() -> None:
     assert "not on the user's machine" in plan.system
     assert "Plan mode: investigate read-only" in plan.system
     assert "ask before edits" in plan.system
+    assert "Chat media:" in plan.system
     build = await compose_system_prompt(agent=get_agent("build"), mode="build")
     assert "Platform: Linux (isolated OpenCuria workspace)" in build.system
     assert "install missing packages" in build.system
+    assert "Chat media:" in build.system
+    assert "![Login](screenshots/login.png)" in build.system
     assert "Plan mode:" not in build.system
     title = await compose_system_prompt(agent=get_agent("title"), mode="build")
     assert "not on the user's machine" not in title.system
+    assert "Chat media:" not in title.system
 
 
 @pytest.mark.parametrize(

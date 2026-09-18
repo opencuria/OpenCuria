@@ -1,5 +1,11 @@
 export type WorkspaceFileKind = 'image' | 'video' | 'text' | 'binary'
 
+export const WORKSPACE_ROOT = '/workspace'
+
+const MARKDOWN_LINK_RE = /(!?)\[([^\]]*)\]\(([^)]+)\)/g
+
+const REMOTE_DEST_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i
+
 const IMAGE_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'tiff', 'tif',
 ])
@@ -80,18 +86,63 @@ export function buildWorkspaceReferenceMarkdown(
     : `[${filename}](${path})`
 }
 
+/** Strip angle-bracket wrapping and an optional markdown title from a dest. */
+export function parseMarkdownLinkDest(raw: string): string {
+  let dest = raw.trim()
+  if (dest.startsWith('<')) {
+    const close = dest.indexOf('>')
+    if (close >= 0) return dest.slice(1, close).trim()
+    dest = dest.slice(1).trimStart()
+  }
+  const space = dest.search(/\s/)
+  if (space >= 0) return dest.slice(0, space)
+  return dest
+}
+
+function posixNormalize(path: string): string {
+  const absolute = path.startsWith('/')
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (out.length > 0) out.pop()
+      continue
+    }
+    out.push(part)
+  }
+  const joined = out.join('/')
+  if (absolute) return `/${joined}`
+  return joined
+}
+
+/**
+ * Resolve a markdown image/link dest to a sandboxed `/workspace/...` path.
+ * Remote URLs and sandbox escapes return null.
+ */
+export function resolveWorkspaceMediaPath(rawDest: string): string | null {
+  const dest = parseMarkdownLinkDest(rawDest)
+  if (!dest || REMOTE_DEST_RE.test(dest)) return null
+  const candidate = dest.startsWith('/') ? dest : `${WORKSPACE_ROOT}/${dest}`
+  const normalized = posixNormalize(candidate)
+  if (normalized !== WORKSPACE_ROOT && !normalized.startsWith(`${WORKSPACE_ROOT}/`)) {
+    return null
+  }
+  return normalized
+}
+
 export function extractWorkspacePathReferences(markdown: string): WorkspacePathReference[] {
   const refs: WorkspacePathReference[] = []
-  const re = /(!?)\[([^\]]*)\]\((\/workspace\/[^)\s]+(?: [^)]+)?)\)/g
+  MARKDOWN_LINK_RE.lastIndex = 0
   let match: RegExpExecArray | null
 
-  while ((match = re.exec(markdown)) !== null) {
-    const isMediaMarkdown = match[1] === '!'
-    const label = (match[2] ?? '').trim()
-    const rawPath = (match[3] ?? '').trim()
-    const path = rawPath.replace(/^<|>$/g, '')
-    if (!path.startsWith('/workspace/')) continue
-    refs.push({ path, label, isMediaMarkdown })
+  while ((match = MARKDOWN_LINK_RE.exec(markdown)) !== null) {
+    const path = resolveWorkspaceMediaPath(match[3] ?? '')
+    if (!path) continue
+    refs.push({
+      path,
+      label: (match[2] ?? '').trim(),
+      isMediaMarkdown: match[1] === '!',
+    })
   }
 
   return refs

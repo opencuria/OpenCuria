@@ -6,12 +6,13 @@ import base64
 
 import pytest
 
+from apps.harness.compaction import build_compaction_prompt, estimate_message_tokens
 from apps.harness.images import (
     IMAGE_TOKEN_ESTIMATE,
     hydrate_user_messages,
     hydrate_workspace_images,
+    resolve_workspace_image_path,
 )
-from apps.harness.compaction import build_compaction_prompt, estimate_message_tokens
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tests.conftest import FakeAccessor
 
@@ -63,6 +64,56 @@ async def test_hydrate_user_messages_only_touches_user_role() -> None:
     assert isinstance(hydrated[1].content, list)
     assert hydrated[0].content == "sys"
     assert hydrated[2].content == "ok"
+
+
+def test_resolve_workspace_image_path_relative_and_absolute() -> None:
+    """Relative dests resolve under /workspace; remotes and escapes fail."""
+    assert resolve_workspace_image_path("cat.png") == "/workspace/cat.png"
+    assert resolve_workspace_image_path("./cat.png") == "/workspace/cat.png"
+    assert (
+        resolve_workspace_image_path("screenshots/login.png")
+        == "/workspace/screenshots/login.png"
+    )
+    assert (
+        resolve_workspace_image_path("/workspace/cat.png")
+        == "/workspace/cat.png"
+    )
+    assert (
+        resolve_workspace_image_path('cat.png "kitten"')
+        == "/workspace/cat.png"
+    )
+    assert resolve_workspace_image_path("https://example.com/a.png") is None
+    assert resolve_workspace_image_path("../etc/passwd.png") is None
+    assert resolve_workspace_image_path("/tmp/x.png") is None
+    assert resolve_workspace_image_path("notes.txt") is None
+    assert resolve_workspace_image_path("/workspace/clip.mp4") is None
+
+
+@pytest.mark.asyncio
+async def test_hydrate_relative_image_path() -> None:
+    """Relative markdown images hydrate from /workspace."""
+    png_bytes = b"\x89PNG\r\n\x1a\n"
+    accessor = FakeAccessor(files={"/workspace/cat.png": png_bytes})
+    hydrated = await hydrate_workspace_images("see ![cat](cat.png)", accessor)
+    assert isinstance(hydrated, list)
+    assert hydrated[0] == {"type": "text", "text": "see "}
+    assert hydrated[1]["type"] == "image_url"
+
+    dotted = await hydrate_workspace_images("![cat](./cat.png)", accessor)
+    assert isinstance(dotted, list)
+    assert dotted[0]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_hydrate_skips_remote_and_escape_images() -> None:
+    """HTTPS and sandbox-escaping dests stay plain text."""
+    accessor = FakeAccessor(files={"/workspace/cat.png": b"x"})
+    remote = "see ![x](https://example.com/a.png)"
+    assert await hydrate_workspace_images(remote, accessor) == remote
+    escaped = "![x](../etc/passwd.png)"
+    assert await hydrate_workspace_images(escaped, accessor) == escaped
+    outside = "![x](/tmp/x.png)"
+    assert await hydrate_workspace_images(outside, accessor) == outside
 
 
 def test_compaction_estimates_image_tokens_without_base64() -> None:

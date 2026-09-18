@@ -196,6 +196,11 @@ async def compose_system_prompt(
     ]
     if agent.mode != "hidden":
         env_lines.append(
+            "Chat media: embed workspace images/videos as markdown, "
+            "e.g. ![Login](screenshots/login.png) (relative to "
+            f"{HARNESS_WORKSPACE_ROOT}, or {HARNESS_WORKSPACE_ROOT}/...)."
+        )
+        env_lines.append(
             "You are working inside an isolated OpenCuria workspace "
             "(Linux container or VM), not on the user's machine. The "
             "environment is disposable: investigate failures thoroughly, "

@@ -3,7 +3,7 @@ import { computed, inject, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { Skeleton } from '@/components/ui/skeleton'
-import { classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
+import { classifyWorkspaceFile, resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import type { HarnessPart } from '@/types/harness'
@@ -61,8 +61,7 @@ const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
 const imageStore = useWorkspaceImageStore()
 
-const WORKSPACE_MEDIA_RE =
-  /!\[([^\]]*)\]\((\/workspace\/[^)\s]+(?: [^)]+)?)\)/g
+const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g
 
 type HtmlSegment = { kind: 'html'; html: string }
 type ImageSegment = { kind: 'image'; path: string; label: string }
@@ -98,11 +97,11 @@ function buildSegments(text: string): MarkdownSegment[] {
   let lastIndex = 0
   let match: RegExpExecArray | null
 
-  WORKSPACE_MEDIA_RE.lastIndex = 0
-  while ((match = WORKSPACE_MEDIA_RE.exec(text)) !== null) {
-    const label = (match[1] ?? '').trim()
-    const rawPath = (match[2] ?? '').trim().replace(/^<|>$/g, '')
-    const fileKind = classifyWorkspaceFile(rawPath)
+  MARKDOWN_IMAGE_RE.lastIndex = 0
+  while ((match = MARKDOWN_IMAGE_RE.exec(text)) !== null) {
+    const path = resolveWorkspaceMediaPath(match[2] ?? '')
+    if (!path) continue
+    const fileKind = classifyWorkspaceFile(path)
     if (fileKind !== 'image' && fileKind !== 'video') continue
 
     const before = text.slice(lastIndex, match.index)
@@ -111,8 +110,8 @@ function buildSegments(text: string): MarkdownSegment[] {
     }
     segments.push({
       kind: fileKind,
-      path: rawPath,
-      label,
+      path,
+      label: (match[1] ?? '').trim(),
     })
     lastIndex = match.index + match[0].length
   }

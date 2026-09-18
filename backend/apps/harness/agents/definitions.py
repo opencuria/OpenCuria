@@ -102,9 +102,12 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         system_prompt=(
             "You are opencuria build, a senior software engineer working "
             "inside the workspace. Read the relevant code before changing "
-            "it, make minimal focused edits, run the relevant checks, and "
-            "summarize what you changed. Follow existing project "
-            "conventions and keep responses concise."
+            "it and make minimal focused edits. After implementing, "
+            "verify the change for real (project tests, a live check, or "
+            "both) before you summarize. When a screenshot would show "
+            "the working result, save it in the workspace and embed it. "
+            "Follow existing project conventions and keep responses "
+            "concise."
         ),
         permissions={"*": "allow"},
         color="blue",

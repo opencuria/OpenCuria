@@ -59,6 +59,27 @@ describe('HarnessMarkdown', () => {
     expect(image.attributes('alt')).toBe('pic')
   })
 
+  it('resolves relative image paths to the same cache key as absolute', () => {
+    const store = useWorkspaceImageStore()
+    store.imageCache['/workspace/a.png'] = 'data:image/png;base64,abc'
+
+    const relative = mountMarkdown('![pic](a.png)')
+    const dotted = mountMarkdown('![pic](./a.png)')
+
+    expect(relative.find('img').attributes('src')).toBe('data:image/png;base64,abc')
+    expect(dotted.find('img').attributes('src')).toBe('data:image/png;base64,abc')
+    expect(relative.find('img').attributes('alt')).toBe('pic')
+  })
+
+  it('leaves remote markdown images to regular HTML rendering', () => {
+    const wrapper = mountMarkdown('![pic](https://example.com/a.png)')
+
+    const image = wrapper.find('img')
+    expect(image.exists()).toBe(true)
+    expect(image.attributes('src')).toBe('https://example.com/a.png')
+    expect(sendFilesRead).not.toHaveBeenCalled()
+  })
+
   it('still renders non-media markdown', () => {
     const wrapper = mountMarkdown('## Hello\n\nVisit [docs](https://example.com).')
 

@@ -126,8 +126,13 @@ async def test_composer_sections_and_metadata() -> None:
     assert "full shell" in composed.system
     assert "- read: Read a file." in composed.system
     assert "- general: Delegated subtasks." in composed.system
-    assert "Independent tool calls in one assistant message run in parallel" in composed.system
+    assert (
+        "Independent tool calls in one assistant message run in parallel"
+        in composed.system
+    )
     assert "Launch independent subagents in one message" in composed.system
+    assert "Chat media:" in composed.system
+    assert "![Login](screenshots/login.png)" in composed.system
     assert composed.truncated is False
 
 

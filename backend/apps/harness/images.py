@@ -8,16 +8,19 @@ from typing import Any
 
 import structlog
 
-from .access.base import WorkspaceAccessor, guess_mime_type
+from .access.base import WorkspaceAccessor, guess_mime_type, sanitize_harness_path
 from .access.runner_accessor import RunnerAccessorError
 from .providers.base import LLMMessage
 
 log = structlog.get_logger(__name__)
 
-WORKSPACE_IMAGE_RE = re.compile(
-    r"!\[([^\]]*)\]\((/workspace/[^)]+\.(?:png|jpg|jpeg|gif|webp))\)",
-    re.IGNORECASE,
-)
+#: Any markdown image; workspace vs remote is decided after dest parsing.
+MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+#: Hydration is image-only (png/jpeg/gif/webp). Videos stay frontend-only.
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+_REMOTE_DEST_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//)", re.IGNORECASE)
 
 IMAGE_TOKEN_ESTIMATE = 1000
 
@@ -181,26 +184,68 @@ def select_persisted_tool_attachments(
     return kept
 
 
+def parse_markdown_link_dest(raw: str) -> str:
+    """Return the destination path from a markdown link/image dest.
+
+    Strips ``<...>`` wrapping and an optional title (``"..."``, ``'...'``,
+    or parenthesized) so ``foo.png "caption"`` becomes ``foo.png``.
+    """
+    dest = (raw or "").strip()
+    if dest.startswith("<"):
+        close = dest.find(">")
+        if close >= 0:
+            return dest[1:close].strip()
+        dest = dest[1:].lstrip()
+    for index, char in enumerate(dest):
+        if char.isspace():
+            return dest[:index]
+    return dest
+
+
+def resolve_workspace_image_path(raw_dest: str) -> str | None:
+    """Return a sandboxed ``/workspace/...`` image path, or None.
+
+    Relative dests resolve against ``/workspace``. Remote URLs, path
+    escapes, and non-image extensions return None.
+    """
+    dest = parse_markdown_link_dest(raw_dest)
+    if not dest or _REMOTE_DEST_RE.match(dest):
+        return None
+    try:
+        normalized = sanitize_harness_path(dest)
+    except ValueError:
+        return None
+    lower = normalized.lower()
+    if not any(lower.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+        return None
+    return normalized
+
+
 async def hydrate_workspace_images(
     content: str,
     accessor: WorkspaceAccessor,
 ) -> str | list[dict[str, Any]]:
     """Replace workspace image markdown with multimodal provider parts.
 
-    Markdown like ``![label](/workspace/cat.png)`` is kept in the text part
-    and supplemented with an ``image_url`` data-URL part. Missing files are
+    Markdown like ``![label](/workspace/cat.png)`` or
+    ``![label](screenshots/cat.png)`` is kept in the text part and
+    supplemented with an ``image_url`` data-URL part. Missing files are
     skipped with a warning so a broken attachment does not abort the run.
     """
-    if not content or not WORKSPACE_IMAGE_RE.search(content):
+    if not content or "![" not in content:
+        return content
+    if not MARKDOWN_IMAGE_RE.search(content):
         return content
 
     parts: list[dict[str, Any]] = []
     last_end = 0
-    for match in WORKSPACE_IMAGE_RE.finditer(content):
+    for match in MARKDOWN_IMAGE_RE.finditer(content):
+        image_path = resolve_workspace_image_path(match.group(2))
+        if image_path is None:
+            continue
         text_before = content[last_end : match.start()]
         if text_before:
             parts.append({"type": "text", "text": text_before})
-        image_path = match.group(2)
         image_part = await _image_part_for_path(image_path, accessor)
         if image_part is not None:
             parts.append(image_part)

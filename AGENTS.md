@@ -628,6 +628,14 @@ divider in chat.
 (capped at 50, prunes `.git`/`node_modules`/etc.). The mention sheet ranks
 basename matches (8 files / 10 total rows) and scrolls the active row into view.
 
+**Chat media:** assistant (and user) text can embed workspace images/videos
+as markdown `![label](path)` — path relative to `/workspace` or absolute
+`/workspace/...`. The environment prompt documents the syntax; the `build`
+agent is told to verify after implementing and embed a screenshot when it
+would show the working result. The webapp resolves both path forms to
+`/workspace/...` before `files:read`; user-message hydration for the LLM
+does the same (images only).
+
 **Security:** computer-use session recordings capture the workspace display;
 credentials or other sensitive content visible on screen may appear in the mp4.
 Recording stays off unless the org explicitly opts in
