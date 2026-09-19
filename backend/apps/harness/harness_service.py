@@ -2646,10 +2646,18 @@ class HarnessService:
         (``args.model_override`` always wins). Effort strategies
         lowest/medium/highest resolve against the catalog efforts of the
         inherited model; ``inherit`` reuses the parent reasoning effort.
+
+        ``args.task_id`` resumes a previous child of the same parent
+        (OpenCode parity): the follow-up prompt runs on the same child
+        session with its persisted history instead of creating a fresh
+        one. Unknown/missing ``task_id`` values fall back to a fresh
+        child; foreign or busy children are rejected with ``ToolError``.
+        A ``subagent_type`` mismatch on resume is ignored — the stored
+        child agent keeps running.
         """
         from .agent_s.harness import truncate_task_output
         from .tools.base import ToolError, ToolResult
-        from .tools.subagents import TASK_OUTPUT_MAX_CHARS
+        from .tools.subagents import TASK_OUTPUT_MAX_CHARS, render_task_output
 
         agent = (args.agent or args.subagent_type or "general").strip().lower()
         configs = dict(agent_configs or {}) or self._agent_configs_map(organization_id)
@@ -2709,6 +2717,13 @@ class HarnessService:
         parent_assistant = await sync_to_async(self.messages.model.objects.get)(
             id=message_id
         )
+        child = await self._resolve_resume_child(parent, args.task_id)
+        resumed = child is not None
+        if resumed:
+            agent = (
+                (child.agent_name or agent or "general").strip().lower()
+                or "general"
+            )
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
                 catalog_efforts = self._catalog_efforts_for_model(
@@ -2721,17 +2736,33 @@ class HarnessService:
                 child_effort = normalize_reasoning_effort(parent.reasoning_effort or "")
         else:
             child_effort = fixed_effort
-        child = await sync_to_async(self.create_session)(
-            workspace_id=parent.workspace_id,
-            organization_id=parent.organization_id,
-            prompt=args.prompt,
-            agent_name=agent,
-            mode=parent.mode,
-            model=model,
-            reasoning_effort=child_effort,
-            title=args.description[:255],
-            parent_id=parent.id,
-        )
+        if resumed:
+            # Resume keeps the stored child routing: model_override still
+            # wins, otherwise the existing child model/effort continue.
+            assert child is not None
+            if override:
+                child = await sync_to_async(self.sessions.set_model)(child, override)
+                model = override
+            else:
+                model = (child.model or model or "").strip()
+                if not model:
+                    raise ToolError(
+                        "No model available for subagent run",
+                        tool="task",
+                    )
+            child_effort = normalize_reasoning_effort(child.reasoning_effort or "")
+        else:
+            child = await sync_to_async(self.create_session)(
+                workspace_id=parent.workspace_id,
+                organization_id=parent.organization_id,
+                prompt=args.prompt,
+                agent_name=agent,
+                mode=parent.mode,
+                model=model,
+                reasoning_effort=child_effort,
+                title=args.description[:255],
+                parent_id=parent.id,
+            )
         await self._on_runner_event(
             parent,
             parent_assistant,
@@ -2817,7 +2848,10 @@ class HarnessService:
                     "summary": str(exc)[:500],
                 },
             )
-            raise ToolError(f"Subagent '{agent}' failed: {exc}", tool="task") from exc
+            raise ToolError(
+                f"Subagent '{agent}' failed (task_id: {child.id}): {exc}",
+                tool="task",
+            ) from exc
         if agent == "computeruse":
             from .agent_s.harness import extract_recording_path
 
@@ -2850,16 +2884,60 @@ class HarnessService:
                 "summary": output[:500],
             },
         )
+        wrapped = render_task_output(str(child.id), display_output)
         return ToolResult(
-            output=display_output,
+            output=wrapped,
             truncated=truncated,
             metadata={
                 "subtask_id": subtask_id,
                 "child_session_id": str(child.id),
+                "task_id": str(child.id),
                 "agent": agent,
                 "status": status,
+                "resumed": resumed,
             },
         )
+
+    async def _resolve_resume_child(
+        self, parent: HarnessSession, task_id: str | None
+    ) -> HarnessSession | None:
+        """Return the resumable child for *task_id* or ``None`` for fresh.
+
+        A child resumes only when it exists and belongs to the same
+        parent, workspace, and organization. Foreign or busy children
+        are rejected so one parent can neither hijack nor queue onto
+        another parent's subagent (sequential resume only, no
+        update-while-running).
+        """
+        from .tools.base import ToolError
+
+        raw = (task_id or "").strip()
+        if not raw:
+            return None
+        try:
+            child_id = uuid.UUID(raw)
+        except (ValueError, TypeError, AttributeError):
+            return None
+        child = await sync_to_async(self.sessions.get_by_id)(child_id)
+        if child is None:
+            # OpenCode parity: an unknown task_id starts a fresh child.
+            return None
+        if (
+            child.parent_id != parent.id
+            or child.workspace_id != parent.workspace_id
+            or child.organization_id != parent.organization_id
+        ):
+            raise ToolError(
+                f"task_id '{raw}' does not belong to this session",
+                tool="task",
+            )
+        if self.is_running(child.id):
+            raise ToolError(
+                f"Subagent '{raw}' is still running; wait for it to finish "
+                "before resuming it",
+                tool="task",
+            )
+        return child
 
 
 def _normalize_skill_ids(skill_ids: list[str] | None) -> list[str]:

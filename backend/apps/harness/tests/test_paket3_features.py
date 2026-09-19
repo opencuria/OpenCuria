@@ -406,7 +406,9 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
             "max_depth": 1,
         },
     )()
-    args = TaskArgs(description="research", prompt="look around", subagent_type="general")
+    args = TaskArgs(
+        description="research", prompt="look around", subagent_type="general"
+    )
     result = await service._run_subagent_tool(
         parent=parent,
         args=args,
@@ -420,7 +422,259 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
     assert len(children) == 1
     child = children[0]
     assert child.parent_id == parent.id
-    started = [item for item in emitted if item.get("event") == "harness.subtask_started"]
+    assert f'<task id="{child.id}" state="completed">' in result.output
+    assert result.metadata["task_id"] == str(child.id)
+    assert result.metadata["child_session_id"] == str(child.id)
+    assert result.metadata["resumed"] is False
+    started = [
+        item for item in emitted if item.get("event") == "harness.subtask_started"
+    ]
     assert started
     assert started[0]["child_session_id"] == str(child.id)
     assert started[0]["model"] == child.model
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_task_resume_reprompts_same_child_session(harness_workspace) -> None:
+    """Resume via task_id reuses the child session and keeps its history."""
+    from apps.harness.tools.subagents import TaskArgs
+
+    emitted: list[dict] = []
+
+    async def _emit(event: str, data: dict) -> None:
+        emitted.append({"event": event, **data})
+
+    prompts: list[str] = []
+
+    class _ScriptedProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]  # noqa: E501
+            """Record the child history depth, then answer."""
+            prompts.append(str(messages[-1].content or ""))
+            history_users = [
+                message
+                for message in messages
+                if message.role == "user"
+                and "follow-up" not in str(message.content or "")
+            ]
+            yield Delta(
+                text=f"answer-{len(prompts)} (saw {len(history_users)} prior)",
+                usage=Usage(1, 1, 2),
+            )
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+        provider_factory=lambda _org: _ScriptedProvider("unused"),
+    )
+    org_id = harness_workspace.runner.organization_id
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    parent_assistant = service.messages.create(
+        session_id=parent.id, role="assistant", content=""
+    )
+    service._runs[str(parent.id)] = {
+        "session_id": str(parent.id),
+        "message_id": str(parent_assistant.id),
+        "tool_parts": {},
+        "subtask_parts": {},
+    }
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "big-model",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    first = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="research", prompt="first question", subagent_type="general"
+        ),
+        ctx=ctx,
+        subtask_id="sub-first",
+        organization_id=org_id,
+    )
+    child_id = first.metadata["child_session_id"]
+    assert f'<task id="{child_id}"' in first.output
+    # Resume with a mismatched subagent_type: stored child agent wins.
+    second = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="follow-up",
+            prompt="follow-up question",
+            subagent_type="explore",
+            task_id=child_id,
+        ),
+        ctx=ctx,
+        subtask_id="sub-second",
+        organization_id=org_id,
+    )
+    assert second.metadata["child_session_id"] == child_id
+    assert second.metadata["task_id"] == child_id
+    assert second.metadata["resumed"] is True
+    assert second.metadata["agent"] == "general"
+    assert f'<task id="{child_id}"' in second.output
+    children = list(HarnessSession.objects.filter(parent_id=parent.id))
+    assert [str(item.id) for item in children] == [child_id]
+    assert prompts == ["first question", "follow-up question"]
+    user_rows = list(
+        HarnessSession.objects.get(id=child_id).messages.order_by("created_at")
+    )
+    assert [row.content for row in user_rows if row.role == "user"] == [
+        "first question",
+        "follow-up question",
+    ]
+    started_ids = [
+        item["child_session_id"]
+        for item in emitted
+        if item.get("event") == "harness.subtask_started"
+    ]
+    assert started_ids == [child_id, child_id]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> None:
+    """Foreign task_id values error; busy children cannot be resumed."""
+    from apps.harness.tools.base import ToolError
+    from apps.harness.tools.subagents import TaskArgs
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: FakeProvider("child output"),
+    )
+    org_id = harness_workspace.runner.organization_id
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    other = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="other",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    foreign = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="foreign child",
+        agent_name="general",
+        mode="build",
+        model="big-model",
+        parent_id=other.id,
+    )
+    for owner in (parent, other):
+        assistant = service.messages.create(
+            session_id=owner.id, role="assistant", content=""
+        )
+        service._runs[str(owner.id)] = {
+            "session_id": str(owner.id),
+            "message_id": str(assistant.id),
+            "tool_parts": {},
+            "subtask_parts": {},
+        }
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "big-model",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    with pytest.raises(ToolError, match="does not belong"):
+        await service._run_subagent_tool(
+            parent=parent,
+            args=TaskArgs(
+                description="d", prompt="p", subagent_type="general",
+                task_id=str(foreign.id),
+            ),
+            ctx=ctx,
+            subtask_id="sub-foreign",
+            organization_id=org_id,
+        )
+    own = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="own child",
+        agent_name="general",
+        mode="build",
+        model="big-model",
+        parent_id=parent.id,
+    )
+    service._tasks[str(own.id)] = asyncio.get_running_loop().create_future()
+    try:
+        with pytest.raises(ToolError, match="still running"):
+            await service._run_subagent_tool(
+                parent=parent,
+                args=TaskArgs(
+                    description="d", prompt="p", subagent_type="general",
+                    task_id=str(own.id),
+                ),
+                ctx=ctx,
+                subtask_id="sub-busy",
+                organization_id=org_id,
+            )
+    finally:
+        pending = service._tasks.pop(str(own.id), None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+    # Unknown task_id falls back to a fresh child (OpenCode parity).
+    fresh = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="d", prompt="p", subagent_type="general",
+            task_id=str(uuid.uuid4()),
+        ),
+        ctx=ctx,
+        subtask_id="sub-fresh",
+        organization_id=org_id,
+    )
+    assert fresh.metadata["resumed"] is False
+    assert fresh.metadata["child_session_id"] != str(own.id)
+    # Child errors surface the resumable task_id (OpenCode parity): an
+    # empty model with no fallback leaves no routable model.
+    parent.model = ""
+    parent.save(update_fields=["model", "updated_at"])
+    no_model_ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    with pytest.raises(ToolError, match=r"No model available"):
+        await service._run_subagent_tool(
+            parent=parent,
+            args=TaskArgs(description="d", prompt="p", subagent_type="general"),
+            ctx=no_model_ctx,
+            subtask_id="sub-boom",
+            organization_id=org_id,
+        )
+    assert HarnessSession.objects.filter(parent_id=parent.id).count() >= 2

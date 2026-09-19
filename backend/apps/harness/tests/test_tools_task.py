@@ -146,7 +146,11 @@ async def test_task_happy_path_returns_child_text(fake_accessor) -> None:
     result = await TaskTool().execute(
         {"description": "research", "prompt": "look around"}, ctx
     )
-    assert result.output == "child says hi"
+    assert "child says hi" in result.output
+    assert f'<task id="{result.metadata["subtask_id"]}" state="completed">' in (
+        result.output
+    )
+    assert result.metadata["task_id"] == result.metadata["subtask_id"]
     kinds = [event["type"] for event in events]
     assert "subtask_started" in kinds
     assert "subtask_finished" in kinds
@@ -299,6 +303,19 @@ async def test_task_long_output_truncated(fake_accessor) -> None:
     result = await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
     assert result.truncated is True
     assert "truncated" in result.output
+    assert '<task id="' in result.output
+
+
+async def test_task_envelope_carries_resumable_task_id(fake_accessor) -> None:
+    """Direct task output embeds the task_id for resume (OpenCode parity)."""
+    events: list[dict[str, Any]] = []
+    ctx, _ = _task_ctx(fake_accessor, events, [_text_step("hello")])
+    result = await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
+    task_id = result.metadata["task_id"]
+    assert task_id == result.metadata["subtask_id"]
+    assert f'<task id="{task_id}" state="completed">' in result.output
+    assert "<task_result>" in result.output
+    assert "hello" in result.output
 
 
 async def test_todo_updated_event_after_todowrite(fake_accessor) -> None:
