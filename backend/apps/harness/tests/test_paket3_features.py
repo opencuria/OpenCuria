@@ -188,6 +188,84 @@ def test_create_session_returns_skill_ids_in_body(paket3_setup, fake_harness_ser
 
 
 @pytest.mark.django_db(transaction=True)
+def test_parts_returns_per_message_skill_ids(paket3_setup, fake_harness_service):
+    """parts echoes the per-turn skill snapshot on each user message."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(paket3_setup["org_skill"].id)
+    personal_skill_id = str(paket3_setup["personal_skill"].id)
+    owner = paket3_setup["owner"]
+    org = paket3_setup["org"]
+    client = _client(user=owner, org=org, permissions=RUN)
+    response = client.post(
+        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "first", "skill_ids": [org_skill_id]}),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    session_id = response.json()["id"]
+    session = fake_harness_service.get_session(session_id)
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    assert [row.role for row in messages] == ["user", "assistant"]
+    assert list(messages[0].skill_ids or []) == [org_skill_id]
+    assert list(messages[1].skill_ids or []) == []
+
+    read_client = _client(user=owner, org=org, permissions=READ)
+    parts_response = read_client.get(f"/api/v1/harness/sessions/{session_id}/parts")
+    assert parts_response.status_code == 200, parts_response.content[:500]
+    payload = parts_response.json()
+    by_role = {row["role"]: row for row in payload["messages"]}
+    assert by_role["user"]["skill_ids"] == [org_skill_id]
+    assert by_role["assistant"]["skill_ids"] == []
+
+    # A second turn with different skills snapshots per message.
+    followup = client.post(
+        f"/api/v1/harness/sessions/{session_id}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": [personal_skill_id]}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 202, followup.content[:500]
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    users = [row for row in messages if row.role == "user"]
+    assert [list(row.skill_ids or []) for row in users] == [
+        [org_skill_id],
+        [personal_skill_id],
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_service):
+    """Fork keeps the per-message skill snapshot of the copied prefix."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    skill_id = str(paket3_setup["org_skill"].id)
+    owner = paket3_setup["owner"]
+    org = paket3_setup["org"]
+    session = fake_harness_service.create_session(
+        workspace_id=paket3_setup["owned"].id,
+        organization_id=org.id,
+        prompt="forked",
+        skill_ids=[skill_id],
+        user_id=owner.id,
+    )
+    await fake_harness_service.start_run(
+        session,
+        "forked",
+        organization_id=org.id,
+        workspace_id=str(paket3_setup["owned"].id),
+        user_id=owner.id,
+        skill_ids=[skill_id],
+    )
+    source = HarnessMessageRepository.list_for_session(session.id)
+    assert [row.role for row in source] == ["user", "assistant"]
+    forked = await fake_harness_service.fork_session(session.id)
+    copied = HarnessMessageRepository.list_for_session(forked.id)
+    assert [row.role for row in copied] == ["user", "assistant"]
+    assert list(copied[0].skill_ids or []) == [skill_id]
+    assert list(copied[1].skill_ids or []) == []
+
+
+@pytest.mark.django_db(transaction=True)
 def test_patch_session_title_happy(paket3_setup, fake_harness_service):
     """PATCH session title succeeds with harness:run."""
     session = fake_harness_service.create_session(

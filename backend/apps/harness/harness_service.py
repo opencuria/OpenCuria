@@ -887,10 +887,12 @@ class HarnessService:
                 session_id=session.id, role="user"
             ).count()
         )()
+        effective_skill_ids = list(session.skill_ids or [])
         user_message = await sync_to_async(self.messages.create)(
             session_id=session.id,
             role="user",
             content=prompt.strip(),
+            skill_ids=effective_skill_ids,
         )
         assistant = await sync_to_async(self.messages.create)(
             session_id=session.id,

@@ -9,6 +9,7 @@ import {
   clearComposerTransition,
   isComposerTransitionPending,
 } from '@/lib/composerTransition'
+import { subscribeToWorkspace } from '@/services/socket'
 
 const workspaceStore = {
   workspaces: [] as Workspace[],
@@ -55,6 +56,16 @@ vi.mock('@/stores/skills', () => ({
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => authStore,
+}))
+
+const fileExplorerStore = {
+  tree: [] as never[],
+  fetchDirectory: vi.fn().mockResolvedValue(undefined),
+  findFiles: vi.fn().mockResolvedValue([]),
+}
+
+vi.mock('@/stores/fileExplorer', () => ({
+  useFileExplorerStore: () => fileExplorerStore,
 }))
 
 vi.mock('@/services/harness.api', async () => {
@@ -153,6 +164,14 @@ async function mountHome() {
         HarnessChatInput: {
           template:
             '<div data-testid="chat-home-composer"><textarea data-testid="composer-textarea" /></div>',
+          methods: {
+            chooseMention() {},
+          },
+        },
+        HarnessSheetStack: {
+          props: ['sheets'],
+          template:
+            '<div v-if="(sheets ?? []).length" data-testid="composer-sheet-stack">{{ (sheets ?? []).length }}</div>',
         },
         WorkspaceSidePanel: {
           props: ['workspaceId'],
@@ -329,6 +348,37 @@ describe('ChatHomeView', () => {
 
     expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
+  })
+
+  it('renders the mention sheet stack above the home composer', async () => {
+    const { wrapper } = await mountHome()
+
+    // No candidates yet: the stack stays hidden (no empty sheet chrome).
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
+    expect(vi.mocked(subscribeToWorkspace)).toHaveBeenCalledWith('ws-1')
+    expect(fileExplorerStore.fetchDirectory).toHaveBeenCalledWith('ws-1', '/workspace')
+    const vm = wrapper.vm as unknown as {
+      handleMentionMirror: (
+        open: boolean,
+        query: string,
+        candidates: Array<{ kind: string; label: string; insert: string }>,
+        index: number,
+      ) => void
+      handleMentionSelect: (candidate: { kind: string; label: string; insert: string }) => void
+    }
+
+    // Mirrored mention candidates produce a mention sheet like the chat panel.
+    vm.handleMentionMirror(true, 'a', [{ kind: 'file', label: 'a.ts', insert: 'file:/a.ts' }], 0)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').text()).toBe('1')
+
+    // Hover syncs the active index into the mirrored state.
+    const vmState = wrapper.vm as unknown as { mentionActiveIndex: number }
+    vm.handleMentionSelect({ kind: 'file', label: 'a.ts', insert: 'file:/a.ts' })
+    await wrapper.vm.$nextTick()
+    expect(vmState.mentionActiveIndex).toBe(0)
   })
 
   it('renders only the side panel toggle in the home header', async () => {

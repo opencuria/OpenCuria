@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import HarnessMessageView from './HarnessMessageView.vue'
 import type { HarnessMessage } from '@/types/harness'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+import { useSkillStore } from '@/stores/skills'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -36,6 +37,20 @@ function makeUser(overrides: Partial<HarnessMessage> = {}): HarnessMessage {
     parts: [],
     ...overrides,
   }
+}
+
+function seedSkills(): void {
+  useSkillStore().skills = [
+    {
+      id: 'skill-1',
+      name: 'Lint rules',
+      body: 'Always lint',
+      scope: 'personal',
+      created_by_email: null,
+      created_at: '2026-03-29T10:00:00.000Z',
+      updated_at: '2026-03-29T10:00:00.000Z',
+    },
+  ]
 }
 
 function makeAssistant(overrides: Partial<HarnessMessage> = {}): HarnessMessage {
@@ -160,5 +175,44 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.find('.markdown-stub').attributes('data-on-primary')).toBe('true')
     expect(wrapper.html()).toContain('px-3')
     expect(wrapper.html()).toContain('py-2')
+  })
+
+  it('shows no skill pills without skill_ids', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser() },
+    })
+
+    expect(wrapper.find('[data-testid="message-skills"]').exists()).toBe(false)
+  })
+
+  it('shows no skill pills on assistant messages', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeAssistant({ skill_ids: ['skill-1'] }) },
+    })
+
+    expect(wrapper.find('[data-testid="message-skills"]').exists()).toBe(false)
+  })
+
+  it('renders skill pills with resolved names, composer style', () => {
+    seedSkills()
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser({ skill_ids: ['skill-1'] }) },
+    })
+
+    const pills = wrapper.findAll('[data-testid="message-skill-pill"]')
+    expect(wrapper.find('[data-testid="message-skills"]').exists()).toBe(true)
+    expect(pills).toHaveLength(1)
+    expect(pills[0]!.text()).toContain('Lint rules')
+    expect(pills[0]!.classes()).toContain('bg-primary/10')
+    expect(pills[0]!.classes()).toContain('text-primary')
+  })
+
+  it('falls back to the short id for unknown skills', () => {
+    seedSkills()
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser({ skill_ids: ['deadbeef-1234-5678-9abc-def012345678'] }) },
+    })
+
+    expect(wrapper.get('[data-testid="message-skill-pill"]').text()).toContain('deadbeef')
   })
 })

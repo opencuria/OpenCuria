@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { GitFork, Pencil } from '@lucide/vue'
+import { BookText, GitFork, Pencil } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import {
   buildMessageBlocks,
@@ -13,6 +13,7 @@ import { formatMessageHoverLine } from '@/lib/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
 import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
+import { useSkillStore } from '@/stores/skills'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -167,6 +168,18 @@ function forkFromHere(): void {
   emit('fork', props.message.id)
 }
 
+/** Skills active for this user turn (right-aligned pills, composer style). */
+const skillStore = useSkillStore()
+const messageSkills = computed(() => {
+  if (props.message.role !== 'user') return []
+  const ids = props.message.skill_ids ?? []
+  if (ids.length === 0) return []
+  return ids.map((id) => {
+    const skill = skillStore.skills.find((entry) => entry.id === id)
+    return { id, name: skill?.name ?? String(id).slice(0, 8) }
+  })
+})
+
 function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   return block.kind === 'workedFor' ? [] : [block]
 }
@@ -210,6 +223,21 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
             Save
           </Button>
         </div>
+      </div>
+      <div
+        v-if="messageSkills.length > 0"
+        class="mt-1.5 flex flex-wrap justify-end gap-1.5"
+        data-testid="message-skills"
+      >
+        <span
+          v-for="skill in messageSkills"
+          :key="skill.id"
+          class="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+          data-testid="message-skill-pill"
+        >
+          <BookText :size="10" />
+          {{ skill.name }}
+        </span>
       </div>
       <div
         v-if="isEditableMessage && !editing"

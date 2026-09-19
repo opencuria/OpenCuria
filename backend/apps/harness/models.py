@@ -404,6 +404,11 @@ class HarnessMessage(models.Model):
     )
     finish = models.CharField(max_length=32, blank=True, default="")
     error = models.TextField(blank=True, default="")
+    skill_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Skill UUIDs active for this user turn.",
+    )
     notice_dismissed_at = models.DateTimeField(
         null=True,
         blank=True,

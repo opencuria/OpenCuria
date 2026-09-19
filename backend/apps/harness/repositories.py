@@ -601,6 +601,7 @@ class HarnessMessageRepository:
         model: str = "",
         reasoning_effort: str = "",
         provider: str = "",
+        skill_ids: list[str] | None = None,
     ) -> HarnessMessage:
         """Create a user or assistant message shell."""
         message = HarnessMessage.objects.create(
@@ -610,6 +611,7 @@ class HarnessMessageRepository:
             model=model or "",
             reasoning_effort=reasoning_effort or "",
             provider=provider or "",
+            skill_ids=list(skill_ids or []),
         )
         if role == HarnessMessageRole.USER:
             HarnessSessionRepository.touch_last_message_at(
@@ -701,6 +703,7 @@ class HarnessMessageRepository:
                 model=src.model or "",
                 reasoning_effort=src.reasoning_effort or "",
                 provider=src.provider or "",
+                skill_ids=list(getattr(src, "skill_ids", None) or []),
                 cost=float(src.cost or 0.0),
                 tokens=dict(src.tokens or {}),
                 finish=src.finish or "",

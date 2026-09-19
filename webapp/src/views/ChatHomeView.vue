@@ -8,11 +8,12 @@
  * No polling: ChatSidebar handles live updates; a single
  * fetchWorkspaces()/fetchSkills() on mount is enough here.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Container, Plus } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
+import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
 import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
@@ -23,19 +24,24 @@ import {
   armComposerTransition,
   prefersReducedMotion,
 } from '@/lib/composerTransition'
+import { buildComposerSheets } from '@/lib/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import type { MentionCandidate } from '@/lib/harnessMentions'
 import type { HarnessSessionMode } from '@/types/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useSkillStore } from '@/stores/skills'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 
 const LAST_WORKSPACE_KEY = 'opencuria:last-workspace'
 
 const router = useRouter()
 const authStore = useAuthStore()
+const fileExplorer = useFileExplorerStore()
 const harnessStore = useHarnessStore()
 const sidePanelStore = useSidePanelStore()
 const skillStore = useSkillStore()
@@ -49,8 +55,60 @@ const createOpen = ref(false)
 const leaving = ref(false)
 const composerWrapRef = ref<HTMLElement | null>(null)
 const homeChatInputRef = ref<{
+  chooseMention: (candidate: MentionCandidate) => void
   uploadChatFiles: (files: File[] | FileList) => Promise<void>
 } | null>(null)
+
+/**
+ * Mention/slash mirror from the home input, rendered as the topmost
+ * sheet — same component and look as the workspace chat panel.
+ */
+const mentionActive = ref(false)
+const mentionActiveIndex = ref(0)
+const mentionCandidates = ref<MentionCandidate[]>([])
+
+const composerSheets = computed(() =>
+  buildComposerSheets({
+    mention:
+      mentionActive.value && mentionCandidates.value.length > 0
+        ? { candidates: mentionCandidates.value, activeIndex: mentionActiveIndex.value }
+        : null,
+  }),
+)
+
+function handleMentionMirror(
+  open: boolean,
+  query: string,
+  candidates: MentionCandidate[],
+  index: number,
+): void {
+  void query
+  mentionCandidates.value = open ? candidates : []
+  mentionActiveIndex.value = open ? index : 0
+  mentionActive.value = open && candidates.length > 0
+}
+
+function handleMentionSelect(candidate: MentionCandidate): void {
+  homeChatInputRef.value?.chooseMention(candidate)
+}
+
+function handleMentionHover(index: number): void {
+  mentionActiveIndex.value = index
+}
+
+/** Seed the explorer tree so `@` file search works like in the chat. */
+const homeSocketCleanup: Array<() => void> = []
+
+function cleanupHomeSocket(workspaceId: string | null): void {
+  if (workspaceId) unsubscribeFromWorkspace(workspaceId)
+  for (const fn of homeSocketCleanup.splice(0)) fn()
+}
+
+function setupHomeFileSearch(workspaceId: string | null): void {
+  if (!workspaceId) return
+  subscribeToWorkspace(workspaceId)
+  void fileExplorer.fetchDirectory(workspaceId, '/workspace')
+}
 
 /**
  * Home-composer drop zone: same behaviour as the workspace chat panel —
@@ -273,7 +331,21 @@ onMounted(async () => {
   }
   pickInitialWorkspace()
   void skillStore.fetchSkills()
+  setupHomeFileSearch(selectedWorkspaceId.value)
 })
+
+onUnmounted(() => {
+  cleanupHomeSocket(selectedWorkspaceId.value)
+})
+
+watch(
+  () => selectedWorkspaceId.value,
+  (next, prev) => {
+    if (next === prev) return
+    cleanupHomeSocket(prev)
+    setupHomeFileSearch(next)
+  },
+)
 </script>
 
 <template>
@@ -344,25 +416,40 @@ onMounted(async () => {
         </div>
 
         <div v-else ref="composerWrapRef" class="mt-6">
-          <HarnessChatInput
-            ref="homeChatInputRef"
-            :workspace-id="selectedWorkspaceId ?? undefined"
-            :session-id="null"
-            :mode="composerMode"
-            :model="harnessStore.modelInput"
-            :effort="harnessStore.effortInput"
-            :skill-options="skillStore.skills"
-            :disabled="inputDisabled"
-            :sending="sending"
-            :busy-message="busyMessage"
-            :upload-drag="homeUploadDragState"
-            class="text-left"
-            data-testid="chat-home-composer"
-            @update:mode="composerMode = $event"
-            @update:model="harnessStore.setComposerModel($event)"
-            @update:effort="harnessStore.setComposerEffort($event)"
-            @send="handleSend"
-          />
+          <div class="flex min-w-0 flex-1 flex-col text-left">
+            <HarnessSheetStack
+              :sheets="composerSheets"
+              @mention-select="handleMentionSelect"
+              @mention-hover="handleMentionHover"
+            />
+            <HarnessChatInput
+              ref="homeChatInputRef"
+              :workspace-id="selectedWorkspaceId ?? undefined"
+              :session-id="null"
+              :mode="composerMode"
+              :model="harnessStore.modelInput"
+              :effort="harnessStore.effortInput"
+              :files="fileExplorer.tree"
+              :skill-options="skillStore.skills"
+              :disabled="inputDisabled"
+              :sending="sending"
+              :busy-message="busyMessage"
+              :upload-drag="homeUploadDragState"
+              :attached="composerSheets.length > 0"
+              mention-controlled
+              :mention-active-index="mentionActiveIndex"
+              class="text-left"
+              data-testid="chat-home-composer"
+              @update:mode="composerMode = $event"
+              @update:model="harnessStore.setComposerModel($event)"
+              @update:effort="harnessStore.setComposerEffort($event)"
+              @send="handleSend"
+              @mention-change="
+                (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
+              "
+              @mention-select="handleMentionSelect"
+            />
+          </div>
         </div>
       </div>
     </div>

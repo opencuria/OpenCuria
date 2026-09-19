@@ -49,6 +49,8 @@ export interface HarnessMessage {
   content: string
   model?: string
   reasoning_effort?: string
+  /** Skill UUIDs active for this user turn (persisted per message). */
+  skill_ids?: string[]
   cost?: number
   tokens?: Record<string, number>
   finish?: string

@@ -224,6 +224,7 @@ class HarnessMessageOut(Schema):
     tokens: dict = {}
     finish: str
     error: str
+    skill_ids: list[str] = []
     notice_dismissed_at: datetime | None = None
     created_at: datetime
     completed_at: datetime | None = None
@@ -1446,6 +1447,10 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                         tokens=dict(message.tokens or {}),
                         finish=message.finish or "",
                         error=message.error or "",
+                        skill_ids=[
+                            str(skill_id)
+                            for skill_id in (message.skill_ids or [])
+                        ],
                         notice_dismissed_at=message.notice_dismissed_at,
                         created_at=message.created_at,
                         completed_at=message.completed_at,

@@ -288,6 +288,7 @@ export const useHarnessStore = defineStore('harness', () => {
           session_id: session.id,
           role: 'user',
           content: prompt,
+          skill_ids: [...skillIds],
           parts: [],
           created_at: new Date().toISOString(),
         },
@@ -326,6 +327,7 @@ export const useHarnessStore = defineStore('harness', () => {
         session_id: sessionId,
         role: 'user',
         content: prompt,
+        skill_ids: [...(options.skillIds ?? [])],
         parts: [],
         created_at: new Date().toISOString(),
       })
