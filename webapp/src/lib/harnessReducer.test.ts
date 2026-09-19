@@ -880,4 +880,27 @@ describe('harnessReducer', () => {
     expect(settled[0]!.parts[1]!.state).toBe('completed')
     expect(settled[0]!.parts[2]!.state).toBe('running')
   })
+
+  it('closes the live turn on the follow-up interrupt marker (finish=interrupted)', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', { text: 'partial' })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'bash', title: '$ sleep 60', call_id: 'call-1', arguments: '' },
+      { step: 1, partId: 'part-tool-1' },
+    )
+
+    const assistant = applyPartDelta(messages, 'session-1', { interrupted: true })
+
+    expect(assistant.finish).toBe('interrupted')
+    expect(assistant.error).toBe('interrupted by follow-up')
+    expect(assistant.completed_at).toBeTruthy()
+    const states = Object.fromEntries(assistant.parts.map((part) => [part.id, part.state]))
+    // Running text completes (thought already happened); the open tool errors.
+    expect(Object.values(states)).toContain('completed')
+    const tool = findPart(assistant, { callId: 'call-1' })
+    expect(tool?.state).toBe('error')
+    expect(tool?.output).toBe('interrupted by follow-up')
+  })
 })

@@ -2432,3 +2432,318 @@ async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None
     assert len(forwarded) == 1
     assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
     assert secret not in str(forwarded[0]["delta"]["agent_meta"])
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_interrupt_armed_during_busy_chains_followup(harness_workspace) -> None:
+    """request_interrupt during a busy run chains a follow-up at the boundary."""
+    gate = asyncio.Event()
+
+    slow_calls = {"n": 0}
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            # First provider call of the ORIGINAL run hangs (parked step)
+            # and then emits a tool call: tools execute, then the
+            # post-batch boundary fires the interrupt. Every later call
+            # (chained run) answers text-only.
+            slow_calls["n"] += 1
+            if slow_calls["n"] == 1:
+                await gate.wait()
+                for delta in _tool_step(
+                    "todowrite", {"todos": []}, call_id="call-1"
+                ):
+                    yield delta
+                return
+            for delta in _text_step("slow"):
+                yield delta
+
+    slow = SlowProvider([])
+    service, _, events = _service(provider=slow)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "slow run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if not service.is_running(session.id):
+            break
+    assert service.is_running(session.id)
+
+    await service.request_interrupt(
+        session,
+        "follow up now",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert service.has_interrupt_pending(session.id)
+    # Follow-up user message is persisted immediately (visible + reload-safe).
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.role for m in stored] == ["user", "assistant", "user"]
+    assert stored[-1].content == "follow up now"
+    armed = [e for e in events if e.get("interrupt_pending") is True]
+    assert armed
+
+    # Release the parked provider step: the loop observes the armed slot
+    # at the step boundary, finalizes the turn as interrupted, and chains.
+    gate.set()
+    for _ in range(200):
+        stored = HarnessMessageRepository.list_for_session(session.id)
+        assistants = [m for m in stored if m.role == "assistant"]
+        if len(assistants) >= 2 and assistants[-1].finish == "stop":
+            break
+        await asyncio.sleep(0.05)
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assistants = [m for m in stored if m.role == "assistant"]
+    assert assistants[0].finish == "interrupted"
+    assert "follow" in (assistants[0].error or "").lower()
+    assert assistants[-1].finish == "stop"
+    assert assistants[-1].content == "slow"
+    session.refresh_from_db()
+    assert session.status == "idle"
+    assert not service.has_interrupt_pending(session.id)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_interrupt_tool_batch_finishes_before_chain(harness_workspace) -> None:
+    """A running tool batch completes before the interrupt chains."""
+    from apps.harness import harness_service as service_module
+
+    tool_done = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    class SlowTool:
+        name = "slowtool"
+        description = "slow"
+        permission_key = "slowtool"
+
+        def parameters_schema(self):  # type: ignore[no-untyped-def]
+            return {"type": "object", "properties": {}}
+
+        def title(self, args):  # type: ignore[no-untyped-def]
+            return "slowtool"
+
+        def coerce_args(self, args):  # type: ignore[no-untyped-def]
+            return args
+
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            tool_done.set()
+            await release_tool.wait()
+            from apps.harness.tools.base import ToolResult
+
+            return ToolResult(output="tool-out")
+
+    slow = FakeProvider(
+        [
+            _tool_step("slowtool", {}, call_id="call-slow"),
+            _text_step("after tools"),
+        ]
+    )
+    service, _, _ = _service(provider=slow)
+    session = await _db_create_session(harness_workspace)
+
+    real_tools_for_session = HarnessService._tools_for_session
+
+    def _tools_with_slow(self, session_id, agent_name="build"):  # type: ignore[no-untyped-def]
+        registry = real_tools_for_session(self, session_id, agent_name)
+        registry.register(SlowTool())
+        return registry
+
+    service_module.HarnessService._tools_for_session = _tools_with_slow  # type: ignore[method-assign]
+    try:
+        await service.start_run(
+            session,
+            "run tools",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        await asyncio.wait_for(tool_done.wait(), timeout=5)
+        await service.request_interrupt(
+            session,
+            "follow up",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        # Tool still in flight: no chain yet, batch must finish first.
+        await asyncio.sleep(0.2)
+        stored = HarnessMessageRepository.list_for_session(session.id)
+        assistants = [m for m in stored if m.role == "assistant"]
+        assert len(assistants) == 1
+        release_tool.set()
+        for _ in range(200):
+            stored = HarnessMessageRepository.list_for_session(session.id)
+            assistants = [m for m in stored if m.role == "assistant"]
+            if len(assistants) >= 2 and assistants[-1].finish == "stop":
+                break
+            await asyncio.sleep(0.05)
+        stored = HarnessMessageRepository.list_for_session(session.id)
+        assistants = [m for m in stored if m.role == "assistant"]
+        assert assistants[0].finish == "interrupted"
+        parts = HarnessPartRepository.list_for_message(assistants[0].id)
+        tools = [p for p in parts if p.type == "tool"]
+        assert tools and all(p.state == "completed" for p in tools)
+        assert "tool-out" in (tools[0].output or "")
+    finally:
+        service_module.HarnessService._tools_for_session = real_tools_for_session  # type: ignore[method-assign]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_interrupt_replaces_older_pending(harness_workspace) -> None:
+    """A second interrupt replaces the first (single slot, newest wins)."""
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            started.set()
+            await gate.wait()
+            yield Delta(text="slow", usage=Usage(1, 1, 2))
+
+    slow = SlowProvider([])
+    service, _, _ = _service(provider=slow)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "slow run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    # Grace period: `started` fires on provider entry; ensure the step is
+    # parked inside chat_stream (not just entered) before arming.
+    await asyncio.sleep(0.5)
+    await service.request_interrupt(
+        session,
+        "first",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service.request_interrupt(
+        session,
+        "second",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    pending = service.get_interrupt_pending(session.id)
+    assert pending is not None and pending["prompt"] == "second"
+    gate.set()
+    for _ in range(200):
+        stored = HarnessMessageRepository.list_for_session(session.id)
+        assistants = [m for m in stored if m.role == "assistant"]
+        if len(assistants) >= 2 and assistants[-1].finish == "stop":
+            break
+        await asyncio.sleep(0.05)
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    users = [m for m in stored if m.role == "user"]
+    assert [u.content for u in users] == ["slow run", "first", "second"]
+    assistants = [m for m in stored if m.role == "assistant"]
+    assert assistants[-1].content == "slow"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_interrupt_blocked_with_open_gate(harness_workspace) -> None:
+    """request_interrupt raises gate_pending while a gate waits."""
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            started.set()
+            await gate.wait()
+            yield Delta(text="slow", usage=Usage(1, 1, 2))
+
+    slow = SlowProvider([])
+    service, _, _ = _service(provider=slow)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "slow run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    request = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="rm -rf /",
+    )
+    try:
+        with pytest.raises(ConflictError) as exc_info:
+            await service.request_interrupt(
+                session,
+                "follow up",
+                organization_id=harness_workspace.runner.organization_id,
+                workspace_id=str(harness_workspace.id),
+            )
+        assert exc_info.value.code == "gate_pending"
+        assert not service.has_interrupt_pending(session.id)
+    finally:
+        await sync_to_async(PermissionRequestRepository.mark_resolved)(
+            request, approved=False, remember="once"
+        )
+        gate.set()
+        await service._tasks[str(session.id)]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_interrupt_idle_behaves_like_start_run(harness_workspace) -> None:
+    """request_interrupt on an idle session starts a normal run."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await service.request_interrupt(
+        session,
+        "fresh prompt",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+    assert assistant.finish == "stop"
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.role for m in stored] == ["user", "assistant"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_clears_interrupt_slot(harness_workspace) -> None:
+    """abort_run discards an armed follow-up (explicit Stop wins)."""
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            started.set()
+            await gate.wait()
+            yield Delta(text="slow", usage=Usage(1, 1, 2))
+
+    slow = SlowProvider([])
+    service, _, _ = _service(provider=slow)
+    session = await _db_create_session(harness_workspace)
+    await service.start_run(
+        session,
+        "slow run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    # Grace period: `started` fires on provider entry; ensure the step is
+    # parked inside chat_stream (not just entered) before arming.
+    await asyncio.sleep(0.5)
+    await service.request_interrupt(
+        session,
+        "follow up",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    assert service.has_interrupt_pending(session.id)
+    gate.set()
+    await service.abort_run(session.id)
+    assert not service.has_interrupt_pending(session.id)
+    assert not service.is_running(session.id)
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assistants = [m for m in stored if m.role == "assistant"]
+    # Abort won the race: no chained run started afterwards.
+    assert len(assistants) == 1

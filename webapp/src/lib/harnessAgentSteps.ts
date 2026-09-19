@@ -182,15 +182,15 @@ export function agentPrimaryAction(part: HarnessPart): { text: string; legacy: b
 /**
  * View-model options: streaming state plus the final assistant-message
  * outcome. `finish`/`error` come straight from `HarnessMessage`
- * (`HarnessService` sets `finish='error'|'aborted'` with `error=...` on a
- * failed run, after a best-effort `step_finish` already closed the markers).
- * While streaming the message is not final yet, so no stale error may leak
- * into the timeline: callers pass the message finish/error only when the
- * run is no longer streaming.
+ * (`HarnessService` sets `finish='error'|'aborted'|'interrupted'` with
+ * `error=...` on a failed run, after a best-effort `step_finish` already
+ * closed the markers). While streaming the message is not final yet, so
+ * no stale error may leak into the timeline: callers pass the message
+ * finish/error only when the run is no longer streaming.
  */
 export interface AgentStepViewOptions {
   streaming?: boolean
-  /** Final `HarnessMessage.finish` (e.g. `'error'` / `'aborted'`). */
+  /** Final `HarnessMessage.finish` (e.g. `'error'` / `'aborted'` / `'interrupted'`). */
   finish?: string
   /** Final `HarnessMessage.error` text. */
   messageError?: string
@@ -200,7 +200,7 @@ export interface AgentStepViewOptions {
 export function isFinalMessageError(opts: AgentStepViewOptions): boolean {
   if (opts.streaming) return false
   const finish = (opts.finish ?? '').trim().toLowerCase()
-  if (finish === 'error' || finish === 'aborted') return true
+  if (finish === 'error' || finish === 'aborted' || finish === 'interrupted') return true
   return (opts.messageError ?? '').trim() !== ''
 }
 
@@ -210,7 +210,7 @@ export function isFinalMessageError(opts: AgentStepViewOptions): boolean {
  * Reasoning parts stay separate chronological rows (they are not consumed
  * here); only their step state flows into `live` via the caller. `live`
  * marks the newest non-completed step while the turn streams. On a final
- * run-level failure (`finish='error'|'aborted'` or a message error once the
+ * run-level failure (`finish='error'|'aborted'|'interrupted'` or a message error once the
  * turn is no longer streaming) the last agent step reads as `error`
  * regardless of its marker status (even when its `step-finish` marker is
  * still missing); earlier completed steps stay completed.

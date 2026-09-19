@@ -445,6 +445,37 @@ describe('HarnessChatInput', () => {
     const attach = wrapper.find('[data-testid="composer-attach"]')
     expect(attach.attributes('disabled')).toBeDefined()
   })
+
+  it('keeps the textarea writable while busy (follow-up interrupt)', async () => {
+    const wrapper = mountInput({ disabled: true, busy: true, stoppable: true })
+    const textarea = wrapper.find('[data-testid="composer-textarea"]')
+    expect(textarea.attributes('disabled')).toBeUndefined()
+    expect(textarea.attributes('placeholder')).toContain('interrupt')
+    // Mode/model stay disabled; only text + action slot stay live.
+    expect(wrapper.find('[data-testid="composer-mode-trigger"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="composer-attach"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('morphs the single action slot: stop when empty, send when busy with text', async () => {
+    const busyEmpty = mountInput({ disabled: true, busy: true, stoppable: true })
+    expect(busyEmpty.find('[data-testid="composer-stop"]').exists()).toBe(true)
+    expect(busyEmpty.find('[data-testid="composer-send"]').exists()).toBe(false)
+
+    const busyDraft = mountInput({ disabled: true, busy: true, stoppable: true })
+    await busyDraft.find('textarea').setValue('follow up now')
+    expect(busyDraft.find('[data-testid="composer-stop"]').exists()).toBe(false)
+    const send = busyDraft.find('[data-testid="composer-send"]')
+    expect(send.exists()).toBe(true)
+    expect(send.attributes('disabled')).toBeUndefined()
+    await busyDraft.find('textarea').trigger('keydown', { key: 'Enter' })
+    expect((busyDraft.emitted('send') ?? []).length).toBe(1)
+  })
+
+  it('shows the queued follow-up chip while interrupt_pending', () => {
+    const wrapper = mountInput({ disabled: true, busy: true, stoppable: true, interruptPending: true })
+    expect(wrapper.find('[data-testid="composer-interrupt-pending"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-interrupt-pending"]').text()).toContain('queued')
+  })
 })
 
 /** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */

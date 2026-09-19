@@ -107,6 +107,18 @@ DOOM_LOOP_REPEATS = 3
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 PermissionCallback = Callable[..., Awaitable[str]]
 QuestionCallback = Callable[..., Awaitable[list[Any]]]
+#: Cooperative follow-up check: returns True when the run should stop at
+#: the next step boundary so a queued follow-up prompt can take over.
+InterruptCheck = Callable[[], bool]
+
+
+class InterruptedError(Exception):
+    """Raised when a run stops at a step boundary for a follow-up prompt.
+
+    Unlike ``asyncio.CancelledError`` (hard abort via Stop), this keeps
+    in-flight tool calls intact: the check fires before/after tool
+    batches, never inside one, so a running tool call always finishes.
+    """
 
 
 class ModelResolver(Protocol):
@@ -160,6 +172,12 @@ class RunOptions:
     last_step_prompt_tokens: int = 0
     last_step_completion_tokens: int = 0
     last_step_total_tokens: int = 0
+    # Cooperative follow-up interrupt: when set, the loop raises
+    # ``InterruptedError`` at the next step boundary (before a provider
+    # step or after a finished tool batch) so a pending follow-up prompt
+    # can start a fresh chained run. In-flight tool batches always finish
+    # first — no hard cancellation mid-tool.
+    should_interrupt: InterruptCheck | None = None
 
 
 @dataclass
@@ -818,6 +836,8 @@ class HarnessRunner:
             KeyError: For unknown agent names.
             ValueError: For invalid modes or empty prompts.
             asyncio.CancelledError: On abort (after emitting ``aborted``).
+            InterruptedError: On cooperative follow-up interrupt (after
+                emitting ``interrupted``) at a step boundary.
         """
         options = opts or RunOptions()
         # Per-run once-approval cache: never shared across runs, even
@@ -870,9 +890,31 @@ class HarnessRunner:
                 depth=depth,
                 max_depth=max_depth,
             )
+        except InterruptedError:
+            await self._send({"type": "interrupted", "reason": "follow_up"})
+            raise
         except asyncio.CancelledError:
             await self._send({"type": "aborted", "reason": "cancelled"})
             raise
+
+    def _check_interrupt(self, opts: RunOptions) -> None:
+        """Raise ``InterruptedError`` when a follow-up prompt is pending.
+
+        The step loop calls this only at step boundaries — before a
+        provider step and after a finished tool batch — so a running
+        tool call is never torn down mid-flight. Deliberately no
+        in-stream race: racing ``__anext__`` against the flag would
+        require cancelling the provider generator, which deadlocks under
+        ``ThreadSensitiveContext`` (the cancelled ``__anext__`` never
+        completes, the step never finalizes).
+        """
+        check = getattr(opts, "should_interrupt", None)
+        try:
+            pending = bool(check is not None and check())
+        except Exception:  # pragma: no cover - defensive
+            pending = False
+        if pending:
+            raise InterruptedError("follow-up prompt pending")
 
     async def _run_inner(
         self,
@@ -965,6 +1007,11 @@ class HarnessRunner:
         while True:
             step += 1
             is_last = _is_last_step(step, max_steps)
+            # Cooperative follow-up interrupt (boundary 1 of 2): a pending
+            # follow-up stops the run before new provider work starts.
+            # Checked BEFORE step_start so an early-armed interrupt leaves
+            # no orphaned running step part behind.
+            self._check_interrupt(opts)
             if step == 1 and is_overflow(
                 prompt_tokens=last_step_prompt,
                 completion_tokens=last_step_completion,
@@ -1132,6 +1179,10 @@ class HarnessRunner:
             )
             for outcome in outcomes:
                 messages.append(outcome.message)
+            # Cooperative follow-up interrupt (boundary 2 of 2): the tool
+            # batch finished cleanly, so a pending follow-up takes over
+            # before the next step. Never fires mid-batch.
+            self._check_interrupt(opts)
             if is_overflow(
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,
@@ -1253,10 +1304,19 @@ class HarnessRunner:
                 screenshot=screenshot,
                 config=config,
                 emit=self._send,
+                should_interrupt=getattr(opts, "should_interrupt", None),
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # Cooperative follow-up interrupt from the Agent-S step loop:
+            # surface as an event like abort so the service can mark the
+            # turn interrupted and chain the follow-up.
+            from .runner import InterruptedError as _InterruptedError
+
+            if isinstance(exc, _InterruptedError):
+                await self._send({"type": "interrupted", "reason": "follow_up"})
+                raise
             raise RuntimeError(f"Agent-S computer-use run failed: {exc}") from exc
         return RunResult(
             output=result.output,

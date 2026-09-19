@@ -76,6 +76,8 @@ const props = defineProps<{
   disabled?: boolean
   sending?: boolean
   stoppable?: boolean
+  busy?: boolean
+  interruptPending?: boolean
   busyMessage?: string
   workspaceId?: string
   sessionId?: string | null
@@ -148,14 +150,27 @@ const selectedSkills = computed(() =>
   (props.skillOptions ?? []).filter((skill) => selectedSkillIds.value.includes(skill.id)),
 )
 
-const canSend = computed(() => prompt.value.trim().length > 0 && !props.disabled && !props.sending)
+const canSend = computed(
+  () => prompt.value.trim().length > 0 && !props.sending && (props.busy || !props.disabled),
+)
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
 const canManageFiles = computed(
-  () => !props.disabled && !props.sending && Boolean(props.workspaceId),
+  () => !props.busy && !props.disabled && !props.sending && Boolean(props.workspaceId),
 )
+
+/**
+ * While a run is active the composer stays usable for follow-ups: mode,
+ * model, and skills stay disabled (the chained turn inherits the session),
+ * but the textarea + send slot stay live. With text the single action
+ * slot sends the follow-up (graceful interrupt); without text it stops.
+ */
+const controlsDisabled = computed(() => props.disabled || props.busy)
 
 const CONTEXT_RING_RADIUS = 6
 const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
+
+/** Non-empty draft: the single action slot morphs from Stop to Send. */
+const hasDraft = computed(() => prompt.value.trim().length > 0)
 
 const contextLimit = computed(() => {
   const catalogModel = resolveCatalogModel(catalog.value, localModel.value)
@@ -855,9 +870,13 @@ function onComposerKeydown(e: KeyboardEvent): void {
         <Textarea
           ref="textareaRef"
           v-model="prompt"
-          :disabled="disabled"
+          :disabled="disabled && !busy"
           :rows="1"
-          placeholder="Plan, Build, / for skills, @ for context"
+          :placeholder="
+            busy
+              ? 'Write to interrupt — the running tool call finishes first'
+              : 'Plan, Build, / for skills, @ for context'
+          "
           class="min-h-10 max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-2 text-base !shadow-none !outline-none !ring-0 transition-[height] duration-100 ease-out focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0 md:min-h-9"
           data-testid="composer-textarea"
           @keydown="handleKeydown"
@@ -917,7 +936,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
               size="sm"
               class="h-8 min-w-0 max-w-full shrink gap-1.5 rounded-full px-2.5 text-xs font-medium"
               data-testid="composer-mode-trigger"
-              :disabled="disabled"
+              :disabled="controlsDisabled"
             >
               <component :is="modeIcon" :size="14" class="shrink-0" />
               <span class="min-w-0 truncate">{{ modeLabel }}</span>
@@ -945,7 +964,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
           :recent-models="recentModels"
           :recent-efforts="recentEntries"
           :loading="modelLoading"
-          :disabled="disabled"
+          :disabled="controlsDisabled"
           @update:model="setModel"
           @update:effort="setEffort"
         />
@@ -1020,7 +1039,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             />
           </div>
           <Button
-            v-if="stoppable"
+            v-if="stoppable && !hasDraft"
             :disabled="!canStop"
             size="icon"
             class="h-8 w-8 shrink-0 rounded-full transition-all"
@@ -1045,7 +1064,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                 : 'bg-muted text-muted-foreground'
             "
-            title="Send"
+            :title="stoppable ? 'Send follow-up (interrupts after the running tool call)' : 'Send'"
             data-testid="composer-send"
             @click="handleSend"
           >
@@ -1054,7 +1073,18 @@ function onComposerKeydown(e: KeyboardEvent): void {
         </div>
       </div>
     </div>
-    <p v-if="busyMessage" class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400">
+    <p
+      v-if="interruptPending"
+      data-testid="composer-interrupt-pending"
+      class="mt-2 flex items-center justify-center gap-1 text-center text-xs text-amber-600 dark:text-amber-400"
+    >
+      <Loader2 :size="12" class="animate-spin" aria-hidden="true" />
+      Follow-up queued — takes over after the running tool call.
+    </p>
+    <p
+      v-else-if="busyMessage"
+      class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400"
+    >
       {{ busyMessage }}
     </p>
   </div>

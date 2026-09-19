@@ -200,6 +200,9 @@ describe('buildAgentStepViews', () => {
     const aborted = buildAgentStepViews(parts, { finish: 'aborted', messageError: 'x' })
     expect(aborted.map((view) => view.status)).toEqual(['completed', 'error'])
 
+    const interrupted = buildAgentStepViews(parts, { finish: 'interrupted' })
+    expect(interrupted.map((view) => view.status)).toEqual(['completed', 'error'])
+
     const ok = buildAgentStepViews(parts, { finish: 'stop' })
     expect(ok.map((view) => view.status)).toEqual(['completed', 'completed'])
   })
@@ -268,10 +271,12 @@ describe('isFinalMessageError', () => {
   it('detects error/aborted finishes only once the turn is final', () => {
     expect(isFinalMessageError({ finish: 'error' })).toBe(true)
     expect(isFinalMessageError({ finish: 'aborted' })).toBe(true)
+    expect(isFinalMessageError({ finish: 'interrupted' })).toBe(true)
     expect(isFinalMessageError({ messageError: 'boom' })).toBe(true)
     expect(isFinalMessageError({ finish: 'stop' })).toBe(false)
     expect(isFinalMessageError({})).toBe(false)
     expect(isFinalMessageError({ streaming: true, finish: 'error' })).toBe(false)
     expect(isFinalMessageError({ streaming: true, messageError: 'boom' })).toBe(false)
+    expect(isFinalMessageError({ streaming: true, finish: 'interrupted' })).toBe(false)
   })
 })

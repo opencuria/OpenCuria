@@ -1099,6 +1099,81 @@ async def send_harness_message(
 
 
 @harness_router.post(
+    "/harness/sessions/{session_id}/interrupt",
+    response={202: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    summary="Send a follow-up prompt to a running harness session",
+)
+async def interrupt_harness_session(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessMessageIn
+):
+    """Arm a follow-up prompt while a run is active (graceful interrupt).
+
+    Idle sessions behave like ``POST .../message`` (immediate new run).
+    Busy sessions persist the user message at once and chain a fresh run
+    as soon as the active turn reaches the next step boundary — running
+    tool calls always finish first, no hard abort mid-tool. At most one
+    follow-up is armed per session; a newer request replaces an older
+    one. Returns 409 ``gate_pending`` while the run waits for a
+    permission/question decision.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    from asgiref.sync import sync_to_async
+
+    org_id = _get_org_id(request)
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        await sync_to_async(service.ensure_user_promptable)(session)
+        # Idle fast-path keeps the classic mode/model/effort handling
+        # (applied only when idle) before start_run.
+        if not service.is_running(session.id):
+            if payload.mode and payload.mode.strip():
+                session = await sync_to_async(service.set_mode)(
+                    session.id, payload.mode
+                )
+            if payload.model and payload.model.strip():
+                session = await sync_to_async(service.set_model)(
+                    session.id, payload.model
+                )
+            if payload.reasoning_effort and payload.reasoning_effort.strip():
+                session = await sync_to_async(service.set_reasoning_effort)(
+                    session.id, payload.reasoning_effort
+                )
+            await service.start_run(
+                session,
+                payload.prompt,
+                organization_id=org_id,
+                workspace_id=str(session.workspace_id),
+                user_id=request.user.id,
+                skill_ids=payload.skill_ids if payload.skill_ids else None,
+            )
+        else:
+            await service.request_interrupt(
+                session,
+                payload.prompt,
+                organization_id=org_id,
+                workspace_id=str(session.workspace_id),
+                user_id=request.user.id,
+                mode=payload.mode or None,
+                model=payload.model or None,
+                reasoning_effort=payload.reasoning_effort or None,
+                skill_ids=payload.skill_ids if payload.skill_ids else None,
+            )
+        fresh = await sync_to_async(service.get_session)(session.id)
+        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.post(
     "/harness/sessions/{session_id}/fork",
     response={201: HarnessSessionOut, 400: dict, 403: dict, 404: dict},
     summary="Fork a harness session (read-only, works while busy)",

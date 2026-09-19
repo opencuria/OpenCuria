@@ -912,3 +912,162 @@ def test_start_run_dismisses_prior_notices(harness_setup, fake_harness_service):
     assert sent.status_code == 202, sent.content[:500]
     old.refresh_from_db()
     assert old.notice_dismissed_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interrupt_idle_starts_run(harness_setup, fake_harness_service):
+    """POST interrupt on an idle session starts a run (message parity)."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="initial",
+        mode="build",
+        agent_name="build",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/interrupt",
+        data=json.dumps({"prompt": "follow up"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 202, response.content[:500]
+    assert response.json()["status"] == "busy"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interrupt_to_subagent_is_400(harness_setup, fake_harness_service):
+    """POST interrupt to a subagent child session is rejected."""
+    parent = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="parent",
+    )
+    child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="child",
+        parent_id=parent.id,
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{child.id}/interrupt",
+        data=json.dumps({"prompt": "hello subagent"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "validation_error"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interrupt_needs_run_permission(harness_setup, fake_harness_service):
+    """POST interrupt without harness:run is 403."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="initial",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/interrupt",
+        data=json.dumps({"prompt": "follow up"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interrupt_busy_arms_followup(harness_setup, fake_harness_service):
+    """POST interrupt while busy arms the slot and persists the message."""
+    import asyncio as _asyncio
+    import uuid as _uuid
+
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="first",
+    )
+    # Fake a busy run task (same pattern as the 409-busy tests): the API
+    # layer sees is_running True while no real loop owns the session.
+    async def _never() -> None:
+        await _asyncio.Event().wait()
+
+    loop = _asyncio.new_event_loop()
+    task = loop.create_task(_never())
+    fake_harness_service._tasks[str(session.id)] = task
+    # Seed one assistant shell so the interrupt path can correlate.
+    HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    try:
+        client = _client(
+            user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+        )
+        response = client.post(
+            f"/api/v1/harness/sessions/{session.id}/interrupt",
+            data=json.dumps({"prompt": "follow up now"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 202, response.content[:500]
+        # The faked busy task lives on a foreign event loop, so
+        # is_running is False from the API thread — the session row
+        # stays idle while the slot is armed in-memory.
+        assert fake_harness_service.has_interrupt_pending(session.id)
+        pending = fake_harness_service.get_interrupt_pending(session.id)
+        assert pending is not None and pending["prompt"] == "follow up now"
+        rows = HarnessMessageRepository.list_for_session(session.id)
+        assert rows[-1].role == "user"
+        assert rows[-1].content == "follow up now"
+    finally:
+        fake_harness_service._interrupt_pending.pop(str(session.id), None)
+        task.cancel()
+        loop.close()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_interrupt_busy_with_open_gate_is_409(harness_setup, fake_harness_service):
+    """POST interrupt while a permission gate waits returns gate_pending."""
+    import asyncio as _asyncio
+
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="first",
+    )
+    # Fake a busy run task (same pattern as the 409-busy tests).
+    async def _never() -> None:
+        await _asyncio.Event().wait()
+
+    loop = _asyncio.new_event_loop()
+    task = loop.create_task(_never())
+    fake_harness_service._tasks[str(session.id)] = task
+    PermissionRequestRepository.create(
+        organization_id=harness_setup["org"].id,
+        session_id=session.id,
+        workspace_id=harness_setup["owned"].id,
+        tool="bash",
+        pattern="rm -rf /",
+    )
+    try:
+        client = _client(
+            user=harness_setup["owner"],
+            org=harness_setup["org"],
+            permissions=RUN + PERMS,
+        )
+        response = client.post(
+            f"/api/v1/harness/sessions/{session.id}/interrupt",
+            data=json.dumps({"prompt": "follow up now"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 409, response.content[:500]
+        assert response.json()["code"] == "gate_pending"
+        assert not fake_harness_service.has_interrupt_pending(session.id)
+    finally:
+        task.cancel()
+        loop.close()

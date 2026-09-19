@@ -56,8 +56,8 @@ const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template:
     '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
-  props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag'],
-  emits: ['prefill'],
+  props: ['disabled', 'busy', 'interruptPending', 'workspaceId', 'sessionId', 'uploadDrag'],
+  emits: ['prefill', 'send', 'stop'],
   methods: {
     setPrompt(prompt: string) {
       ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
@@ -617,6 +617,40 @@ describe('HarnessChatPanel', () => {
 
     const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
     expect(container.props('disabled')).toBe(false)
+  })
+
+  it('keeps the composer writable while busy and routes send to interruptSession', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.props('disabled')).toBe(false)
+    expect(input.props('busy')).toBe(true)
+    const interruptSpy = vi.spyOn(store, 'interruptSession').mockResolvedValue(true)
+    const sendSpy = vi.spyOn(store, 'sendMessage')
+    input.vm.$emit('send', 'follow up now', 'build', 'm', [], '')
+    await flushPromises()
+    expect(interruptSpy).toHaveBeenCalledWith('session-root', 'follow up now', {
+      mode: 'build',
+      model: 'm',
+      skillIds: [],
+      reasoningEffort: '',
+    })
+    expect(sendSpy).not.toHaveBeenCalled()
   })
 
   it('forwards container edit events to the store editMessage action', async () => {

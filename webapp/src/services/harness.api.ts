@@ -189,6 +189,30 @@ export function sendHarnessMessage(
 }
 
 /**
+ * Send a follow-up prompt to a *running* session (graceful interrupt).
+ * Mirrors `POST /harness/sessions/{id}/interrupt` (202 Session).
+ * Idle sessions behave like `sendHarnessMessage`; busy sessions arm the
+ * single follow-up slot and chain a fresh run at the next step boundary.
+ * 409 `gate_pending` while a permission/question gate waits for the user.
+ */
+export function interruptHarnessSession(
+  sessionId: string,
+  data: HarnessMessageIn | string,
+): Promise<HarnessSession> {
+  const body =
+    typeof data === 'string'
+      ? { prompt: data }
+      : {
+          prompt: data.prompt,
+          mode: data.mode ?? '',
+          model: data.model ?? '',
+          reasoning_effort: data.reasoning_effort ?? '',
+          skill_ids: data.skill_ids ?? [],
+        }
+  return post<HarnessSession>(`/harness/sessions/${sessionId}/interrupt`, body)
+}
+
+/**
  * Fork a harness session (read-only, works while busy).
  * Mirrors `POST /harness/sessions/{id}/fork` (201 Session).
  */

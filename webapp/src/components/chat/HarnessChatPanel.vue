@@ -96,10 +96,15 @@ const activeNotice = computed<NoticeSheetState | null>(() => {
     if (message.notice_dismissed_at) continue
     if (harness.dismissedNoticeIds[message.id]) continue
     const aborted = message.finish === 'aborted'
+    const interrupted = message.finish === 'interrupted'
     return {
       messageId: message.id,
-      text: aborted ? 'Run stopped by user' : message.error,
-      tone: aborted ? 'info' : 'error',
+      text: aborted
+        ? 'Run stopped by user'
+        : interrupted
+          ? 'Run interrupted by follow-up'
+          : message.error,
+      tone: aborted || interrupted ? 'info' : 'error',
     }
   }
   return null
@@ -273,14 +278,23 @@ const messageActionsDisabled = computed(
   () => isSubagentSession.value || activeSession.value?.status === 'busy',
 )
 
-const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
+const isBusy = computed(() => activeSession.value?.status === 'busy')
+const interruptPending = computed(() =>
+  activeSession.value ? Boolean(harness.interruptPendingBySession[activeSession.value.id]) : false,
+)
+
+/** Composer stays writable while busy: textarea + send slot drive the
+ * follow-up interrupt; only the workspace/gate readiness disables it.
+ * Mode/model/skills/attach stay disabled inside the input via `busy`. */
+const inputDisabled = computed(() => !props.canPrompt)
+const inputBusy = computed(() => Boolean(props.canPrompt && isBusy.value))
 const inputStoppable = computed(() =>
   Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
 )
 const busyMessage = computed(() => {
   if (!props.canPrompt) return 'Workspace is not ready for prompts.'
-  if (activeSession.value?.status === 'busy')
-    return 'Agent is running — stop or wait to send another message.'
+  if (isBusy.value)
+    return 'Sending interrupts the run after the running tool call.'
   return undefined
 })
 
@@ -351,6 +365,7 @@ function setupSocketListeners(): void {
         harness.handleSessionStatus(data.session_id, data.status, {
           model: data.model,
           reasoning_effort: data.reasoning_effort,
+          interrupt_pending: data.interrupt_pending,
         })
         if (data.status === 'idle') {
           void harness.fetchParts(data.session_id)
@@ -508,6 +523,17 @@ async function handleSend(
   try {
     if (!harness.activeSessionId) {
       await harness.createSession(props.workspaceId, prompt, mode, model, skillIds, effort)
+    } else if (harness.activeSession?.status === 'busy') {
+      // Busy composer send = graceful follow-up interrupt (single slot,
+      // the running tool call finishes first, then the new run chains).
+      // A 409 gate_pending leaves the draft intact (no clear).
+      const ok = await harness.interruptSession(harness.activeSessionId, prompt, {
+        mode,
+        model,
+        skillIds,
+        reasoningEffort: effort,
+      })
+      void ok
     } else {
       await harness.sendMessage(harness.activeSessionId, prompt, {
         mode,
@@ -634,6 +660,8 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :disabled="inputDisabled"
           :sending="sending"
           :stoppable="inputStoppable"
+          :busy="inputBusy"
+          :interrupt-pending="interruptPending"
           :busy-message="busyMessage"
           :mode="composerMode"
           :model="harness.modelInput"

@@ -59,6 +59,7 @@ from .repositories import (
     TodoRepository,
 )
 from .runner import HarnessRunner, RunOptions
+from .runner import InterruptedError as _InterruptedForFollowUp
 from .tools import default_tool_registry
 from .tools.subagents import TaskArgs
 from .tools.todos import TodoWriteTool, repository_for_session
@@ -136,6 +137,20 @@ class HarnessService:
         self._event_locks: dict[str, asyncio.Lock] = {}
         # run context kept in memory: session_id -> dict
         self._runs: dict[str, dict[str, Any]] = {}
+        # Follow-up interrupt slot: session_id -> pending follow-up payload.
+        # At most ONE pending follow-up per session; a newer request
+        # replaces an older one (no FIFO queue). The running loop observes
+        # the slot via ``RunOptions.should_interrupt`` and stops at the
+        # next step boundary (tool batches always finish first); the slot
+        # is then consumed by chaining a fresh run. ``None`` values mean
+        # no follow-up pending.
+        self._interrupt_pending: dict[str, dict[str, Any]] = {}
+        # Cross-context interrupt flags: run tasks are spawned with a
+        # fresh contextvars.Context (see _spawn_background), so closures
+        # over _interrupt_pending would read a stale copy. These
+        # threading.Events are shared by reference — arming sets the
+        # event, consuming clears it (see _interrupt_flag).
+        self._interrupt_events: dict[str, Any] = {}
         self._process_cleanup = process_cleanup
 
     # -- session lifecycle ------------------------------------------------
@@ -828,6 +843,230 @@ class HarnessService:
         task = self._tasks.get(str(session_id))
         return task is not None and not task.done()
 
+    def has_interrupt_pending(self, session_id: uuid.UUID) -> bool:
+        """Return True when a follow-up interrupt is armed for *session_id*."""
+        return str(session_id) in self._interrupt_pending
+
+    def get_interrupt_pending(self, session_id: uuid.UUID) -> dict[str, Any] | None:
+        """Return the pending follow-up payload (copy) or None."""
+        pending = self._interrupt_pending.get(str(session_id))
+        return dict(pending) if pending is not None else None
+
+    async def _has_open_user_gate(self, session_id: uuid.UUID) -> bool:
+        """Return True when a permission/question gate waits for the user.
+
+        Follow-up interrupts are blocked while a gate is open: the run is
+        parked inside a user decision, not inside model/tool work, so an
+        interrupt would orphan the decision. The user resolves the gate
+        first, then sends the follow-up.
+        """
+        if self._pending_permissions or self._pending_questions:
+            return True
+        try:
+            session_ids = await sync_to_async(self.sessions.list_descendant_ids)(
+                session_id
+            )
+        except Exception:  # pragma: no cover - defensive
+            session_ids = [session_id]
+        # Interrupt path is async-safe: list_pending_* hit the ORM via
+        # sync_to_async, while the service-level helper is sync-only and
+        # would raise SynchronousOnlyOperation in async context.
+        pending_perms = await sync_to_async(
+            self.permissions.requests.list_pending_for_sessions
+        )(list(session_ids))
+        if any(str(row.session_id) == str(session_id) for row in pending_perms):
+            return True
+        pending_questions = await sync_to_async(
+            QuestionRequestRepository.list_pending_for_sessions
+        )(list(session_ids))
+        return any(str(row.session_id) == str(session_id) for row in pending_questions)
+
+    def _should_interrupt(self, session_id: uuid.UUID) -> bool:
+        """Cooperative check wired into ``RunOptions.should_interrupt``."""
+        return str(session_id) in self._interrupt_pending
+
+    def _interrupt_flag(self, key: str) -> Callable[[], bool]:
+        """Build a context-passing interrupt check for one run.
+
+        The run task is spawned with a fresh ``contextvars.Context``
+        (see :meth:`_spawn_background`), so a plain closure over
+        ``self._interrupt_pending`` would read a *copied* dict and never
+        see arms from other contexts. The flag therefore consults a
+        per-key ``threading.Event`` (shared by reference across context
+        copies) plus the dict as fallback.
+        """
+        import threading
+
+        event = self._interrupt_events.get(key)
+        if event is None:
+            event = threading.Event()
+            self._interrupt_events[key] = event
+        pending = self._interrupt_pending
+
+        def _check() -> bool:
+            try:
+                if event.is_set():
+                    return True
+            except Exception:  # pragma: no cover - defensive
+                pass
+            try:
+                return key in pending
+            except Exception:  # pragma: no cover - defensive
+                return False
+
+        return _check
+
+    def _arm_interrupt_event(self, key: str) -> None:
+        """Signal the cross-context interrupt flag for *key*."""
+        event = self._interrupt_events.get(key)
+        if event is None:
+            import threading
+
+            event = threading.Event()
+            self._interrupt_events[key] = event
+        try:
+            event.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def _clear_interrupt_event(self, key: str) -> None:
+        """Clear (and drop) the cross-context interrupt flag for *key*."""
+        event = self._interrupt_events.pop(key, None)
+        if event is None:
+            return
+        try:
+            event.clear()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    async def request_interrupt(
+        self,
+        session: HarnessSession,
+        prompt: str,
+        *,
+        organization_id: uuid.UUID | None = None,
+        workspace_id: str = "",
+        user_id: int | None = None,
+        mode: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        skill_ids: list[str] | None = None,
+    ) -> HarnessMessage:
+        """Arm a follow-up prompt for the active run of *session*.
+
+        Behavior:
+        - Idle session: behaves exactly like :meth:`start_run` (normal
+          follow-up; handles the busy→idle race between click and request).
+        - Busy session without an open user gate: persists the user
+          message immediately (visible + reload-safe), arms the single
+          interrupt slot (a newer request replaces an older one), and
+          emits ``harness.session_status`` with ``interrupt_pending`` so
+          the UI can show the armed state. The running loop stops at the
+          next step boundary and chains a fresh run automatically.
+        - Busy session with an open permission/question gate: raises
+          ``ConflictError(code="gate_pending")`` — the gate must be
+          resolved first.
+
+        Returns the assistant shell of the chained run when started
+        immediately (idle), otherwise the shell of the still-running turn
+        (the chained run reuses the same busy window).
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        self.ensure_user_promptable(session)
+        key = str(session.id)
+        if not self.is_running(session.id):
+            return await self.start_run(
+                session,
+                prompt.strip(),
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                skill_ids=skill_ids,
+            )
+        if await self._has_open_user_gate(session.id):
+            raise ConflictError(
+                "Session is waiting for a permission or question decision; "
+                "resolve it before sending a follow-up",
+                code="gate_pending",
+            )
+        org_id = organization_id or session.organization_id
+        # Persist overrides while the run is active so the chained turn
+        # picks them up: mode/model/effort/skills are normally applied
+        # only when idle (see API layer).
+        if mode is not None and mode.strip():
+            normalized = mode.strip().lower()
+            if normalized not in ("plan", "build"):
+                raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+            session = await sync_to_async(self.sessions.set_mode)(
+                session, normalized
+            )
+        if model is not None and model.strip():
+            session = await sync_to_async(self.sessions.set_model)(
+                session, model.strip()
+            )
+        if reasoning_effort is not None and reasoning_effort.strip():
+            session = await sync_to_async(self.sessions.set_reasoning_effort)(
+                session, normalize_reasoning_effort(reasoning_effort)
+            )
+        if skill_ids is not None and user_id is not None:
+            session = await sync_to_async(self.update_skill_ids)(
+                session.id,
+                skill_ids,
+                user_id=user_id,
+                organization_id=org_id,
+            )
+            session = await sync_to_async(self.get_session)(session.id)
+        # Persist the user message NOW (not at chain time): the bubble is
+        # immediately visible, survives reload/restart, and is part of the
+        # history snapshot the chained run builds after the interrupt.
+        user_message = await sync_to_async(self.messages.create)(
+            session_id=session.id,
+            role="user",
+            content=prompt.strip(),
+        )
+        self._interrupt_pending[key] = {
+            "prompt": prompt.strip(),
+            "user_message_id": str(user_message.id),
+            "organization_id": str(org_id),
+            "workspace_id": workspace_id or str(session.workspace_id),
+            "user_id": user_id,
+        }
+        self._arm_interrupt_event(key)
+        log.info(
+            "harness_interrupt_armed",
+            session_id=key,
+            user_message_id=str(user_message.id),
+            replaced=True,
+        )
+        await self._emit_frontend(
+            FRONTEND_EVENT_STATUS,
+            {
+                **self._session_status_payload(session, "busy"),
+                "interrupt_pending": True,
+            },
+            str(session.workspace_id),
+        )
+        # Return the live assistant shell so callers can correlate; the
+        # chained turn creates its own shell after the interrupt lands.
+        run_ctx = self._runs.get(key, {})
+        assistant_id = run_ctx.get("message_id")
+        assistant = None
+        if assistant_id:
+            try:
+                assistant = await sync_to_async(self.messages.model.objects.get)(
+                    id=assistant_id
+                )
+            except Exception:
+                assistant = None
+        if assistant is None:
+            stored = await sync_to_async(self.messages.list_for_session)(session.id)
+            assistant = next(
+                (row for row in reversed(stored) if row.role == "assistant"),
+                stored[-1] if stored else None,
+            )
+        return assistant
+
     async def start_run(
         self,
         session: HarnessSession,
@@ -968,10 +1207,18 @@ class HarnessService:
         return assistant
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
-        """Cancel the active run task, reject pending user gates, and mark aborted."""
+        """Cancel the active run task, reject pending user gates, and mark aborted.
+
+        A pending follow-up interrupt is discarded: an explicit Stop means
+        "stop, don't continue", so the armed follow-up must not chain.
+        """
         session = await sync_to_async(self.get_session)(session_id)
         children = await sync_to_async(self.sessions.list_children)(session_id)
         key = str(session.id)
+        # Explicit stop wins over an armed follow-up: drop the slot so no
+        # chained run starts after the abort settles.
+        self._interrupt_pending.pop(key, None)
+        self._clear_interrupt_event(key)
         task = self._tasks.get(key)
         if task is None or task.done():
             # Still ensure idle status (e.g. task already finished).
@@ -1565,6 +1812,14 @@ class HarnessService:
                     organization_id=organization_id,
                     agent_configs=dict(agent_configs),
                 ),
+                # Cooperative follow-up interrupt: the loop checks the
+                # single pending slot at step boundaries only, so tool
+                # batches always finish before the run hands over. The
+                # flag is context-passing (threading.Event): the run task
+                # lives in a fresh contextvars.Context (see
+                # _spawn_background) and would otherwise read a stale
+                # dict copy that never sees arms from other contexts.
+                should_interrupt=self._interrupt_flag(key),
             )
             result = await loop_runner.run(
                 prompt, session.agent_name or "build", model, session.mode, opts
@@ -1598,12 +1853,33 @@ class HarnessService:
                 assistant, finish=result.finish_reason
             )
             await self._settle_open_stream_parts(assistant)
+            chained = await self._maybe_chain_interrupt(
+                session=session,
+                organization_id=organization_id,
+            )
+            if chained is not None:
+                return
         except asyncio.CancelledError:
             await sync_to_async(self.messages.complete)(
                 assistant, finish="aborted", error="aborted by user"
             )
             await self._fail_open_parts(assistant, state="error", output="aborted")
             raise
+        except _InterruptedForFollowUp as exc:
+            await self._finalize_interrupted_turn(
+                session=session,
+                assistant=assistant,
+                follow_up_prompt=str(exc.args[0] if exc.args else ""),
+            )
+            chained = await self._maybe_chain_interrupt(
+                session=session,
+                organization_id=organization_id,
+            )
+            if chained is not None:
+                return
+            # Slot vanished between check and chain (abort won the race):
+            # fall through to the normal idle finally below.
+            log.info("harness_interrupt_slot_lost", session_id=key)
         except Exception as exc:
             await sync_to_async(self.messages.complete)(
                 assistant, finish="error", error=str(exc)
@@ -1622,6 +1898,9 @@ class HarnessService:
             # Agent-S desktop lease release: an abort racing the finally
             # must not cancel the stops, and stops are best-effort (a
             # single failure never fails the run or swallows the abort).
+            # Interrupt chaining restarts inside this same busy window
+            # (no idle flapping): only go idle when no chained run took
+            # over (i.e. the slot was consumed and a new task registered).
             await self._cleanup_session_processes(
                 workspace_id=str(session.workspace_id),
                 session_id=key,
@@ -1630,18 +1909,224 @@ class HarnessService:
             self._runs.pop(key, None)
             self._tasks.pop(key, None)
             self._event_locks.pop(key, None)
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
+            if not self._is_chain_active(key):
+                self._interrupt_pending.pop(key, None)
+                self._clear_interrupt_event(key)
+                await sync_to_async(self.sessions.mark_status)(
+                    session, HarnessSessionStatus.IDLE
+                )
+                await self._emit_frontend(
+                    FRONTEND_EVENT_STATUS,
+                    self._session_status_payload(
+                        session,
+                        "idle",
+                        model=assistant.model or "",
+                    ),
+                    str(session.workspace_id),
+                )
+
+    def _is_chain_active(self, key: str) -> bool:
+        """Return True when an interrupt chain took over the busy window.
+
+        The chained ``start_run`` replaces ``self._tasks[key]`` with the
+        new task while this frame is still in its ``finally``: seeing a
+        *different live* task means the session never went idle.
+        """
+        task = self._tasks.get(key)
+        current = asyncio.current_task()
+        return task is not None and task is not current and not task.done()
+
+    async def _maybe_chain_interrupt(
+        self,
+        *,
+        session: HarnessSession,
+        organization_id: uuid.UUID,
+    ) -> HarnessMessage | None:
+        """Start the chained follow-up run for a pending interrupt slot.
+
+        Consumes the slot and delegates to the chained starter (fresh
+        user message rows already exist; the chained run creates its own
+        assistant shell + history snapshot including the follow-up). The
+        chained task replaces ``self._tasks[key]`` so the outer
+        ``finally`` keeps the session busy instead of flapping to idle.
+        Returns the new assistant shell, or None when no slot is armed.
+        """
+        key = str(session.id)
+        pending = self._interrupt_pending.pop(key, None)
+        self._clear_interrupt_event(key)
+        if pending is None:
+            return None
+        follow_up = str(pending.get("prompt", "") or "")
+        if not follow_up.strip():
+            return None
+        try:
+            fresh = await sync_to_async(self.get_session)(session.id)
+        except NotFoundError:
+            log.warning("harness_interrupt_chain_no_session", session_id=key)
+            return None
+        try:
+            chained = await self._start_chained_run(
+                fresh,
+                follow_up,
+                organization_id=organization_id,
+                workspace_id=str(pending.get("workspace_id") or fresh.workspace_id),
+                user_id=pending.get("user_id"),
             )
-            await self._emit_frontend(
-                FRONTEND_EVENT_STATUS,
-                self._session_status_payload(
-                    session,
-                    "idle",
-                    model=assistant.model or "",
+        except Exception:
+            log.exception("harness_interrupt_chain_failed", session_id=key)
+            return None
+        log.info(
+            "harness_interrupt_chained",
+            session_id=key,
+            assistant_id=str(chained.id),
+        )
+        return chained
+
+    async def _start_chained_run(
+        self,
+        session: HarnessSession,
+        follow_up: str,
+        *,
+        organization_id: uuid.UUID,
+        workspace_id: str = "",
+        user_id: int | None = None,
+    ) -> HarnessMessage:
+        """Start the chained run reusing the persisted follow-up message.
+
+        Mirrors :meth:`start_run` but does NOT create a second user row
+        (``request_interrupt`` already persisted it) and does NOT touch
+        the busy flag (the session never went idle). History is rebuilt
+        fresh so the interrupted turn (``finish="interrupted"``) plus the
+        follow-up message are both visible to the model.
+        """
+        from .providers.resolver import StaticModelResolver
+        from .services import ProviderConfigService
+
+        key = str(session.id)
+        org_id = organization_id or session.organization_id
+        session = await sync_to_async(self.get_session)(session.id)
+        resolved_model = await sync_to_async(self.validate_provider_for_run)(
+            org_id, session, provider=None
+        )
+        provider_id, _ = parse_model_ref(resolved_model)
+        user_row = await sync_to_async(
+            lambda: self.messages.model.objects.filter(
+                session_id=session.id, role="user"
+            )
+            .order_by("-created_at", "-id")
+            .first()
+        )()
+        if user_row is None or (user_row.content or "").strip() != follow_up.strip():
+            # Lost update (message edited/deleted meanwhile): persist a
+            # fresh row so the chain never drops the user's text.
+            user_row = await sync_to_async(self.messages.create)(
+                session_id=session.id,
+                role="user",
+                content=follow_up.strip(),
+            )
+        assistant = await sync_to_async(self.messages.create)(
+            session_id=session.id,
+            role="assistant",
+            content="",
+            model=resolved_model,
+            reasoning_effort=session.reasoning_effort or "",
+            provider=provider_id,
+        )
+        await sync_to_async(self.messages.dismiss_prior_notices)(
+            session.id, exclude_ids=[assistant.id]
+        )
+        session.status = HarnessSessionStatus.BUSY
+        history = await self._build_history(session, exclude_message_id=assistant.id)
+        skill_bodies: list[str] = []
+        if session.skill_ids and user_id is not None:
+            skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                list(session.skill_ids or []),
+                user_id=user_id,
+                organization_id=org_id,
+            )
+        run_ctx: dict[str, Any] = {
+            "session_id": key,
+            "workspace_id": workspace_id or str(session.workspace_id),
+            "organization_id": str(org_id),
+            "message_id": str(assistant.id),
+            "user_message_id": str(user_row.id),
+            "text_part_id": None,
+            "reasoning_part_id": None,
+            "tool_parts": {},
+            "step_parts": {},
+            "subtask_parts": {},
+            "skill_bodies": skill_bodies,
+        }
+        # Register before spawning so the outer finally sees the live
+        # chained task and keeps the busy window open.
+        self._runs[key] = run_ctx
+        task = self._spawn_background(
+            self._execute_run(
+                session=session,
+                prompt=follow_up.strip(),
+                history=history,
+                assistant=assistant,
+                provider=None,
+                organization_id=org_id,
+            )
+        )
+        self._tasks[key] = task
+        task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
+        await self._emit_frontend(
+            FRONTEND_EVENT_STATUS,
+            {
+                **self._session_status_payload(
+                    session, "busy", model=resolved_model
                 ),
-                str(session.workspace_id),
-            )
+                "interrupt_pending": False,
+            },
+            str(session.workspace_id),
+        )
+        return assistant
+
+    async def _finalize_interrupted_turn(
+        self,
+        *,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        follow_up_prompt: str,
+    ) -> None:
+        """Finalize the preempted turn as ``finish="interrupted"``.
+
+        Same shape as abort (partial text/reasoning kept, open
+        tool/subtask parts errored) but with its own finish reason so the
+        UI can render "interrupted by follow-up" instead of "stopped".
+        The router-level ``interrupted`` event is also forwarded so live
+        clients can close the streaming bubble immediately.
+
+        ``follow_up_prompt`` is the armed follow-up text when known (used
+        for the operator log); the persisted ``error`` stays a stable
+        machine-readable marker so clients can match on it.
+        """
+        key = str(session.id)
+        await sync_to_async(self.messages.complete)(
+            assistant,
+            finish="interrupted",
+            error="interrupted by follow-up",
+        )
+        await self._fail_open_parts(
+            assistant, state="error", output="interrupted by follow-up"
+        )
+        await self._emit_frontend(
+            FRONTEND_EVENT_PART,
+            {
+                "workspace_id": str(session.workspace_id),
+                "session_id": key,
+                "delta": {"interrupted": True},
+                "step": None,
+            },
+            str(session.workspace_id),
+        )
+        log.info(
+            "harness_run_interrupted",
+            session_id=key,
+            follow_up_chars=len(follow_up_prompt or ""),
+        )
 
     async def _cleanup_session_processes(
         self,
@@ -1921,9 +2406,19 @@ class HarnessService:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
+        """Persist a runner streaming event and forward it to frontend.
+
+        Shielded against outer cancellation: ``abort_run`` cancels the
+        run task, which may be awaiting this emit inside the runner loop
+        (e.g. inside the interrupt-aware provider pump). Without the
+        shield the CancelledError would propagate through ``_send`` and
+        surface as ``aborted`` instead of the more specific
+        ``interrupted``/``stop`` outcome the loop was finalizing.
+        """
         async with self._event_lock(str(session.id)):
-            await self._persist_runner_event(session, assistant, event)
+            await asyncio.shield(
+                self._persist_runner_event(session, assistant, event)
+            )
 
     async def _persist_runner_event(
         self,
@@ -1954,9 +2449,9 @@ class HarnessService:
                 state="running",
                 meta={"step": event.get("step")},
             )
-            self._runs.get(session_id, {}).get("step_parts", {})[
-                str(event.get("step"))
-            ] = str(part.id)
+            run_ctx = self._runs.get(session_id)
+            if run_ctx is not None:
+                run_ctx.get("step_parts", {})[str(event.get("step"))] = str(part.id)
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
@@ -1965,6 +2460,21 @@ class HarnessService:
                     "delta": {"step_start": event.get("step")},
                     "step": event.get("step"),
                     "part_id": str(part.id),
+                },
+                workspace_id,
+            )
+        elif etype == "interrupted":
+            # Router-level interrupt marker (emitted by HarnessRunner.run
+            # alongside the InterruptedError): forward live so clients can
+            # close the streaming bubble immediately. Persistence happens
+            # in _finalize_interrupted_turn once the service catches it.
+            await self._emit_frontend(
+                FRONTEND_EVENT_PART,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "delta": {"interrupted": True},
+                    "step": None,
                 },
                 workspace_id,
             )
@@ -1986,10 +2496,11 @@ class HarnessService:
             # Close the matching step-start part (DB-side; it stayed
             # ``running`` because steps used to be frontend-only). A
             # missing step part (e.g. legacy rows) is not an error.
+            run_ctx = self._runs.get(session_id)
+            if run_ctx is None:
+                return
             step_part_id = (
-                self._runs.get(session_id, {})
-                .get("step_parts", {})
-                .pop(str(event.get("step")), None)
+                run_ctx.get("step_parts", {}).pop(str(event.get("step")), None)
             )
             if step_part_id is not None:
                 step_part = await sync_to_async(
@@ -2004,7 +2515,6 @@ class HarnessService:
             # the ids makes the next step start fresh parts so the final
             # answer stays after tools in created_at order ("Worked for"
             # above the answer after idle fetchParts).
-            run_ctx = self._runs.get(session_id, {})
             reasoning_part_id = run_ctx.pop("reasoning_part_id", None)
             if reasoning_part_id is not None:
                 reasoning_part = await sync_to_async(
@@ -2059,9 +2569,11 @@ class HarnessService:
                 },
                 meta={"step": event.get("step")},
             )
-            self._runs.get(session_id, {}).get("tool_parts", {})[
-                str(event.get("call_id", ""))
-            ] = str(part.id)
+            run_ctx = self._runs.get(session_id)
+            if run_ctx is not None:
+                run_ctx.get("tool_parts", {})[str(event.get("call_id", ""))] = str(
+                    part.id
+                )
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
@@ -2194,9 +2706,11 @@ class HarnessService:
                     "reasoning_effort": event.get("reasoning_effort", ""),
                 },
             )
-            self._runs.get(session_id, {}).get("subtask_parts", {})[
-                str(event.get("subtask_id", ""))
-            ] = str(part.id)
+            run_ctx = self._runs.get(session_id)
+            if run_ctx is not None:
+                run_ctx.get("subtask_parts", {})[str(event.get("subtask_id", ""))] = (
+                    str(part.id)
+                )
             await self._emit_frontend(
                 FRONTEND_EVENT_SUBTASK_STARTED,
                 {
@@ -2296,7 +2810,13 @@ class HarnessService:
         reasoning = str(delta.get("reasoning", "") or "")
         step = event.get("step")
         key = str(session.id)
-        run_ctx = self._runs.get(key, {})
+        run_ctx = self._runs.get(key)
+        if run_ctx is None:
+            # No live run context (e.g. direct _on_runner_event calls in
+            # tests): use a throwaway so streaming deltas still persist.
+            # Inside real runs the context always exists, so late events
+            # racing the finally keep landing on the live dict.
+            run_ctx = {"text_part_id": None, "reasoning_part_id": None}
         if text:
             part_id = run_ctx.get("text_part_id")
             if part_id is None:

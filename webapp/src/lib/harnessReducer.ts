@@ -342,6 +342,23 @@ export function applyPartDelta(
     }
   }
 
+  if (delta.interrupted) {
+    // Follow-up interrupt marker: close the live turn the same way the
+    // server finalizes it (`finish="interrupted"` persists via the idle
+    // reconcile). Running text/reasoning/tool/subtask rows settle so the
+    // chained run starts its own assistant message below.
+    message.finish = 'interrupted'
+    message.error = 'interrupted by follow-up'
+    message.completed_at = message.completed_at ?? new Date().toISOString()
+    for (const part of message.parts) {
+      if (part.state !== 'running' && part.state !== 'pending') continue
+      part.state = part.type === 'text' || part.type === 'reasoning' ? 'completed' : 'error'
+      if (part.type !== 'text' && part.type !== 'reasoning' && !part.output) {
+        part.output = 'interrupted by follow-up'
+      }
+    }
+  }
+
   return message
 }
 

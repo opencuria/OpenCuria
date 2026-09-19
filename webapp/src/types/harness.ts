@@ -237,6 +237,8 @@ export interface HarnessPartDelta {
   /** Safe plan summary riding the live `agent` event (untrusted transport). */
   agent_meta?: Partial<HarnessAgentMeta>
   compaction?: boolean
+  /** Follow-up interrupt marker: the running turn was preempted (`finish="interrupted"` persists via reconcile). */
+  interrupted?: boolean
   /** Live tool attachments on `tool_completed` (same shape as persisted meta). */
   attachments?: Array<{
     type?: string
@@ -302,6 +304,8 @@ export interface HarnessSessionStatusEvent {
   status: HarnessSessionStatus
   model?: string
   reasoning_effort?: string
+  /** True while a follow-up interrupt is armed (busy sessions only). */
+  interrupt_pending?: boolean
 }
 
 export interface HarnessTodoUpdatedEvent {

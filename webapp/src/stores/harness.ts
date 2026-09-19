@@ -26,6 +26,7 @@ import {
   dismissHarnessNotice,
   editHarnessMessage,
   forkHarnessSession,
+  interruptHarnessSession,
   listHarnessParts,
   listHarnessSessions,
   listHarnessTodos,
@@ -84,6 +85,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const composerDirty = ref(false)
   /** Message ids whose error/abort notice the user dismissed (optimistic local cache; server `notice_dismissed_at` is the source of truth). */
   const dismissedNoticeIds = ref<Record<string, true>>({})
+  /** Follow-up interrupt armed per session (busy only; server is source of truth via `session_status`). */
+  const interruptPendingBySession = ref<Record<string, boolean>>({})
 
   // --- Getters ---
   const activeSession = computed(
@@ -335,6 +338,62 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  /**
+   * Send a follow-up prompt while a run is active (graceful interrupt).
+   * The server persists the user message at once, arms the single
+   * follow-up slot, and chains a fresh run at the next step boundary —
+   * running tool calls always finish first. Optimistically pushes the
+   * user bubble + marks the session interrupt-pending; the socket
+   * `session_status` event confirms/clears it. A 409 `gate_pending`
+   * surfaces a dedicated hint (resolve the gate first).
+   */
+  async function interruptSession(
+    sessionId: string,
+    prompt: string,
+    options: {
+      mode?: HarnessSessionMode
+      model?: string
+      skillIds?: string[]
+      reasoningEffort?: string
+    } = {},
+  ): Promise<boolean> {
+    const notifications = useNotificationStore()
+    try {
+      const session = await interruptHarnessSession(sessionId, {
+        prompt,
+        mode: options.mode,
+        model: options.model,
+        skill_ids: options.skillIds,
+        reasoning_effort: options.reasoningEffort,
+      })
+      upsertSession(session)
+      interruptPendingBySession.value = {
+        ...interruptPendingBySession.value,
+        [sessionId]: true,
+      }
+      messagesFor(sessionId).push({
+        id: `local-user-${sessionId}-${Date.now()}`,
+        session_id: sessionId,
+        role: 'user',
+        content: prompt,
+        parts: [],
+        created_at: new Date().toISOString(),
+      })
+      recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
+      return true
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestError && e.status === 409) {
+        notifications.error(
+          'Resolve the pending approval or question first, then send the follow-up.',
+          e.message,
+        )
+        return false
+      }
+      notifications.error('Follow-up failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
   async function renameSession(sessionId: string, title: string): Promise<void> {
     const notifications = useNotificationStore()
     try {
@@ -558,7 +617,11 @@ export const useHarnessStore = defineStore('harness', () => {
   function handleSessionStatus(
     sessionId: string,
     status: HarnessSession['status'],
-    extras?: { model?: string; reasoning_effort?: string },
+    extras?: {
+      model?: string
+      reasoning_effort?: string
+      interrupt_pending?: boolean
+    },
   ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
@@ -568,8 +631,20 @@ export const useHarnessStore = defineStore('harness', () => {
         session.reasoning_effort = extras.reasoning_effort
       }
     }
+    if (extras?.interrupt_pending !== undefined) {
+      const next = { ...interruptPendingBySession.value }
+      if (extras.interrupt_pending) {
+        next[sessionId] = true
+      } else {
+        delete next[sessionId]
+      }
+      interruptPendingBySession.value = next
+    }
     stampRunModel(sessionId, extras)
     if (status === 'idle') {
+      const next = { ...interruptPendingBySession.value }
+      delete next[sessionId]
+      interruptPendingBySession.value = next
       stampAssistantCompleted(sessionId)
       if (viewingSessionId.value === sessionId && !session?.manual_unread) {
         void markSessionRead(sessionId)
@@ -735,6 +810,7 @@ export const useHarnessStore = defineStore('harness', () => {
     loading.value = false
     error.value = null
     dismissedNoticeIds.value = {}
+    interruptPendingBySession.value = {}
     agentConfigs.value = []
     composerDirty.value = false
   }
@@ -755,6 +831,7 @@ export const useHarnessStore = defineStore('harness', () => {
     agentConfigs,
     composerDirty,
     dismissedNoticeIds,
+    interruptPendingBySession,
     // Getters
     activeSession,
     activeMessages,
@@ -773,6 +850,7 @@ export const useHarnessStore = defineStore('harness', () => {
     fetchTodos,
     createSession,
     sendMessage,
+    interruptSession,
     forkSession,
     editMessage,
     renameSession,

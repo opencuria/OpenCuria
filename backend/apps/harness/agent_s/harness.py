@@ -444,6 +444,7 @@ async def run_agent_s_computeruse(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     worker_engine_params: dict[str, Any] | None = None,
     session_factory: Any | None = None,
+    should_interrupt: Callable[[], bool] | None = None,
 ) -> AgentSRunResult:
     """Run the Agent-S computer-use loop (mirrors ``run_agent``).
 
@@ -576,6 +577,20 @@ async def run_agent_s_computeruse(
 
         for _ in range(max_steps):
             steps += 1
+            # Cooperative follow-up interrupt: stop at the step boundary
+            # (before new Agent-S work starts) so a pending follow-up can
+            # take over. An in-flight screenshot/action is never torn
+            # down — only fresh steps are skipped.
+            if should_interrupt is not None:
+                try:
+                    if bool(should_interrupt()):
+                        from apps.harness.runner import InterruptedError
+
+                        raise InterruptedError("follow-up prompt pending")
+                except InterruptedError:
+                    raise
+                except Exception:  # pragma: no cover - defensive
+                    pass
             # Attribute streamed reasoning of this Agent-S step (the
             # completion adapter emits ``part_updated`` reasoning without
             # step context) so persistence meta and socket opts carry it.
