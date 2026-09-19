@@ -36,6 +36,32 @@ class TaskArgs(BaseModel):
     model_override: str | None = Field(
         default=None, description="Optional model for the child run."
     )
+    task_id: str | None = Field(
+        default=None,
+        description=(
+            "This should only be set if you mean to resume a previous task "
+            "(you can pass a prior task_id and the task will continue the "
+            "same subagent session as before instead of creating a fresh one)"
+        ),
+    )
+
+
+def render_task_output(task_id: str, text: str, *, state: str = "completed") -> str:
+    """Wrap child text in an OpenCode-style ``<task>`` envelope.
+
+    The envelope carries the resumable ``task_id`` (child session id in
+    the persistent service path, ephemeral subtask id in the direct
+    runner path) so the parent model can pass it back via
+    ``TaskArgs.task_id`` to continue the same subagent session.
+    """
+    tag = "task_result"
+    return (
+        f'<task id="{task_id}" state="{state}">\n'
+        f"<{tag}>\n"
+        f"{text}\n"
+        f"</{tag}>\n"
+        "</task>"
+    )
 
 
 class TaskTool(Tool):
@@ -48,7 +74,11 @@ class TaskTool(Tool):
     ``task`` tool from children at the limit (see ``runner``). The model
     is inherited from the parent unless ``model_override`` is given.
     Child events propagate as ``subtask_started``/``subtask_finished``
-    via ``ctx.parent_emit``; the child result returns as truncated text.
+    via ``ctx.parent_emit``; the child result returns as truncated text
+    wrapped in an OpenCode-style ``<task id="...">`` envelope whose id
+    can be passed back as ``task_id`` to resume the same subagent
+    session (see ``TaskArgs.task_id``). ``subagent_type`` mismatches on
+    resume are ignored: the stored child agent keeps running.
     """
 
     name = "task"
@@ -56,7 +86,12 @@ class TaskTool(Tool):
         "Launch a subagent (general|explore|computeruse) for a subtask and "
         "return its result text. Launch multiple independent task calls in "
         "one message to run them in parallel. Subagents cannot launch further "
-        "subagents beyond the depth limit and cannot use todowrite."
+        "subagents beyond the depth limit and cannot use todowrite. "
+        "The result includes a task_id you can reuse later to continue the "
+        "same subagent session: each call starts fresh unless you pass "
+        "task_id to resume (which continues with its previous messages and "
+        "tool outputs). When starting fresh, the prompt must contain a "
+        "highly detailed task description."
     )
     args_schema: type[BaseModel] = TaskArgs
     permission_key = "task"
@@ -192,6 +227,7 @@ class TaskTool(Tool):
                     output[:TASK_OUTPUT_MAX_CHARS]
                     + f"\n…[truncated {len(result.output)} chars total]"
                 )
+        wrapped = render_task_output(subtask_id, output)
         await self._emit_parent(
             ctx,
             {
@@ -209,10 +245,11 @@ class TaskTool(Tool):
             status="completed",
         )
         return ToolResult(
-            output=output,
+            output=wrapped,
             truncated=truncated,
             metadata={
                 "subtask_id": subtask_id,
+                "task_id": subtask_id,
                 "agent": agent,
                 "status": "completed",
                 "steps": result.steps,
