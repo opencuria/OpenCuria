@@ -33,6 +33,7 @@ vi.mock('@/services/socket', () => ({
 }))
 
 const getDesktopStatus = vi.mocked(workspacesApi.getDesktopStatus)
+const startDesktopApi = vi.mocked(workspacesApi.startDesktop)
 const stopDesktopApi = vi.mocked(workspacesApi.stopDesktop)
 
 function emit(event: string, data: Record<string, unknown>): void {
@@ -363,5 +364,37 @@ describe('useDesktopSession lifecycle', () => {
 
     expect(store.isConnected).toBe(false)
     expect(store.proxyUrl).toBeNull()
+  })
+
+  it('bumps viewer generation on reconnect without restarting a live session', () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const session = useDesktopSession(ref('ws-1'))
+
+    session.handleReconnect()
+
+    expect(store.viewerGeneration).toBe(1)
+    expect(store.isConnected).toBe(true)
+    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
+    expect(startDesktopApi).not.toHaveBeenCalled()
+  })
+
+  it('starts the desktop on reconnect when no session is connected', async () => {
+    startDesktopApi.mockResolvedValue({ task_id: 'task-1' })
+    getDesktopStatus.mockResolvedValue({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+    })
+    const store = useDesktopStore()
+    const session = useDesktopSession(ref('ws-1'))
+
+    session.handleReconnect()
+    await Promise.resolve()
+
+    expect(store.isConnecting).toBe(true)
+    expect(startDesktopApi).toHaveBeenCalledWith('ws-1')
+    expect(store.viewerGeneration).toBe(0)
   })
 })

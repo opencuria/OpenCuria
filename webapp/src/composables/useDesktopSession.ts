@@ -187,7 +187,12 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   }
 
   function handleReconnect(): void {
-    desktopStore.setDisconnected()
+    // Keep the runner session; remount the iframe so a dropped KasmVNC
+    // client cannot keep its idle timer against a torn-down UI.rfb.
+    if (desktopStore.isConnected) {
+      desktopStore.bumpViewer()
+      return
+    }
     void startDesktop()
   }
 

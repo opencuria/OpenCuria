@@ -247,6 +247,14 @@ function handleIframeLoad(): void {
   bindDesktopIframeKeydownListener()
 }
 
+function onVisibilityChange(): void {
+  // Safari drops the iframe WebSocket when the tab is backgrounded.
+  // Remount the client against the still-running Xvnc session.
+  if (document.visibilityState !== 'visible') return
+  if (!desktopStore.isConnected) return
+  desktopStore.bumpViewer()
+}
+
 onMounted(() => {
   if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId) {
     desktopStore.reset()
@@ -258,6 +266,7 @@ onMounted(() => {
     void startDesktop()
   }
   window.addEventListener('keydown', onGlobalKeydown)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
@@ -268,6 +277,7 @@ onBeforeUnmount(() => {
   iframeKeydownCleanup?.()
   iframeKeydownCleanup = null
   window.removeEventListener('keydown', onGlobalKeydown)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 watch(
@@ -291,7 +301,7 @@ watch(
 )
 
 watch(
-  () => desktopStore.proxyUrl,
+  () => [desktopStore.proxyUrl, desktopStore.viewerGeneration] as const,
   () => {
     iframeLoaded.value = false
   },
@@ -330,6 +340,7 @@ watch(desktopIframeRef, () => {
           :style="scaledFrameStyle"
         >
           <iframe
+            :key="`${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`"
             ref="desktopIframeRef"
             :src="desktopIframeSrc"
             title="Desktop"
@@ -338,6 +349,7 @@ watch(desktopIframeRef, () => {
             :style="scaledIframeStyle"
             sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
             allow="clipboard-read; clipboard-write"
+            data-testid="desktop-surface-iframe"
             @load="handleIframeLoad"
           />
         </div>

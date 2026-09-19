@@ -62,4 +62,19 @@ describe('desktop store leases', () => {
     store.reset()
     expect(store.computerUseActive).toBe(false)
   })
+
+  it('bumps viewer generation independently of the session url', () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    expect(store.viewerGeneration).toBe(0)
+
+    store.bumpViewer()
+    store.bumpViewer()
+    expect(store.viewerGeneration).toBe(2)
+    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
+    expect(store.isConnected).toBe(true)
+
+    store.reset()
+    expect(store.viewerGeneration).toBe(0)
+  })
 })

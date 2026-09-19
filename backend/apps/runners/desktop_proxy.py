@@ -23,7 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -36,6 +36,89 @@ _PATH_RE = re.compile(r"^/ws/desktop/(?P<workspace_id>[0-9a-f\-]{36})(?P<rest>/.
 
 _COOKIE_NAME = "desktop_auth"
 _COOKIE_MAX_AGE = 3600  # 1 hour
+
+# KasmVNC 1.3.3 treats any iframe as Kasm VDI and starts a 5s idle timer
+# that reads ``UI.rfb.lastActiveAt`` with no null check. After a websocket
+# drop the RFB object is cleared but the interval keeps running, which
+# surfaces as the "KasmVNC encountered an error" overlay. This script
+# wraps ``setInterval`` before the client bundle runs.
+_KASM_IDLE_GUARD_SCRIPT = (
+    b"<script data-opencuria-kasm-idle-guard>"
+    b"(function(){"
+    b"var n=window.setInterval.bind(window);"
+    b"window.setInterval=function(handler,timeout){"
+    b"if(typeof handler!=='function'){return n.apply(this,arguments);}"
+    b"var wrapped=function(){try{return handler.apply(this,arguments);}"
+    b"catch(err){var msg=String((err&&err.message)||err);"
+    b"if(!window.UI||!window.UI.rfb){return;}"
+    b"if(msg.indexOf('lastActiveAt')!==-1||msg.indexOf('UI.rfb')!==-1){return;}"
+    b"throw err;}};"
+    b"var args=Array.prototype.slice.call(arguments);args[0]=wrapped;"
+    b"return n.apply(this,args);};"
+    b"})();"
+    b"</script>"
+)
+
+
+def build_vnc_redirect_url(workspace_id: str, token: str | None) -> str:
+    """Return the Location for the KasmVNC client, with a safe WebSocket path.
+
+    ``path`` is query-encoded so ``?token=`` stays inside the KasmVNC
+    WebSocket path instead of being parsed as another ``vnc.html``
+    parameter. ``reconnect=false`` disables KasmVNC's iframe VDI
+    auto-reconnect, which races the idle timer against a torn-down
+    ``UI.rfb``.
+    """
+    token_value = token or ""
+    ws_path = f"ws/desktop/{workspace_id}/?token={token_value}"
+    query = urlencode(
+        {
+            "token": token_value,
+            "autoconnect": "true",
+            "resize": "scale",
+            "reconnect": "false",
+            "path": ws_path,
+        }
+    )
+    return f"/ws/desktop/{workspace_id}/vnc.html?{query}"
+
+
+def inject_kasm_idle_guard(html: bytes) -> bytes:
+    """Insert the idle-timer guard so it runs before KasmVNC scripts."""
+    if b"data-opencuria-kasm-idle-guard" in html:
+        return html
+    lower = html.lower()
+    head_idx = lower.find(b"<head")
+    if head_idx != -1:
+        gt = html.find(b">", head_idx)
+        if gt != -1:
+            insert_at = gt + 1
+            return html[:insert_at] + _KASM_IDLE_GUARD_SCRIPT + html[insert_at:]
+    close_idx = lower.find(b"</head>")
+    if close_idx != -1:
+        return html[:close_idx] + _KASM_IDLE_GUARD_SCRIPT + html[close_idx:]
+    return _KASM_IDLE_GUARD_SCRIPT + html
+
+
+def _is_vnc_html_path(rest_path: str) -> bool:
+    """Return whether this proxied path is the KasmVNC client page."""
+    return rest_path.split("?", 1)[0] == "/vnc.html"
+
+
+def apply_vnc_client_patches(
+    rest_path: str,
+    headers: list[list[bytes]],
+    body: bytes,
+) -> tuple[list[list[bytes]], bytes]:
+    """Inject the idle-timer guard into vnc.html and fix Content-Length."""
+    if not _is_vnc_html_path(rest_path):
+        return headers, body
+    patched = inject_kasm_idle_guard(body)
+    if patched == body:
+        return headers, body
+    headers = [item for item in headers if item[0].lower() != b"content-length"]
+    headers.append([b"content-length", str(len(patched)).encode()])
+    return headers, patched
 
 
 @dataclass
@@ -229,17 +312,10 @@ async def _proxy_http(
     """Reverse-proxy HTTP requests to KasmVNC through the runner."""
     # If rest_path is just "/" redirect to the vnc.html page
     if rest_path == "/":
-        base_path = f"/ws/desktop/{workspace_id}"
-        # path= tells KasmVNC client where to open the WebSocket.
-        # KasmVNC serves WS at root, so we proxy to / on the upstream.
-        ws_path = f"ws/desktop/{workspace_id}/?token={token}"
         # Always scale locally. ``resize=remote`` asks KasmVNC to send
         # SetDesktopSize and would shrink/grow the real X11 framebuffer
         # when switching between the chat mini viewer and fullscreen.
-        redirect_url = (
-            f"{base_path}/vnc.html?token={token}"
-            f"&autoconnect=true&resize=scale&path={ws_path}"
-        )
+        redirect_url = build_vnc_redirect_url(workspace_id, token)
         resp_headers = [[b"location", redirect_url.encode()]]
         if cookie_header:
             resp_headers.append([b"set-cookie", cookie_header.encode()])
@@ -280,6 +356,10 @@ async def _proxy_http(
             body_bytes = body.encode()
         else:
             body_bytes = bytes(body)
+
+        headers, body_bytes = apply_vnc_client_patches(
+            rest_path, headers, body_bytes
+        )
 
         await send({
             "type": "http.response.start",

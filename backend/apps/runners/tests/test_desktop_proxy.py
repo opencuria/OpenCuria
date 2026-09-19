@@ -16,7 +16,10 @@ from apps.organizations.models import Membership, MembershipRole
 from apps.runners.desktop_proxy import (
     _register_ws_tunnel,
     _unregister_ws_tunnel,
+    apply_vnc_client_patches,
+    build_vnc_redirect_url,
     desktop_proxy_app,
+    inject_kasm_idle_guard,
     push_runner_ws_closed,
     push_runner_ws_frame,
 )
@@ -146,7 +149,7 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
     scope = {
         "type": "http",
         "method": "GET",
-        "path": f"/ws/desktop/{workspace_id}/vnc.html",
+        "path": f"/ws/desktop/{workspace_id}/dist/main.bundle.js",
         "query_string": b"token=test-token",
         "headers": [],
     }
@@ -157,7 +160,7 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
         "desktop:proxy_http_request",
         {
             "workspace_id": workspace_id,
-            "path": "/vnc.html",
+            "path": "/dist/main.bundle.js",
             "query_string": "token=test-token",
             "method": "GET",
         },
@@ -211,6 +214,9 @@ async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
     assert "resize=scale" in location
     assert "resize=remote" not in location
     assert "autoconnect=true" in location
+    assert "reconnect=false" in location
+    assert f"path=ws%2Fdesktop%2F{workspace_id}%2F%3Ftoken%3Dtest-token" in location
+    assert f"path=ws/desktop/{workspace_id}/?token=" not in location
 
 
 @pytest.mark.asyncio
@@ -258,3 +264,120 @@ async def test_runner_frames_from_wrong_runner_are_ignored():
             await asyncio.wait_for(queue.get(), timeout=0.05)
     finally:
         _unregister_ws_tunnel(tunnel_id)
+
+
+def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
+    workspace_id = "297de18f-3cc8-4e14-b64a-35c80856d51b"
+    location = build_vnc_redirect_url(workspace_id, "tok+/=x")
+
+    assert location.startswith(f"/ws/desktop/{workspace_id}/vnc.html?")
+    assert "autoconnect=true" in location
+    assert "resize=scale" in location
+    assert "reconnect=false" in location
+    assert "path=ws%2Fdesktop%2F" in location
+    assert "%3Ftoken%3D" in location
+    assert f"path=ws/desktop/{workspace_id}/?token=" not in location
+
+
+def test_inject_kasm_idle_guard_inserts_into_head_and_is_idempotent():
+    original = (
+        b"<html><head lang='en'><title>KasmVNC</title></head>"
+        b"<body></body></html>"
+    )
+    patched = inject_kasm_idle_guard(original)
+
+    assert b"data-opencuria-kasm-idle-guard" in patched
+    assert patched.startswith(b"<html><head lang='en'>")
+    assert patched.count(b"data-opencuria-kasm-idle-guard") == 1
+    assert inject_kasm_idle_guard(patched) == patched
+
+
+def test_inject_kasm_idle_guard_prefixes_html_without_head():
+    patched = inject_kasm_idle_guard(b"<html><body>vnc</body></html>")
+
+    assert patched.startswith(b"<script data-opencuria-kasm-idle-guard>")
+    assert patched.endswith(b"<html><body>vnc</body></html>")
+
+
+def test_apply_vnc_client_patches_rewrites_vnc_html_content_length():
+    body = b"<html><head></head><body>ok</body></html>"
+    headers = [
+        [b"Content-Type", b"text/html"],
+        [b"Content-Length", str(len(body)).encode()],
+    ]
+
+    next_headers, next_body = apply_vnc_client_patches("/vnc.html", headers, body)
+
+    assert b"data-opencuria-kasm-idle-guard" in next_body
+    assert next_body != body
+    header_map = {key.lower(): value for key, value in next_headers}
+    assert header_map[b"content-length"] == str(len(next_body)).encode()
+    assert header_map[b"content-type"] == b"text/html"
+
+
+def test_apply_vnc_client_patches_leaves_non_html_assets_unchanged():
+    body = b"/* kasm bundle */ UI.rfb.lastActiveAt"
+    headers = [[b"Content-Type", b"application/javascript"], [b"Content-Length", b"99"]]
+
+    next_headers, next_body = apply_vnc_client_patches(
+        "/dist/main.bundle.js",
+        headers,
+        body,
+    )
+
+    assert next_headers is headers
+    assert next_body is body
+
+
+@pytest.mark.asyncio
+async def test_proxy_vnc_html_injects_idle_guard(monkeypatch):
+    workspace_id = str(uuid.uuid4())
+    original = b"<html><head></head><body>kasm</body></html>"
+    sio = AsyncMock()
+    sio.call = AsyncMock(
+        return_value={
+            "status": 200,
+            "headers": [
+                ["Content-Type", "text/html"],
+                ["Content-Length", str(len(original))],
+            ],
+            "body": base64.b64encode(original).decode("ascii"),
+            "body_encoding": "base64",
+        }
+    )
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._validate_token",
+        AsyncMock(return_value=SimpleNamespace(pk=1)),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._user_can_access_workspace",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._get_desktop_proxy_target",
+        AsyncMock(
+            return_value={
+                "runner_sid": "runner-sid",
+                "runner_id": "runner-id",
+                "desktop_info": {"port": 6901},
+            }
+        ),
+    )
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": f"/ws/desktop/{workspace_id}/vnc.html",
+        "query_string": b"token=test-token",
+        "headers": [],
+    }
+
+    events = await _call_http(scope)
+
+    body = events[1]["body"]
+    header_map = {key.lower(): value for key, value in events[0]["headers"]}
+    assert events[0]["status"] == 200
+    assert b"data-opencuria-kasm-idle-guard" in body
+    assert header_map[b"content-length"] == str(len(body)).encode()
+    assert header_map[b"content-type"] == b"text/html"

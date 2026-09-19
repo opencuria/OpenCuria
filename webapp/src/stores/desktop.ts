@@ -17,6 +17,7 @@ export const useDesktopStore = defineStore('desktop', () => {
   const computerUseActive = computed(() => computerUseRuns.value.size > 0)
   const proxyUrl = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
+  const viewerGeneration = ref(0)
 
   function open(): void {
     isOpen.value = true
@@ -24,6 +25,11 @@ export const useDesktopStore = defineStore('desktop', () => {
 
   function close(): void {
     isOpen.value = false
+  }
+
+  /** Remount the KasmVNC iframe without stopping the runner session. */
+  function bumpViewer(): void {
+    viewerGeneration.value += 1
   }
 
   function setConnecting(wsId: string): void {
@@ -85,6 +91,7 @@ export const useDesktopStore = defineStore('desktop', () => {
     computerUseRuns.value = new Set()
     proxyUrl.value = null
     workspaceId.value = null
+    viewerGeneration.value = 0
   }
 
   return {
@@ -94,8 +101,10 @@ export const useDesktopStore = defineStore('desktop', () => {
     computerUseActive,
     proxyUrl,
     workspaceId,
+    viewerGeneration,
     open,
     close,
+    bumpViewer,
     setConnecting,
     setConnected,
     setComputerUseActive,

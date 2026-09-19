@@ -85,6 +85,10 @@ describe('DesktopSurface', () => {
     sidebarDesktopHost.value = null
     modalDesktopHost.value = null
     document.body.innerHTML = ''
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
   })
 
   it('teleports the iframe into the sidebar host by default', async () => {
@@ -187,5 +191,67 @@ describe('DesktopSurface', () => {
     await flushPromises()
 
     expect(stopDesktop).toHaveBeenCalledWith('ws-1')
+  })
+
+  it('remounts the iframe when viewer generation bumps', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    mountSurface()
+    await nextTick()
+    const iframe = sidebarHost.querySelector('iframe')!
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+
+    store.bumpViewer()
+    await nextTick()
+
+    const nextIframe = sidebarHost.querySelector('iframe')
+    expect(nextIframe).toBeTruthy()
+    expect(nextIframe).not.toBe(iframe)
+    expect(nextIframe?.classList.contains('opacity-0')).toBe(true)
+    expect(sidebarHost.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
+  it('bumps viewer generation when the tab becomes visible', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+
+    expect(store.viewerGeneration).toBe(1)
+  })
+
+  it('does not remount while the tab is hidden or disconnected', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const wrapper = mountSurface()
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+    expect(store.viewerGeneration).toBe(0)
+
+    store.setDisconnected()
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+    expect(store.viewerGeneration).toBe(0)
+    wrapper.unmount()
   })
 })
