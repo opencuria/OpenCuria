@@ -14,36 +14,78 @@ class DummyService:
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.create_workspace_calls = []
-        self.start_desktop = AsyncMock(
-            return_value=type(
-                "Session",
-                (),
-                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
-            )()
+        # Step 2: websocket terminal + image handlers call the managers
+        # directly (``service.terminal_manager`` / ``service.images``).
+        # The dummy mirrors that surface so handler tests exercise the
+        # same path; the underlying mocks stay directly awaitable.
+        self.terminal_manager = AsyncMock()
+        self.images = AsyncMock()
+        self.images.create_workspace_from_image_artifact = AsyncMock(
+            side_effect=self._create_workspace_from_image_artifact
         )
-        self.stop_desktop = AsyncMock(
-            return_value=type(
-                "Release",
-                (),
-                {
-                    "stopped": True,
-                    "process_alive": False,
-                    "viewer_held": False,
-                    "computer_use_active": False,
-                },
-            )()
-        )
-        self.get_desktop_container_ip = lambda workspace_id: "127.0.0.1"
-        self.get_desktop_network_name = lambda workspace_id: "workspace-net"
+        self.sync_from_runtime = AsyncMock()
+        self.recover_desktop_sessions_from_runtime = AsyncMock()
+        self.run_health_check_loop = AsyncMock()
+        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
+        self.create_workspace_calls = []
+        # Step 6b: websocket desktop handlers call the manager directly
+        # (``service.desktop``). The dummy mirrors that surface so handler
+        # tests exercise the same path; the underlying mocks stay directly
+        # awaitable. Facade shims delegate to the same impls.
+        self.desktop = self._FakeDesktop(self)
+        self.start_desktop = self.desktop.start_desktop
+        self.stop_desktop = self.desktop.stop_desktop
+        self.get_desktop_container_ip = self.desktop.get_desktop_container_ip
+        self.get_desktop_network_name = self.desktop.get_desktop_network_name
+
+    class _FakeDesktop:
+        def __init__(self, outer) -> None:
+            self._outer = outer
+            self.start_desktop = AsyncMock(
+                return_value=type(
+                    "Session",
+                    (),
+                    {
+                        "port": 6901,
+                        "viewer_held": True,
+                        "computeruse_run_ids": set(),
+                    },
+                )()
+            )
+            self.stop_desktop = AsyncMock(
+                return_value=type(
+                    "Release",
+                    (),
+                    {
+                        "stopped": True,
+                        "process_alive": False,
+                        "viewer_held": False,
+                        "computer_use_active": False,
+                    },
+                )()
+            )
+
+        def get_desktop_container_ip(self, workspace_id):
+            return "127.0.0.1"
+
+        def get_desktop_network_name(self, workspace_id):
+            return "workspace-net"
+
+        def get_desktop_session(self, workspace_id):
+            """Stub session lookup: no cached session (cold interface path)."""
+            return
 
     def get_desktop_session(self, workspace_id):
         """Stub session lookup: no cached session (cold interface path)."""
         return
 
-    async def create_workspace_from_image_artifact(self, **kwargs):
+    async def _create_workspace_from_image_artifact(self, **kwargs):
         return kwargs["new_workspace_id"], bool(
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
+
+    async def create_workspace_from_image_artifact(self, **kwargs):
+        return await self._create_workspace_from_image_artifact(**kwargs)
 
     async def create_workspace(self, **kwargs):
         self.create_workspace_calls.append(kwargs)
@@ -146,15 +188,22 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
-        service.start_desktop = AsyncMock(
+        service.desktop.start_desktop = AsyncMock(
             return_value=type(
                 "Session",
                 (),
                 {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
             )()
         )
-        service.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
-        service.get_desktop_network_name = lambda workspace_id: ""
+        service.start_desktop = service.desktop.start_desktop
+        service.desktop.get_desktop_container_ip = (
+            lambda workspace_id: "10.100.0.2"
+        )
+        service.get_desktop_container_ip = (
+            service.desktop.get_desktop_container_ip
+        )
+        service.desktop.get_desktop_network_name = lambda workspace_id: ""
+        service.get_desktop_network_name = service.desktop.get_desktop_network_name
 
         interface = WebSocketInterface(service, RunnerSettings())
         interface._sio.emit = AsyncMock()
@@ -165,7 +214,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         handler = interface._sio.handlers["/"]["task:start_desktop"]
         await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
 
-        service.start_desktop.assert_awaited_once_with(
+        service.desktop.start_desktop.assert_awaited_once_with(
             workspace_id, width=None, height=None
         )
         interface._sio.emit.assert_awaited_with(
@@ -191,7 +240,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         handler = interface._sio.handlers["/"]["task:stop_desktop"]
         await handler({"task_id": task_id, "workspace_id": str(workspace_id)})
 
-        service.stop_desktop.assert_awaited_once_with(workspace_id)
+        service.desktop.stop_desktop.assert_awaited_once_with(workspace_id)
         interface._sio.emit.assert_awaited_with(
             "desktop:stopped",
             {
@@ -204,7 +253,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         service = DummyService()
-        service.stop_desktop = AsyncMock(
+        service.desktop.stop_desktop = AsyncMock(
             return_value=type(
                 "Release",
                 (),
@@ -216,6 +265,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 },
             )()
         )
+        service.stop_desktop = service.desktop.stop_desktop
         interface = WebSocketInterface(service, RunnerSettings())
         interface._sio.emit = AsyncMock()
         task_id = "desktop-stop-2"
@@ -311,7 +361,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_clone_failure_emits_workspace_id(self) -> None:
         service = DummyService()
-        service.create_workspace_from_image_artifact = AsyncMock(
+        service.images.create_workspace_from_image_artifact = AsyncMock(
             side_effect=RuntimeError("boom")
         )
 

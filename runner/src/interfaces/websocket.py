@@ -117,7 +117,9 @@ class WebSocketInterface(Interface):
         query_string: str = "",
     ) -> dict[str, object]:
         """Fetch a desktop HTTP resource from the local workspace runtime."""
-        container_ip = self._service.get_desktop_container_ip(workspace_id)
+        container_ip = self._service.desktop.get_desktop_container_ip(
+            workspace_id
+        )
         upstream_url = f"http://{container_ip}:6901{rest_path}"
         if query_string:
             upstream_url = f"{upstream_url}?{query_string}"
@@ -190,7 +192,9 @@ class WebSocketInterface(Interface):
         subprotocols: list[str] | None = None,
     ) -> dict[str, object]:
         """Open a runner-local WebSocket tunnel to the desktop session."""
-        container_ip = self._service.get_desktop_container_ip(workspace_id)
+        container_ip = self._service.desktop.get_desktop_container_ip(
+            workspace_id
+        )
         upstream_url = f"ws://{container_ip}:6901/websockify"
         upstream_origin = f"http://{container_ip}:6901"
         chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
@@ -239,7 +243,9 @@ class WebSocketInterface(Interface):
     def _desktop_lifecycle_payload(self, workspace_id: uuid.UUID) -> dict | None:
         """Return a desktop:process payload for *workspace_id*, if any."""
         try:
-            state = self._service.get_desktop_state_payload(workspace_id)
+            state = self._service.desktop.get_desktop_state_payload(
+                workspace_id
+            )
         except Exception:
             logger.exception(
                 "desktop_lifecycle_payload_failed",
@@ -511,7 +517,7 @@ class WebSocketInterface(Interface):
             # Backend is gone: fail all generic streams closed so no MCP
             # process tree lingers without a consumer.
             with contextlib.suppress(Exception):
-                await self._service.close_all_streams(
+                await self._service.streams.close_all_streams(
                     reason="backend_disconnect"
                 )
             # Cancel stream pumps too: they would otherwise linger until
@@ -660,11 +666,11 @@ class WebSocketInterface(Interface):
             *, request_id: str, workspace_id: str, path: str
         ) -> tuple[str, str]:
             """Validate request/workspace/path for an upload start chunk."""
-            from ..service import WorkspaceService as _Svc
+            from ..services.exec_kernel import sanitize_path as _sanitize_path
 
             if not request_id or not isinstance(request_id, str):
                 raise ValueError("request_id must not be empty")
-            _Svc._sanitize_path(path)
+            _sanitize_path(path)
             uuid.UUID(workspace_id)
             return request_id, path
 
@@ -705,7 +711,7 @@ class WebSocketInterface(Interface):
                 raise ValueError(f"chunk {index_n} too large")
             if entry["buffered_chars"] + len(clean) > entry["max_chars"]:
                 self._upload_transfers.pop(key, None)
-                from ..service import FILE_UPLOAD_MAX_SIZE as _UP_MAX
+                from ..services.files import FILE_UPLOAD_MAX_SIZE as _UP_MAX
 
                 raise ValueError(
                     "Upload exceeds maximum size of " f"{_UP_MAX} bytes"
@@ -820,7 +826,8 @@ class WebSocketInterface(Interface):
                         },
                     )
 
-                result = await self._service.build_image(
+                # Step 2: image ops go through the ImageManager directly.
+                result = await self._service.images.build_image(
                     runtime_type=runtime_type,
                     build_job_id=build_job_id,
                     dockerfile_content=data.get("dockerfile_content", ""),
@@ -977,7 +984,7 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 # Check if workspace exists in cache before removal
-                already_absent = workspace_id not in self._service._cache
+                already_absent = not self._service.workspace_exists(workspace_id)
                 await self._service.remove_workspace(workspace_id)
                 await sio.emit(
                     "workspace:removed",
@@ -1033,7 +1040,8 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_terminal")
 
             try:
-                terminal_id = await self._service.start_terminal(
+                # Step 2: terminal sessions go through the TerminalManager.
+                terminal_id = await self._service.terminal_manager.start_terminal(
                     workspace_id,
                     cols=cols,
                     rows=rows,
@@ -1050,7 +1058,9 @@ class WebSocketInterface(Interface):
                 # Start background reader task
                 async def _read_pty() -> None:
                     try:
-                        async for chunk in self._service.read_terminal(terminal_id):
+                        async for chunk in self._service.terminal_manager.read_terminal(
+                            terminal_id
+                        ):
                             await sio.emit(
                                 "terminal:output",
                                 {
@@ -1063,7 +1073,9 @@ class WebSocketInterface(Interface):
                         log.exception("pty_read_failed")
                     finally:
                         try:
-                            await self._service.close_terminal(terminal_id)
+                            await self._service.terminal_manager.close_terminal(
+                                terminal_id
+                            )
                         except Exception:
                             log.exception("terminal_cleanup_failed")
                         await sio.emit(
@@ -1091,7 +1103,7 @@ class WebSocketInterface(Interface):
             terminal_id = data["terminal_id"]
             raw = base64.b64decode(data["data"])
             try:
-                await self._service.write_terminal(terminal_id, raw)
+                await self._service.terminal_manager.write_terminal(terminal_id, raw)
             except Exception:
                 logger.exception("terminal_write_failed", terminal_id=terminal_id)
 
@@ -1101,7 +1113,9 @@ class WebSocketInterface(Interface):
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
             try:
-                await self._service.resize_terminal(terminal_id, cols, rows)
+                await self._service.terminal_manager.resize_terminal(
+                    terminal_id, cols, rows
+                )
             except Exception:
                 logger.exception("terminal_resize_failed", terminal_id=terminal_id)
 
@@ -1114,7 +1128,7 @@ class WebSocketInterface(Interface):
                 reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
                 if reader:
                     reader.cancel()
-                await self._service.close_terminal(terminal_id)
+                await self._service.terminal_manager.close_terminal(terminal_id)
                 await sio.emit(
                     "terminal:closed",
                     {
@@ -1135,16 +1149,20 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
-                before = self._service.get_desktop_session(workspace_id)
-                session = await self._service.start_desktop(
+                before = self._service.desktop.get_desktop_session(workspace_id)
+                session = await self._service.desktop.start_desktop(
                     workspace_id,
                     width=data.get("desktop_width"),
                     height=data.get("desktop_height"),
                 )
 
                 # Get container IP for backend proxy
-                container_ip = self._service.get_desktop_container_ip(workspace_id)
-                network_name = self._service.get_desktop_network_name(workspace_id)
+                container_ip = (
+                    self._service.desktop.get_desktop_container_ip(workspace_id)
+                )
+                network_name = self._service.desktop.get_desktop_network_name(
+                    workspace_id
+                )
 
                 # A fresh Xvnc incarnation invalidates every tunnel bound to
                 # the old process (stale restart, recovery, or cold start
@@ -1188,7 +1206,7 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="stop_desktop")
 
             try:
-                result = await self._service.stop_desktop(workspace_id)
+                result = await self._service.desktop.stop_desktop(workspace_id)
                 if result.stopped or not result.process_alive:
                     await self._close_desktop_proxy_tunnels_for_workspace(
                         workspace_id
@@ -1226,7 +1244,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(workspace_id=str(workspace_id))
             try:
-                await self._service.write_desktop_clipboard(
+                await self._service.desktop.write_desktop_clipboard(
                     workspace_id,
                     data.get("text", ""),
                 )
@@ -1240,7 +1258,9 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(workspace_id=str(workspace_id))
             try:
-                text = await self._service.read_desktop_clipboard(workspace_id)
+                text = await self._service.desktop.read_desktop_clipboard(
+                    workspace_id
+                )
                 return {"ok": True, "text": text}
             except Exception as exc:
                 log.exception("desktop_clipboard_read_failed")
@@ -1389,7 +1409,7 @@ class WebSocketInterface(Interface):
                 try:
                     while True:
                         try:
-                            chunk = await self._service.stream_read_once(
+                            chunk = await self._service.streams.stream_read_once(
                                 connection_id, stream_name, STREAM_OUTPUT_CHUNK
                             )
                         except ValueError:
@@ -1453,7 +1473,7 @@ class WebSocketInterface(Interface):
                 await sender
                 exit_code: int | None = None
                 try:
-                    exit_code = await self._service.stream_wait(connection_id)
+                    exit_code = await self._service.streams.stream_wait(connection_id)
                 except ValueError:
                     exit_code = None
                 except Exception:
@@ -1465,7 +1485,7 @@ class WebSocketInterface(Interface):
                 # so a concurrent full close cannot double-cancel.
                 self._running_tasks.pop(task_key, None)
                 with contextlib.suppress(Exception):
-                    await self._service.stream_close(connection_id)
+                    await self._service.streams.stream_close(connection_id)
                 await sio.emit(
                     "workspace:stream_closed",
                     {
@@ -1493,7 +1513,7 @@ class WebSocketInterface(Interface):
                     if sender is not None:
                         await sender
                 try:
-                    await self._service.stream_close(connection_id)
+                    await self._service.streams.stream_close(connection_id)
                 except Exception:
                     pass
                 with contextlib.suppress(Exception):
@@ -1520,7 +1540,7 @@ class WebSocketInterface(Interface):
                     if sender is not None:
                         await sender
                 try:
-                    await self._service.stream_close(connection_id)
+                    await self._service.streams.stream_close(connection_id)
                 except Exception:
                     pass
                 with contextlib.suppress(Exception):
@@ -1545,7 +1565,7 @@ class WebSocketInterface(Interface):
                     if sender is not None:
                         await sender
                 try:
-                    await self._service.stream_close(connection_id)
+                    await self._service.streams.stream_close(connection_id)
                 except Exception:
                     pass
                 with contextlib.suppress(Exception):
@@ -1585,7 +1605,7 @@ class WebSocketInterface(Interface):
                     )
                 if kind == "process":
                     command = raw.get("command", raw.get("args", []))
-                    await self._service.stream_start_process(
+                    await self._service.streams.stream_start_process(
                         workspace_id,
                         conn_echo,
                         command,
@@ -1593,7 +1613,7 @@ class WebSocketInterface(Interface):
                         env=raw.get("env", {}),
                     )
                 elif kind == "tcp":
-                    await self._service.stream_start_tcp(
+                    await self._service.streams.stream_start_tcp(
                         workspace_id,
                         conn_echo,
                         raw.get("host", ""),
@@ -1654,11 +1674,11 @@ class WebSocketInterface(Interface):
             raw = data if isinstance(data, dict) else {}
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                session = self._service.get_stream(conn_echo)
+                session = self._service.streams.get_stream(conn_echo)
                 if session.workspace_id != workspace_id:
                     raise ValueError("workspace mismatch for stream")
                 decoded = _decode_stream_data(raw.get("data", ""))
-                await self._service.stream_write(conn_echo, decoded)
+                await self._service.streams.stream_write(conn_echo, decoded)
                 return {
                     "ok": True,
                     "connection_id": conn_echo,
@@ -1685,7 +1705,7 @@ class WebSocketInterface(Interface):
                 workspace_id = uuid.UUID(ws_echo)
                 if conn_echo:
                     try:
-                        session = self._service.get_stream(conn_echo)
+                        session = self._service.streams.get_stream(conn_echo)
                     except ValueError:
                         session = None
                     if session is not None and (
@@ -1696,7 +1716,7 @@ class WebSocketInterface(Interface):
                     # Half-close: deliver stdin EOF but NEVER cancel the
                     # output pump — the process reply still follows.
                     with contextlib.suppress(Exception):
-                        await self._service.stream_write_eof(conn_echo)
+                        await self._service.streams.stream_write_eof(conn_echo)
                     return {
                         "ok": True,
                         "connection_id": conn_echo,
@@ -1711,7 +1731,7 @@ class WebSocketInterface(Interface):
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
-                result = await self._service.stream_close(conn_echo)
+                result = await self._service.streams.stream_close(conn_echo)
                 return {
                     "ok": True,
                     "connection_id": conn_echo,
@@ -1741,7 +1761,7 @@ class WebSocketInterface(Interface):
             task_key = f"harness:{request_id}"
 
             async def _run() -> None:
-                coro = self._service.exec_harness_command_stream(
+                coro = self._service.harness.exec_harness_command_stream(
                     workspace_id,
                     data.get("command", []),
                     workdir=data.get("workdir", "/workspace"),
@@ -1835,7 +1855,7 @@ class WebSocketInterface(Interface):
             async def _run() -> None:
                 try:
                     timeout_s = float(timeout) if timeout is not None else None
-                    coro = self._service.exec_harness_command(
+                    coro = self._service.harness.exec_harness_command(
                         workspace_id,
                         data.get("command", []),
                         workdir=data.get("workdir", "/workspace"),
@@ -1893,7 +1913,7 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.read_file(
+                result = await self._service.files.read_file(
                     workspace_id, path, max_size=data.get("max_size")
                 )
                 await _emit_chunked_result(
@@ -1939,7 +1959,7 @@ class WebSocketInterface(Interface):
                         "harness:write_file_chunk/"
                         "harness:write_file_finish"
                     )
-                await self._service.write_file_content(
+                await self._service.files.write_file_content(
                     workspace_id,
                     path,
                     normalize_base64(content),
@@ -1975,7 +1995,7 @@ class WebSocketInterface(Interface):
                     MAX_CHUNKS_PER_TRANSFER,
                     max_b64_chars_for_raw_bytes,
                 )
-                from ..service import FILE_UPLOAD_MAX_SIZE
+                from ..services.files import FILE_UPLOAD_MAX_SIZE
 
                 total = _parse_total_chunks(
                     data.get("total_chunks", 0),
@@ -2084,7 +2104,7 @@ class WebSocketInterface(Interface):
                 _entry, content = _finish_upload_transfer(
                     key=key, workspace_id=str(workspace_id), path=path
                 )
-                await self._service.write_file_content(
+                await self._service.files.write_file_content(
                     workspace_id,
                     path,
                     content,
@@ -2117,7 +2137,7 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                raw_entries = await self._service.list_files(workspace_id, path)
+                raw_entries = await self._service.files.list_files(workspace_id, path)
                 entries = [
                     {
                         "name": entry.get("name", ""),
@@ -2154,7 +2174,7 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.stat_path(workspace_id, path)
+                result = await self._service.files.stat_path(workspace_id, path)
                 await _harness_result(
                     "harness:stat_result",
                     {
@@ -2185,8 +2205,10 @@ class WebSocketInterface(Interface):
 
             async def _run() -> None:
                 try:
-                    before = self._service.get_desktop_session(workspace_id)
-                    result = await self._service.desktop_action(
+                    before = self._service.desktop.get_desktop_session(
+                        workspace_id
+                    )
+                    result = await self._service.desktop.desktop_action(
                         workspace_id, action, args
                     )
                     # Lifecycle announcements are emitted *before* the
@@ -2199,7 +2221,9 @@ class WebSocketInterface(Interface):
                     # them before desktop:process so the mini viewer never
                     # attaches to a recycled Xvnc via a stale socket.
                     if action in {"ensure", "hold"} and result.get("ok"):
-                        after = self._service.get_desktop_session(workspace_id)
+                        after = self._service.desktop.get_desktop_session(
+                            workspace_id
+                        )
                         if after is not None and after is not before:
                             await self._close_desktop_proxy_tunnels_for_workspace(
                                 workspace_id
@@ -2262,7 +2286,7 @@ class WebSocketInterface(Interface):
             log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="process_start")
             try:
-                result = await self._service.start_background_process(
+                result = await self._service.background.start_background_process(
                     workspace_id,
                     process_id,
                     str(data.get("command", "")),
@@ -2304,7 +2328,9 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             try:
-                processes = await self._service.list_background_processes(workspace_id)
+                processes = await self._service.background.list_background_processes(
+                    workspace_id
+                )
                 await _harness_result(
                     "harness:process_list_result",
                     {
@@ -2331,7 +2357,7 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
             try:
-                process = await self._service.get_background_status(
+                process = await self._service.background.get_background_status(
                     workspace_id, process_id
                 )
                 await _harness_result(
@@ -2360,7 +2386,7 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
             try:
-                result = await self._service.stop_background_process(
+                result = await self._service.background.stop_background_process(
                     workspace_id, process_id
                 )
                 await _harness_result(
@@ -2408,7 +2434,7 @@ class WebSocketInterface(Interface):
                 raw_expected = raw.get("expected", [])
                 if not isinstance(raw_expected, list):
                     raise ValueError("expected must be a list")
-                processes = await self._service.verify_and_reattach_background_processes(
+                processes = await self._service.background.verify_and_reattach_background_processes(
                     workspace_id, raw_expected
                 )
                 await _harness_result(
@@ -2443,7 +2469,7 @@ class WebSocketInterface(Interface):
                 task.cancel()
                 logger.info("stream_cancelled", connection_id=conn)
             with contextlib.suppress(Exception):
-                await self._service.stream_close(conn)
+                await self._service.streams.stream_close(conn)
 
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
@@ -2616,7 +2642,7 @@ class WebSocketInterface(Interface):
                 try:
                     timeout = git_timeout_for(operation) + 30.0
                     result = await asyncio.wait_for(
-                        self._service.execute_git_operation(
+                        self._service.git.execute_git_operation(
                             workspace_id,
                             operation,
                             repo_path,
@@ -2714,7 +2740,7 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                entries = await self._service.list_files(workspace_id, path)
+                entries = await self._service.files.list_files(workspace_id, path)
                 await sio.emit(
                     "files:list_result",
                     {
@@ -2744,7 +2770,7 @@ class WebSocketInterface(Interface):
             limit = data.get("limit", 50) if isinstance(data, dict) else 50
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.find_files(
+                result = await self._service.files.find_files(
                     workspace_id, query=query, limit=limit
                 )
                 await sio.emit(
@@ -2797,7 +2823,7 @@ class WebSocketInterface(Interface):
             max_size = raw.get("max_size")
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.read_file(
+                result = await self._service.files.read_file(
                     workspace_id,
                     path,
                     max_size=max_size,
@@ -2851,7 +2877,7 @@ class WebSocketInterface(Interface):
                         MAX_CHUNKS_PER_TRANSFER,
                         max_b64_chars_for_raw_bytes,
                     )
-                    from ..service import FILE_UPLOAD_MAX_SIZE
+                    from ..services.files import FILE_UPLOAD_MAX_SIZE
 
                     _prune_upload_transfers()
                     total = _parse_total_chunks(
@@ -2868,9 +2894,11 @@ class WebSocketInterface(Interface):
                         is_directory = bool(raw.get("is_directory", False))
                     except (TypeError, ValueError) as exc:
                         raise ValueError("invalid upload fields") from exc
-                    from ..service import WorkspaceService as _Svc2
+                    from ..services.exec_kernel import (
+                        sanitize_filename as _sanitize_filename,
+                    )
 
-                    _Svc2._sanitize_filename(filename)
+                    _sanitize_filename(filename)
                     key = _upload_key("browser-upload", request_id)
                     if key in self._upload_transfers:
                         raise ValueError("upload already in progress")
@@ -2899,7 +2927,7 @@ class WebSocketInterface(Interface):
                     raw.get("content"), str
                 ):
                     raise ValueError("filename and content must be strings")
-                await self._service.upload_file(
+                await self._service.files.upload_file(
                     workspace_id,
                     path=path,
                     filename=raw["filename"],
@@ -2982,7 +3010,7 @@ class WebSocketInterface(Interface):
                 entry, content_b64 = _finish_upload_transfer(
                     key=key, workspace_id=str(workspace_id), path=path
                 )
-                await self._service.upload_file(
+                await self._service.files.upload_file(
                     workspace_id,
                     path=path,
                     filename=entry["filename"],
@@ -3034,7 +3062,7 @@ class WebSocketInterface(Interface):
             path = raw.get("path")
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.download_file(workspace_id, path)
+                result = await self._service.files.download_file(workspace_id, path)
                 await _emit_chunked_result(
                     chunk_event="files:download_chunk",
                     result_event="files:download_result",
@@ -3074,7 +3102,9 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             log.info("task_received", task="create_image_artifact")
             try:
-                artifact = await self._service.create_image_artifact(workspace_id, name)
+                artifact = await self._service.images.create_image_artifact(
+                    workspace_id, name
+                )
                 await sio.emit(
                     "image_artifact:created",
                     {
@@ -3108,7 +3138,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
-                artifacts = await self._service.list_image_artifacts(workspace_id)
+                artifacts = await self._service.images.list_image_artifacts(workspace_id)
                 await sio.emit(
                     "image_artifact:list",
                     {
@@ -3144,12 +3174,12 @@ class WebSocketInterface(Interface):
             try:
                 result = "deleted"
                 if runtime_type:
-                    result = await self._service.delete_image_reference(
+                    result = await self._service.images.delete_image_reference(
                         runtime_type=runtime_type,
                         image_ref=image_artifact_id,
                     )
                 elif workspace_id is not None:
-                    await self._service.delete_image_artifact(
+                    await self._service.images.delete_image_artifact(
                         workspace_id, image_artifact_id
                     )
                 else:
@@ -3192,7 +3222,7 @@ class WebSocketInterface(Interface):
                 (
                     ws_id,
                     credentials_present,
-                ) = await self._service.create_workspace_from_image_artifact(
+                ) = await self._service.images.create_workspace_from_image_artifact(
                     image_artifact_id=image_artifact_id,
                     new_workspace_id=new_workspace_id,
                     runtime_type=runtime_type,
@@ -3261,7 +3291,7 @@ class WebSocketInterface(Interface):
     async def stop(self) -> None:
         """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
         with contextlib.suppress(Exception):
-            await self._service.close_all_streams(reason="runner_shutdown")
+            await self._service.streams.close_all_streams(reason="runner_shutdown")
         # Cancel heartbeat
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()

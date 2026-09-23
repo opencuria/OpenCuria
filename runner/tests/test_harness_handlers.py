@@ -32,8 +32,95 @@ class _FakeService:
         self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
         self._desktop_sessions: dict = {}
+        # Step 4: websocket harness/files handlers call the managers
+        # directly (``service.harness`` / ``service.files``). The fake
+        # mirrors that surface so handler tests exercise the same path;
+        # the underlying coroutines stay directly awaitable.
+        self.harness = self._FakeHarness(self)
+        self.files = self._FakeFiles(self)
+        # Step 6b: websocket desktop handlers call the manager directly
+        # (``service.desktop``). The fake mirrors that surface so handler
+        # tests exercise the same path; impls live on the outer fake and
+        # the facade shims delegate to the manager, like the real service.
+        self.desktop = self._FakeDesktop(self)
 
-    async def exec_harness_command(
+    class _FakeHarness:
+        def __init__(self, outer: _FakeService) -> None:
+            self._outer = outer
+
+        async def exec_harness_command(
+            self, workspace_id, command, workdir="/workspace", env=None
+        ):
+            return await self._outer._exec_harness_command_impl(
+                workspace_id, command, workdir=workdir, env=env
+            )
+
+        async def exec_harness_command_stream(
+            self, workspace_id, command, workdir="/workspace", env=None
+        ):
+            async for chunk in self._outer._exec_harness_command_stream_impl(
+                workspace_id, command, workdir=workdir, env=env
+            ):
+                yield chunk
+
+    class _FakeFiles:
+        def __init__(self, outer: _FakeService) -> None:
+            self._outer = outer
+
+        async def read_file(self, workspace_id, path, max_size=None):
+            return await self._outer._read_file_impl(
+                workspace_id, path, max_size=max_size
+            )
+
+        async def write_file_content(
+            self, workspace_id, path, content_b64, mode=0o644
+        ):
+            return await self._outer._write_file_content_impl(
+                workspace_id, path, content_b64, mode=mode
+            )
+
+        async def list_files(self, workspace_id, path):
+            return await self._outer._list_files_impl(workspace_id, path)
+
+        async def find_files(self, workspace_id, query="", limit=50):
+            return await self._outer._find_files_impl(
+                workspace_id, query=query, limit=limit
+            )
+
+        async def stat_path(self, workspace_id, path):
+            return await self._outer._stat_path_impl(workspace_id, path)
+
+    class _FakeDesktop:
+        def __init__(self, outer: _FakeService) -> None:
+            self._outer = outer
+
+        async def desktop_action(self, workspace_id, action, args=None):
+            return await self._outer._desktop_action_impl(
+                workspace_id, action, args
+            )
+
+        def get_desktop_state_payload(self, workspace_id):
+            return self._outer._get_desktop_state_payload_impl(workspace_id)
+
+        def get_desktop_session(self, workspace_id):
+            # Sessions as plain sentinels: identity comparison detects restarts.
+            return self._outer._desktop_sessions.get(workspace_id)
+
+        async def start_desktop(self, workspace_id, width=None, height=None):
+            return await self._outer._start_desktop_impl(
+                workspace_id, width=width, height=height
+            )
+
+        async def stop_desktop(self, workspace_id):
+            return await self._outer._stop_desktop_impl(workspace_id)
+
+        def get_desktop_container_ip(self, workspace_id):
+            return "172.22.0.2"
+
+        def get_desktop_network_name(self, workspace_id):
+            return f"opencuria-ws-{workspace_id}"
+
+    async def _exec_harness_command_impl(
         self, workspace_id, command, workdir="/workspace", env=None
     ):
         self.exec_calls.append(
@@ -48,7 +135,7 @@ class _FakeService:
             raise ValueError("Path must be under /workspace")
         return self.wait_result
 
-    async def exec_harness_command_stream(
+    async def _exec_harness_command_stream_impl(
         self, workspace_id, command, workdir="/workspace", env=None
     ):
         self.stream_payloads.append((workspace_id, command, workdir, env))
@@ -62,7 +149,7 @@ class _FakeService:
             yield ("stderr", "oops")
             yield ("exit", "3")
 
-    async def read_file(self, workspace_id, path, max_size=None):
+    async def _read_file_impl(self, workspace_id, path, max_size=None):
         self.read_calls.append((workspace_id, path, max_size))
         if ".." in str(path):
             raise ValueError("Path must be under /workspace")
@@ -73,14 +160,14 @@ class _FakeService:
             "mime_type": "text/plain",
         }
 
-    async def write_file_content(
+    async def _write_file_content_impl(
         self, workspace_id, path, content_b64, mode=0o644
     ):
         self.write_calls.append((workspace_id, path, content_b64, mode))
         if ".." in str(path):
             raise ValueError("Path must be under /workspace")
 
-    async def list_files(self, workspace_id, path):
+    async def _list_files_impl(self, workspace_id, path):
         self.list_calls.append((workspace_id, path))
         if ".." in str(path):
             raise ValueError("Path must be under /workspace")
@@ -93,7 +180,7 @@ class _FakeService:
             }
         ]
 
-    async def find_files(self, workspace_id, query="", limit=50):
+    async def _find_files_impl(self, workspace_id, query="", limit=50):
         self.find_calls.append((workspace_id, query, limit))
         if ".." in str(query):
             raise ValueError("Invalid find query")
@@ -102,7 +189,7 @@ class _FakeService:
             "truncated": False,
         }
 
-    async def stat_path(self, workspace_id, path):
+    async def _stat_path_impl(self, workspace_id, path):
         self.stat_calls.append((workspace_id, path))
         if ".." in str(path):
             raise ValueError("Path must be under /workspace")
@@ -113,7 +200,49 @@ class _FakeService:
             "mime_type": "text/plain",
         }
 
+    # Back-compat shims: facade delegates keep the same names.
+    async def exec_harness_command(
+        self, workspace_id, command, workdir="/workspace", env=None
+    ):
+        return await self.harness.exec_harness_command(
+            workspace_id, command, workdir=workdir, env=env
+        )
+
+    async def exec_harness_command_stream(
+        self, workspace_id, command, workdir="/workspace", env=None
+    ):
+        async for chunk in self.harness.exec_harness_command_stream(
+            workspace_id, command, workdir=workdir, env=env
+        ):
+            yield chunk
+
+    async def read_file(self, workspace_id, path, max_size=None):
+        return await self.files.read_file(
+            workspace_id, path, max_size=max_size
+        )
+
+    async def write_file_content(
+        self, workspace_id, path, content_b64, mode=0o644
+    ):
+        return await self.files.write_file_content(
+            workspace_id, path, content_b64, mode=mode
+        )
+
+    async def list_files(self, workspace_id, path):
+        return await self.files.list_files(workspace_id, path)
+
+    async def find_files(self, workspace_id, query="", limit=50):
+        return await self.files.find_files(
+            workspace_id, query=query, limit=limit
+        )
+
+    async def stat_path(self, workspace_id, path):
+        return await self.files.stat_path(workspace_id, path)
+
     async def desktop_action(self, workspace_id, action, args=None):
+        return await self.desktop.desktop_action(workspace_id, action, args)
+
+    async def _desktop_action_impl(self, workspace_id, action, args=None):
         self.desktop_action_calls.append((workspace_id, action, args))
         if action == "ensure":
             return {"ok": True, "display": ":1", "port": 6901}
@@ -153,6 +282,9 @@ class _FakeService:
         return {"ok": True, "action": action}
 
     def get_desktop_state_payload(self, workspace_id):
+        return self.desktop.get_desktop_state_payload(workspace_id)
+
+    def _get_desktop_state_payload_impl(self, workspace_id):
         return {
             "workspace_id": str(workspace_id),
             "port": 6901,
@@ -165,9 +297,14 @@ class _FakeService:
 
     def get_desktop_session(self, workspace_id):
         # Sessions as plain sentinels: identity comparison detects restarts.
-        return self._desktop_sessions.get(workspace_id)
+        return self.desktop.get_desktop_session(workspace_id)
 
     async def start_desktop(self, workspace_id, width=None, height=None):
+        return await self.desktop.start_desktop(
+            workspace_id, width=width, height=height
+        )
+
+    async def _start_desktop_impl(self, workspace_id, width=None, height=None):
         if workspace_id in self._desktop_sessions:
             # Idempotent path: reuse the pre-seeded session object untouched
             # so tests can pin "same object → no tunnel close".
@@ -184,6 +321,9 @@ class _FakeService:
         return session
 
     async def stop_desktop(self, workspace_id):
+        return await self.desktop.stop_desktop(workspace_id)
+
+    async def _stop_desktop_impl(self, workspace_id):
         from unittest.mock import MagicMock
 
         return MagicMock(
@@ -194,10 +334,10 @@ class _FakeService:
         )
 
     def get_desktop_container_ip(self, workspace_id):
-        return "172.22.0.2"
+        return self.desktop.get_desktop_container_ip(workspace_id)
 
     def get_desktop_network_name(self, workspace_id):
-        return f"opencuria-ws-{workspace_id}"
+        return self.desktop.get_desktop_network_name(workspace_id)
 
 
 def _interface(service: _FakeService) -> WebSocketInterface:
@@ -248,7 +388,7 @@ class HarnessExecWaitTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(5)
             return (0, "", "")  # pragma: no cover
 
-        service.exec_harness_command = _slow  # type: ignore[assignment]
+        service.harness.exec_harness_command = _slow  # type: ignore[assignment]
         interface = _interface(service)
         workspace_id = uuid.uuid4()
         handler = interface._sio.handlers["/"]["harness:exec_wait"]
@@ -518,7 +658,9 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
                 "computer_use": True,
             }
 
-        service.desktop_action = _idempotent_hold  # type: ignore[method-assign]
+        service.desktop.desktop_action = _idempotent_hold  # type: ignore[method-assign]
+        # Facade shim delegates to the manager, so keep both in sync.
+        service.desktop_action = service.desktop.desktop_action
         closed: list = []
 
         async def _fake_close(ws_id):
@@ -608,7 +750,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("desktop:stopped", events)
 
         class StoppingService(_FakeService):
-            async def desktop_action(self, workspace_id, action, args=None):
+            async def _desktop_action_impl(self, workspace_id, action, args=None):
                 self.desktop_action_calls.append((workspace_id, action, args))
                 return {
                     "ok": True,
@@ -736,7 +878,9 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             service._desktop_sessions[ws_id] = fresh
             return fresh
 
-        service.start_desktop = _restarting_start  # type: ignore[method-assign]
+        service.desktop.start_desktop = _restarting_start  # type: ignore[method-assign]
+        # Facade shim delegates to the manager, so keep both in sync.
+        service.start_desktop = service.desktop.start_desktop
         await interface._sio.handlers["/"]["task:start_desktop"](
             {"task_id": "task-2", "workspace_id": str(workspace_id)}
         )
@@ -783,7 +927,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
 
         class BlockingService(_FakeService):
-            async def desktop_action(self, workspace_id, action, args=None):
+            async def _desktop_action_impl(self, workspace_id, action, args=None):
                 self.desktop_action_calls.append((workspace_id, action, args))
                 started.set()
                 await asyncio.sleep(30)
@@ -1037,7 +1181,7 @@ class HarnessExecWaitTrackedTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(5)
             return (0, "", "")  # pragma: no cover
 
-        service.exec_harness_command = _slow  # type: ignore[assignment]
+        service.harness.exec_harness_command = _slow  # type: ignore[assignment]
         interface = _interface(service)
         workspace_id = uuid.uuid4()
         handler = interface._sio.handlers["/"]["harness:exec_wait"]

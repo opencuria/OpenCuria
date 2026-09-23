@@ -46,23 +46,81 @@ class FakeChunkService:
         self.upload_calls: list[dict] = []
         self.write_calls: list[dict] = []
 
-    async def read_file(self, workspace_id, path, max_size=None):
+    # Step 4: websocket files/harness handlers call ``service.files``
+    # directly. Mirror that surface so handler tests exercise the same
+    # path; the underlying impls stay directly awaitable.
+        self.files = self._FakeFiles(self)
+
+    class _FakeFiles:
+        def __init__(self, outer) -> None:
+            self._outer = outer
+
+        async def read_file(self, workspace_id, path, max_size=None):
+            return await self._outer._read_file_impl(
+                workspace_id, path, max_size=max_size
+            )
+
+        async def download_file(self, workspace_id, path):
+            return await self._outer._download_file_impl(workspace_id, path)
+
+        async def upload_file(
+            self, workspace_id, path, filename, content_b64, is_directory=False
+        ):
+            return await self._outer._upload_file_impl(
+                workspace_id, path, filename, content_b64,
+                is_directory=is_directory,
+            )
+
+        async def write_file_content(
+            self, workspace_id, path, content_b64, mode=0o644
+        ):
+            return await self._outer._write_file_content_impl(
+                workspace_id, path, content_b64, mode=mode
+            )
+
+    async def _read_file_impl(self, workspace_id, path, max_size=None):
         self.read_calls.append((workspace_id, path, max_size))
         return {"content": self.read_content, "size": len(self.read_content),
                 "truncated": False, "mime_type": "text/plain"}
 
-    async def download_file(self, workspace_id, path):
+    async def _download_file_impl(self, workspace_id, path):
         return {"content": self.download_content, "filename": "a.txt",
                 "is_archive": False, "size": len(self.download_content)}
 
-    async def upload_file(self, workspace_id, path, filename, content_b64, is_directory=False):
+    async def _upload_file_impl(
+        self, workspace_id, path, filename, content_b64, is_directory=False
+    ):
         self.upload_calls.append({"workspace_id": workspace_id, "path": path,
                                   "filename": filename, "content_b64": content_b64,
                                   "is_directory": is_directory})
 
-    async def write_file_content(self, workspace_id, path, content_b64, mode=0o644):
+    async def _write_file_content_impl(
+        self, workspace_id, path, content_b64, mode=0o644
+    ):
         self.write_calls.append({"workspace_id": workspace_id, "path": path,
                                  "content_b64": content_b64, "mode": mode})
+
+    # Back-compat shims: existing tests call the facade methods directly.
+    async def read_file(self, workspace_id, path, max_size=None):
+        return await self._read_file_impl(workspace_id, path, max_size=max_size)
+
+    async def download_file(self, workspace_id, path):
+        return await self._download_file_impl(workspace_id, path)
+
+    async def upload_file(
+        self, workspace_id, path, filename, content_b64, is_directory=False
+    ):
+        return await self._upload_file_impl(
+            workspace_id, path, filename, content_b64,
+            is_directory=is_directory,
+        )
+
+    async def write_file_content(
+        self, workspace_id, path, content_b64, mode=0o644
+    ):
+        return await self._write_file_content_impl(
+            workspace_id, path, content_b64, mode=mode
+        )
 
 
 def _interface(service) -> WebSocketInterface:

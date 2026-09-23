@@ -12,481 +12,277 @@ the runtime backends (Docker, QEMU/KVM) and cached in memory.
 from __future__ import annotations
 
 import asyncio
-import base64
-import contextlib
-import io
-import os
-import re
-import shlex
-import tarfile
-import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import structlog
 
 from . import git as git_ops
 from .config import RunnerSettings
 from .models import DesktopReleaseResult, DesktopSession, WorkspaceInfo
-from .runtime.base import (
-    ImageArtifactInfo,
-    ProcessHandle,
-    PtyHandle,
-    RuntimeBackend,
-    WorkspaceConfig,
-)
+from .runtime.base import RuntimeBackend
 
 logger = structlog.get_logger(__name__)
 
-FILE_READ_DEFAULT_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
-FILE_READ_ABSOLUTE_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
-FILE_UPLOAD_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
-#: Max raw bytes served by ``download_file``. Matches the absolute read cap
-#: (100 MiB) so a single download can never buffer unbounded memory even
-#: though payloads are chunked on the wire. Oversized downloads fail with a
-#: small structured error instead of a runner disconnect.
-FILE_DOWNLOAD_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
-FIND_FILES_DEFAULT_LIMIT = 50
-FIND_FILES_PRUNE_NAMES = (
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "dist",
-    ".next",
+# -- Step 1 canonical re-exports -------------------------------------------
+# Pure/stateless helpers now live canonically in ``src.services``. They are
+# re-exported here so ``src.service.<NAME>`` keeps working for existing
+# importers (``src/interfaces/websocket.py``, tests). Do not add new logic
+# here — edit the canonical modules instead.
+from .services.exec_kernel import (  # noqa: F401,E402
+    _REDIRECTION_RE,
+    _SHELL_OPERATOR_TOKENS,
+    ExecKernel,
+    KeyedLockMap,
+    WorkspaceContext,
+    normalise_command_args,
+    sanitize_exec_workdir,
+    sanitize_filename,
+    sanitize_path,
 )
-_FIND_FILES_QUERY_RE = re.compile(r"^[A-Za-z0-9_/:.+-]*$")
-_FIND_FILES_SUCCESS_EXIT_CODES = {0, 1, 141}
-_SHELL_OPERATOR_TOKENS = {
-    "|",
-    "||",
-    "&",
-    "&&",
-    ";",
-    ";;",
-    "(",
-    ")",
-    "<",
-    "<<",
-    "<<<",
-    ">",
-    ">>",
-    ">|",
-    "&>",
-    "&>>",
-}
-_REDIRECTION_RE = re.compile(r"^\d*(?:>>?|<<?|<>|>&|<&|&>>?)(?:\d+|[^\s].*)?$")
-
-WORKSPACE_CREDENTIAL_DIR = "/root/.opencuria-credentials"
-WORKSPACE_CREDENTIAL_MANIFEST = "/root/.opencuria-credentials/manifest"
-WORKSPACE_CREDENTIAL_ENV_FILE = "/root/.opencuria-env.sh"
-WORKSPACE_CREDENTIAL_PROFILE_D = "/etc/profile.d/opencuria-env.sh"
-WORKSPACE_CREDENTIAL_BASHRC = "/root/.bashrc"
-WORKSPACE_CREDENTIAL_BASHRC_LINE = (
-    "test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh"
+from .services.files import (  # noqa: F401,E402
+    _FIND_FILES_QUERY_RE,
+    _FIND_FILES_SUCCESS_EXIT_CODES,
+    FILE_DOWNLOAD_MAX_SIZE,
+    FILE_READ_ABSOLUTE_MAX_SIZE,
+    FILE_READ_DEFAULT_MAX_SIZE,
+    FILE_UPLOAD_MAX_SIZE,
+    FIND_FILES_DEFAULT_LIMIT,
+    FIND_FILES_PRUNE_NAMES,
+    FileManager,
+    build_find_files_command,
+    build_single_file_tar,
+    build_tar_entries,
+    convert_archive_to_tar,
+    sanitize_find_query,
 )
-WORKSPACE_CREDENTIAL_ENVIRONMENT = "/etc/environment"
-WORKSPACE_CREDENTIAL_ENVIRONMENT_START = "# OPENCURIA_CREDENTIALS_START"
-WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
+from .services.harness_exec import HarnessExecService  # noqa: F401,E402
+from .services.git_service import GitService  # noqa: F401,E402
+from .services.sessions.streams import (  # noqa: F401,E402
+    _TCP_HOST_RE,
+    _validate_stream_host,
+    _validate_stream_port,
+    STREAM_BLOCKED_ENV_EXACT,
+    STREAM_BLOCKED_ENV_PREFIXES,
+    STREAM_CHUNK_SIZE,
+    STREAM_MAX_PER_WORKSPACE,
+    TCP_RELAY_CODE,
+)
+from .services.sessions.xdotool import (  # noqa: F401,E402
+    _XDOTOOL_FUNCTION_KEY_RE,
+    _XDOTOOL_KEY_ALIASES,
+    _XDOTOOL_KEY_FAILURE_MARKERS,
+    _XDOTOOL_MODIFIER_ALIASES,
+    _collapse_xdotool_token,
+    _normalize_xdotool_key_combo,
+    _normalize_xdotool_token,
+    _xdotool_key_failed,
+    _xdotool_type_command,
+)
+# -- Step 2 canonical managers ------------------------------------------------
+# Leaf clusters (terminals + images) now live canonically in
+# ``src.services``. ``TerminalSession`` is re-exported so
+# ``src.service.TerminalSession`` keeps working for existing importers.
+from .services.images import ImageManager  # noqa: F401,E402
+from .services.credentials import (  # noqa: F401,E402
+    WORKSPACE_CREDENTIAL_BASHRC,
+    WORKSPACE_CREDENTIAL_BASHRC_LINE,
+    WORKSPACE_CREDENTIAL_DIR,
+    WORKSPACE_CREDENTIAL_ENV_FILE,
+    WORKSPACE_CREDENTIAL_ENVIRONMENT,
+    WORKSPACE_CREDENTIAL_ENVIRONMENT_END,
+    WORKSPACE_CREDENTIAL_ENVIRONMENT_START,
+    WORKSPACE_CREDENTIAL_MANIFEST,
+    WORKSPACE_CREDENTIAL_PROFILE_D,
+    CredentialManager,
+)
+from .services.sessions.background import (  # noqa: F401,E402
+    _BACKGROUND_ENV_KEY_RE,
+    _BACKGROUND_PROCESS_ID_RE,
+    _BACKGROUND_STOP_GRACE_S,
+    _BACKGROUND_STOP_POLL_S,
+    _BACKGROUND_VERIFY_MAX_ENTRIES,
+    BACKGROUND_PROCESS_DIR,
+    BackgroundProcess,
+    BackgroundProcessManager,
+)
+from .services.sessions.streams import (  # noqa: F401,E402
+    StreamManager,
+    StreamSession,
+)
+from .services.sessions.terminals import (  # noqa: F401,E402
+    TerminalManager,
+    TerminalSession,
+)
+from .services.sessions.desktop import (  # noqa: F401,E402
+    _CLICK_BUTTONS,
+    _RUN_ID_RE,
+    _SCROLL_BUTTONS,
+    COMPUTER_USE_RECORD_DIR,
+    DEFAULT_DESKTOP_HEIGHT,
+    DEFAULT_DESKTOP_WIDTH,
+    DESKTOP_DISPLAY,
+    DESKTOP_EXECUTE_MAX_CHARS,
+    DESKTOP_EXECUTE_TIMEOUT_S,
+    DESKTOP_HOLDER_COMPUTERUSE,
+    DESKTOP_HOLDER_VIEWER,
+    DESKTOP_HOME,
+    DESKTOP_XAUTHORITY_PATH,
+    MAX_DESKTOP_HEIGHT,
+    MAX_DESKTOP_WIDTH,
+    MIN_DESKTOP_HEIGHT,
+    MIN_DESKTOP_WIDTH,
+    DesktopManager,
+)
+from .services.workspace_lifecycle import WorkspaceLifecycle  # noqa: F401,E402
+from .services.workspace_registry import WorkspaceRegistry  # noqa: F401,E402
 
-DESKTOP_DISPLAY = ":1"
-DESKTOP_HOME = "/root"
-#: Marker file written by the runner once a workspace X11 client
-#: environment is known to accept connections (currently an empty
-#: ``.Xauthority`` is sufficient: Xvnc uses ``-SecurityTypes None`` but
-#: python-Xlib unconditionally opens ``$XAUTHORITY``/``~/.Xauthority``,
-#: so every X11 client — including PyAutoGUI — requires the file to
-#: exist; without it every ``execute`` snippet fails before connecting).
-DESKTOP_XAUTHORITY_PATH = "/root/.Xauthority"
-DEFAULT_DESKTOP_WIDTH = 1920
-DEFAULT_DESKTOP_HEIGHT = 1080
-MIN_DESKTOP_WIDTH = 800
-MAX_DESKTOP_WIDTH = 3840
-MIN_DESKTOP_HEIGHT = 600
-MAX_DESKTOP_HEIGHT = 2160
-COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
-#: Max accepted ``desktop_action("execute")`` code payload (chars).
-#: Mirrors the backend ``ACTION_EXECUTE_MAX_CHARS`` guard.
-DESKTOP_EXECUTE_MAX_CHARS = 200_000
-#: Timeout (seconds) for one remote ``desktop_action("execute")`` snippet.
-DESKTOP_EXECUTE_TIMEOUT_S = 120.0
-_RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-DESKTOP_HOLDER_VIEWER = "viewer"
-DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
-_SCROLL_BUTTONS = {
-    "up": 4,
-    "down": 5,
-    "left": 6,
-    "right": 7,
-}
-_CLICK_BUTTONS = {
-    "left": 1,
-    "middle": 2,
-    "right": 3,
-    1: 1,
-    2: 2,
-    3: 3,
-}
+# ``FILE_READ_*`` / ``FILE_UPLOAD_*`` / ``FILE_DOWNLOAD_*`` size caps are
+# canonically defined in ``src.services.files`` (Step 4) and re-exported
+# above, so ``src.service.<NAME>`` keeps working with identical objects
+# (not copies). Do not re-define them here.
+
+# ``WORKSPACE_CREDENTIAL_*`` path constants are canonically defined in
+# ``src.services.credentials`` (Step 4 forward-move) and re-exported
+# above, so ``src.service.<NAME>`` keeps working with identical objects.
+# The literals below are kept as comments for grep continuity only.
+# WORKSPACE_CREDENTIAL_DIR = "/root/.opencuria-credentials"
+# WORKSPACE_CREDENTIAL_MANIFEST = "/root/.opencuria-credentials/manifest"
+# WORKSPACE_CREDENTIAL_ENV_FILE = "/root/.opencuria-env.sh"
+# WORKSPACE_CREDENTIAL_PROFILE_D = "/etc/profile.d/opencuria-env.sh"
+# WORKSPACE_CREDENTIAL_BASHRC = "/root/.bashrc"
+# WORKSPACE_CREDENTIAL_BASHRC_LINE = (
+#     "test -f /root/.opencuria-env.sh && . /root/.opencuria-env.sh"
+# )
+# WORKSPACE_CREDENTIAL_ENVIRONMENT = "/etc/environment"
+# WORKSPACE_CREDENTIAL_ENVIRONMENT_START = "# OPENCURIA_CREDENTIALS_START"
+# WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
+
+# ``DESKTOP_*`` / ``DEFAULT_DESKTOP_*`` / ``MIN_DESKTOP_*`` /
+# ``MAX_DESKTOP_*`` / ``COMPUTER_USE_RECORD_DIR`` constants plus
+# ``_RUN_ID_RE`` / ``DESKTOP_HOLDER_*`` / ``_SCROLL_BUTTONS`` /
+# ``_CLICK_BUTTONS`` are canonically defined in
+# ``src.services.sessions.desktop`` (Step 6a) and re-exported above, so
+# ``src.service.<NAME>`` keeps working with identical objects (not
+# copies). Do not re-define them here.
+# The literals below are kept as comments for grep continuity only.
+# DESKTOP_DISPLAY = ":1"
+# DESKTOP_HOME = "/root"
+# DESKTOP_XAUTHORITY_PATH = "/root/.Xauthority"
+# DEFAULT_DESKTOP_WIDTH = 1920
+# DEFAULT_DESKTOP_HEIGHT = 1080
+# MIN_DESKTOP_WIDTH = 800
+# MAX_DESKTOP_WIDTH = 3840
+# MIN_DESKTOP_HEIGHT = 600
+# MAX_DESKTOP_HEIGHT = 2160
+# COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
+# DESKTOP_EXECUTE_MAX_CHARS = 200_000
+# DESKTOP_EXECUTE_TIMEOUT_S = 120.0
+# _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+# DESKTOP_HOLDER_VIEWER = "viewer"
+# DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
+# _SCROLL_BUTTONS = {"up": 4, "down": 5, "left": 6, "right": 7}
+# _CLICK_BUTTONS = {"left": 1, "middle": 2, "right": 3, 1: 1, 2: 2, 3: 3}
+import sys as _sys
+
+for _alias_name in (
+    "DESKTOP_DISPLAY",
+    "DESKTOP_HOME",
+    "DESKTOP_XAUTHORITY_PATH",
+    "DEFAULT_DESKTOP_WIDTH",
+    "DEFAULT_DESKTOP_HEIGHT",
+    "MIN_DESKTOP_WIDTH",
+    "MAX_DESKTOP_WIDTH",
+    "MIN_DESKTOP_HEIGHT",
+    "MAX_DESKTOP_HEIGHT",
+    "COMPUTER_USE_RECORD_DIR",
+    "DESKTOP_EXECUTE_MAX_CHARS",
+    "DESKTOP_EXECUTE_TIMEOUT_S",
+    "_RUN_ID_RE",
+    "DESKTOP_HOLDER_VIEWER",
+    "DESKTOP_HOLDER_COMPUTERUSE",
+    "_SCROLL_BUTTONS",
+    "_CLICK_BUTTONS",
+):
+    _sys.modules[__name__].__dict__[_alias_name] = getattr(
+        _sys.modules["src.services.sessions.desktop"], _alias_name
+    )
+del _sys, _alias_name
 # Ubuntu 22.04 ships xdotool 3.20160805, which has almost no key aliases
-# and treats a bare "--" as an invalid option. Map LLM-friendly names to
-# X11 keysyms that this version actually sends.
-_XDOTOOL_KEY_ALIASES = {
-    "enter": "Return",
-    "return": "Return",
-    "esc": "Escape",
-    "escape": "Escape",
-    "tab": "Tab",
-    "space": "space",
-    "spacebar": "space",
-    "backspace": "BackSpace",
-    "bksp": "BackSpace",
-    "delete": "Delete",
-    "del": "Delete",
-    "up": "Up",
-    "down": "Down",
-    "left": "Left",
-    "right": "Right",
-    "arrowup": "Up",
-    "arrowdown": "Down",
-    "arrowleft": "Left",
-    "arrowright": "Right",
-    "pageup": "Page_Up",
-    "pagedown": "Page_Down",
-    "pgup": "Page_Up",
-    "pgdn": "Page_Down",
-    "home": "Home",
-    "end": "End",
-    "insert": "Insert",
-    "ins": "Insert",
-    "capslock": "Caps_Lock",
-}
-_XDOTOOL_MODIFIER_ALIASES = {
-    "control": "ctrl",
-    "ctrl": "ctrl",
-    "command": "super",
-    "cmd": "super",
-    "meta": "super",
-    "win": "super",
-    "windows": "super",
-    "super": "super",
-    "option": "alt",
-    "alt": "alt",
-    "shift": "shift",
-}
-_XDOTOOL_KEY_FAILURE_MARKERS = (
-    "No such key name",
-    "Ignoring it",
-    "Invalid --option",
-)
-_XDOTOOL_FUNCTION_KEY_RE = re.compile(r"^f([1-9]|1[0-9]|2[0-4])$")
-
-BACKGROUND_PROCESS_DIR = "/workspace/.opencuria/processes"
-_BACKGROUND_PROCESS_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_BACKGROUND_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_BACKGROUND_STOP_GRACE_S = 2.0
-_BACKGROUND_STOP_POLL_S = 0.2
-#: Max candidate entries accepted by a single process_verify request.
-#: Bounds per-request exec probes (one kill -0 + at most one cat per
-#: candidate) so a hostile/misbehaving backend cannot fan out
-#: unbounded workspace execs.
-_BACKGROUND_VERIFY_MAX_ENTRIES = 100
+# and treats a bare "--" as an invalid option. Canonical definitions live
+# in ``src.services.sessions.xdotool`` (Step 1); re-exported above.
+# Background constants/dataclasses live canonically in
+# ``src.services.sessions.background`` (Step 3); re-exported above.
+# Stream dataclass/manager live canonically in
+# ``src.services.sessions.streams`` (Step 3); re-exported above.
 
 
 def _collapse_xdotool_token(token: str) -> str:
     """Return a case- and separator-insensitive lookup key."""
-    return token.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    from .services.sessions.xdotool import _collapse_xdotool_token as _impl
+
+    return _impl(token)
 
 
 def _normalize_xdotool_token(token: str, *, modifier: bool = False) -> str:
     """Map one key or modifier name to an xdotool 3.20160805 token."""
-    raw = str(token).strip()
-    if not raw:
-        raise ValueError("key token must not be empty")
-    collapsed = _collapse_xdotool_token(raw)
-    if modifier:
-        alias = _XDOTOOL_MODIFIER_ALIASES.get(collapsed)
-        if alias is not None:
-            return alias
-        key_alias = _XDOTOOL_KEY_ALIASES.get(collapsed)
-        if key_alias is not None:
-            return key_alias
-        return raw
-    alias = _XDOTOOL_KEY_ALIASES.get(collapsed)
-    if alias is not None:
-        return alias
-    modifier_alias = _XDOTOOL_MODIFIER_ALIASES.get(collapsed)
-    if modifier_alias is not None:
-        return modifier_alias
-    function_key = _XDOTOOL_FUNCTION_KEY_RE.fullmatch(collapsed)
-    if function_key:
-        return f"F{function_key.group(1)}"
-    return raw
+    from .services.sessions.xdotool import _normalize_xdotool_token as _impl
+
+    return _impl(token, modifier=modifier)
 
 
 def _normalize_xdotool_key_combo(key: str, modifiers: list[Any]) -> str:
     """Build an xdotool key combo from a key name and optional modifiers."""
-    if not isinstance(modifiers, list):
-        raise ValueError("modifiers must be a list")
-    mod_tokens: list[str] = []
-    for item in modifiers:
-        if not isinstance(item, str):
-            raise ValueError("modifiers must be a list of strings")
-        stripped = item.strip()
-        if not stripped:
-            continue
-        mod_tokens.append(_normalize_xdotool_token(stripped, modifier=True))
-    parts = [part.strip() for part in str(key).split("+") if part.strip()]
-    if not parts:
-        raise ValueError("key must not be empty")
-    *combo_mods, key_part = parts
-    tokens = [
-        *mod_tokens,
-        *(
-            _normalize_xdotool_token(part, modifier=True)
-            for part in combo_mods
-        ),
-        _normalize_xdotool_token(key_part),
-    ]
-    return "+".join(tokens)
+    from .services.sessions.xdotool import _normalize_xdotool_key_combo as _impl
+
+    return _impl(key, modifiers)
 
 
 def _xdotool_type_command(text: str) -> str:
     """Build an xdotool type command compatible with Ubuntu 22.04."""
-    quoted = shlex.quote(text)
-    if text.startswith("-"):
-        return (
-            f"printf '%s' {quoted} | "
-            "xdotool type --delay 0 --clearmodifiers --file -"
-        )
-    return f"xdotool type --delay 0 --clearmodifiers {quoted}"
+    from .services.sessions.xdotool import _xdotool_type_command as _impl
+
+    return _impl(text)
 
 
 def _xdotool_key_failed(exit_code: int, output: str) -> bool:
     """Return True when xdotool did not actually deliver the key."""
-    if exit_code != 0:
-        return True
-    return any(marker in output for marker in _XDOTOOL_KEY_FAILURE_MARKERS)
+    from .services.sessions.xdotool import _xdotool_key_failed as _impl
+
+    return _impl(exit_code, output)
 
 
-@dataclass
-class BackgroundProcess:
-    """Detached background process tracked in memory (runner owns liveness)."""
-
-    process_id: str
-    workspace_id: uuid.UUID
-    pid: int
-    command: str
-    workdir: str
-    log_path: str
-    exit_path: str
-    name: str = ""
-    started_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+# ``TerminalSession`` is canonically defined in
+# ``src.services.sessions.terminals`` (Step 2) and re-exported at module
+# top, so ``src.service.TerminalSession`` keeps working for existing
+# importers with the identical object (not a copy/subclass).
 
 
-@dataclass
-class TerminalSession:
-    """Runtime PTY handle for an interactive terminal session."""
-
-    handle: PtyHandle
-    runtime: RuntimeBackend
+# ``BackgroundProcess`` + ``BACKGROUND_PROCESS_DIR`` / ``_BACKGROUND_*``
+# constants are canonically defined in
+# ``src.services.sessions.background`` (Step 3) and re-exported at module
+# top, so ``src.service.<NAME>`` keeps working with identical objects.
 
 
-#: Max generic stream sessions per workspace (process + TCP relay).
-STREAM_MAX_PER_WORKSPACE = 8
-
-#: Max raw bytes per stream chunk in either direction.
-STREAM_CHUNK_SIZE = 64 * 1024
-
-#: Env keys never forwarded into a stream process (shell/runtime hijack
-#: surface).  Mirrors the backend harness guard.
-STREAM_BLOCKED_ENV_PREFIXES = (
-    "LD_",
-    "PYTHON",
-    "PATH",
-    "HOME",
-    "SHELL",
-    "IFS",
-    "ENV",
-    "BASH_ENV",
-)
-STREAM_BLOCKED_ENV_EXACT = {
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "PATH",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "HOME",
-    "SHELL",
-}
-
-#: Static workspace-local TCP relay: resolves DNS *inside* the workspace
-#: and connects ``host:port``, optionally upgrading to TLS with default
-#: certificate verification and ``server_hostname`` SNI.  Runs via the
-#: same process transport (``python3 -u -c <constant> -- host port tls
-#: server_hostname``); stdio is the raw byte stream, stderr carries the
-#: relay error line on failure.  No host shell connect happens anywhere.
-TCP_RELAY_CODE = """\
-import socket, ssl, sys
-
-def _fail(msg):
-    sys.stderr.write("relay-error: " + msg + "\\n")
-    sys.stderr.flush()
-    sys.exit(1)
-
-if len(sys.argv) != 6:
-    _fail("usage: relay host port tls server_hostname")
-host = sys.argv[2]
-try:
-    port = int(sys.argv[3])
-except ValueError:
-    _fail("invalid port")
-if not 1 <= port <= 65535:
-    _fail("port out of range")
-tls = sys.argv[4] == "1"
-server_hostname = sys.argv[5] or None
-try:
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-except socket.gaierror as exc:
-    _fail("dns failed: %s" % (exc,))
-if not infos:
-    _fail("dns returned no addresses")
-last = None
-raw = None
-for family, socktype, proto, _canon, sockaddr in infos:
-    try:
-        raw = socket.socket(family, socktype, proto)
-        raw.settimeout(15)
-        raw.connect(sockaddr)
-        last = None
-        break
-    except OSError as exc:
-        last = exc
-        try:
-            raw.close()
-        except OSError:
-            pass
-        raw = None
-if raw is None:
-    _fail("connect failed: %s" % (last,))
-try:
-    raw.settimeout(None)
-    if tls:
-        ctx = ssl.create_default_context()
-        try:
-            conn = ctx.wrap_socket(raw, server_hostname=server_hostname or host)
-        except Exception as exc:
-            raw.close()
-            _fail("tls failed: %s" % (exc,))
-    else:
-        conn = raw
-    fdin = sys.stdin.buffer
-    fdout = sys.stdout.buffer
-    import os as _os
-    import select
-    stdin_fd = fdin.fileno()
-    stdin_eof = False
-    conn_write_closed = False
-    # Full-duplex: stdin EOF only half-closes the server direction —
-    # the socket stays open for reading until the server sends EOF.
-    # Conversely a server EOF ends the relay (pending stdin bytes were
-    # already forwarded when select reported both sides readable).
-    while True:
-        wait_for_stdin = [] if stdin_eof else [stdin_fd]
-        r, _w, _x = select.select(wait_for_stdin + [conn], [], [])
-        if stdin_fd in r:
-            try:
-                chunk = _os.read(stdin_fd, 65536)
-            except OSError as exc:
-                _fail("stdin read failed: %s" % (exc,))
-            if not chunk:
-                stdin_eof = True
-                if not conn_write_closed:
-                    try:
-                        conn.shutdown(socket.SHUT_WR)
-                    except OSError:
-                        pass
-                    conn_write_closed = True
-                # Fall through: still drain the server reply below and
-                # keep looping on the socket alone until server EOF.
-            else:
-                try:
-                    conn.sendall(chunk)
-                except OSError as exc:
-                    _fail("send failed: %s" % (exc,))
-        if conn in r:
-            try:
-                data = conn.recv(65536)
-            except OSError as exc:
-                _fail("recv failed: %s" % (exc,))
-            if not data:
-                break
-            try:
-                fdout.write(data)
-                fdout.flush()
-            except OSError:
-                break
-except BrokenPipeError:
-    pass
-except Exception as exc:
-    _fail("relay failed: %s" % (exc,))
-finally:
-    try:
-        conn.close()
-    except Exception:
-        pass
-"""
-
-_TCP_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$")
+# ``StreamSession`` is canonically defined in
+# ``src.services.sessions.streams`` (Step 3) and re-exported at module
+# top (constants/validators since Step 1), so ``src.service.<NAME>``
+# keeps working with identical objects.
 
 
 def _validate_stream_host(host: str) -> str:
     """Validate a TCP relay host (DNS name, IPv4/IPv6, or workspace-localhost)."""
-    cleaned = (host or "").strip()
-    if not cleaned or len(cleaned) > 255 or "\x00" in cleaned or "\n" in cleaned:
-        raise ValueError(f"Invalid stream host: {host!r}")
-    if cleaned in ("localhost", "127.0.0.1", "::1"):
-        return cleaned
-    import ipaddress as _ip
+    from .services.sessions.streams import _validate_stream_host as _impl
 
-    try:
-        _ip.ip_address(cleaned)
-        return cleaned
-    except ValueError:
-        pass
-    if not _TCP_HOST_RE.match(cleaned):
-        raise ValueError(f"Invalid stream host: {host!r}")
-    return cleaned
+    return _impl(host)
 
 
 def _validate_stream_port(port: object) -> int:
     """Validate a TCP relay port (1..65535)."""
-    try:
-        number = int(port)  # type: ignore[arg-type]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid stream port: {port!r}") from exc
-    if isinstance(port, bool) or not 1 <= number <= 65535:
-        raise ValueError(f"Invalid stream port: {port!r}")
-    return number
+    from .services.sessions.streams import _validate_stream_port as _impl
 
-
-@dataclass
-class StreamSession:
-    """One generic bidirectional stream bound to a workspace."""
-
-    connection_id: str
-    workspace_id: uuid.UUID
-    kind: str  # "process" | "tcp"
-    handle: ProcessHandle | None
-    runtime: RuntimeBackend
-    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    closed: bool = False
+    return _impl(port)
 
 
 class WorkspaceService:
@@ -511,37 +307,220 @@ class WorkspaceService:
     ) -> None:
         self._runtimes = runtimes
         self._settings = settings
-        self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
-        self._terminals: dict[str, TerminalSession] = {}
-        self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
-        self._desktop_recordings: dict[tuple[uuid.UUID, str], tuple[int, str]] = {}
+        # Step 8: cache ownership lives in ``WorkspaceRegistry``
+        # (canonical ``src.services.workspace_registry``); ``_cache``
+        # stays as a property alias below so tests poking
+        # ``service._cache[...]`` keep working. All managers are wired
+        # with bound lookups onto the registry (no service import in
+        # the modules). The registry is constructed FIRST so every
+        # manager resolves through it; late-bound closures over the
+        # service facades keep instance-attribute overrides and
+        # monkeypatching working exactly as before.
+        #
+        # ``_runtimes`` stays the SAME dict object the registry and all
+        # managers were constructed with (``WorkspaceService`` never
+        # rebinds it), so in-place test reassignment
+        # (``service._runtimes = {...}``) would detach the managers.
+        # The property setter below therefore updates the shared dict
+        # in place AND re-points the registry/managers at the new
+        # mapping, preserving the pre-Step-8 rebinding behaviour.
+        self._registry = WorkspaceRegistry(runtimes, settings)
+        # Step 2: leaf managers own terminal + image state. The managers
+        # are wired with bound lookups (no service import in the modules)
+        # and write through to the live cache via closures (not captured
+        # dict objects) so ``sync_from_runtime`` reassignments stay
+        # correct.
+        self._terminals_manager = TerminalManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            lambda workspace_id: self._cache.pop(workspace_id, None),
+            WORKSPACE_CREDENTIAL_ENV_FILE,
+        )
+        self._images = ImageManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            self._get_runtime_by_type,
+            None,
+            lambda info: self._cache.__setitem__(info.workspace_id, info),
+            self.inject_workspace_credentials,
+        )
+        # Step 3: stateful leaf clusters own stream + background state.
+        # The managers are wired with bound lookups (no service import in
+        # the modules). ``sanitize_exec_workdir`` is the canonical
+        # ``src.services.exec_kernel`` function (bound facade keeps parity
+        # via the same canonical helper).
+        self._streams_manager = StreamManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            self._sanitize_exec_workdir,
+        )
+        self._background = BackgroundProcessManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            self._sanitize_exec_workdir,
+            WORKSPACE_CREDENTIAL_ENV_FILE,
+        )
+        # Step 4: content-plane managers (files + harness exec) sit on top
+        # of the exec kernel. Wired with bound lookups (no service import
+        # in the modules).
+        self._files_manager = FileManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+        )
+        self._harness = HarnessExecService(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            self._sanitize_exec_workdir,
+            WORKSPACE_CREDENTIAL_ENV_FILE,
+        )
+        # Step 5: exec kernel + credential manager. The kernel owns the
+        # stateless exec entry points (wrap + normalise + runtime
+        # dispatch); the credential manager owns persistent
+        # inject/remove. Both are wired with the canonical env-file
+        # constant (no service import in the modules). ``inject`` needs
+        # no exec hook (verbatim facade logic uses the runtime
+        # directly); the manager keeps an optional ``exec_command``
+        # parameter for forward compatibility.
+        self._exec_kernel = ExecKernel(
+            credential_env_file=WORKSPACE_CREDENTIAL_ENV_FILE,
+        )
+        self._credentials_manager = CredentialManager(
+            credential_env_file=WORKSPACE_CREDENTIAL_ENV_FILE,
+        )
+        # Git operations: serialised per workspace/repo so concurrent
+        # snapshot + mutation requests cannot interleave mid-sequence.
+        # Step 7: full git orchestration lives in the ``GitService``
+        # manager (canonical ``src.services.git_service``), wired with
+        # bound lookups (no service import in the module). The manager
+        # owns the ``_git_lock_map`` KeyedLockMap (Step 5 mechanics,
+        # canonical ``src.services.exec_kernel``); ``_git_locks`` /
+        # ``_git_locks_guard`` stay as property aliases onto the
+        # manager's map so tests poking ``service._git_locks[...]``
+        # keep working.
+        self._git = GitService(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+        )
+        # Step 6a: desktop lifecycle manager owns the shared Xvnc
+        # process, leases and recordings. Wired with bound lookups (no
+        # service import in the module); the harness hook is a late-bound
+        # closure over the ``exec_harness_command`` facade (delegates to
+        # the harness manager) used by ``desktop_action("execute")``, so
+        # ``monkeypatch.setattr(service, "exec_harness_command", ...)``
+        # and instance-attribute overrides
+        # (``service._ensure_desktop_process_locked = ...``) keep working
+        # through the facade. ``sync_from_runtime`` reassignments stay
+        # correct (closures, not captured dicts).
+        self._desktop = DesktopManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            lambda workspace_id, command, workdir="/workspace", env=None: (
+                self.exec_harness_command(
+                    workspace_id, command, workdir=workdir, env=env
+                )
+            ),
+        )
         # Limit concurrent file-read SSH channels per workspace to avoid
         # exhausting the SSH server's MaxSessions limit (default: 10).
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
         # keeps peak channel usage well below 10.
-        self._file_read_semaphores: dict[uuid.UUID, asyncio.Semaphore] = {}
-        # Self-healing: tracks when each workspace was first found unreachable.
-        # Cleared once the workspace becomes reachable again.
-        self._unreachable_since: dict[uuid.UUID, float] = {}
-        # Background processes: workspace-scoped detached processes.
-        # The runner owns liveness (in-memory); the backend owns list/history.
-        self._background_processes: dict[uuid.UUID, dict[str, BackgroundProcess]] = {}
-        self._background_lock = asyncio.Lock()
-        # Serialises concurrent starts of the same process_id so two
-        # parallel starts cannot orphan each other's PID (last-writer-wins
-        # on the tracking dict would leak the loser's process). Entries are
-        # retained for the runner lifetime (bounded by ever-seen
-        # workspace/process ids, cleared on restart) — same rationale as
-        # the desktop locks: dropping a lock object while a holder waits
-        # would hand the next caller a different lock.
-        self._background_start_locks: dict[
-            tuple[uuid.UUID, str], asyncio.Lock
-        ] = {}
-        self._background_start_locks_guard = asyncio.Lock()
-        # Git operations: serialised per workspace/repo so concurrent
-        # snapshot + mutation requests cannot interleave mid-sequence.
-        self._git_locks: dict[tuple[uuid.UUID, str], asyncio.Lock] = {}
-        self._git_locks_guard = asyncio.Lock()
+        # Step 4: state is owned by ``FileManager``; this stays as a
+        # property alias below so tests poking
+        # ``service._file_read_semaphores[...]`` keep working.
+        # Step 8: lifecycle orchestration lives in ``WorkspaceLifecycle``
+        # (canonical ``src.services.workspace_lifecycle``). The composer
+        # wires it here, after the leaf managers exist, with hook
+        # closures that read the *current* attribute values at call time
+        # (late-bound ``getattr``) so instance-attribute overrides and
+        # ``monkeypatch`` on the service keep working exactly like the
+        # pre-Step-8 ``self.<facade>`` calls.
+        self._lifecycle = WorkspaceLifecycle(
+            self._registry,
+            settings,
+            runtimes,
+            self._credentials_manager,
+            self._exec_kernel,
+            self._background,
+            self._streams_manager,
+            self._desktop,
+        )
+        # Registry cross-cluster hooks: late-bound service facades.
+        # ``desktop_sessions`` / ``background_entries`` are passed as
+        # live dict *objects* owned by the managers (the managers never
+        # rebind them — service property setters mutate in place), so
+        # identity holds for the process lifetime.
+        self._registry.desktop_sessions = self._desktop._desktop_sessions
+        self._registry.background_entries = self._background._background_processes
+        self._registry.background_status = (
+            lambda runtime, instance_id, entry: self._background_status_locked(
+                runtime, instance_id, entry
+            )
+        )
+        self._registry.desktop_live = (
+            lambda workspace_id: self._is_desktop_session_live(workspace_id)
+        )
+        self._registry.desktop_heartbeat_payload = (
+            lambda workspace_id, session: self._desktop_heartbeat_payload(
+                workspace_id, session
+            )
+        )
+        # Lifecycle cross-cluster hooks: late-bound service facades.
+        self._lifecycle.remove_hook = (
+            lambda runtime, instance_id, log: self.remove_workspace_credentials(
+                runtime, instance_id, log
+            )
+        )
+        self._lifecycle.inject_hook = (
+            lambda runtime, instance_id, env_vars, files, ssh_keys, log: (
+                self.inject_workspace_credentials(
+                    runtime, instance_id, env_vars, files, ssh_keys, log
+                )
+            )
+        )
+        self._lifecycle.exec_hook = (
+            lambda runtime, instance_id, command: self._exec_command(
+                runtime, instance_id, command
+            )
+        )
+        self._lifecycle.close_streams_hook = (
+            lambda workspace_id, reason: self.close_workspace_streams(
+                workspace_id, reason=reason
+            )
+        )
+        self._lifecycle.kill_all_hook = (
+            lambda workspace_id, reason: self._kill_all_background_processes(
+                workspace_id, reason=reason
+            )
+        )
+        self._lifecycle.drop_tracking_hook = (
+            lambda workspace_id, reason: self._drop_background_tracking(
+                workspace_id, reason=reason
+            )
+        )
+        self._lifecycle.release_hook = (
+            lambda workspace_id, holder, run_id=None, force=False: (
+                self.release_desktop(
+                    workspace_id, holder=holder, run_id=run_id, force=force
+                )
+            )
+        )
+        self._lifecycle.interrupt_hook = (
+            lambda workspace_id: self._interrupt_desktop_recordings(workspace_id)
+        )
+        self._lifecycle.desktop_lock_hook = (
+            lambda workspace_id: self._desktop_lock(workspace_id)
+        )
+        # Self-healing unreachable timers are owned by the lifecycle;
+        # this stays as a property alias below so tests poking
+        # ``service._unreachable_since[...]`` keep working.
         # Desktop lifecycle: serialised per workspace so a concurrent
         # viewer start and a computer-use hold cannot stop/start the
         # shared Xvnc :1 process twice, and a release racing a start
@@ -552,51 +531,361 @@ class WorkspaceService:
         # release wakes the first waiter before it re-acquires, so a
         # drop in that window hands a third caller a different lock
         # object and lifecycle operations run in parallel.
-        self._desktop_locks: dict[uuid.UUID, asyncio.Lock] = {}
-        self._desktop_locks_guard = asyncio.Lock()
-        # Generic bidirectional stream sessions (MCP stdio / TCP relay).
-        # Workspace-bound, in-memory only; bounded per workspace.
-        self._streams: dict[str, StreamSession] = {}
-        self._streams_guard = asyncio.Lock()
+        # Step 6a: mechanics live in the manager-owned
+        # ``DesktopManager._desktop_lock_map`` (canonical
+        # ``src.services.exec_kernel.KeyedLockMap``);
+        # ``_desktop_lock_map`` / ``_desktop_locks`` /
+        # ``_desktop_locks_guard`` stay as property aliases onto the
+        # manager's map so tests poking
+        # ``service._desktop_locks.get(...)`` keep working.
+
+    # -- Step 8 composer accessors ---------------------------------------
+    # ``_cache`` stays readable/writable as a dict alias onto the
+    # registry-owned store so tests poking ``service._cache[...]``
+    # keep working. ``registry`` / ``lifecycle`` are the stable entry
+    # points for the extracted clusters.
+    #
+    # -- Step 2 manager accessors ----------------------------------------
+    # ``_terminals`` stays readable/writable as a dict alias onto the
+    # manager-owned store so tests poking ``service._terminals[...]``
+    # keep working. ``terminal_manager`` / ``images`` are the stable
+    # entry points the websocket handlers use.
+    #
+    # -- Step 3 manager accessors ----------------------------------------
+    # ``_streams`` / ``_background_processes`` (+ ``_background_lock`` /
+    # ``_background_start_locks`` / ``_background_start_locks_guard`` /
+    # ``_streams_guard``) stay readable/writable as aliases onto the
+    # manager-owned stores so tests poking ``service._streams[...]`` /
+    # ``service._background_processes[...]`` keep working. ``streams`` /
+    # ``background`` are the stable entry points the websocket handlers
+    # use.
+    #
+    # -- Step 4 manager accessors ----------------------------------------
+    # ``_file_read_semaphores`` stays readable/writable as an alias onto
+    # the file-manager-owned dict so tests poking
+    # ``service._file_read_semaphores[...]`` keep working. ``files`` /
+    # ``harness`` are the stable entry points the websocket handlers use.
+    #
+    # -- Step 6a manager accessors ---------------------------------------
+    # ``_desktop_sessions`` / ``_desktop_recordings`` /
+    # ``_desktop_lock_map`` / ``_desktop_locks`` /
+    # ``_desktop_locks_guard`` stay readable/writable as aliases onto the
+    # desktop-manager-owned stores so tests poking
+    # ``service._desktop_sessions[...]`` /
+    # ``service._desktop_recordings[...]`` /
+    # ``service._desktop_locks.get(...)`` keep working. ``desktop`` is
+    # the stable entry point the websocket handlers will use (Step 6b).
+
+    @property
+    def _runtimes(self) -> dict[str, RuntimeBackend]:
+        """Return the shared runtime-backend mapping.
+
+        Step 8: the SAME dict object handed to the registry, the
+        lifecycle and every manager at construction time.
+        """
+        return self.__dict__["_runtimes"]
+
+    @_runtimes.setter
+    def _runtimes(self, value: dict[str, RuntimeBackend]) -> None:
+        """Re-point the whole composition at a new runtime mapping.
+
+        Step 8: pre-Step-8 code allowed ``service._runtimes = {...}``
+        rebinding (relied upon by tests); the managers and the registry
+        hold their own references, so the setter propagates the new
+        mapping to all of them to preserve that behaviour.
+        """
+        self.__dict__["_runtimes"] = value
+        _registry = self.__dict__.get("_registry")
+        if _registry is not None:
+            try:
+                _registry._runtimes = value
+            except AttributeError:
+                pass
+        for _manager_attr in (
+            "_terminals_manager",
+            "_images",
+            "_streams_manager",
+            "_background",
+            "_files_manager",
+            "_harness",
+            "_git",
+            "_desktop",
+        ):
+            _manager = self.__dict__.get(_manager_attr)
+            if _manager is not None:
+                try:
+                    _manager._runtimes = value
+                except AttributeError:
+                    pass
+        _lifecycle = self.__dict__.get("_lifecycle")
+        if _lifecycle is not None:
+            try:
+                _lifecycle._runtimes = value
+            except AttributeError:
+                pass
+
+    @property
+    def _cache(self) -> dict[uuid.UUID, WorkspaceInfo]:
+        """Alias onto the registry-owned workspace cache dict."""
+        return self._registry._cache
+
+    @_cache.setter
+    def _cache(self, value: dict) -> None:
+        self._registry._cache.clear()
+        self._registry._cache.update(value)
+
+    @property
+    def registry(self) -> WorkspaceRegistry:
+        """Return the workspace registry (cache ownership)."""
+        return self._registry
+
+    @property
+    def lifecycle(self) -> WorkspaceLifecycle:
+        """Return the workspace lifecycle orchestrator."""
+        return self._lifecycle
+
+    @property
+    def _unreachable_since(self) -> dict[uuid.UUID, float]:
+        """Alias onto the lifecycle-owned self-healing timer dict."""
+        return self._lifecycle._unreachable_since
+
+    @_unreachable_since.setter
+    def _unreachable_since(self, value: dict) -> None:
+        self._lifecycle._unreachable_since.clear()
+        self._lifecycle._unreachable_since.update(value)
+
+    @property
+    def _desktop_sessions(self) -> dict[uuid.UUID, DesktopSession]:
+        """Alias onto the desktop manager's session dict."""
+        return self._desktop._desktop_sessions
+
+    @_desktop_sessions.setter
+    def _desktop_sessions(self, value: dict) -> None:
+        self._desktop._desktop_sessions.clear()
+        self._desktop._desktop_sessions.update(value)
+
+    @property
+    def _desktop_recordings(
+        self,
+    ) -> dict[tuple[uuid.UUID, str], tuple[int, str]]:
+        """Alias onto the desktop manager's recording dict."""
+        return self._desktop._desktop_recordings
+
+    @_desktop_recordings.setter
+    def _desktop_recordings(self, value: dict) -> None:
+        self._desktop._desktop_recordings.clear()
+        self._desktop._desktop_recordings.update(value)
+
+    @property
+    def _desktop_lock_map(self) -> KeyedLockMap:
+        """Alias onto the desktop manager's keyed lock map."""
+        return self._desktop._desktop_lock_map
+
+    @_desktop_lock_map.setter
+    def _desktop_lock_map(self, value: KeyedLockMap) -> None:
+        self._desktop._desktop_lock_map = value
+
+    @property
+    def _desktop_locks(self) -> dict[uuid.UUID, asyncio.Lock]:
+        """Alias onto the desktop manager's keyed lock map dict."""
+        return self._desktop._desktop_locks
+
+    @_desktop_locks.setter
+    def _desktop_locks(self, value: dict) -> None:
+        self._desktop._desktop_locks.clear()
+        self._desktop._desktop_locks.update(value)
+
+    @property
+    def _desktop_locks_guard(self) -> asyncio.Lock:
+        """Alias onto the desktop manager's lock-map guard."""
+        return self._desktop._desktop_locks_guard
+
+    @_desktop_locks_guard.setter
+    def _desktop_locks_guard(self, value: asyncio.Lock) -> None:
+        self._desktop._desktop_locks_guard = value
+
+    @property
+    def _file_read_semaphores(self) -> dict[uuid.UUID, asyncio.Semaphore]:
+        """Alias onto the file manager's semaphore dict."""
+        return self._files_manager._file_read_semaphores
+
+    @_file_read_semaphores.setter
+    def _file_read_semaphores(self, value: dict) -> None:
+        self._files_manager._file_read_semaphores.clear()
+        self._files_manager._file_read_semaphores.update(value)
+
+    @property
+    def _streams(self) -> dict[str, StreamSession]:
+        """Alias onto the stream manager's session dict."""
+        return self._streams_manager._streams
+
+    @_streams.setter
+    def _streams(self, value: dict) -> None:
+        self._streams_manager._streams.clear()
+        self._streams_manager._streams.update(value)
+
+    @property
+    def _streams_guard(self) -> asyncio.Lock:
+        """Alias onto the stream manager's guard lock."""
+        return self._streams_manager._streams_guard
+
+    @_streams_guard.setter
+    def _streams_guard(self, value: asyncio.Lock) -> None:
+        self._streams_manager._streams_guard = value
+
+    @property
+    def _background_processes(
+        self,
+    ) -> dict[uuid.UUID, dict[str, BackgroundProcess]]:
+        """Alias onto the background manager's tracking dict."""
+        return self._background._background_processes
+
+    @_background_processes.setter
+    def _background_processes(self, value: dict) -> None:
+        self._background._background_processes.clear()
+        self._background._background_processes.update(value)
+
+    @property
+    def _background_lock(self) -> asyncio.Lock:
+        """Alias onto the background manager's tracking lock."""
+        return self._background._background_lock
+
+    @_background_lock.setter
+    def _background_lock(self, value: asyncio.Lock) -> None:
+        self._background._background_lock = value
+
+    @property
+    def _background_start_locks(
+        self,
+    ) -> dict[tuple[uuid.UUID, str], asyncio.Lock]:
+        """Alias onto the background manager's keyed start-lock map."""
+        return self._background._background_start_locks
+
+    @_background_start_locks.setter
+    def _background_start_locks(self, value: dict) -> None:
+        self._background._background_start_locks.clear()
+        self._background._background_start_locks.update(value)
+
+    @property
+    def _background_start_locks_guard(self) -> asyncio.Lock:
+        """Alias onto the background manager's start-lock guard."""
+        return self._background._background_start_locks_guard
+
+    @_background_start_locks_guard.setter
+    def _background_start_locks_guard(self, value: asyncio.Lock) -> None:
+        self._background._background_start_locks_guard = value
+
+    @property
+    def streams(self) -> StreamManager:
+        """Return the generic stream session manager."""
+        return self._streams_manager
+
+    @property
+    def background(self) -> BackgroundProcessManager:
+        """Return the background process manager."""
+        return self._background
+
+    @property
+    def _terminals(self) -> dict[str, TerminalSession]:
+        """Alias onto the terminal manager's session dict."""
+        return self._terminals_manager._terminals
+
+    @_terminals.setter
+    def _terminals(self, value: dict) -> None:
+        self._terminals_manager._terminals.clear()
+        self._terminals_manager._terminals.update(value)
+
+    @property
+    def terminal_manager(self) -> TerminalManager:
+        """Return the terminal session manager."""
+        return self._terminals_manager
+
+    @property
+    def images(self) -> ImageManager:
+        """Return the image build/artifact manager."""
+        return self._images
+
+    @property
+    def files(self) -> FileManager:
+        """Return the file operation manager."""
+        return self._files_manager
+
+    @property
+    def harness(self) -> HarnessExecService:
+        """Return the harness command execution manager."""
+        return self._harness
+
+    @property
+    def credentials(self) -> CredentialManager:
+        """Return the credential inject/remove manager."""
+        return self._credentials_manager
+
+    @property
+    def exec_kernel(self) -> ExecKernel:
+        """Return the exec kernel (wrap + normalise + runtime dispatch)."""
+        return self._exec_kernel
+
+    @property
+    def desktop(self) -> DesktopManager:
+        """Return the desktop session manager."""
+        return self._desktop
+
+    @property
+    def git(self) -> GitService:
+        """Return the git orchestration manager."""
+        return self._git
+
+    @property
+    def _git_lock_map(self) -> KeyedLockMap:
+        """Alias onto the git manager's keyed lock map."""
+        return self._git._git_lock_map
+
+    @_git_lock_map.setter
+    def _git_lock_map(self, value: KeyedLockMap) -> None:
+        self._git._git_lock_map = value
+
+    @property
+    def _git_locks(self) -> dict[tuple[uuid.UUID, str], asyncio.Lock]:
+        """Alias onto the git manager's keyed lock map dict."""
+        return self._git._git_locks
+
+    @_git_locks.setter
+    def _git_locks(self, value: dict) -> None:
+        self._git._git_locks.clear()
+        self._git._git_locks.update(value)
+
+    @property
+    def _git_locks_guard(self) -> asyncio.Lock:
+        """Alias onto the git manager's lock-map guard."""
+        return self._git._git_locks_guard
+
+    @_git_locks_guard.setter
+    def _git_locks_guard(self, value: asyncio.Lock) -> None:
+        self._git._git_locks_guard = value
 
     # -- background processes --------------------------------------------------
+    # Step 3: thin facade over ``BackgroundProcessManager`` (canonical).
+    # State (``_background_processes`` / ``_background_lock`` /
+    # ``_background_start_locks`` + guard) is owned by the manager and
+    # exposed via property aliases above.
 
     @staticmethod
     def _sanitize_background_file_path(value: str | None, suffix: str) -> str | None:
         """Validate a backend-assigned background log/exit path.
 
-        Returns the path when it lives directly under
-        ``BACKGROUND_PROCESS_DIR`` (prefix ``DIR + "/"``), contains no
-        ``..`` segments, its basename matches
-        ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` and ends with *suffix*
-        (``.log`` / ``.exit``).  Returns ``None`` for anything else so
-        callers fall back to the legacy ``{DIR}/{process_id}`` schema.
+        Step 3: thin facade over
+        ``BackgroundProcessManager._sanitize_background_file_path``.
         """
-        if not isinstance(value, str):
-            return None
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        prefix = BACKGROUND_PROCESS_DIR.rstrip("/") + "/"
-        if not cleaned.startswith(prefix):
-            return None
-        remainder = cleaned[len(prefix):]
-        if not remainder or "/" in remainder or ".." in remainder:
-            return None
-        basename = remainder
-        if not basename.endswith(suffix):
-            return None
-        if not _BACKGROUND_PROCESS_ID_RE.match(basename):
-            return None
-        return cleaned
+        return BackgroundProcessManager._sanitize_background_file_path(value, suffix)
 
     @staticmethod
     def _sanitize_process_id(process_id: str) -> str:
-        """Validate a backend-assigned background process id."""
-        cleaned = (process_id or "").strip()
-        if not cleaned or not _BACKGROUND_PROCESS_ID_RE.match(cleaned):
-            raise ValueError(f"Invalid process_id: {process_id!r}")
-        return cleaned
+        """Validate a backend-assigned background process id.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._sanitize_process_id``.
+        """
+        return BackgroundProcessManager._sanitize_process_id(process_id)
 
     @staticmethod
     def _build_background_start_shell(
@@ -607,32 +896,11 @@ class WorkspaceService:
     ) -> str:
         """Build a detached start shell for a background process.
 
-        The wrapper sources the persistent credential env file, applies
-        per-process env overrides, then runs the command detached via
-        ``setsid`` and records the exit code in *exit_path*.
-
-        The command runs in a subshell so shell-terminating commands
-        (e.g. ``exit 3``) only terminate the subshell and the outer
-        shell still writes ``$?`` to the exit file.
+        Step 3: thin facade over
+        ``BackgroundProcessManager._build_background_start_shell``.
         """
-        env_assignments = " ".join(
-            f"{key}={shlex.quote(str(value))}"
-            for key, value in (extra_env or {}).items()
-            if _BACKGROUND_ENV_KEY_RE.match(str(key))
-        )
-        source = (
-            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
-            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi"
-        )
-        if env_assignments:
-            runner_cmd = f"{source}; export {env_assignments}; ( {command} )"
-        else:
-            runner_cmd = f"{source}; ( {command} )"
-        return (
-            f"mkdir -p {shlex.quote(BACKGROUND_PROCESS_DIR)} && "
-            f"rm -f {shlex.quote(exit_path)} && "
-            f"setsid bash -c {shlex.quote(runner_cmd + '; echo $? > ' + exit_path)}"
-            f" > {shlex.quote(log_path)} 2>&1 < /dev/null & echo $!"
+        return BackgroundProcessManager._build_background_start_shell(
+            command, log_path, exit_path, extra_env
         )
 
     async def _probe_background_pid(
@@ -641,13 +909,12 @@ class WorkspaceService:
         instance_id: str,
         pid: int,
     ) -> bool:
-        """Return True when *pid* is still alive inside the workspace."""
-        exit_code, _ = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", f"kill -0 {int(pid)} 2>/dev/null"],
-            workdir="/workspace",
-        )
-        return exit_code == 0
+        """Return True when *pid* is still alive inside the workspace.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._probe_background_pid``.
+        """
+        return await self._background._probe_background_pid(runtime, instance_id, pid)
 
     async def _read_background_exit_code(
         self,
@@ -655,18 +922,14 @@ class WorkspaceService:
         instance_id: str,
         exit_path: str,
     ) -> int | None:
-        """Read the exit code recorded in *exit_path*, if any."""
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["cat", exit_path],
-            workdir="/workspace",
+        """Read the exit code recorded in *exit_path*, if any.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._read_background_exit_code``.
+        """
+        return await self._background._read_background_exit_code(
+            runtime, instance_id, exit_path
         )
-        if exit_code != 0:
-            return None
-        try:
-            return int(output.strip().split()[0])
-        except (IndexError, ValueError):
-            return None
 
     async def _kill_background_pid(
         self,
@@ -675,28 +938,22 @@ class WorkspaceService:
         pid: int,
         signal: str,
     ) -> None:
-        """Best-effort signal delivery to a background process group."""
-        script = (
-            f"kill -{signal} -{int(pid)} 2>/dev/null || "
-            f"kill -{signal} {int(pid)} 2>/dev/null || true"
-        )
-        await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", script],
-            workdir="/workspace",
-        )
+        """Best-effort signal delivery to a background process group.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._kill_background_pid``.
+        """
+        await self._background._kill_background_pid(runtime, instance_id, pid, signal)
 
     async def _background_start_lock(
         self, workspace_id: uuid.UUID, process_id: str
     ) -> asyncio.Lock:
-        """Return the serialising lock for one workspace/process_id pair."""
-        key = (workspace_id, process_id)
-        async with self._background_start_locks_guard:
-            lock = self._background_start_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._background_start_locks[key] = lock
-            return lock
+        """Return the serialising lock for one workspace/process_id pair.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._background_start_lock``.
+        """
+        return await self._background._background_start_lock(workspace_id, process_id)
 
     async def _stop_background_pid_graceful(
         self,
@@ -704,24 +961,12 @@ class WorkspaceService:
         instance_id: str,
         pid: int,
     ) -> None:
-        """Best-effort stop of one background PID (TERM -> grace -> KILL)."""
-        try:
-            if not await self._probe_background_pid(runtime, instance_id, pid):
-                return
-            await self._kill_background_pid(runtime, instance_id, pid, "TERM")
-            elapsed = 0.0
-            while elapsed <= _BACKGROUND_STOP_GRACE_S:
-                if not await self._probe_background_pid(runtime, instance_id, pid):
-                    return
-                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
-                elapsed += _BACKGROUND_STOP_POLL_S
-            if await self._probe_background_pid(runtime, instance_id, pid):
-                await self._kill_background_pid(runtime, instance_id, pid, "KILL")
-        except Exception:
-            logger.exception(
-                "background_process_restart_stop_failed",
-                old_pid=pid,
-            )
+        """Best-effort stop of one background PID (TERM -> grace -> KILL).
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._stop_background_pid_graceful``.
+        """
+        await self._background._stop_background_pid_graceful(runtime, instance_id, pid)
 
     async def verify_and_reattach_background_processes(
         self,
@@ -730,240 +975,24 @@ class WorkspaceService:
     ) -> list[dict[str, Any]]:
         """Verify untracked ("vanished") processes and reattach live ones.
 
-        The backend sends candidate ``{process_id, pid, log_path,
-        exit_path, command?, workdir?, name?}`` dicts for DB-RUNNING rows
-        that no longer appear in the runner report (typically after a
-        runner restart wiped in-memory tracking). For each candidate:
-
-        - already tracked -> normal live status (no state change);
-        - untracked but PID alive -> reattach into
-          ``_background_processes`` (idempotent) and report ``running``;
-        - untracked and PID dead but exit file readable -> ``exited``
-          with the recorded code (no tracking);
-        - otherwise -> ``unknown`` (no tracking).
-
-        A runtime/workspace failure yields a per-candidate error entry
-        instead of failing the whole batch. Paths outside
-        ``BACKGROUND_PROCESS_DIR`` (or with a failing process_id) are
-        rejected fail-closed as ``unknown`` so a hostile payload can
-        neither reattach nor probe arbitrary files.
+        Step 3: thin facade over
+        ``BackgroundProcessManager.verify_and_reattach_background_processes``.
         """
-        results: list[dict[str, Any]] = []
-        if not isinstance(expected, list):
-            raise ValueError("expected must be a list")
-        if len(expected) > _BACKGROUND_VERIFY_MAX_ENTRIES:
-            raise ValueError(
-                f"expected must hold at most {_BACKGROUND_VERIFY_MAX_ENTRIES} entries"
-            )
-        try:
-            info = self._get_cached(workspace_id)
-            runtime = self._get_runtime(workspace_id)
-            if not info.instance_id:
-                raise RuntimeError("Workspace has no instance assigned")
-        except Exception as exc:
-            for candidate in expected:
-                raw_id = (
-                    candidate.get("process_id")
-                    if isinstance(candidate, dict)
-                    else None
-                )
-                results.append(
-                    {
-                        "process_id": str(raw_id or ""),
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": None,
-                        "error": str(exc),
-                    }
-                )
-            return results
-
-        for candidate in expected:
-            if not isinstance(candidate, dict):
-                results.append(
-                    {
-                        "process_id": "",
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": None,
-                        "error": "invalid candidate entry",
-                    }
-                )
-                continue
-            raw_process_id = candidate.get("process_id", "")
-            try:
-                cleaned_process_id = self._sanitize_process_id(
-                    str(raw_process_id or "")
-                )
-            except ValueError as exc:
-                results.append(
-                    {
-                        "process_id": str(raw_process_id or ""),
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": None,
-                        "error": str(exc),
-                    }
-                )
-                continue
-            raw_pid = candidate.get("pid")
-            try:
-                pid = int(raw_pid)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                results.append(
-                    {
-                        "process_id": cleaned_process_id,
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": None,
-                        "error": f"Invalid pid: {raw_pid!r}",
-                    }
-                )
-                continue
-            if pid <= 0:
-                results.append(
-                    {
-                        "process_id": cleaned_process_id,
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": pid,
-                        "error": f"Invalid pid: {raw_pid!r}",
-                    }
-                )
-                continue
-            log_path = self._sanitize_background_file_path(
-                candidate.get("log_path"), ".log"
-            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log")
-            exit_path = self._sanitize_background_file_path(
-                candidate.get("exit_path"), ".exit"
-            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit")
-            try:
-                async with self._background_lock:
-                    tracked = self._background_processes.get(
-                        workspace_id, {}
-                    ).get(cleaned_process_id)
-                if tracked is not None:
-                    status = await self._background_status_locked(
-                        runtime, info.instance_id, tracked
-                    )
-                    results.append(status)
-                    continue
-                if await self._probe_background_pid(
-                    runtime, info.instance_id, pid
-                ):
-                    command = candidate.get("command", "")
-                    if not isinstance(command, str):
-                        command = ""
-                    workdir = candidate.get("workdir", "/workspace")
-                    try:
-                        safe_workdir = self._sanitize_exec_workdir(workdir)
-                    except ValueError:
-                        safe_workdir = "/workspace"
-                    name = candidate.get("name", "")
-                    if not isinstance(name, str):
-                        name = ""
-                    entry = BackgroundProcess(
-                        process_id=cleaned_process_id,
-                        workspace_id=workspace_id,
-                        pid=pid,
-                        command=command.strip() if command else "",
-                        workdir=safe_workdir,
-                        log_path=log_path,
-                        exit_path=exit_path,
-                        name=name,
-                    )
-                    async with self._background_lock:
-                        existing = self._background_processes.get(
-                            workspace_id, {}
-                        ).get(cleaned_process_id)
-                        if existing is None:
-                            self._background_processes.setdefault(
-                                workspace_id, {}
-                            )[cleaned_process_id] = entry
-                        else:
-                            # A concurrent start won the slot while the
-                            # probes were in flight: report the winner's
-                            # live status instead of overwriting it.
-                            winner = existing
-                    if existing is not None:
-                        status = await self._background_status_locked(
-                            runtime, info.instance_id, winner
-                        )
-                        results.append(status)
-                        continue
-                    logger.info(
-                        "background_process_reattached",
-                        workspace_id=str(workspace_id),
-                        process_id=cleaned_process_id,
-                        pid=pid,
-                    )
-                    results.append(
-                        {
-                            "process_id": cleaned_process_id,
-                            "status": "running",
-                            "exit_code": None,
-                            "pid": pid,
-                        }
-                    )
-                    continue
-                exit_code = await self._read_background_exit_code(
-                    runtime, info.instance_id, exit_path
-                )
-                if exit_code is None:
-                    results.append(
-                        {
-                            "process_id": cleaned_process_id,
-                            "status": "unknown",
-                            "exit_code": None,
-                            "pid": pid,
-                        }
-                    )
-                else:
-                    results.append(
-                        {
-                            "process_id": cleaned_process_id,
-                            "status": "exited",
-                            "exit_code": exit_code,
-                            "pid": pid,
-                        }
-                    )
-            except Exception as exc:
-                logger.exception(
-                    "background_process_verify_failed",
-                    workspace_id=str(workspace_id),
-                    process_id=cleaned_process_id,
-                )
-                results.append(
-                    {
-                        "process_id": cleaned_process_id,
-                        "status": "unknown",
-                        "exit_code": None,
-                        "pid": pid,
-                        "error": str(exc),
-                    }
-                )
-        return results
+        return await self._background.verify_and_reattach_background_processes(
+            workspace_id, expected
+        )
 
     async def _drop_background_tracking(
         self, workspace_id: uuid.UUID, *, reason: str
     ) -> int:
         """Drop in-memory tracking after the VM/container was rebooted.
 
-        RAM processes are dead by definition, so PID entries can never
-        be valid again; keeping them would report stale ``exited`` rows
-        and risk signalling a reused foreign PID.
+        Step 3: thin facade over
+        ``BackgroundProcessManager._drop_background_tracking``.
         """
-        async with self._background_lock:
-            entries = self._background_processes.pop(workspace_id, None)
-        count = len(entries) if entries else 0
-        if count:
-            logger.info(
-                "background_processes_dropped_after_restart",
-                workspace_id=str(workspace_id),
-                count=count,
-                reason=reason,
-            )
-        return count
+        return await self._background._drop_background_tracking(
+            workspace_id, reason=reason
+        )
 
     async def start_background_process(
         self,
@@ -978,108 +1007,19 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Start a detached background process inside a workspace.
 
-        Args:
-            workspace_id: Target workspace.
-            process_id: Backend-assigned unique id (used for log/exit files).
-            command: Shell command to run detached (non-empty).
-            workdir: Working directory inside the workspace VM/container.
-            env: Optional per-process environment overrides.
-            name: Optional human-readable process name.
-            log_path: Optional backend-assigned log path. Used only when it
-                passes :meth:`_sanitize_background_file_path` validation;
-                otherwise the legacy ``{DIR}/{process_id}.log`` schema applies.
-            exit_path: Optional backend-assigned exit path (same rule,
-                ``.exit`` suffix).
-
-        Returns:
-            Dict with ``process_id``, ``pid``, ``log_path``, ``exit_path``.
+        Step 3: thin facade over
+        ``BackgroundProcessManager.start_background_process``.
         """
-        cleaned_process_id = self._sanitize_process_id(process_id)
-        if not (command or "").strip():
-            raise ValueError("command must not be empty")
-        safe_workdir = self._sanitize_exec_workdir(workdir)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-
-        extra_env = dict(env or {})
-        for key in extra_env:
-            if not _BACKGROUND_ENV_KEY_RE.match(str(key)):
-                raise ValueError(f"Invalid env key: {key!r}")
-
-        legacy_log_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log"
-        legacy_exit_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit"
-        resolved_log_path = (
-            self._sanitize_background_file_path(log_path, ".log")
-            or legacy_log_path
+        return await self._background.start_background_process(
+            workspace_id,
+            process_id,
+            command,
+            workdir=workdir,
+            env=env,
+            name=name,
+            log_path=log_path,
+            exit_path=exit_path,
         )
-        resolved_exit_path = (
-            self._sanitize_background_file_path(exit_path, ".exit")
-            or legacy_exit_path
-        )
-        # Restart safety: serialised per process_id so two concurrent
-        # starts cannot orphan each other's PID (the tracking dict would
-        # otherwise keep only the last writer and leak the loser's
-        # process). A living old PID is best-effort stopped (TERM ->
-        # grace -> KILL) before the new run starts; the tracking entry
-        # itself is replaced below after start.
-        start_lock = await self._background_start_lock(
-            workspace_id, cleaned_process_id
-        )
-        async with start_lock:
-            async with self._background_lock:
-                old_entry = self._background_processes.get(
-                    workspace_id, {}
-                ).get(cleaned_process_id)
-            old_pid = old_entry.pid if old_entry is not None else None
-            if old_pid is not None:
-                await self._stop_background_pid_graceful(
-                    runtime, info.instance_id, old_pid
-                )
-            start_shell = self._build_background_start_shell(
-                command.strip(), resolved_log_path, resolved_exit_path, extra_env
-            )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["sh", "-lc", start_shell],
-                workdir=safe_workdir,
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to start background process: {output}")
-            try:
-                pid = int(output.strip().split()[-1])
-            except (IndexError, ValueError) as exc:
-                raise RuntimeError(
-                    f"Failed to parse background process pid: {output!r}"
-                ) from exc
-
-            entry = BackgroundProcess(
-                process_id=cleaned_process_id,
-                workspace_id=workspace_id,
-                pid=pid,
-                command=command.strip(),
-                workdir=safe_workdir,
-                log_path=resolved_log_path,
-                exit_path=resolved_exit_path,
-                name=name or "",
-            )
-            async with self._background_lock:
-                self._background_processes.setdefault(workspace_id, {})[
-                    cleaned_process_id
-                ] = entry
-        logger.info(
-            "background_process_started",
-            workspace_id=str(workspace_id),
-            process_id=cleaned_process_id,
-            pid=pid,
-        )
-        return {
-            "process_id": cleaned_process_id,
-            "pid": pid,
-            "log_path": resolved_log_path,
-            "exit_path": resolved_exit_path,
-        }
 
     async def _background_status_locked(
         self,
@@ -1087,88 +1027,49 @@ class WorkspaceService:
         instance_id: str,
         entry: BackgroundProcess,
     ) -> dict[str, Any]:
-        """Compute a live status dict for a tracked background process."""
-        running = await self._probe_background_pid(runtime, instance_id, entry.pid)
-        if running:
-            return {
-                "process_id": entry.process_id,
-                "status": "running",
-                "exit_code": None,
-                "pid": entry.pid,
-            }
-        exit_code = await self._read_background_exit_code(
-            runtime, instance_id, entry.exit_path
+        """Compute a live status dict for a tracked background process.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._background_status_locked``.
+        """
+        return await self._background._background_status_locked(
+            runtime, instance_id, entry
         )
-        if exit_code is None:
-            return {
-                "process_id": entry.process_id,
-                "status": "unknown",
-                "exit_code": None,
-                "pid": entry.pid,
-            }
-        return {
-            "process_id": entry.process_id,
-            "status": "exited",
-            "exit_code": exit_code,
-            "pid": entry.pid,
-        }
 
     def _get_background_entry(
         self,
         workspace_id: uuid.UUID,
         process_id: str,
     ) -> BackgroundProcess:
-        """Return the tracked entry or raise for unknown process ids."""
-        cleaned = self._sanitize_process_id(process_id)
-        entry = self._background_processes.get(workspace_id, {}).get(cleaned)
-        if entry is None:
-            raise ValueError(
-                f"Background process {cleaned} not found "
-                f"for workspace {workspace_id}"
-            )
-        return entry
+        """Return the tracked entry or raise for unknown process ids.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager._get_background_entry``.
+        """
+        return self._background._get_background_entry(workspace_id, process_id)
 
     async def get_background_status(
         self,
         workspace_id: uuid.UUID,
         process_id: str,
     ) -> dict[str, Any]:
-        """Return the live status of one tracked background process."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with self._background_lock:
-            entry = self._get_background_entry(workspace_id, process_id)
-        return await self._background_status_locked(runtime, info.instance_id, entry)
+        """Return the live status of one tracked background process.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager.get_background_status``.
+        """
+        return await self._background.get_background_status(workspace_id, process_id)
 
     async def list_background_processes(
         self,
         workspace_id: uuid.UUID,
     ) -> list[dict[str, Any]]:
-        """Return live statuses for all tracked background processes."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with self._background_lock:
-            entries = list(self._background_processes.get(workspace_id, {}).values())
-        results: list[dict[str, Any]] = []
-        for entry in entries:
-            status = await self._background_status_locked(
-                runtime, info.instance_id, entry
-            )
-            results.append(
-                {
-                    **status,
-                    "command": entry.command,
-                    "workdir": entry.workdir,
-                    "log_path": entry.log_path,
-                    "name": entry.name,
-                    "started_at": entry.started_at.isoformat(),
-                }
-            )
-        return results
+        """Return live statuses for all tracked background processes.
+
+        Step 3: thin facade over
+        ``BackgroundProcessManager.list_background_processes``.
+        """
+        return await self._background.list_background_processes(workspace_id)
 
     async def stop_background_process(
         self,
@@ -1177,87 +1078,10 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Stop a tracked background process and drop it from tracking.
 
-        Sends SIGTERM, waits up to a short grace period, then escalates to
-        SIGKILL. Already exited processes are cleaned up and reported as
-        exited.
+        Step 3: thin facade over
+        ``BackgroundProcessManager.stop_background_process``.
         """
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with self._background_lock:
-            entry = self._get_background_entry(workspace_id, process_id)
-
-        if not await self._probe_background_pid(runtime, info.instance_id, entry.pid):
-            exit_code = await self._read_background_exit_code(
-                runtime, info.instance_id, entry.exit_path
-            )
-            async with self._background_lock:
-                self._background_processes.get(workspace_id, {}).pop(
-                    entry.process_id, None
-                )
-            logger.info(
-                "background_process_already_exited",
-                workspace_id=str(workspace_id),
-                process_id=entry.process_id,
-                exit_code=exit_code,
-            )
-            return {
-                "process_id": entry.process_id,
-                "stopped": False,
-                "status": "exited" if exit_code is not None else "unknown",
-                "exit_code": exit_code,
-                "pid": entry.pid,
-            }
-
-        await self._kill_background_pid(runtime, info.instance_id, entry.pid, "TERM")
-        elapsed = 0.0
-        stopped = False
-        while elapsed <= _BACKGROUND_STOP_GRACE_S:
-            if not await self._probe_background_pid(
-                runtime, info.instance_id, entry.pid
-            ):
-                stopped = True
-                break
-            await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
-            elapsed += _BACKGROUND_STOP_POLL_S
-        if not stopped:
-            await self._kill_background_pid(
-                runtime, info.instance_id, entry.pid, "KILL"
-            )
-            # Same grace poll as after TERM: the wrapper's exit file is
-            # only written once the shell actually dies, so wait for the
-            # PID to disappear before reading it (avoids "unknown" with
-            # a lost exit code on fast kills).
-            elapsed = 0.0
-            while elapsed <= _BACKGROUND_STOP_GRACE_S:
-                if not await self._probe_background_pid(
-                    runtime, info.instance_id, entry.pid
-                ):
-                    break
-                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
-                elapsed += _BACKGROUND_STOP_POLL_S
-            stopped = True
-        exit_code = await self._read_background_exit_code(
-            runtime, info.instance_id, entry.exit_path
-        )
-        async with self._background_lock:
-            self._background_processes.get(workspace_id, {}).pop(
-                entry.process_id, None
-            )
-        logger.info(
-            "background_process_stopped",
-            workspace_id=str(workspace_id),
-            process_id=entry.process_id,
-            pid=entry.pid,
-        )
-        return {
-            "process_id": entry.process_id,
-            "stopped": stopped,
-            "status": "exited" if exit_code is not None else "unknown",
-            "exit_code": exit_code,
-            "pid": entry.pid,
-        }
+        return await self._background.stop_background_process(workspace_id, process_id)
 
     async def _kill_all_background_processes(
         self,
@@ -1267,110 +1091,11 @@ class WorkspaceService:
     ) -> None:
         """Best-effort kill of every tracked process for a workspace.
 
-        Mirrors the single-stop protocol per PID: SIGTERM, a grace poll,
-        then SIGKILL for survivors, followed by one verification probe.
-        Tracking is dropped only after the kill attempt ran; when the
-        workspace/runtime is gone there is nothing left to signal, so
-        tracking is dropped as well (only a runtime stop/remove can
-        guarantee death in that case — both callers do exactly that).
+        Step 3: thin facade over
+        ``BackgroundProcessManager._kill_all_background_processes``.
         """
-        async with self._background_lock:
-            entries = list(self._background_processes.get(workspace_id, {}).values())
-        if not entries:
-            return
-        kill_attempted = False
-        info = self._cache.get(workspace_id)
-        runtime = self._runtimes.get(info.runtime_type) if info else None
-        if info is None or runtime is None or not info.instance_id:
-            logger.warning(
-                "background_processes_kill_skipped",
-                workspace_id=str(workspace_id),
-                reason=reason,
-            )
-        else:
-            kill_attempted = True
-            for entry in entries:
-                try:
-                    if await self._probe_background_pid(
-                        runtime, info.instance_id, entry.pid
-                    ):
-                        await self._kill_background_pid(
-                            runtime, info.instance_id, entry.pid, "TERM"
-                        )
-                except Exception:
-                    logger.exception(
-                        "background_process_kill_failed",
-                        workspace_id=str(workspace_id),
-                        process_id=entry.process_id,
-                        reason=reason,
-                    )
-            # Grace between TERM and KILL (the single-stop protocol).
-            elapsed = 0.0
-            while elapsed <= _BACKGROUND_STOP_GRACE_S:
-                try:
-                    alive = [
-                        entry
-                        for entry in entries
-                        if await self._probe_background_pid(
-                            runtime, info.instance_id, entry.pid
-                        )
-                    ]
-                except Exception:
-                    logger.exception(
-                        "background_process_kill_failed",
-                        workspace_id=str(workspace_id),
-                        reason=reason,
-                    )
-                    alive = list(entries)
-                if not alive:
-                    break
-                await asyncio.sleep(_BACKGROUND_STOP_POLL_S)
-                elapsed += _BACKGROUND_STOP_POLL_S
-            for entry in entries:
-                try:
-                    if await self._probe_background_pid(
-                        runtime, info.instance_id, entry.pid
-                    ):
-                        await self._kill_background_pid(
-                            runtime, info.instance_id, entry.pid, "KILL"
-                        )
-                except Exception:
-                    logger.exception(
-                        "background_process_kill_failed",
-                        workspace_id=str(workspace_id),
-                        process_id=entry.process_id,
-                        reason=reason,
-                    )
-            # Final verification: log survivors instead of silently
-            # dropping them — a setsid grandchild with its own session
-            # can escape even the group kill.
-            for entry in entries:
-                try:
-                    if await self._probe_background_pid(
-                        runtime, info.instance_id, entry.pid
-                    ):
-                        logger.warning(
-                            "background_process_survived_kill_all",
-                            workspace_id=str(workspace_id),
-                            process_id=entry.process_id,
-                            pid=entry.pid,
-                            reason=reason,
-                        )
-                except Exception:
-                    logger.exception(
-                        "background_process_kill_failed",
-                        workspace_id=str(workspace_id),
-                        process_id=entry.process_id,
-                        reason=reason,
-                    )
-        async with self._background_lock:
-            self._background_processes.pop(workspace_id, None)
-        logger.info(
-            "background_processes_killed",
-            workspace_id=str(workspace_id),
-            count=len(entries),
-            reason=reason,
-            kill_attempted=kill_attempted,
+        await self._background._kill_all_background_processes(
+            workspace_id, reason=reason
         )
 
     # -- cache management --------------------------------------------------
@@ -1378,124 +1103,59 @@ class WorkspaceService:
     async def sync_from_runtime(self) -> None:
         """Rebuild the in-memory cache from live runtime state.
 
-        Called at startup and can be called periodically to reconcile
-        the cache with actual runtime state (e.g. workspaces killed
-        externally).  Queries all registered runtime backends.
+        Step 8: thin facade over the canonical ``WorkspaceRegistry``
+        (``src.services.workspace_registry``).
         """
-        new_cache: dict[uuid.UUID, WorkspaceInfo] = {}
-
-        for runtime_type, runtime in self._runtimes.items():
-            infos = await runtime.list_workspaces()
-            for info in infos:
-                try:
-                    ws_id = uuid.UUID(info.workspace_id)
-                except ValueError:
-                    logger.warning(
-                        "skipping_invalid_workspace_id",
-                        raw_id=info.workspace_id,
-                    )
-                    continue
-
-                existing = self._cache.get(ws_id)
-
-                new_cache[ws_id] = WorkspaceInfo(
-                    workspace_id=ws_id,
-                    instance_id=info.instance_id,
-                    status=info.status,
-                    runtime_type=runtime_type,
-                    created_at=(
-                        existing.created_at if existing else datetime.now(timezone.utc)
-                    ),
-                )
-
-        # Preserve "creating" entries that are not yet visible to the runtime.
-        # A workspace in the "creating" state has been registered by the service
-        # layer but runtime.create_workspace() is still in progress (e.g. the
-        # QEMU VM is booting).  Dropping it from the cache would cause the
-        # next heartbeat to omit it and the backend to mark it as failed.
-        for ws_id, existing in self._cache.items():
-            if existing.status == "creating" and ws_id not in new_cache:
-                new_cache[ws_id] = existing
-
-        self._cache = new_cache
-        logger.info(
-            "cache_synced_from_runtime",
-            workspace_count=len(self._cache),
-        )
+        await self._registry.sync_from_runtime()
 
     def _get_cached(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        """Look up a workspace in the cache or raise."""
-        info = self._cache.get(workspace_id)
-        if info is None:
-            raise ValueError(f"Workspace {workspace_id} not found")
-        return info
+        """Look up a workspace in the cache or raise.
+
+        Step 8: thin facade over the canonical ``WorkspaceRegistry``.
+        """
+        return self._registry.get_cached(workspace_id)
 
     def _get_runtime(self, workspace_id: uuid.UUID) -> RuntimeBackend:
-        """Return the runtime backend for a workspace."""
-        info = self._get_cached(workspace_id)
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' not available for "
-                f"workspace {workspace_id}"
-            )
-        return runtime
+        """Return the runtime backend for a workspace.
+
+        Step 8: thin facade over the canonical ``WorkspaceRegistry``.
+        """
+        return self._registry.get_runtime(workspace_id)
 
     def _get_runtime_by_type(self, runtime_type: str) -> RuntimeBackend:
-        """Return the runtime backend by type name."""
-        runtime = self._runtimes.get(runtime_type)
-        if runtime is None:
-            raise RuntimeError(f"Runtime '{runtime_type}' is not enabled")
-        return runtime
+        """Return the runtime backend by type name.
+
+        Step 8: thin facade over the canonical ``WorkspaceRegistry``.
+        """
+        return self._registry.get_runtime_by_type(runtime_type)
 
     @property
     def supported_runtimes(self) -> list[str]:
-        """Return the list of enabled runtime type names."""
-        return list(self._runtimes.keys())
+        """Return the list of enabled runtime type names.
+
+        Step 8: thin facade over the canonical ``WorkspaceRegistry``.
+        """
+        return self._registry.supported_runtimes
+
+    def workspace_exists(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when *workspace_id* is present in the cache.
+
+        Step 8: public read-through to the canonical
+        ``WorkspaceRegistry`` (replaces the private
+        ``service._cache`` poke in the websocket layer).
+        """
+        return self._registry.workspace_exists(workspace_id)
 
     # -- command execution helpers ---------------------------------------------
+    # Step 1: canonical logic lives in ``src.services.exec_kernel``.
 
     def _normalise_command_args(self, raw_args: list[str] | str) -> list[str]:
         """Return command args suitable for runtime execution.
 
-        Commands are primarily modelled as argv lists. However, configure
-        commands are sometimes authored with shell operators (e.g. ``|``,
-        ``&&``) split into individual args. Such operators are treated as
-        literal argv tokens by Docker/SSH exec and therefore fail.
-
-        To keep backend data backwards-compatible, detect shell operators and
-        redirections (including forms with attached targets like
-        ``2>/dev/null``) and route execution through ``bash -lc`` with a safely
-        re-constructed command string.
+        Step 5: thin facade over the canonical ``ExecKernel``
+        (``src.services.exec_kernel``).
         """
-        if isinstance(raw_args, str):
-            return ["bash", "-lc", raw_args]
-
-        args = [str(arg) for arg in raw_args]
-        if (
-            len(args) >= 2
-            and args[0] in {"bash", "sh"}
-            and args[1]
-            in {
-                "-c",
-                "-lc",
-            }
-        ):
-            return args
-
-        if not any(
-            token in _SHELL_OPERATOR_TOKENS or _REDIRECTION_RE.match(token)
-            for token in args
-        ):
-            return args
-
-        command_str = " ".join(
-            token
-            if token in _SHELL_OPERATOR_TOKENS or _REDIRECTION_RE.match(token)
-            else shlex.quote(token)
-            for token in args
-        )
-        return ["bash", "-lc", command_str]
+        return self._exec_kernel.normalise_command_args(raw_args)
 
     async def _exec_command(
         self,
@@ -1513,15 +1173,11 @@ class WorkspaceService:
 
         Returns:
             Tuple of (exit_code, output).
+
+        Step 5: thin facade over the canonical ``ExecKernel``
+        (``src.services.exec_kernel``).
         """
-        wrapped_command = self._wrap_command_with_persistent_env(command)
-        command_args = self._normalise_command_args(wrapped_command["args"])
-        return await runtime.exec_command_wait(
-            instance_id,
-            command=command_args,
-            workdir=wrapped_command.get("workdir"),
-            env=wrapped_command.get("env"),
-        )
+        return await self._exec_kernel.exec_command(runtime, instance_id, command)
 
     async def _exec_command_stream(
         self,
@@ -1539,14 +1195,12 @@ class WorkspaceService:
 
         Yields:
             Raw output lines from the command.
+
+        Step 5: thin facade over the canonical ``ExecKernel``
+        (``src.services.exec_kernel``).
         """
-        wrapped_command = self._wrap_command_with_persistent_env(command)
-        command_args = self._normalise_command_args(wrapped_command["args"])
-        async for line in runtime.exec_command(
-            instance_id,
-            command=command_args,
-            workdir=wrapped_command.get("workdir"),
-            env=wrapped_command.get("env"),
+        async for line in self._exec_kernel.exec_command_stream(
+            runtime, instance_id, command
         ):
             yield line
 
@@ -1557,84 +1211,26 @@ class WorkspaceService:
         files: list[tuple[str, bytes, int]],
     ) -> bytes:
         """Build a tar archive containing multiple files."""
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as tar:
-            for filename, content, mode in files:
-                info = tarfile.TarInfo(name=filename)
-                info.size = len(content)
-                info.mode = mode
-                tar.addfile(info, io.BytesIO(content))
-        return buffer.getvalue()
+        from .services.files import build_tar_entries as _impl
+
+        return _impl(files)
 
     @staticmethod
     def _credential_path_helpers() -> list[str]:
-        """Return shell helper functions used by inject and remove scripts."""
+        """Return shell helper functions used by inject and remove scripts.
 
-        return [
-            'opencuria_credential_home="${HOME:-/root}"',
-            "opencuria_resolve_credential_path() {",
-            '  raw_path="$1"',
-            "  tilde_prefix='~/'",
-            "  home_prefix='${HOME}/'",
-            '  if [ "$raw_path" = "~" ] || [ "$raw_path" = "${HOME}" ] || [ "$raw_path" = "${opencuria_credential_home}" ]; then',
-            '    printf "%s\\n" "$opencuria_credential_home"',
-            "    return",
-            "  fi",
-            '  if [ "${raw_path#"$tilde_prefix"}" != "$raw_path" ]; then',
-            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$tilde_prefix"}"',
-            "    return",
-            "  fi",
-            '  if [ "${raw_path#"$home_prefix"}" != "$raw_path" ]; then',
-            '    printf "%s/%s\\n" "$opencuria_credential_home" "${raw_path#"$home_prefix"}"',
-            "    return",
-            "  fi",
-            '  if [ "${raw_path#/}" != "$raw_path" ]; then',
-            '    printf "%s\\n" "$raw_path"',
-            "    return",
-            "  fi",
-            '  printf "%s/%s\\n" "$opencuria_credential_home" "$raw_path"',
-            "}",
-            "opencuria_strip_environment_block() {",
-            f"  env_file={shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
-            '  if [ ! -f "$env_file" ]; then',
-            "    return",
-            "  fi",
-            "  tmp_env=$(mktemp)",
-            f"  awk '/{WORKSPACE_CREDENTIAL_ENVIRONMENT_START}/{{skip=1}} "
-            f"/{WORKSPACE_CREDENTIAL_ENVIRONMENT_END}/{{skip=0; next}} !skip' "
-            '"$env_file" > "$tmp_env" || true',
-            '  cat "$tmp_env" > "$env_file"',
-            '  rm -f "$tmp_env"',
-            "}",
-        ]
+        Step 5: thin facade over the canonical ``CredentialManager``
+        (``src.services.credentials``).
+        """
+        return CredentialManager._credential_path_helpers()
 
     def _wrap_command_with_persistent_env(self, command: dict) -> dict:
-        """Source persistent workspace credentials before running a command."""
+        """Source persistent workspace credentials before running a command.
 
-        normalised_args = self._normalise_command_args(command["args"])
-        extra_env = command.get("env") or {}
-        extra_exports = "; ".join(
-            f"export {key}={shlex.quote(str(value))}"
-            for key, value in extra_env.items()
-        )
-        source = (
-            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
-            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi"
-        )
-        if extra_exports:
-            source = f"{source}; {extra_exports}"
-        wrapper = f'{source}; exec "$@"'
-        return {
-            **command,
-            "args": [
-                "bash",
-                "-lc",
-                wrapper,
-                "opencuria-exec",
-                *normalised_args,
-            ],
-            "env": {},
-        }
+        Step 5: thin facade over the canonical ``ExecKernel``
+        (``src.services.exec_kernel``).
+        """
+        return self._exec_kernel.wrap_command_with_persistent_env(command)
 
     async def remove_workspace_credentials(
         self,
@@ -1642,48 +1238,14 @@ class WorkspaceService:
         instance_id: str,
         log,
     ) -> None:
-        """Idempotently remove persisted credential material from a workspace."""
+        """Idempotently remove persisted credential material from a workspace.
 
-        cleanup_script = "\n".join(
-            [
-                "#!/bin/sh",
-                "set -eu",
-                *self._credential_path_helpers(),
-                f"manifest={shlex.quote(WORKSPACE_CREDENTIAL_MANIFEST)}",
-                'if [ -f "$manifest" ]; then',
-                '  while IFS= read -r file_path || [ -n "$file_path" ]; do',
-                '    [ -z "$file_path" ] && continue',
-                '    rm -f "$(opencuria_resolve_credential_path "$file_path")"',
-                '  done < "$manifest"',
-                "fi",
-                "opencuria_strip_environment_block",
-                f"rm -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
-                f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
-                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} ]; then",
-                "  tmp_bashrc=$(mktemp)",
-                f"  grep -vxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
-                f'{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)} > "$tmp_bashrc" || true',
-                f'  cat "$tmp_bashrc" > {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}',
-                '  rm -f "$tmp_bashrc"',
-                "fi",
-                "rm -f /root/.ssh/id_ed25519 /root/.ssh/id_ed25519_*",
-                "rm -f /root/.ssh/config /root/.ssh/known_hosts",
-                f"rm -rf {shlex.quote(WORKSPACE_CREDENTIAL_DIR)}",
-                "rm -rf /tmp/opencuria-op-*",
-                "find /var/lib/cloud/instances -type f "
-                "\\( -name 'user-data.txt' -o -name 'user-data.txt.i' "
-                "-o -name 'cloud-config.txt' -o -path '*/scripts/runcmd' \\) "
-                "-delete 2>/dev/null || true",
-            ]
+        Step 5: thin facade over the canonical ``CredentialManager``
+        (``src.services.credentials``).
+        """
+        await self._credentials_manager.remove_workspace_credentials(
+            runtime, instance_id, log
         )
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", cleanup_script],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to remove workspace credentials: {output}")
-        log.info("workspace_credentials_removed")
 
     async def inject_workspace_credentials(
         self,
@@ -1698,175 +1260,24 @@ class WorkspaceService:
 
         Returns True when credential material was written, False when the
         workspace has no attached secrets after a clean remove.
+
+        Step 5: thin facade over the canonical ``CredentialManager``
+        (``src.services.credentials``). The leading remove goes through
+        this facade's own (overridable/mockable)
+        ``remove_workspace_credentials`` first — exactly like the
+        pre-Step-5 logic — then the manager's ``_inject_after_remove``
+        materializes the remainder verbatim.
         """
-
         await self.remove_workspace_credentials(runtime, instance_id, log)
-
-        env_vars = env_vars or {}
-        credential_files = files or []
-        ssh_keys = ssh_keys or []
-        if not env_vars and not credential_files and not ssh_keys:
-            return False
-
-        staging_dir = WORKSPACE_CREDENTIAL_DIR
-        files_dir = f"{staging_dir}/files"
-        ssh_dir = f"{staging_dir}/ssh"
-        install_path = f"{staging_dir}/install.sh"
-        archive_files: list[tuple[str, bytes, int]] = []
-        installed_paths: list[str] = [
-            WORKSPACE_CREDENTIAL_ENV_FILE,
-            WORKSPACE_CREDENTIAL_PROFILE_D,
-            WORKSPACE_CREDENTIAL_MANIFEST,
-        ]
-        helper_lines = self._credential_path_helpers()
-        install_lines = [
-            "#!/bin/sh",
-            "set -eu",
-            *helper_lines,
-            f"mkdir -p {shlex.quote(WORKSPACE_CREDENTIAL_DIR)} /root/.ssh /etc/profile.d",
-            f"install -m 600 {shlex.quote(staging_dir + '/env.sh')} "
-            f"{shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}",
-            f"install -m 644 {shlex.quote(staging_dir + '/profile.d.sh')} "
-            f"{shlex.quote(WORKSPACE_CREDENTIAL_PROFILE_D)}",
-            "opencuria_strip_environment_block",
-            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_START)} "
-            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}",
-        ]
-
-        env_export_lines = [
-            "#!/bin/sh",
-            'export PATH="/root/.local/bin:$PATH"',
-        ]
-        for key, value in env_vars.items():
-            env_export_lines.append(f"export {key}={shlex.quote(str(value))}")
-            install_lines.append(
-                "printf '%s\\n' "
-                f"{shlex.quote(f'{key}={value}')} "
-                f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
-            )
-        install_lines.append(
-            f"printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT_END)} "
-            f">> {shlex.quote(WORKSPACE_CREDENTIAL_ENVIRONMENT)}"
+        return await self._credentials_manager._inject_after_remove(
+            runtime, instance_id, env_vars, files, ssh_keys, log
         )
-        archive_files.append(
-            ("env.sh", ("\n".join(env_export_lines) + "\n").encode("utf-8"), 0o600)
-        )
-        archive_files.append(
-            (
-                "profile.d.sh",
-                (f"{WORKSPACE_CREDENTIAL_BASHRC_LINE}\n").encode("utf-8"),
-                0o644,
-            )
-        )
-
-        install_lines.extend(
-            [
-                f"touch {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
-                f"if ! grep -qxF {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
-                f"{shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}; then",
-                f"  printf '%s\\n' {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC_LINE)} "
-                f">> {shlex.quote(WORKSPACE_CREDENTIAL_BASHRC)}",
-                "fi",
-            ]
-        )
-
-        for index, credential_file in enumerate(credential_files, start=1):
-            source_relpath = f"files/credential_{index}"
-            source_abspath = f"{files_dir}/credential_{index}"
-            target_path = str(credential_file["target_path"])
-            mode = int(credential_file.get("mode", 0o600))
-            content = str(credential_file.get("content", ""))
-            archive_files.append((source_relpath, content.encode("utf-8"), 0o600))
-            install_lines.extend(
-                [
-                    "target_path=$(opencuria_resolve_credential_path "
-                    f"{shlex.quote(target_path)})",
-                    'mkdir -p "$(dirname "$target_path")"',
-                    f'install -m {mode:o} {shlex.quote(source_abspath)} "$target_path"',
-                ]
-            )
-            installed_paths.append(target_path)
-
-        if ssh_keys:
-            config_lines = [
-                "Host *",
-                "    StrictHostKeyChecking accept-new",
-                "    UserKnownHostsFile /root/.ssh/known_hosts",
-                "    IdentitiesOnly yes",
-            ]
-            for index, key_pem in enumerate(ssh_keys):
-                key_name = "id_ed25519" if index == 0 else f"id_ed25519_{index + 1}"
-                archive_files.append(
-                    (
-                        f"ssh/{key_name}",
-                        key_pem.rstrip().encode("utf-8") + b"\n",
-                        0o600,
-                    )
-                )
-                install_lines.append(
-                    f"install -m 600 {shlex.quote(ssh_dir + '/' + key_name)} "
-                    f"{shlex.quote('/root/.ssh/' + key_name)}"
-                )
-                config_lines.append(f"    IdentityFile /root/.ssh/{key_name}")
-                installed_paths.append(f"/root/.ssh/{key_name}")
-            archive_files.append(("ssh/known_hosts", b"", 0o600))
-            archive_files.append(
-                (
-                    "ssh/config",
-                    ("\n".join(config_lines) + "\n").encode("utf-8"),
-                    0o600,
-                )
-            )
-            install_lines.extend(
-                [
-                    f"install -m 600 {shlex.quote(ssh_dir + '/config')} /root/.ssh/config",
-                    f"install -m 600 {shlex.quote(ssh_dir + '/known_hosts')} "
-                    "/root/.ssh/known_hosts",
-                ]
-            )
-            installed_paths.extend(["/root/.ssh/config", "/root/.ssh/known_hosts"])
-
-        manifest = "".join(f"{path}\n" for path in installed_paths)
-        archive_files.append(("manifest", manifest.encode("utf-8"), 0o600))
-        archive_files.append(
-            ("install.sh", ("\n".join(install_lines) + "\n").encode("utf-8"), 0o700)
-        )
-
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=[
-                "mkdir",
-                "-p",
-                staging_dir,
-                f"{staging_dir}/files",
-                f"{staging_dir}/ssh",
-            ],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            raise RuntimeError(
-                f"Failed to create credential staging directory: {output}"
-            )
-
-        archive_data = self._build_tar_entries(archive_files)
-        await runtime.put_archive(instance_id, staging_dir, archive_data)
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["sh", "-lc", f". {shlex.quote(install_path)}"],
-            workdir="/root",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to inject workspace credentials: {output}")
-
-        log.info(
-            "workspace_credentials_injected",
-            has_env=bool(env_vars),
-            file_count=len(credential_files),
-            ssh_key_count=len(ssh_keys),
-        )
-        return True
 
     # -- workspace lifecycle ---------------------------------------------------
+    # Step 8: canonical orchestration lives in ``WorkspaceLifecycle``
+    # (``src.services.workspace_lifecycle``); the composer exposes it
+    # via ``lifecycle``. These stay as thin delegates with identical
+    # signatures so websocket handlers, main.py and tests keep working.
 
     async def create_workspace(
         self,
@@ -1884,140 +1295,28 @@ class WorkspaceService:
     ) -> tuple[uuid.UUID, bool]:
         """Create a new workspace, inject credentials, and clone repos.
 
-        Args:
-            repos: Git repository URLs to clone into the workspace.
-            env_vars: Environment variables persisted in the workspace
-                until a controlled stop.
-            files: Credential files persisted in the workspace until a
-                controlled stop.
-            ssh_keys: SSH private keys persisted in the workspace until a
-                controlled stop.
-            workspace_id: Workspace ID assigned by the backend.
-            runtime_type: Which runtime to use (``"docker"`` or ``"qemu"``).
-
-        Returns the workspace UUID and whether credentials were injected.
+        Step 8: thin facade over ``WorkspaceLifecycle.create_workspace``.
         """
-        if workspace_id is None:
-            workspace_id = uuid.uuid4()
-
-        runtime = self._get_runtime_by_type(runtime_type)
-
-        log = logger.bind(
-            workspace_id=str(workspace_id),
-            runtime=runtime_type,
-        )
-        log.info("creating_workspace", repos=repos)
-
-        # Build runtime-appropriate config
-        if runtime_type == "docker":
-            if not image_tag:
-                raise RuntimeError("Docker workspace creation requires an image tag")
-            volume_name = f"opencuria-workspace-{workspace_id}"
-            config = WorkspaceConfig(
-                workspace_id=str(workspace_id),
-                image=image_tag,
-                env_vars={},
-                volumes={volume_name: {"bind": "/workspace", "mode": "rw"}},
-                network=self._settings.docker_network,
-                labels={"opencuria.workspace-id": str(workspace_id)},
-            )
-        else:
-            if not base_image_path:
-                raise RuntimeError("QEMU workspace creation requires a base image path")
-            # QEMU — image is base QCOW2 path, no Docker volumes
-            config = WorkspaceConfig(
-                workspace_id=str(workspace_id),
-                image=base_image_path,
-                env_vars={},
-                network=self._settings.qemu_network,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-                labels={"opencuria.workspace-id": str(workspace_id)},
-            )
-
-        # Register a "creating" cache entry *before* calling
-        # runtime.create_workspace() so that heartbeat syncs during VM boot
-        # (which can take 60 s+ for QEMU) do not drop this workspace and
-        # cause the backend to mark it as failed.  instance_id is unknown at
-        # this point — it will be updated once create_workspace() returns.
-        self._cache[workspace_id] = WorkspaceInfo(
+        return await self._lifecycle.create_workspace(
+            repos,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+            env_vars=env_vars,
+            files=files,
+            ssh_keys=ssh_keys,
             workspace_id=workspace_id,
-            instance_id="",
-            status="creating",
             runtime_type=runtime_type,
+            image_tag=image_tag,
+            base_image_path=base_image_path,
         )
-
-        try:
-            instance_id = await runtime.create_workspace(config)
-        except Exception:
-            log.exception("workspace_creation_failed")
-            self._cache.pop(workspace_id, None)
-            raise
-
-        # Update cache with the real instance_id now that the runtime has assigned it.
-        self._cache[workspace_id] = WorkspaceInfo(
-            workspace_id=workspace_id,
-            instance_id=instance_id,
-            status="creating",
-            runtime_type=runtime_type,
-        )
-
-        credentials_present = await self.inject_workspace_credentials(
-            runtime,
-            instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
-        )
-
-        for repo_url in repos:
-            log.info("cloning_repo", repo=repo_url)
-            exit_code, output = await self._exec_command(
-                runtime,
-                instance_id,
-                {
-                    "args": ["git", "clone", repo_url],
-                    "workdir": "/workspace",
-                    "env": {},
-                    "description": f"Clone repository: {repo_url}",
-                },
-            )
-            if exit_code != 0:
-                log.warning("repo_clone_failed", repo=repo_url, output=output)
-            else:
-                log.info("repo_cloned", repo=repo_url)
-
-        self._cache[workspace_id].status = "running"
-
-        log.info("workspace_ready", credentials_present=credentials_present)
-        return workspace_id, credentials_present
 
     async def stop_workspace(self, workspace_id: uuid.UUID) -> bool:
         """Remove credentials then stop a running workspace.
 
-        Returns False because credentials are stripped before the instance
-        is stopped. Raises if credential removal fails so the workspace
-        stays running with secrets still present.
+        Step 8: thin facade over ``WorkspaceLifecycle.stop_workspace``.
         """
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-
-        await self.remove_workspace_credentials(runtime, info.instance_id, log)
-        await self._kill_all_background_processes(workspace_id, reason="stop")
-        await self.close_workspace_streams(workspace_id, reason="stop")
-        await self.release_desktop(
-            workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
-        )
-        await runtime.stop_workspace(info.instance_id)
-        info.status = "exited"
-        log.info("workspace_stopped")
-        return False
+        return await self._lifecycle.stop_workspace(workspace_id)
 
     async def resume_workspace(
         self,
@@ -2029,41 +1328,19 @@ class WorkspaceService:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> bool:
-        """Resume a stopped workspace and re-inject persistent credentials."""
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
+        """Resume a stopped workspace and re-inject persistent credentials.
 
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-
-        if info.runtime_type == "qemu":
-            if (
-                qemu_vcpus is None
-                or qemu_memory_mb is None
-                or qemu_disk_size_gb is None
-            ):
-                raise RuntimeError("Missing QEMU resource settings for resume")
-            await runtime.reconfigure_workspace(
-                info.instance_id,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-                restart=False,
-            )
-
-        await runtime.start_workspace(info.instance_id)
-        info.status = "running"
-        credentials_present = await self.inject_workspace_credentials(
-            runtime,
-            info.instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
+        Step 8: thin facade over ``WorkspaceLifecycle.resume_workspace``.
+        """
+        return await self._lifecycle.resume_workspace(
+            workspace_id,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+            env_vars=env_vars,
+            files=files,
+            ssh_keys=ssh_keys,
         )
-        log.info("workspace_resumed", credentials_present=credentials_present)
-        return credentials_present
 
     async def inject_credentials(
         self,
@@ -2072,19 +1349,12 @@ class WorkspaceService:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> bool:
-        """Replace persistent credentials on a running workspace."""
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        return await self.inject_workspace_credentials(
-            runtime,
-            info.instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
+        """Replace persistent credentials on a running workspace.
+
+        Step 8: thin facade over ``WorkspaceLifecycle.inject_credentials``.
+        """
+        return await self._lifecycle.inject_credentials(
+            workspace_id, env_vars=env_vars, files=files, ssh_keys=ssh_keys
         )
 
     async def update_workspace_resources(
@@ -2095,498 +1365,123 @@ class WorkspaceService:
         qemu_memory_mb: int,
         qemu_disk_size_gb: int,
     ) -> None:
-        """Reconfigure resources for an existing QEMU workspace."""
-        info = self._get_cached(workspace_id)
-        if info.runtime_type != "qemu":
-            raise RuntimeError(
-                "Workspace runtime does not support resource reconfiguration"
-            )
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        # Reconfigure restarts the VM: all in-workspace stream processes
-        # die with it, so close the tracked sessions first.
-        await self.close_workspace_streams(
-            workspace_id, reason="reconfigure_resources"
-        )
-        await runtime.reconfigure_workspace(
-            info.instance_id,
+        """Reconfigure resources for an existing QEMU workspace.
+
+        Step 8: thin facade over
+        ``WorkspaceLifecycle.update_workspace_resources``.
+        """
+        await self._lifecycle.update_workspace_resources(
+            workspace_id,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
-            restart=True,
         )
-        # The VM rebooted: every RAM process is dead, so drop tracking.
-        # Keeping entries would report stale exited rows and risk
-        # signalling a reused foreign PID after the reboot.
-        await self._drop_background_tracking(
-            workspace_id, reason="reconfigure_resources"
-        )
-        info.status = "running"
 
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove a workspace and clean up resources.
 
-        The per-workspace desktop lock is acquired first and held across
-        the entire desktop-state/cache transition (recording interrupt
-        while the cache is still available, then cache pop plus
-        session/recording clear with no lock release in between). A
-        concurrent ensure/start holding the lock therefore completes
-        first; remove only pops the cache afterwards. A queued start/hold
-        acquiring the same retained lock afterwards finds no cache entry
-        and fails cleanly instead of resurrecting a session. The lock
-        object itself is kept for the process lifetime (never dropped) so
-        queued waiters and later callers always share one serialising
-        lock. Runtime removal runs after the lock is released: it must
-        never block behind a stuck Xvnc start while holding the desktop
-        lock. ``_interrupt_desktop_recordings``/``_exec_desktop_shell``
-        take no desktop lock and are awaited while holding it;
-        correctness wins over head-of-line blocking (runtime commands
-        have their own limits). Recording-interrupt errors still clear
-        state and attempt runtime removal.
+        Step 8: thin facade over ``WorkspaceLifecycle.remove_workspace``.
         """
-        log = logger.bind(workspace_id=str(workspace_id))
-        await self.close_workspace_streams(workspace_id, reason="remove")
-        await self._kill_all_background_processes(workspace_id, reason="remove")
-        lock = await self._desktop_lock(workspace_id)
-        async with lock:
-            # Interrupt while the cache is still available:
-            # _exec_desktop_shell needs _get_cached, so popping first
-            # would turn every interrupt into a "not found" failure.
-            # _interrupt_desktop_recordings already swallows per-command
-            # errors and clears the recordings dict; the outer guard only
-            # covers unexpected failures so state clear + runtime remove
-            # still run.
-            try:
-                await self._interrupt_desktop_recordings(workspace_id)
-            except Exception:
-                logger.exception(
-                    "desktop_recording_interrupt_failed",
-                    workspace_id=str(workspace_id),
-                )
-            info = self._cache.pop(workspace_id, None)
-            self._desktop_sessions.pop(workspace_id, None)
-            # Final sweep for entries added during the interrupt awaits
-            # (record_start is lock-free); still under the same hold, so
-            # no waiter could publish a session in between.
-            self._desktop_recordings = {
-                key: value
-                for key, value in self._desktop_recordings.items()
-                if key[0] != workspace_id
-            }
-
-        if info and info.instance_id:
-            runtime = self._runtimes.get(info.runtime_type)
-            if runtime:
-                await runtime.remove_workspace(info.instance_id)
-
-        log.info("workspace_removed")
+        await self._lifecycle.remove_workspace(workspace_id)
 
     async def cleanup_unknown_workspace(self, workspace_id: uuid.UUID) -> bool:
         """Best-effort cleanup for a runtime workspace unknown to the backend.
 
-        Returns ``True`` when a cached runtime instance was found and cleanup
-        was attempted. Returns ``False`` when the workspace was already absent.
-
-        Same atomicity as :meth:`remove_workspace`: the desktop lock is
-        held across recording interrupt (cache still available), cache pop
-        (plus unreachable-timer pop), and session/recording clear, with no
-        release in between. The lock object is retained afterwards (never
-        dropped) so queued waiters keep sharing one lock object.
+        Step 8: thin facade over
+        ``WorkspaceLifecycle.cleanup_unknown_workspace``.
         """
-        log = logger.bind(workspace_id=str(workspace_id))
-        await self.close_workspace_streams(
-            workspace_id, reason="cleanup_unknown"
-        )
-        await self._kill_all_background_processes(
-            workspace_id, reason="cleanup_unknown"
-        )
-        lock = await self._desktop_lock(workspace_id)
-        async with lock:
-            # Same ordering as remove_workspace: interrupt while the cache
-            # is still available (per-command errors are swallowed inside
-            # the helper; the guard only covers unexpected failures), then
-            # pop and sweep with no lock release in between.
-            try:
-                await self._interrupt_desktop_recordings(workspace_id)
-            except Exception:
-                logger.exception(
-                    "desktop_recording_interrupt_failed",
-                    workspace_id=str(workspace_id),
-                )
-            info = self._cache.pop(workspace_id, None)
-            self._unreachable_since.pop(workspace_id, None)
-            self._desktop_sessions.pop(workspace_id, None)
-            self._desktop_recordings = {
-                key: value
-                for key, value in self._desktop_recordings.items()
-                if key[0] != workspace_id
-            }
-
-        if info is None:
-            log.info("unknown_workspace_already_absent")
-            return False
-
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' not available for cleanup"
-            )
-
-        if info.instance_id:
-            await runtime.remove_workspace(info.instance_id)
-
-        log.warning(
-            "unknown_workspace_cleaned",
-            runtime_type=info.runtime_type,
-            instance_id=info.instance_id,
-        )
-        return True
+        return await self._lifecycle.cleanup_unknown_workspace(workspace_id)
 
     # -- self-healing SSH health check -----------------------------------------
+    # Step 8: canonical logic lives in ``WorkspaceLifecycle``. Delegates
+    # below preserve the public/private names for registry wiring and
+    # health-loop callers.
 
     async def _check_workspace_reachable(
         self, workspace_id: uuid.UUID, info: WorkspaceInfo
     ) -> bool:
         """Return True if the workspace responds to a lightweight exec probe.
 
-        Uses a short timeout so the loop does not block for a long time.
+        Step 8: thin facade over
+        ``WorkspaceLifecycle._check_workspace_reachable``.
         """
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None or not info.instance_id:
-            return True  # cannot check — assume reachable to avoid false restarts
-
-        try:
-            exit_code, _ = await asyncio.wait_for(
-                runtime.exec_command_wait(
-                    info.instance_id,
-                    command=["echo", "ok"],
-                ),
-                timeout=15,
-            )
-            return exit_code == 0
-        except Exception:
-            return False
+        return await self._lifecycle._check_workspace_reachable(workspace_id, info)
 
     async def run_health_check_loop(self) -> None:
         """Periodically probe running workspaces and restart unreachable ones.
 
         Runs indefinitely; cancel the task to stop it.
 
-        A workspace is restarted when it has been continuously unreachable for
-        more than ``settings.ssh_unreachable_timeout`` seconds.  After a
-        restart, the unreachable timer is cleared so the workspace gets a
-        fresh chance to come up.
+        Step 8: thin facade over
+        ``WorkspaceLifecycle.run_health_check_loop``.
         """
-        interval = self._settings.ssh_health_check_interval
-        timeout = self._settings.ssh_unreachable_timeout
+        await self._lifecycle.run_health_check_loop()
 
-        log = logger.bind(loop="health_check")
-        log.info(
-            "health_check_loop_started",
-            check_interval_s=interval,
-            unreachable_timeout_s=timeout,
-        )
-
-        while True:
-            try:
-                await asyncio.sleep(interval)
-
-                # Snapshot the cache — do not hold it across awaits.
-                candidates = [
-                    (ws_id, info)
-                    for ws_id, info in self._cache.items()
-                    if info.status == "running"
-                ]
-
-                for ws_id, info in candidates:
-                    reachable = await self._check_workspace_reachable(ws_id, info)
-
-                    if reachable:
-                        # Clear any existing failure timer.
-                        self._unreachable_since.pop(ws_id, None)
-                        continue
-
-                    # Workspace is unreachable.
-                    first_failure = self._unreachable_since.setdefault(
-                        ws_id, time.monotonic()
-                    )
-                    unreachable_for = time.monotonic() - first_failure
-
-                    log.warning(
-                        "workspace_unreachable",
-                        workspace_id=str(ws_id),
-                        unreachable_for_s=round(unreachable_for),
-                        threshold_s=timeout,
-                    )
-
-                    if unreachable_for >= timeout:
-                        log.error(
-                            "workspace_self_healing_restart",
-                            workspace_id=str(ws_id),
-                            runtime=info.runtime_type,
-                        )
-                        try:
-                            runtime = self._runtimes.get(info.runtime_type)
-                            if runtime and info.instance_id:
-                                # Hard reset kills all in-workspace stream
-                                # processes: close tracked sessions first.
-                                await self.close_workspace_streams(
-                                    ws_id, reason="self_healing_restart"
-                                )
-                                await runtime.restart_workspace(info.instance_id)
-                                # The VM rebooted: drop background tracking
-                                # (RAM processes are dead; stale PIDs must
-                                # never be signalled after a reboot).
-                                await self._drop_background_tracking(
-                                    ws_id, reason="self_healing_restart"
-                                )
-                                # Reset status and clear the failure timer.
-                                if ws_id in self._cache:
-                                    self._cache[ws_id].status = "running"
-                                self._unreachable_since.pop(ws_id, None)
-                                log.info(
-                                    "workspace_self_healed",
-                                    workspace_id=str(ws_id),
-                                )
-                        except Exception:
-                            log.exception(
-                                "workspace_self_heal_failed",
-                                workspace_id=str(ws_id),
-                            )
-
-            except asyncio.CancelledError:
-                log.info("health_check_loop_stopped")
-                break
-            except Exception:
-                log.exception("health_check_loop_error")
+    # -- workspace registry reads ----------------------------------------------
+    # Step 8: canonical cache ownership lives in ``WorkspaceRegistry``
+    # (``src.services.workspace_registry``). Delegates preserve names.
 
     async def list_workspaces(self) -> list[WorkspaceInfo]:
-        """Return all known workspaces, refreshing from the runtime."""
-        await self.sync_from_runtime()
-        return list(self._cache.values())
+        """Return all known workspaces, refreshing from the runtime.
+
+        Step 8: thin facade over ``WorkspaceRegistry.list_workspaces``.
+        """
+        return await self._registry.list_workspaces()
 
     async def get_workspace(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        """Return a single workspace by ID, checking live status."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
+        """Return a single workspace by ID, checking live status.
 
-        # Refresh status from runtime
-        if info.instance_id:
-            try:
-                status = await runtime.get_workspace_status(info.instance_id)
-                info.status = status.status
-            except Exception:
-                info.status = "unknown"
-
-        return info
+        Step 8: thin facade over ``WorkspaceRegistry.get_workspace``.
+        """
+        return await self._registry.get_workspace(workspace_id)
 
     def get_workspace_statuses(self) -> list[dict]:
         """Return lightweight status list for heartbeat reporting.
 
-        Reads from the in-memory cache without hitting the runtime,
-        so it's fast enough for periodic heartbeats.
+        Step 8: thin facade over ``WorkspaceRegistry.get_workspace_statuses``.
         """
-        return [
-            {
-                "workspace_id": str(info.workspace_id),
-                "status": info.status,
-                "runtime_type": info.runtime_type,
-            }
-            for info in self._cache.values()
-        ]
-
-    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
-        """Return whether the cached desktop session still accepts connections."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        exit_code, _ = await runtime.exec_command_wait(
-            info.instance_id,
-            [
-                "sh",
-                "-lc",
-                (
-                    "if command -v python3 >/dev/null 2>&1; then "
-                    'python3 -c "import socket,sys; '
-                    "sock=socket.socket(); sock.settimeout(1); "
-                    "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
-                    'sys.exit(0 if rc == 0 else 1)"; '
-                    "else "
-                    "pgrep -f '^(/usr/bin/)?Xvnc :1|^(/usr/bin/)?Xtigervnc :1' "
-                    ">/dev/null; "
-                    "fi"
-                ),
-            ],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        return exit_code == 0
+        return self._registry.get_workspace_statuses()
 
     async def get_workspace_heartbeat_statuses(self) -> list[dict]:
-        """Return workspace heartbeat payload including live desktop sessions."""
-        payload: list[dict] = []
-        for info in self._cache.values():
-            workspace_id = info.workspace_id
-            item = {
-                "workspace_id": str(workspace_id),
-                "status": info.status,
-                "runtime_type": info.runtime_type,
-            }
+        """Return workspace heartbeat payload including live desktop sessions.
 
-            session = self._desktop_sessions.get(workspace_id)
-            if session is not None:
-                try:
-                    if await self._is_desktop_session_live(workspace_id):
-                        item["desktop"] = self._desktop_heartbeat_payload(
-                            workspace_id, session
-                        )
-                    else:
-                        self._desktop_sessions.pop(workspace_id, None)
-                        item["desktop"] = None
-                        logger.warning(
-                            "desktop_session_pruned_from_cache",
-                            workspace_id=str(workspace_id),
-                        )
-                except Exception:
-                    self._desktop_sessions.pop(workspace_id, None)
-                    item["desktop"] = None
-                    logger.exception(
-                        "desktop_session_health_check_failed",
-                        workspace_id=str(workspace_id),
-                    )
-
-            processes: list[dict[str, Any]] = []
-            for entry in self._background_processes.get(workspace_id, {}).values():
-                try:
-                    info_for_proc = self._cache.get(workspace_id)
-                    runtime_for_proc = (
-                        self._runtimes.get(info_for_proc.runtime_type)
-                        if info_for_proc is not None
-                        else None
-                    )
-                    if info_for_proc is None or runtime_for_proc is None:
-                        raise RuntimeError("runtime unavailable")
-                    if not info_for_proc.instance_id:
-                        raise RuntimeError("no instance assigned")
-                    processes.append(
-                        await self._background_status_locked(
-                            runtime_for_proc,
-                            info_for_proc.instance_id,
-                            entry,
-                        )
-                    )
-                except Exception:
-                    logger.exception(
-                        "background_heartbeat_failed",
-                        workspace_id=str(workspace_id),
-                        process_id=entry.process_id,
-                    )
-                    processes.append(
-                        {
-                            "process_id": entry.process_id,
-                            "status": "unknown",
-                            "exit_code": None,
-                            "pid": entry.pid,
-                        }
-                    )
-            item["processes"] = processes
-
-            payload.append(item)
-
-        return payload
+        Step 8: thin facade over
+        ``WorkspaceRegistry.get_workspace_heartbeat_statuses``.
+        """
+        return await self._registry.get_workspace_heartbeat_statuses()
 
     async def recover_desktop_sessions_from_runtime(self) -> None:
-        """Rebuild in-memory desktop sessions from live runtime state."""
-        for workspace_id, info in self._cache.items():
-            if info.status != "running" or workspace_id in self._desktop_sessions:
-                continue
+        """Rebuild in-memory desktop sessions from live runtime state.
 
-            try:
-                if not await self._is_desktop_session_live(workspace_id):
-                    continue
-            except Exception:
-                logger.exception(
-                    "desktop_session_recovery_failed",
-                    workspace_id=str(workspace_id),
-                )
-                continue
-
-            self._desktop_sessions[workspace_id] = DesktopSession(
-                workspace_id=workspace_id,
-                instance_id=info.instance_id,
-            )
-            logger.info(
-                "desktop_session_recovered",
-                workspace_id=str(workspace_id),
-            )
+        Step 8: thin facade over
+        ``WorkspaceRegistry.recover_desktop_sessions_from_runtime``.
+        """
+        await self._registry.recover_desktop_sessions_from_runtime()
 
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
-        """Collect host-observed metrics for QEMU workspaces."""
-        qemu_runtime = self._runtimes.get("qemu")
-        if qemu_runtime is None:
-            return {}
+        """Collect host-observed metrics for QEMU workspaces.
 
-        get_workspace_usage = getattr(qemu_runtime, "get_workspace_usage", None)
-        if not callable(get_workspace_usage):
-            return {}
-
-        metrics: dict[str, dict[str, Any]] = {}
-        for workspace_id, info in self._cache.items():
-            if info.runtime_type != "qemu":
-                continue
-            try:
-                usage = await get_workspace_usage(info.instance_id)
-            except Exception:
-                logger.exception(
-                    "vm_metrics_collect_failed",
-                    workspace_id=str(workspace_id),
-                )
-                continue
-
-            if usage is None:
-                continue
-
-            metrics[str(workspace_id)] = usage
-
-        return metrics
-
-    async def _desktop_lock(self, workspace_id: uuid.UUID) -> asyncio.Lock:
-        """Return the serialising lock for one workspace desktop lifecycle.
-
-        The entry is created once and retained for the lifetime of the
-        runner process (bounded by ever-seen workspaces; cleared on
-        restart). It is never dropped: dropping after release cannot
-        observe queued waiters via the public ``asyncio.Lock`` API —
-        ``release()`` only schedules the first waiter's wakeup, and the
-        waiter sets its locked state later — so a drop in that window
-        hands a third caller a different lock object while the woken
-        waiter still references the old one, silently breaking
-        serialisation. One small in-memory ``asyncio.Lock`` per workspace
-        is the accepted trade-off for correctness.
+        Step 8: thin facade over ``WorkspaceRegistry.get_vm_metrics``.
         """
-        async with self._desktop_locks_guard:
-            lock = self._desktop_locks.get(workspace_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._desktop_locks[workspace_id] = lock
-            return lock
+        return await self._registry.get_vm_metrics()
 
     # -- interactive terminal --------------------------------------------------
 
     # -- generic stream sessions (process / workspace-local TCP) -----------
+    # Step 3: thin facade over ``StreamManager`` (canonical). State
+    # (``_streams`` / ``_streams_guard``) is owned by the manager and
+    # exposed via property aliases above. NOTE: the canonical
+    # ``_desktop_lock`` lives in the desktop section below (Step 6a) —
+    # the duplicate that used to sit here was removed in Step 8.
 
     @staticmethod
     def _sanitize_stream_connection_id(connection_id: str) -> str:
-        """Validate a stream connection id (opaque, bounded, fail-closed)."""
-        cleaned = (connection_id or "").strip()
-        if (
-            not cleaned
-            or len(cleaned) > 128
-            or "\x00" in cleaned
-            or "\n" in cleaned
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", cleaned)
-        ):
-            raise ValueError(f"Invalid connection_id: {connection_id!r}")
-        return cleaned
+        """Validate a stream connection id (opaque, bounded, fail-closed).
+
+        Step 3: thin facade over
+        ``StreamManager._sanitize_stream_connection_id``.
+        """
+        return StreamManager._sanitize_stream_connection_id(connection_id)
 
     @staticmethod
     def _sanitize_stream_env(
@@ -2594,54 +1489,25 @@ class WorkspaceService:
     ) -> dict[str, str]:
         """Validate explicit stream env (least privilege: no credential sourcing).
 
-        Only explicitly passed entries reach the child; persistent
-        workspace credential files are never sourced for streams.
+        Step 3: thin facade over ``StreamManager._sanitize_stream_env``.
         """
-        if not env:
-            return {}
-        if not isinstance(env, dict) or len(env) > 64:
-            raise ValueError("Invalid stream env")
-        cleaned: dict[str, str] = {}
-        for key, value in env.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ValueError("Invalid stream env entry")
-            if len(key) > 128 or len(value) > 8192:
-                raise ValueError("Invalid stream env entry")
-            if "\x00" in key or "\x00" in value or "\n" in key:
-                raise ValueError("Invalid stream env entry")
-            upper = key.upper()
-            if upper in STREAM_BLOCKED_ENV_EXACT or any(
-                upper.startswith(prefix) for prefix in STREAM_BLOCKED_ENV_PREFIXES
-            ):
-                raise ValueError(f"env var '{key}' is blocked for streams")
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-                raise ValueError(f"Invalid env var name: {key!r}")
-            cleaned[key] = value
-        return cleaned
+        return StreamManager._sanitize_stream_env(env)
 
     @staticmethod
     def _sanitize_stream_command(command: object) -> list[str]:
-        """Validate a stream argv list (never shell-joined)."""
-        if not isinstance(command, list) or not command:
-            raise ValueError("command must be a non-empty argv list")
-        if len(command) > 64:
-            raise ValueError("command has too many args")
-        argv: list[str] = []
-        for part in command:
-            if not isinstance(part, str) or not part or len(part) > 4096:
-                raise ValueError("Invalid command argv entry")
-            if "\x00" in part:
-                raise ValueError("Invalid command argv entry")
-            argv.append(part)
-        return argv
+        """Validate a stream argv list (never shell-joined).
+
+        Step 3: thin facade over ``StreamManager._sanitize_stream_command``.
+        """
+        return StreamManager._sanitize_stream_command(command)
 
     def _stream_count_for_workspace(self, workspace_id: uuid.UUID) -> int:
-        """Return the number of live streams bound to *workspace_id*."""
-        return sum(
-            1
-            for session in self._streams.values()
-            if session.workspace_id == workspace_id and not session.closed
-        )
+        """Return the number of live streams bound to *workspace_id*.
+
+        Step 3: thin facade over
+        ``StreamManager._stream_count_for_workspace``.
+        """
+        return self._streams_manager._stream_count_for_workspace(workspace_id)
 
     async def stream_start_process(
         self,
@@ -2653,56 +1519,11 @@ class WorkspaceService:
     ) -> StreamSession:
         """Spawn a workspace-bound stdio process stream (least-privilege env).
 
-        The slot (id + per-workspace limit) is reserved under the guard,
-        but the slow ``spawn_process`` runs *outside* the guard so one
-        slow spawn never head-of-line-blocks other stream operations.
-        A spawn failure rolls the reservation back; a close racing the
-        spawn releases the just-spawned process instead of leaking it.
+        Step 3: thin facade over ``StreamManager.stream_start_process``.
         """
-        conn_id = self._sanitize_stream_connection_id(connection_id)
-        argv = self._sanitize_stream_command(command)
-        clean_env = self._sanitize_stream_env(env)
-        safe_workdir = self._sanitize_exec_workdir(workdir or "/workspace")
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with self._streams_guard:
-            if conn_id in self._streams:
-                raise ValueError(f"Duplicate connection_id: {conn_id!r}")
-            if self._stream_count_for_workspace(workspace_id) >= (
-                STREAM_MAX_PER_WORKSPACE
-            ):
-                raise ValueError("too many streams for workspace")
-            # Placeholder reservation (handle=None until spawn commits).
-            self._streams[conn_id] = StreamSession(
-                connection_id=conn_id,
-                workspace_id=workspace_id,
-                kind="process",
-                handle=None,
-                runtime=runtime,
-            )
-        try:
-            handle = await runtime.spawn_process(
-                info.instance_id,
-                command=argv,
-                workdir=safe_workdir,
-                env=clean_env,
-            )
-        except Exception:
-            async with self._streams_guard:
-                reserved = self._streams.get(conn_id)
-                if reserved is not None and reserved.handle is None:
-                    del self._streams[conn_id]
-            raise
-        async with self._streams_guard:
-            reserved = self._streams.get(conn_id)
-            if reserved is not None and reserved.handle is None:
-                reserved.handle = handle
-                return reserved
-        with contextlib.suppress(Exception):
-            await runtime.process_close(handle)
-        raise ValueError(f"Duplicate connection_id: {conn_id!r}")
+        return await self._streams_manager.stream_start_process(
+            workspace_id, connection_id, command, workdir=workdir, env=env
+        )
 
     async def stream_start_tcp(
         self,
@@ -2715,111 +1536,40 @@ class WorkspaceService:
     ) -> StreamSession:
         """Open a workspace-local TCP stream via the static in-workspace relay.
 
-        Slot reservation + spawn-outside-guard mirrors
-        :meth:`stream_start_process` (see there for the race protocol).
+        Step 3: thin facade over ``StreamManager.stream_start_tcp``.
         """
-        conn_id = self._sanitize_stream_connection_id(connection_id)
-        clean_host = _validate_stream_host(host)
-        clean_port = _validate_stream_port(port)
-        use_tls = bool(tls)
-        sni = (server_hostname or "").strip() or clean_host
-        if len(sni) > 255 or "\x00" in sni or "\n" in sni:
-            raise ValueError(f"Invalid server_hostname: {server_hostname!r}")
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        relay_argv = [
-            "python3",
-            "-u",
-            "-c",
-            TCP_RELAY_CODE,
-            "--",
-            clean_host,
-            str(clean_port),
-            "1" if use_tls else "0",
-            sni,
-        ]
-        async with self._streams_guard:
-            if conn_id in self._streams:
-                raise ValueError(f"Duplicate connection_id: {conn_id!r}")
-            if self._stream_count_for_workspace(workspace_id) >= (
-                STREAM_MAX_PER_WORKSPACE
-            ):
-                raise ValueError("too many streams for workspace")
-            self._streams[conn_id] = StreamSession(
-                connection_id=conn_id,
-                workspace_id=workspace_id,
-                kind="tcp",
-                handle=None,
-                runtime=runtime,
-            )
-        try:
-            handle = await runtime.spawn_process(
-                info.instance_id,
-                command=relay_argv,
-                workdir="/workspace",
-                env={},
-            )
-        except Exception as exc:
-            async with self._streams_guard:
-                reserved = self._streams.get(conn_id)
-                if reserved is not None and reserved.handle is None:
-                    del self._streams[conn_id]
-            raise RuntimeError(
-                "workspace python3 relay unavailable: "
-                f"{exc}. The workspace image needs python3 for TCP streams."
-            ) from exc
-        async with self._streams_guard:
-            reserved = self._streams.get(conn_id)
-            if reserved is not None and reserved.handle is None:
-                reserved.handle = handle
-                return reserved
-        with contextlib.suppress(Exception):
-            await runtime.process_close(handle)
-        raise ValueError(f"Duplicate connection_id: {conn_id!r}")
+        return await self._streams_manager.stream_start_tcp(
+            workspace_id,
+            connection_id,
+            host,
+            port,
+            tls=tls,
+            server_hostname=server_hostname,
+        )
 
     def get_stream(self, connection_id: str) -> StreamSession:
         """Return the live session for *connection_id* or raise.
 
-        Sessions still reserving their spawn (``handle is None``) are
-        not yet usable and report as unknown — callers retry after the
-        start ACK instead of observing a half-open handle.
-
-        Public (workspace-scoped callers such as the websocket layer use
-        this instead of reaching into ``_streams``).
+        Step 3: thin facade over ``StreamManager.get_stream``.
         """
-        conn_id = self._sanitize_stream_connection_id(connection_id)
-        session = self._streams.get(conn_id)
-        if session is None or session.closed or session.handle is None:
-            raise ValueError(f"Unknown stream: {conn_id!r}")
-        return session
+        return self._streams_manager.get_stream(connection_id)
 
     def _get_stream(self, connection_id: str) -> StreamSession:
-        """Back-compat alias for :meth:`get_stream`."""
-        return self.get_stream(connection_id)
+        """Back-compat alias for :meth:`get_stream`.
+
+        Step 3: thin facade over ``StreamManager._get_stream``.
+        """
+        return self._streams_manager._get_stream(connection_id)
 
     async def stream_read(
         self, connection_id: str, stream: str = "stdout"
     ) -> AsyncIterator[tuple[str, bytes]]:
-        """Yield ``(stream, data)`` chunks until the stream ends (EOF)."""
-        session = self.get_stream(connection_id)
-        while True:
-            stdout_data = await session.runtime.process_read(
-                session.handle, "stdout", STREAM_CHUNK_SIZE
-            )
-            stderr_data = await session.runtime.process_read(
-                session.handle, "stderr", 4096
-            )
-            emitted = False
-            if stdout_data:
-                emitted = True
-                yield ("stdout", bytes(stdout_data[:STREAM_CHUNK_SIZE]))
-            if stderr_data:
-                emitted = True
-                yield ("stderr", bytes(stderr_data[:STREAM_CHUNK_SIZE]))
-            if not emitted:
-                return
+        """Yield ``(stream, data)`` chunks until the stream ends (EOF).
+
+        Step 3: thin facade over ``StreamManager.stream_read``.
+        """
+        async for chunk in self._streams_manager.stream_read(connection_id, stream):
+            yield chunk
 
     async def stream_read_once(
         self,
@@ -2827,140 +1577,57 @@ class WorkspaceService:
         stream: str = "stdout",
         size: int = STREAM_CHUNK_SIZE,
     ) -> bytes:
-        """Read one bounded chunk from one stream (``b""`` on EOF)."""
-        session = self.get_stream(connection_id)
-        if stream not in ("stdout", "stderr"):
-            raise ValueError(f"unknown stream: {stream!r}")
-        data = await session.runtime.process_read(
-            session.handle, stream, max(1, min(int(size), STREAM_CHUNK_SIZE))
-        )
-        return bytes(data)
+        """Read one bounded chunk from one stream (``b""`` on EOF).
+
+        Step 3: thin facade over ``StreamManager.stream_read_once``.
+        """
+        return await self._streams_manager.stream_read_once(connection_id, stream, size)
 
     async def stream_write(self, connection_id: str, data: bytes) -> None:
-        """Write bounded bytes to the stream stdin (per-connection locked)."""
-        if not isinstance(data, (bytes, bytearray)) or not data:
-            raise ValueError("data must be non-empty bytes")
-        if len(data) > STREAM_CHUNK_SIZE:
-            raise ValueError("stream write exceeds 64KiB chunk limit")
-        session = self.get_stream(connection_id)
-        async with session.write_lock:
-            await session.runtime.process_write(
-                session.handle, bytes(data)
-            )
+        """Write bounded bytes to the stream stdin (per-connection locked).
+
+        Step 3: thin facade over ``StreamManager.stream_write``.
+        """
+        await self._streams_manager.stream_write(connection_id, data)
 
     async def stream_write_eof(self, connection_id: str) -> None:
-        """Half-close the stream stdin (graceful EOF)."""
-        session = self.get_stream(connection_id)
-        async with session.write_lock:
-            await session.runtime.process_write_eof(session.handle)
+        """Half-close the stream stdin (graceful EOF).
+
+        Step 3: thin facade over ``StreamManager.stream_write_eof``.
+        """
+        await self._streams_manager.stream_write_eof(connection_id)
 
     async def stream_wait(self, connection_id: str) -> int | None:
         """Wait for the stream process tree to exit; return exit code.
 
-        Returns ``None`` when the exit code is unknown (Docker reports
-        ``None`` while the exec is still ``Running`` after the pump
-        drained, on framing corruption, or on inspect failures) — the
-        websocket pump omits ``exit_code`` then instead of sending a
-        bogus 0.
+        Step 3: thin facade over ``StreamManager.stream_wait``.
         """
-        session = self.get_stream(connection_id)
-        code = await session.runtime.process_wait(session.handle)
-        logger.info(
-            "stream_wait_result",
-            connection_id=connection_id,
-            exit_code=code,
-        )
-        return code
+        return await self._streams_manager.stream_wait(connection_id)
 
     async def stream_close(self, connection_id: str) -> dict[str, object]:
         """Close one stream and kill its process tree (idempotent-ish).
 
-        ``process_close`` returns ``None`` by contract; the exit code is
-        intentionally not collected here (it is reported by the pump via
-        ``stream_wait`` on natural EOF). Reservations still spawning
-        (``handle is None``) are dropped without touching the runtime —
-        the racing spawn rolls itself back on commit.
+        Step 3: thin facade over ``StreamManager.stream_close``.
         """
-        conn_id = self._sanitize_stream_connection_id(connection_id)
-        async with self._streams_guard:
-            session = self._streams.pop(conn_id, None)
-        if session is None:
-            return {"connection_id": conn_id, "closed": False}
-        session.closed = True
-        if session.handle is None:
-            return {"connection_id": conn_id, "closed": True}
-        try:
-            await session.runtime.process_close(session.handle)
-        except Exception:
-            logger.exception("stream_close_failed", connection_id=conn_id)
-        logger.info(
-            "stream_closed",
-            connection_id=conn_id,
-            kind=session.kind,
-        )
-        return {
-            "connection_id": conn_id,
-            "closed": True,
-        }
+        return await self._streams_manager.stream_close(connection_id)
 
     async def close_workspace_streams(
         self, workspace_id: uuid.UUID, *, reason: str = ""
     ) -> int:
-        """Close every stream bound to *workspace_id*; return closed count."""
-        async with self._streams_guard:
-            targets = [
-                conn_id
-                for conn_id, session in self._streams.items()
-                if session.workspace_id == workspace_id
-            ]
-            sessions = [self._streams.pop(conn_id) for conn_id in targets]
-        closed = 0
-        for session in sessions:
-            session.closed = True
-            if session.handle is None:
-                continue
-            try:
-                await session.runtime.process_close(session.handle)
-                closed += 1
-            except Exception:
-                logger.exception(
-                    "workspace_stream_close_failed",
-                    connection_id=session.connection_id,
-                    reason=reason,
-                )
-        if targets:
-            logger.info(
-                "workspace_streams_closed",
-                workspace_id=str(workspace_id),
-                count=closed,
-                reason=reason,
-            )
-        return closed
+        """Close every stream bound to *workspace_id*; return closed count.
+
+        Step 3: thin facade over ``StreamManager.close_workspace_streams``.
+        """
+        return await self._streams_manager.close_workspace_streams(
+            workspace_id, reason=reason
+        )
 
     async def close_all_streams(self, *, reason: str = "") -> int:
-        """Close every tracked stream (shutdown/disconnect path)."""
-        async with self._streams_guard:
-            sessions = list(self._streams.values())
-            self._streams.clear()
-        closed = 0
-        for session in sessions:
-            session.closed = True
-            if session.handle is None:
-                continue
-            try:
-                await session.runtime.process_close(session.handle)
-                closed += 1
-            except Exception:
-                logger.exception(
-                    "stream_close_all_failed",
-                    connection_id=session.connection_id,
-                    reason=reason,
-                )
-        if sessions:
-            logger.info(
-                "all_streams_closed", count=closed, reason=reason
-            )
-        return closed
+        """Close every tracked stream (shutdown/disconnect path).
+
+        Step 3: thin facade over ``StreamManager.close_all_streams``.
+        """
+        return await self._streams_manager.close_all_streams(reason=reason)
 
     async def start_terminal(
         self,
@@ -2972,1193 +1639,284 @@ class WorkspaceService:
 
         Returns a ``terminal_id`` that identifies this PTY session.
         Persistent workspace credentials are sourced via a login shell.
+
+        Step 2: thin facade over ``TerminalManager.start_terminal``.
         """
-        log = logger.bind(workspace_id=str(workspace_id))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if not await runtime.workspace_exists(info.instance_id):
-            self._cache.pop(workspace_id, None)
-            raise RuntimeError("Workspace instance no longer exists")
-
-        terminal_command = [
-            "/bin/bash",
-            "-lc",
-            (
-                f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
-                f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} "
-                ">/dev/null 2>&1; fi; exec /bin/bash -l"
-            ),
-        ]
-
-        handle = await runtime.exec_pty(
-            info.instance_id,
-            cols=cols,
-            rows=rows,
-            workdir="/workspace",
-            env={"TERM": "xterm-256color"},
-            command=terminal_command,
+        return await self._terminals_manager.start_terminal(
+            workspace_id, cols=cols, rows=rows
         )
-
-        terminal_id = str(uuid.uuid4())
-        self._terminals[terminal_id] = TerminalSession(
-            handle=handle,
-            runtime=runtime,
-        )
-        log.info("terminal_started", terminal_id=terminal_id)
-        return terminal_id
 
     async def read_terminal(self, terminal_id: str) -> AsyncIterator[bytes]:
         """Yield raw bytes from the PTY as they arrive.
 
         Stops when the PTY is closed or returns empty data (EOF).
-        """
-        entry = self._terminals.get(terminal_id)
-        if entry is None:
-            raise ValueError(f"Terminal {terminal_id} not found")
-        handle = entry.handle
-        runtime = entry.runtime
 
-        while not handle.closed:
-            data = await runtime.pty_read(handle)
-            if not data:
-                break
-            yield data
+        Step 2: thin facade over ``TerminalManager.read_terminal``.
+        """
+        async for chunk in self._terminals_manager.read_terminal(terminal_id):
+            yield chunk
 
     async def write_terminal(self, terminal_id: str, data: bytes) -> None:
-        """Write raw bytes (user input) to the PTY stdin."""
-        entry = self._terminals.get(terminal_id)
-        if entry is None:
-            raise ValueError(f"Terminal {terminal_id} not found")
-        handle = entry.handle
-        runtime = entry.runtime
-        await runtime.pty_write(handle, data)
+        """Write raw bytes (user input) to the PTY stdin.
+
+        Step 2: thin facade over ``TerminalManager.write_terminal``.
+        """
+        await self._terminals_manager.write_terminal(terminal_id, data)
 
     async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
-        """Resize the PTY window."""
-        entry = self._terminals.get(terminal_id)
-        if entry is None:
-            raise ValueError(f"Terminal {terminal_id} not found")
-        handle = entry.handle
-        runtime = entry.runtime
-        await runtime.pty_resize(handle, cols, rows)
+        """Resize the PTY window.
+
+        Step 2: thin facade over ``TerminalManager.resize_terminal``.
+        """
+        await self._terminals_manager.resize_terminal(terminal_id, cols, rows)
 
     async def close_terminal(self, terminal_id: str) -> None:
-        """Close a PTY session and release resources."""
-        entry = self._terminals.pop(terminal_id, None)
-        if entry is None:
-            return
-        await entry.runtime.pty_close(entry.handle)
-        logger.info("terminal_closed", terminal_id=terminal_id)
+        """Close a PTY session and release resources.
+
+        Step 2: thin facade over ``TerminalManager.close_terminal``.
+        """
+        await self._terminals_manager.close_terminal(terminal_id)
 
     # -- desktop session (KasmVNC) -----------------------------------------
+    # Step 6a: thin facade over ``DesktopManager`` (canonical). State
+    # (``_desktop_sessions`` / ``_desktop_recordings`` /
+    # ``_desktop_lock_map`` + guard) is owned by the manager and
+    # exposed via property aliases above.
 
-    def _desktop_heartbeat_payload(
-        self,
-        workspace_id: uuid.UUID,
-        session: DesktopSession,
-    ) -> dict[str, Any]:
-        """Return heartbeat fields for a live desktop session."""
-        return {
-            "port": session.port,
-            "container_ip": self.get_desktop_container_ip(workspace_id),
-            "network_name": self.get_desktop_network_name(workspace_id),
-            "viewer": session.viewer_held,
-            "computer_use": bool(session.computeruse_run_ids),
-        }
+    async def _desktop_lock(self, workspace_id: uuid.UUID) -> asyncio.Lock:
+        """Return the serialising lock for one workspace desktop lifecycle.
+
+        Step 6a: thin facade over ``DesktopManager._desktop_lock``.
+        """
+        return await self._desktop._desktop_lock(workspace_id)
+
+    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the cached desktop session still accepts connections.
+
+        Step 6a: thin facade over ``DesktopManager._is_desktop_session_live``.
+        """
+        return await self._desktop._is_desktop_session_live(workspace_id)
+
+    def _desktop_heartbeat_payload(self, workspace_id: uuid.UUID, session: DesktopSession) -> dict[str, Any]:
+        """Return heartbeat fields for a live desktop session.
+
+        Step 6a: thin facade over ``DesktopManager._desktop_heartbeat_payload``.
+        """
+        return self._desktop._desktop_heartbeat_payload(workspace_id, session)
 
     @staticmethod
     def _parse_desktop_holder(holder: str) -> str:
-        """Validate a desktop lease holder kind."""
-        value = (holder or "").strip().lower()
-        if value not in {DESKTOP_HOLDER_VIEWER, DESKTOP_HOLDER_COMPUTERUSE}:
-            raise ValueError(f"Invalid desktop holder: {holder}")
-        return value
+        """Validate a desktop lease holder kind.
+
+        Step 6a: thin facade over ``DesktopManager._parse_desktop_holder``.
+        """
+        return DesktopManager._parse_desktop_holder(holder)
 
     def _empty_desktop_release_result(self) -> DesktopReleaseResult:
-        """Return a release result when no desktop process is tracked."""
-        return DesktopReleaseResult(
-            stopped=False,
-            process_alive=False,
-            viewer_held=False,
-            computer_use_active=False,
-        )
+        """Return a release result when no desktop process is tracked.
 
-    def _desktop_release_result(
-        self,
-        session: DesktopSession | None,
-        *,
-        stopped: bool,
-    ) -> DesktopReleaseResult:
-        """Build a release result from the current session cache."""
-        if session is None:
-            return DesktopReleaseResult(
-                stopped=stopped,
-                process_alive=not stopped,
-                viewer_held=False,
-                computer_use_active=False,
-            )
-        return DesktopReleaseResult(
-            stopped=stopped,
-            process_alive=not stopped,
-            viewer_held=session.viewer_held,
-            computer_use_active=bool(session.computeruse_run_ids),
-        )
+        Step 6a: thin facade over ``DesktopManager._empty_desktop_release_result``.
+        """
+        return self._desktop._empty_desktop_release_result()
+
+    def _desktop_release_result(self, session: DesktopSession | None, *, stopped: bool) -> DesktopReleaseResult:
+        """Build a release result from the current session cache.
+
+        Step 6a: thin facade over ``DesktopManager._desktop_release_result``.
+        """
+        return self._desktop._desktop_release_result(session, stopped=stopped)
 
     @staticmethod
-    def _resolve_desktop_geometry(
-        width: int | None = None,
-        height: int | None = None,
-    ) -> tuple[int, int]:
-        """Return a sanitized even framebuffer size for Xvnc."""
+    def _resolve_desktop_geometry(width: int | None = None, height: int | None = None) -> tuple[int, int]:
+        """Return a sanitized even framebuffer size for Xvnc.
 
-        def _coerce(value: int | None, default: int, minimum: int, maximum: int) -> int:
-            if value is None:
-                return default
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                return default
-            if parsed % 2 != 0:
-                parsed -= 1
-            return max(minimum, min(maximum, parsed))
-
-        return (
-            _coerce(
-                width, DEFAULT_DESKTOP_WIDTH, MIN_DESKTOP_WIDTH, MAX_DESKTOP_WIDTH
-            ),
-            _coerce(
-                height, DEFAULT_DESKTOP_HEIGHT, MIN_DESKTOP_HEIGHT, MAX_DESKTOP_HEIGHT
-            ),
-        )
+        Step 6a: thin facade over ``DesktopManager._resolve_desktop_geometry``.
+        """
+        return DesktopManager._resolve_desktop_geometry(width, height)
 
     @staticmethod
     def _desktop_start_command(width: int, height: int) -> str:
         """Return the shell used to start Xvnc at a fixed geometry.
 
-        Must not call ``opencuria-desktop-stop``. That script uses
-        ``pgrep -f 'Xvnc.*:1'``, which matches this ``bash -lc`` argv and
-        would kill the start process before Xvnc is launched.
-
-        Readiness requires the X11 socket *and* the Kasm websocket port
-        6901 (dependency-free ``/dev/tcp`` poll): ``xstartup`` launches
-        exactly once as soon as the X11 socket exists, and the loop only
-        returns once 6901 is additionally reachable so ensure never
-        reports a half-ready Xvnc. The ``.xstartup-started`` marker is
-        per-start: it is cleared before Xvnc launches so every restart
-        re-runs ``xstartup`` even though the stop path never executes
-        (the stop script would match this shell's own ``Xvnc`` argv).
+        Step 6a: thin facade over ``DesktopManager._desktop_start_command``.
         """
-        geometry = f"{width}x{height}"
-        return (
-            "set -e\n"
-            "export DISPLAY=:1\n"
-            "export HOME=/root\n"
-            # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
-            # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` on
-            # connect — every X11 Python client (PyAutoGUI, mouseinfo,
-            # pyscreeze, OCR helpers, ...) requires the file to exist.
-            # Touch it at start so ``execute`` snippets never die with
-            # ``FileNotFoundError: ... '/root/.Xauthority'`` before even
-            # connecting (``_desktop_env`` additionally exports
-            # ``XAUTHORITY`` explicitly for the same reason).
-            "touch /root/.Xauthority\n"
-            "mkdir -p /root/.vnc\n"
-            # Per-start marker: clearing it here guarantees xstartup runs
-            # again after every Xvnc (re)start. It must not persist across
-            # starts, otherwise a restarted Xvnc would show an empty desktop.
-            "rm -f /root/.vnc/.xstartup-started\n"
-            "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
-            f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
-            "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
-            "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
-            "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
-            "-AcceptPointerEvents -SendCutText -AcceptCutText "
-            "-AcceptSetDesktopSize=0 "
-            ">>/root/.vnc/server.log 2>&1 &\n"
-            "for _ in $(seq 1 120); do\n"
-            # xstartup launches exactly once as soon as the X11 socket
-            # exists (desktop does not wait for the 6901 websocket); the
-            # loop only returns once 6901 is additionally reachable, so
-            # ensure never reports a half-ready Xvnc.
-            "  if [ -e /tmp/.X11-unix/X1 ] "
-            "&& [ ! -f /root/.vnc/.xstartup-started ]; then\n"
-            "    touch /root/.vnc/.xstartup-started\n"
-            "    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\n"
-            "  fi\n"
-            "  if [ -e /tmp/.X11-unix/X1 ] "
-            "&& (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\n"
-            '    echo "Desktop session started on :1 (ws port 6901)"\n'
-            "    exit 0\n"
-            "  fi\n"
-            "  sleep 0.25\n"
-            "done\n"
-            'echo "Desktop session failed to start" >&2\n'
-            "tail -n 50 /root/.vnc/server.log >&2 || true\n"
-            "exit 1\n"
-        )
+        return DesktopManager._desktop_start_command(width, height)
 
-    def get_desktop_state_payload(
-        self,
-        workspace_id: uuid.UUID,
-    ) -> dict[str, Any] | None:
-        """Return cache/network fields for desktop lifecycle announcements."""
-        session = self._desktop_sessions.get(workspace_id)
-        if session is None:
-            return None
-        return {
-            "workspace_id": str(workspace_id),
-            "port": session.port,
-            "container_ip": self.get_desktop_container_ip(workspace_id),
-            "network_name": self.get_desktop_network_name(workspace_id),
-            "viewer": session.viewer_held,
-            "computer_use": bool(session.computeruse_run_ids),
-            "generation": session.generation,
-        }
+    def get_desktop_state_payload(self, workspace_id: uuid.UUID) -> dict[str, Any] | None:
+        """Return cache/network fields for desktop lifecycle announcements.
 
-    async def ensure_desktop_process(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> DesktopSession:
+        Step 6a: thin facade over ``DesktopManager.get_desktop_state_payload``.
+        """
+        return self._desktop.get_desktop_state_payload(workspace_id)
+
+    async def ensure_desktop_process(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
         """Start the shared KasmVNC process without acquiring a lease.
 
-        Idempotent: a live cached or recovered session is reused. Leases on a
-        stale cache entry are copied onto the restarted session.
-
-        Serialised per workspace via :meth:`_desktop_lock` so concurrent
-        viewer and computer-use acquires single-flight one Xvnc start.
+        Step 6a: thin facade over ``DesktopManager.ensure_desktop_process``.
         """
-        lock = await self._desktop_lock(workspace_id)
-        async with lock:
-            return await self._ensure_desktop_process_locked(
-                workspace_id, width=width, height=height
-            )
+        return await self._desktop.ensure_desktop_process(workspace_id, width=width, height=height)
 
-    async def _ensure_desktop_process_locked(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> DesktopSession:
-        """Ensure the desktop process while holding the workspace lock."""
-        existing = self._desktop_sessions.get(workspace_id)
-        preserved_viewer = existing.viewer_held if existing is not None else False
-        preserved_runs = (
-            set(existing.computeruse_run_ids) if existing is not None else set()
-        )
-        preserved_generation = existing.generation if existing is not None else 0
-        if existing is not None:
-            if await self._is_desktop_session_live(workspace_id):
-                logger.info("desktop_already_running", workspace_id=str(workspace_id))
-                return existing
-            self._desktop_sessions.pop(workspace_id, None)
-            logger.warning(
-                "desktop_cached_session_stale",
-                workspace_id=str(workspace_id),
-            )
+    async def _ensure_desktop_process_locked(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
+        """Ensure the desktop process while holding the workspace lock.
 
-        if await self._is_desktop_session_live(workspace_id):
-            recovered = DesktopSession(
-                workspace_id=workspace_id,
-                instance_id=self._get_cached(workspace_id).instance_id,
-                viewer_held=preserved_viewer,
-                computeruse_run_ids=preserved_runs,
-                generation=preserved_generation + 1,
-            )
-            self._desktop_sessions[workspace_id] = recovered
-            logger.info(
-                "desktop_session_recovered_on_start",
-                workspace_id=str(workspace_id),
-                generation=recovered.generation,
-            )
-            return recovered
+        Step 6a: thin facade over ``DesktopManager._ensure_desktop_process_locked``.
+        """
+        return await self._desktop._ensure_desktop_process_locked(workspace_id, width=width, height=height)
 
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        resolved_width, resolved_height = self._resolve_desktop_geometry(width, height)
-
-        log = logger.bind(workspace_id=str(workspace_id))
-
-        # Stop first as its own exec. The baked stop script matches
-        # ``Xvnc.*:1`` in any process argv, so it must not run inside the
-        # start command whose command line contains those bytes.
-        await runtime.exec_command_wait(
-            info.instance_id,
-            [
-                "bash",
-                "-lc",
-                "/usr/local/bin/opencuria-desktop-stop >/dev/null 2>&1 || true",
-            ],
-            env={"HOME": "/root"},
-        )
-
-        start_command = self._desktop_start_command(
-            resolved_width, resolved_height
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            ["bash", "-lc", start_command],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        if exit_code != 0:
-            log.error("desktop_start_failed", exit_code=exit_code, output=output)
-            raise RuntimeError(f"Failed to start desktop session: {output}")
-
-        session = DesktopSession(
-            workspace_id=workspace_id,
-            instance_id=info.instance_id,
-            viewer_held=preserved_viewer,
-            computeruse_run_ids=preserved_runs,
-            generation=preserved_generation + 1,
-        )
-        self._desktop_sessions[workspace_id] = session
-        log.info("desktop_started", port=session.port, generation=session.generation)
-        return session
-
-    async def acquire_desktop(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        holder: str,
-        run_id: str | None = None,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> DesktopSession:
+    async def acquire_desktop(self, workspace_id: uuid.UUID, *, holder: str, run_id: str | None = None, width: int | None = None, height: int | None = None) -> DesktopSession:
         """Ensure the desktop process and acquire a viewer or computer-use lease.
 
-        The whole ensure+lease mutation runs under the per-workspace
-        desktop lock (``async with`` serialises every holder: while one
-        task holds it, no other acquire/release can touch the cached
-        session, so the ``seen`` snapshot below is stable by construction
-        and only this holder mutates it). ``release``/``start`` ordering
-        is pinned by the same lock — see the serialisation test.
+        Step 6a: thin facade over ``DesktopManager.acquire_desktop``.
         """
-        kind = self._parse_desktop_holder(holder)
-        if kind != DESKTOP_HOLDER_VIEWER:
-            # Fail fast on invalid run ids before touching shared state.
-            self._sanitize_run_id(str(run_id or ""))
-        lock = await self._desktop_lock(workspace_id)
-        async with lock:
-            # ``seen`` cannot change under us: every other acquire/release
-            # path takes the same lock, which we currently hold. The merge
-            # below only matters when ensure *replaces* the cache entry
-            # with a fresh Xvnc incarnation (stale restart/recovery):
-            # leases added to the old object before the replacement are
-            # carried onto the new one so neither holder loses its lease.
-            seen = self._desktop_sessions.get(workspace_id)
-            seen_viewer = seen.viewer_held if seen is not None else False
-            seen_runs = (
-                set(seen.computeruse_run_ids) if seen is not None else set()
-            )
-            session = await self._ensure_desktop_process_locked(
-                workspace_id,
-                width=width,
-                height=height,
-            )
-            if session is not seen and seen is not None:
-                session.viewer_held = session.viewer_held or seen_viewer
-                session.computeruse_run_ids |= seen_runs
-            if kind == DESKTOP_HOLDER_VIEWER:
-                session.viewer_held = True
-            else:
-                session.computeruse_run_ids.add(
-                    self._sanitize_run_id(str(run_id or ""))
-                )
-            self._desktop_sessions[workspace_id] = session
-            logger.info(
-                "desktop_lease_acquired",
-                workspace_id=str(workspace_id),
-                holder=kind,
-                run_id=run_id,
-                viewer=session.viewer_held,
-                computer_use=bool(session.computeruse_run_ids),
-            )
-            return session
+        return await self._desktop.acquire_desktop(workspace_id, holder=holder, run_id=run_id, width=width, height=height)
 
-    async def release_desktop(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        holder: str,
-        run_id: str | None = None,
-        force: bool = False,
-    ) -> DesktopReleaseResult:
+    async def release_desktop(self, workspace_id: uuid.UUID, *, holder: str, run_id: str | None = None, force: bool = False) -> DesktopReleaseResult:
         """Drop a desktop lease and stop Xvnc when no holders remain.
 
-        ``force=True`` ignores remaining leases, interrupts recordings, and
-        stops the process. Used for workspace stop/remove.
-
-        Runs under the per-workspace desktop lock. Only the session object
-        observed while holding the lock may be stopped: when the last
-        lease clears, the cached session is compared by identity before
-        stopping so a concurrent start cannot have its new process killed.
+        Step 6a: thin facade over ``DesktopManager.release_desktop``.
         """
-        kind = self._parse_desktop_holder(holder)
-        if kind != DESKTOP_HOLDER_VIEWER:
-            self._sanitize_run_id(str(run_id or ""))
-        lock = await self._desktop_lock(workspace_id)
-        async with lock:
-            if force:
-                session = self._desktop_sessions.get(workspace_id)
-                has_recordings = any(
-                    key[0] == workspace_id for key in self._desktop_recordings
-                )
-                if session is None and not has_recordings:
-                    return DesktopReleaseResult(
-                        stopped=True,
-                        process_alive=False,
-                        viewer_held=False,
-                        computer_use_active=False,
-                    )
-                await self._stop_desktop_process(
-                    workspace_id, interrupt_recordings=True
-                )
-                stopped_result = DesktopReleaseResult(
-                    stopped=True,
-                    process_alive=False,
-                    viewer_held=False,
-                    computer_use_active=False,
-                )
-            else:
-                session = self._desktop_sessions.get(workspace_id)
-                if session is None:
-                    return self._empty_desktop_release_result()
+        return await self._desktop.release_desktop(workspace_id, holder=holder, run_id=run_id, force=force)
 
-                if kind == DESKTOP_HOLDER_VIEWER:
-                    session.viewer_held = False
-                else:
-                    session.computeruse_run_ids.discard(
-                        self._sanitize_run_id(str(run_id or ""))
-                    )
+    async def start_desktop(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
+        """Acquire the viewer lease and ensure the desktop process is running.
 
-                logger.info(
-                    "desktop_lease_released",
-                    workspace_id=str(workspace_id),
-                    holder=kind,
-                    run_id=run_id,
-                    viewer=session.viewer_held,
-                    computer_use=bool(session.computeruse_run_ids),
-                )
-                if session.viewer_held or session.computeruse_run_ids:
-                    return self._desktop_release_result(session, stopped=False)
-
-                await self._stop_desktop_process(
-                    workspace_id,
-                    interrupt_recordings=True,
-                    expected_session=session,
-                )
-                if self._desktop_sessions.get(workspace_id) is session:
-                    # A concurrent start installed a fresh session while the
-                    # stop exec ran: report it instead of claiming "stopped".
-                    return self._desktop_release_result(session, stopped=False)
-                stopped_result = DesktopReleaseResult(
-                    stopped=True,
-                    process_alive=False,
-                    viewer_held=False,
-                    computer_use_active=False,
-                )
-        # No lock cleanup here: the per-workspace lock object is retained
-        # for the process lifetime so queued waiters and later callers
-        # always share one serialising lock (see _desktop_lock).
-        return stopped_result
-
-    async def start_desktop(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> DesktopSession:
-        """Acquire the viewer lease and ensure the desktop process is running."""
-        return await self.acquire_desktop(
-            workspace_id,
-            holder=DESKTOP_HOLDER_VIEWER,
-            width=width,
-            height=height,
-        )
+        Step 6a: thin facade over ``DesktopManager.start_desktop``.
+        """
+        return await self._desktop.start_desktop(workspace_id, width=width, height=height)
 
     async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
-        """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
-        return await self.release_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
+        """Release the viewer lease. Stops Xvnc only when no computer-use hold remains.
+
+        Step 6a: thin facade over ``DesktopManager.stop_desktop``.
+        """
+        return await self._desktop.stop_desktop(workspace_id)
 
     async def _interrupt_desktop_recordings(self, workspace_id: uuid.UUID) -> None:
-        """Send SIGINT/SIGTERM to ffmpeg recordings for *workspace_id*."""
-        recordings = [
-            (run_id, pid, path)
-            for (ws_id, run_id), (pid, path) in self._desktop_recordings.items()
-            if ws_id == workspace_id
-        ]
-        if not recordings:
-            return
-        try:
-            for run_id, pid, _path in recordings:
-                stop_cmd = (
-                    f"kill -INT {pid} 2>/dev/null || true; "
-                    "sleep 0.5; "
-                    f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
-                )
-                await self._exec_desktop_shell(workspace_id, stop_cmd)
-                logger.info(
-                    "desktop_recording_interrupted",
-                    workspace_id=str(workspace_id),
-                    run_id=run_id,
-                    pid=pid,
-                )
-        except Exception:
-            logger.exception(
-                "desktop_recording_interrupt_failed",
-                workspace_id=str(workspace_id),
-            )
-        self._desktop_recordings = {
-            key: value
-            for key, value in self._desktop_recordings.items()
-            if key[0] != workspace_id
-        }
+        """Send SIGINT/SIGTERM to ffmpeg recordings for *workspace_id*.
 
-    async def _stop_desktop_process(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        interrupt_recordings: bool,
-        expected_session: DesktopSession | None = None,
-    ) -> None:
+        Step 6a: thin facade over ``DesktopManager._interrupt_desktop_recordings``.
+        """
+        return await self._desktop._interrupt_desktop_recordings(workspace_id)
+
+    async def _stop_desktop_process(self, workspace_id: uuid.UUID, *, interrupt_recordings: bool, expected_session: DesktopSession | None = None) -> None:
         """Kill Xvnc and drop the cached desktop session.
 
-        When *expected_session* is given, only that exact session object is
-        dropped: a concurrent restart installs a new object under the same
-        key, and the stop exec must not claim or clear the fresh start.
+        Step 6a: thin facade over ``DesktopManager._stop_desktop_process``.
         """
-        log = logger.bind(workspace_id=str(workspace_id))
-        if interrupt_recordings:
-            await self._interrupt_desktop_recordings(workspace_id)
-
-        if expected_session is not None:
-            if self._desktop_sessions.get(workspace_id) is not expected_session:
-                log.warning("desktop_stop_skipped_session_replaced")
-                return
-            self._desktop_sessions.pop(workspace_id, None)
-        else:
-            self._desktop_sessions.pop(workspace_id, None)
-        try:
-            runtime = self._get_runtime(workspace_id)
-            info = self._get_cached(workspace_id)
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                ["/usr/local/bin/opencuria-desktop-stop"],
-            )
-            if exit_code != 0:
-                log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
-        except Exception:
-            log.exception("desktop_stop_failed")
-
-        self._desktop_recordings = {
-            key: value
-            for key, value in self._desktop_recordings.items()
-            if key[0] != workspace_id
-        }
-        log.info("desktop_stopped")
+        return await self._desktop._stop_desktop_process(workspace_id, interrupt_recordings=interrupt_recordings, expected_session=expected_session)
 
     @staticmethod
     def _desktop_env() -> dict[str, str]:
         """Return environment variables for desktop X11 commands.
 
-        ``XAUTHORITY`` is pinned alongside ``HOME``/``DISPLAY`` so every
-        X11 client (xdotool, ffmpeg x11grab, python-Xlib/PyAutoGUI, ...)
-        resolves auth through the runner-owned file instead of depending
-        on ambient workspace state.
+        Step 6a: thin facade over ``DesktopManager._desktop_env``.
         """
-        return {
-            "HOME": DESKTOP_HOME,
-            "DISPLAY": DESKTOP_DISPLAY,
-            "XAUTHORITY": DESKTOP_XAUTHORITY_PATH,
-        }
+        return DesktopManager._desktop_env()
 
     @staticmethod
     def _sanitize_run_id(run_id: str) -> str:
-        """Validate a computer-use recording run identifier."""
-        if not run_id or not _RUN_ID_RE.match(run_id):
-            raise ValueError(f"Invalid run_id: {run_id}")
-        return run_id
+        """Validate a computer-use recording run identifier.
+
+        Step 6a: thin facade over ``DesktopManager._sanitize_run_id``.
+        """
+        return DesktopManager._sanitize_run_id(run_id)
 
     async def _ensure_desktop_xauthority(self, workspace_id: uuid.UUID) -> None:
         """Ensure the X11 client auth file exists inside the workspace.
 
-        Xvnc runs with ``-SecurityTypes None``, but python-Xlib
-        unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` — an empty
-        file is sufficient for the auth-less server. Idempotent best
-        effort: failures only degrade to the previous behaviour (the
-        client raises ``FileNotFoundError``) and must never fail an
-        otherwise healthy ``execute``.
+        Step 6a: thin facade over ``DesktopManager._ensure_desktop_xauthority``.
         """
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        try:
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                ["sh", "-lc", "touch /root/.Xauthority"],
-                env=self._desktop_env(),
-            )
-            if exit_code != 0:
-                logger.warning(
-                    "desktop_xauthority_ensure_failed",
-                    workspace_id=str(workspace_id),
-                    exit_code=exit_code,
-                    output=output,
-                )
-        except Exception:
-            logger.exception(
-                "desktop_xauthority_ensure_failed",
-                workspace_id=str(workspace_id),
-            )
+        return await self._desktop._ensure_desktop_xauthority(workspace_id)
 
     async def _require_desktop_live(self, workspace_id: uuid.UUID) -> None:
-        """Raise when the workspace desktop session is not accepting input."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
+        """Raise when the workspace desktop session is not accepting input.
 
-    async def _exec_desktop_shell(
-        self,
-        workspace_id: uuid.UUID,
-        command: str,
-    ) -> tuple[int, str]:
-        """Execute a shell command inside the workspace desktop environment."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        return await runtime.exec_command_wait(
-            info.instance_id,
-            ["sh", "-lc", command],
-            env=self._desktop_env(),
-        )
+        Step 6a: thin facade over ``DesktopManager._require_desktop_live``.
+        """
+        return await self._desktop._require_desktop_live(workspace_id)
 
-    async def _get_desktop_geometry(
-        self,
-        workspace_id: uuid.UUID,
-        width: int | None = None,
-        height: int | None = None,
-    ) -> tuple[int, int]:
-        """Return desktop width and height, optionally overriding query results."""
-        if width is not None and height is not None:
-            return width, height
+    async def _exec_desktop_shell(self, workspace_id: uuid.UUID, command: str) -> tuple[int, str]:
+        """Execute a shell command inside the workspace desktop environment.
 
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id,
-            "xdotool getdisplaygeometry 2>/dev/null || echo '1920 1080'",
-        )
-        if exit_code == 0:
-            parts = output.strip().split()
-            if len(parts) >= 2:
-                try:
-                    return int(parts[0]), int(parts[1])
-                except ValueError:
-                    pass
+        Step 6a: thin facade over ``DesktopManager._exec_desktop_shell``.
+        """
+        return await self._desktop._exec_desktop_shell(workspace_id, command)
 
-        return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+    async def _get_desktop_geometry(self, workspace_id: uuid.UUID, width: int | None = None, height: int | None = None) -> tuple[int, int]:
+        """Return desktop width and height, optionally overriding query results.
 
-    async def desktop_action(
-        self,
-        workspace_id: uuid.UUID,
-        action: str,
-        args: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Execute a desktop I/O action inside the workspace display."""
-        payload = args or {}
-        log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
+        Step 6a: thin facade over ``DesktopManager._get_desktop_geometry``.
+        """
+        return await self._desktop._get_desktop_geometry(workspace_id, width, height)
 
-        if action == "ensure":
-            session = await self.ensure_desktop_process(
-                workspace_id,
-                width=payload.get("desktop_width"),
-                height=payload.get("desktop_height"),
-            )
-            return {
-                "ok": True,
-                "display": DESKTOP_DISPLAY,
-                "port": session.port,
-            }
+    async def desktop_action(self, workspace_id: uuid.UUID, action: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute a desktop I/O action inside the workspace display.
 
-        if action == "hold":
-            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
-            session = await self.acquire_desktop(
-                workspace_id,
-                holder=holder,
-                run_id=payload.get("run_id"),
-                width=payload.get("desktop_width"),
-                height=payload.get("desktop_height"),
-            )
-            return {
-                "ok": True,
-                "display": DESKTOP_DISPLAY,
-                "port": session.port,
-                "viewer": session.viewer_held,
-                "computer_use": bool(session.computeruse_run_ids),
-            }
-
-        if action == "release":
-            holder = str(payload.get("kind") or DESKTOP_HOLDER_COMPUTERUSE)
-            result = await self.release_desktop(
-                workspace_id,
-                holder=holder,
-                run_id=payload.get("run_id"),
-            )
-            return {
-                "ok": True,
-                "stopped": result.stopped,
-                "process_alive": result.process_alive,
-                "viewer_held": result.viewer_held,
-                "computer_use_active": result.computer_use_active,
-            }
-
-        execute_code = ""
-        if action == "execute":
-            raw_code = payload.get("code", "")
-            if not isinstance(raw_code, str) or not raw_code.strip():
-                raise ValueError("code must not be empty")
-            if len(raw_code) > DESKTOP_EXECUTE_MAX_CHARS:
-                raise ValueError(
-                    f"code exceeds {DESKTOP_EXECUTE_MAX_CHARS} characters"
-                )
-            execute_code = raw_code
-
-        if action not in {"ensure", "hold", "release"}:
-            await self._require_desktop_live(workspace_id)
-
-        if action == "display_info":
-            width, height = await self._get_desktop_geometry(workspace_id)
-            return {
-                "ok": True,
-                "display": DESKTOP_DISPLAY,
-                "width": width,
-                "height": height,
-            }
-
-        if action == "screenshot":
-            width, height = await self._get_desktop_geometry(
-                workspace_id,
-                width=payload.get("width"),
-                height=payload.get("height"),
-            )
-            crop_w = payload.get("crop_w")
-            crop_h = payload.get("crop_h")
-            crop_x = payload.get("crop_x")
-            crop_y = payload.get("crop_y")
-            crop_filter = ""
-            result_width = width
-            result_height = height
-            if (
-                crop_w is not None
-                and crop_h is not None
-                and crop_x is not None
-                and crop_y is not None
-            ):
-                crop_w_int = int(crop_w)
-                crop_h_int = int(crop_h)
-                crop_x_int = int(crop_x)
-                crop_y_int = int(crop_y)
-                if (
-                    crop_w_int < 1
-                    or crop_h_int < 1
-                    or crop_x_int < 0
-                    or crop_y_int < 0
-                    or crop_x_int + crop_w_int > width
-                    or crop_y_int + crop_h_int > height
-                ):
-                    raise ValueError("Invalid screenshot crop bounds")
-                crop_filter = (
-                    f"-vf crop={crop_w_int}:{crop_h_int}:{crop_x_int}:{crop_y_int} "
-                )
-                result_width = crop_w_int
-                result_height = crop_h_int
-            image_format = str(payload.get("format") or "jpeg").strip().lower()
-            if image_format not in {"jpeg", "png"}:
-                raise ValueError(
-                    f"Invalid screenshot format: {payload.get('format')!r} "
-                    "(expected 'jpeg' or 'png')"
-                )
-            max_dimension = payload.get("max_dimension")
-            scale_filter = ""
-            if max_dimension is not None:
-                try:
-                    max_dim = int(max_dimension)
-                except (TypeError, ValueError):
-                    raise ValueError(
-                        "Invalid screenshot max_dimension: "
-                        f"{max_dimension!r} (expected positive integer)"
-                    )
-                if max_dim < 1 or max_dim > 7680:
-                    raise ValueError(
-                        "Invalid screenshot max_dimension: "
-                        f"{max_dimension!r} (expected 1..7680)"
-                    )
-                if max(result_width, result_height) > max_dim:
-                    factor = max_dim / max(result_width, result_height)
-                    out_w = max(1, int(result_width * factor))
-                    out_h = max(1, int(result_height * factor))
-                    scale_filter = f"scale={out_w}:{out_h},"
-                    result_width = out_w
-                    result_height = out_h
-            if image_format == "png":
-                codec_args = "-f image2 -vcodec png pipe:1"
-                result_mime = "image/png"
-            else:
-                codec_args = "-f image2 -vcodec mjpeg pipe:1"
-                result_mime = "image/jpeg"
-            vf_filters: list[str] = []
-            if crop_filter:
-                # crop_filter is "-vf crop=... "; keep only the filter spec.
-                vf_filters.append(crop_filter.replace("-vf", "").strip())
-            if scale_filter:
-                vf_filters.append(scale_filter.rstrip(","))
-            vf_args = f"-vf {','.join(vf_filters)} " if vf_filters else ""
-            ffmpeg_cmd = (
-                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
-                f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -frames:v 1 "
-                f"{vf_args}"
-                f"{codec_args} 2>/dev/null | base64 -w0"
-            )
-            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
-            if exit_code != 0 or not output.strip():
-                log.error("desktop_screenshot_failed", exit_code=exit_code)
-                raise RuntimeError("Failed to capture desktop screenshot")
-            image_b64 = output.strip()
-            log.info(
-                "desktop_screenshot_captured",
-                format=image_format,
-                width=result_width,
-                height=result_height,
-                image_b64_chars=len(image_b64),
-            )
-            return {
-                "ok": True,
-                "image_b64": image_b64,
-                "mime": result_mime,
-                "width": result_width,
-                "height": result_height,
-                "text": "",
-            }
-
-        if action == "move":
-            x = int(payload["x"])
-            y = int(payload["y"])
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id,
-                f"xdotool mousemove --sync {x} {y}",
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to move mouse: {output}")
-            return {"ok": True}
-
-        if action == "click":
-            button = _CLICK_BUTTONS.get(payload.get("button", "left"))
-            if button is None:
-                raise ValueError(f"Invalid mouse button: {payload.get('button')}")
-            x = payload.get("x")
-            y = payload.get("y")
-            parts: list[str] = []
-            if x is not None and y is not None:
-                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
-            repeat = " --repeat 2" if payload.get("double") else ""
-            parts.append(f"xdotool click{repeat} {button}")
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id, " && ".join(parts)
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to click mouse: {output}")
-            return {"ok": True}
-
-        if action == "drag":
-            start_x = int(payload["start_x"])
-            start_y = int(payload["start_y"])
-            end_x = int(payload["end_x"])
-            end_y = int(payload["end_y"])
-            command = (
-                f"xdotool mousemove --sync {start_x} {start_y} mousedown 1 "
-                f"mousemove --sync {end_x} {end_y} mouseup 1"
-            )
-            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to drag mouse: {output}")
-            return {"ok": True}
-
-        if action == "scroll":
-            direction = str(payload.get("direction", "")).lower()
-            button = _SCROLL_BUTTONS.get(direction)
-            if button is None:
-                raise ValueError(f"Invalid scroll direction: {direction}")
-            amount = int(payload.get("amount", 1))
-            if amount < 1 or amount > 20:
-                raise ValueError("Scroll amount must be between 1 and 20")
-            x = payload.get("x")
-            y = payload.get("y")
-            parts = []
-            if x is not None and y is not None:
-                parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
-            parts.append(f"xdotool click --repeat {amount} {button}")
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id, " && ".join(parts)
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to scroll: {output}")
-            return {"ok": True}
-
-        if action == "type":
-            text = str(payload.get("text", ""))
-            if not text:
-                raise ValueError("text must not be empty")
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id,
-                _xdotool_type_command(text),
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to type text: {output}")
-            return {"ok": True}
-
-        if action == "key":
-            key = str(payload.get("key", "")).strip()
-            if not key:
-                raise ValueError("key must not be empty")
-            modifiers = payload.get("modifiers") or []
-            combo = _normalize_xdotool_key_combo(key, modifiers)
-            exit_code, output = await self._exec_desktop_shell(
-                workspace_id,
-                f"xdotool key --clearmodifiers {shlex.quote(combo)}",
-            )
-            if _xdotool_key_failed(exit_code, output):
-                raise RuntimeError(f"Failed to send key: {output}")
-            return {"ok": True}
-
-        if action == "open_url":
-            url = str(payload.get("url", "")).strip()
-            parsed = urlparse(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                raise ValueError("url must use http or https")
-            quoted_url = shlex.quote(url)
-            command = (
-                "for browser in google-chrome-stable google-chrome chromium "
-                "chromium-browser; do "
-                f'if command -v "$browser" >/dev/null 2>&1; then '
-                f'"$browser" --no-sandbox --disable-gpu --disable-dev-shm-usage '
-                f"--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; "
-                "done; "
-                f"xdg-open {quoted_url}"
-            )
-            exit_code, output = await self._exec_desktop_shell(workspace_id, command)
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to open url: {output}")
-            return {"ok": True}
-
-        if action == "record_start":
-            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
-            record_key = (workspace_id, run_id)
-            existing = self._desktop_recordings.get(record_key)
-            if existing is not None:
-                return {"ok": True, "path": existing[1], "run_id": run_id}
-
-            raw_path = payload.get("path")
-            if raw_path:
-                record_path = self._sanitize_path(str(raw_path))
-            else:
-                record_path = f"{COMPUTER_USE_RECORD_DIR}/{run_id}/session.mp4"
-            width, height = await self._get_desktop_geometry(workspace_id)
-            parent_dir = os.path.dirname(record_path)
-            ffmpeg_cmd = (
-                f"mkdir -p {shlex.quote(parent_dir)} && "
-                f"ffmpeg -y -f x11grab -video_size {width}x{height} "
-                f"-framerate 10 -draw_mouse 1 -i {DESKTOP_DISPLAY} "
-                "-c:v libx264 -preset ultrafast -pix_fmt yuv420p "
-                f"{shlex.quote(record_path)} </dev/null "
-                f">>{shlex.quote(record_path + '.log')} 2>&1 & echo $!"
-            )
-            exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to start desktop recording: {output}")
-            pid_text = output.strip().splitlines()[-1].strip()
-            try:
-                pid = int(pid_text)
-            except ValueError:
-                raise RuntimeError(
-                    f"Failed to start desktop recording: invalid pid {pid_text!r}"
-                )
-            self._desktop_recordings[record_key] = (pid, record_path)
-            log.info("desktop_recording_started", run_id=run_id, pid=pid)
-            return {"ok": True, "path": record_path, "run_id": run_id}
-
-        if action == "record_stop":
-            run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
-            record_key = (workspace_id, run_id)
-            recording = self._desktop_recordings.get(record_key)
-            if recording is None:
-                raise RuntimeError(f"No active recording for run_id: {run_id}")
-            pid, record_path = recording
-            stop_cmd = (
-                f"kill -INT {pid} 2>/dev/null || true; "
-                "sleep 0.5; "
-                f"kill -0 {pid} 2>/dev/null && kill -TERM {pid} 2>/dev/null || true"
-            )
-            exit_code, output = await self._exec_desktop_shell(workspace_id, stop_cmd)
-            self._desktop_recordings.pop(record_key, None)
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to stop desktop recording: {output}")
-            log.info("desktop_recording_stopped", run_id=run_id, pid=pid)
-            return {"ok": True, "path": record_path}
-
-        if action == "execute":
-            # Generic Agent-S action execution: run exactly the passed
-            # internal code (materialized by the backend core) via
-            # ``python3 -c`` with the desktop env. No agent logic lives
-            # here; validation only guards the RPC boundary. Validation ran
-            # above; a single generic liveness probe also ran above.
-            # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
-            # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` —
-            # without the file every snippet dies before connecting.
-            # Ensure it (idempotent) on the generic execute path as well:
-            # this self-heals desktops started before the start-command
-            # fix and any workspace where the file was removed.
-            await self._ensure_desktop_xauthority(workspace_id)
-            exit_code, stdout, stderr = await asyncio.wait_for(
-                self.exec_harness_command(
-                    workspace_id,
-                    ["python3", "-c", execute_code],
-                    workdir="/workspace",
-                    env=self._desktop_env(),
-                ),
-                timeout=DESKTOP_EXECUTE_TIMEOUT_S,
-            )
-            return {
-                "ok": True,
-                "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
-            }
-
-        raise ValueError(f"Unknown desktop action: {action}")
+        Step 6a: thin facade over ``DesktopManager.desktop_action``.
+        """
+        return await self._desktop.desktop_action(workspace_id, action, args)
 
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
-        """Write plain text into the desktop clipboard inside the workspace VM/container."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
+        """Write plain text into the desktop clipboard inside the workspace VM/container.
 
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        command = (
-            "set -e;"
-            "TOOL='';"
-            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v apt-get >/dev/null 2>&1; then "
-            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
-            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
-            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; fi; "
-            "fi; "
-            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
-            f"printf %s '{encoded_text}' | base64 -d | "
-            "if [ \"$TOOL\" = 'xsel' ]; then "
-            "DISPLAY=:1 xsel --clipboard --input; "
-            "else DISPLAY=:1 timeout 3 xclip -selection clipboard -in >/dev/null 2>&1 || true; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            ["sh", "-lc", command],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to write desktop clipboard: {output}")
+        Step 6a: thin facade over ``DesktopManager.write_desktop_clipboard``.
+        """
+        return await self._desktop.write_desktop_clipboard(workspace_id, text)
 
     async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
-        """Read plain text from the desktop clipboard inside the workspace VM/container."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
+        """Read plain text from the desktop clipboard inside the workspace VM/container.
 
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        command = (
-            "set -e;"
-            "TOOL='';"
-            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v apt-get >/dev/null 2>&1; then "
-            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
-            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
-            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; fi; "
-            "fi; "
-            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
-            "if [ \"$TOOL\" = 'xclip' ]; then "
-            "DISPLAY=:1 xclip -selection clipboard -o 2>/dev/null || true; "
-            "else DISPLAY=:1 xsel --clipboard --output 2>/dev/null || true; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            ["sh", "-lc", command],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to read desktop clipboard: {output}")
-        return output
+        Step 6a: thin facade over ``DesktopManager.read_desktop_clipboard``.
+        """
+        return await self._desktop.read_desktop_clipboard(workspace_id)
 
     def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
-        """Return the active desktop session if any."""
-        return self._desktop_sessions.get(workspace_id)
+        """Return the active desktop session if any.
+
+        Step 6a: thin facade over ``DesktopManager.get_desktop_session``.
+        """
+        return self._desktop.get_desktop_session(workspace_id)
 
     def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
-        """Get the upstream IP address for the workspace desktop proxy."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not hasattr(runtime, "get_container_ip"):
-            raise RuntimeError("Runtime does not support desktop proxy")
-        return runtime.get_container_ip(info.instance_id, str(workspace_id))
+        """Get the upstream IP address for the workspace desktop proxy.
+
+        Step 6a: thin facade over ``DesktopManager.get_desktop_container_ip``.
+        """
+        return self._desktop.get_desktop_container_ip(workspace_id)
 
     def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
-        """Get the backend-attachable network for a workspace desktop proxy."""
-        runtime = self._get_runtime(workspace_id)
-        if not hasattr(runtime, "get_workspace_network_name"):
-            raise RuntimeError("Runtime does not support desktop networking")
-        return runtime.get_workspace_network_name(str(workspace_id))
+        """Get the backend-attachable network for a workspace desktop proxy.
+
+        Step 6a: thin facade over ``DesktopManager.get_desktop_network_name``.
+        """
+        return self._desktop.get_desktop_network_name(workspace_id)
 
     # -- file operations -------------------------------------------------------
+    # Step 4: thin facade over ``FileManager`` (canonical). State
+    # (``_file_read_semaphores``) is owned by the manager and exposed via
+    # the property alias above. Pure helpers (sanitizers, find, tar) live
+    # in ``src.services.exec_kernel`` / ``src.services.files``.
 
     @staticmethod
     def _sanitize_path(path: str) -> str:
         """Ensure *path* is under ``/workspace`` and prevent traversal."""
-        normalized = os.path.normpath(path)
-        if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-            raise ValueError(f"Path must be under /workspace: {path}")
-        return normalized
+        from .services.exec_kernel import sanitize_path as _impl
+
+        return _impl(path)
 
     @staticmethod
     def _sanitize_exec_workdir(path: str) -> str:
         """Normalize an exec working directory (not sandboxed to /workspace)."""
-        raw_input = path or ""
-        if "\x00" in raw_input or "\n" in raw_input:
-            raise ValueError(f"Invalid workdir: {path}")
-        raw = raw_input.strip() or "/workspace"
-        candidate = raw if os.path.isabs(raw) else f"/workspace/{raw}"
-        normalized = os.path.normpath(candidate)
-        if not os.path.isabs(normalized):
-            raise ValueError(f"Invalid workdir: {path}")
-        return normalized
+        from .services.exec_kernel import sanitize_exec_workdir as _impl
+
+        return _impl(path)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
         """Validate and return a safe filename for workspace uploads."""
-        if not filename:
-            raise ValueError("Filename must not be empty")
+        from .services.exec_kernel import sanitize_filename as _impl
 
-        if filename != os.path.basename(filename):
-            raise ValueError("Filename must not contain path separators")
-
-        if filename in {".", ".."}:
-            raise ValueError("Invalid filename")
-
-        return filename
+        return _impl(filename)
 
     async def _realpath_under_workspace(
         self,
@@ -4168,61 +1926,25 @@ class WorkspaceService:
     ) -> str:
         """Resolve symlinks for *path* and ensure it stays in /workspace.
 
-        Runs ``realpath -m`` inside the workspace, which resolves symlinks
-        and ``..`` segments. Raises ``ValueError`` (fail-closed) when the
-        resolved path escapes ``/workspace``. Falls back to *path* when
-        ``realpath`` is unavailable in the image (coreutils ships it on
-        Ubuntu, so this is only a safety net). Note: check-then-use is
-        inherently TOCTOU-prone if the workspace mutates the link between
-        the check and the file operation; accepted here as defense-in-depth
-        on top of the ``/workspace`` sandbox.
+        Step 4: thin facade over ``FileManager._realpath_under_workspace``.
         """
-        exit_code, output = await runtime.exec_command_wait(
-            instance_id,
-            command=["realpath", "-m", path],
-            workdir="/workspace",
+        return await self._files_manager._realpath_under_workspace(
+            runtime, instance_id, path
         )
-        if exit_code != 0:
-            return path
-        resolved = output.strip().splitlines()
-        if not resolved or not resolved[0]:
-            return path
-        real = resolved[0].strip()
-        if real != "/workspace" and not real.startswith("/workspace/"):
-            raise ValueError(f"Path escapes /workspace: {path}")
-        return real
 
     @staticmethod
     def _build_single_file_tar(filename: str, content: bytes) -> bytes:
         """Build a tar archive containing exactly one file."""
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w") as tar:
-            info = tarfile.TarInfo(name=filename)
-            info.size = len(content)
-            info.mode = 0o644
-            tar.addfile(info, io.BytesIO(content))
-        return buffer.getvalue()
+        from .services.files import build_single_file_tar as _impl
+
+        return _impl(filename, content)
 
     @staticmethod
     def _convert_archive_to_tar(content: bytes) -> bytes:
         """Convert an uploaded archive payload to a plain tar stream."""
-        source = io.BytesIO(content)
-        target = io.BytesIO()
+        from .services.files import convert_archive_to_tar as _impl
 
-        with tarfile.open(fileobj=source, mode="r:*") as src_tar:
-            with tarfile.open(fileobj=target, mode="w") as dst_tar:
-                for member in src_tar.getmembers():
-                    if member.name.startswith("/") or ".." in member.name.split("/"):
-                        raise ValueError("Archive contains unsafe paths")
-                    if member.issym() or member.islnk():
-                        raise ValueError("Archive contains unsafe links")
-
-                    extracted = None
-                    if member.isfile():
-                        extracted = src_tar.extractfile(member)
-                    dst_tar.addfile(member, extracted)
-
-        return target.getvalue()
+        return _impl(content)
 
     async def list_files(
         self,
@@ -4232,51 +1954,10 @@ class WorkspaceService:
         """List files and directories at *path* inside the workspace.
 
         Returns a list of dicts with ``name``, ``path``, ``type``, ``size``.
+
+        Step 4: thin facade over ``FileManager.list_files``.
         """
-        safe_path = self._sanitize_path(path)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
-
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=[
-                "find",
-                safe_path,
-                "-maxdepth",
-                "1",
-                "-mindepth",
-                "1",
-                "-printf",
-                r"%y\t%s\t%p\n",
-            ],
-            workdir="/workspace",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to list files: {output}")
-
-        entries: list[dict] = []
-        for line in output.strip().splitlines():
-            parts = line.split("\t", 2)
-            if len(parts) != 3:
-                continue
-            file_type_char, size_str, file_path = parts
-            entries.append(
-                {
-                    "name": os.path.basename(file_path),
-                    "path": file_path,
-                    "type": "directory" if file_type_char == "d" else "file",
-                    "size": int(size_str) if size_str.isdigit() else 0,
-                }
-            )
-
-        # Sort: directories first, then alphabetically
-        entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
-        return entries
+        return await self._files_manager.list_files(workspace_id, path)
 
     @staticmethod
     def sanitize_find_query(query: str) -> str:
@@ -4285,10 +1966,9 @@ class WorkspaceService:
         Only characters that the chat ``@`` mention regex allows are accepted.
         ``..`` is rejected even though ``.`` is otherwise valid.
         """
-        cleaned = (query or "").strip()
-        if ".." in cleaned or not _FIND_FILES_QUERY_RE.fullmatch(cleaned):
-            raise ValueError("Invalid find query")
-        return cleaned
+        from .services.files import sanitize_find_query as _impl
+
+        return _impl(query)
 
     @classmethod
     def build_find_files_command(cls, query: str, limit: int) -> list[str]:
@@ -4297,19 +1977,9 @@ class WorkspaceService:
         Prunes common junk directories. An empty *query* lists shallower paths
         first; a non-empty query uses case-insensitive ``-ipath``.
         """
-        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
-        prune = " -o ".join(
-            f"-name {shlex.quote(name)}" for name in FIND_FILES_PRUNE_NAMES
-        )
-        match = ""
-        if query:
-            match = f"-ipath {shlex.quote(f'*{query}*')} "
-        pipeline = (
-            f"find {shlex.quote('/workspace')} \\( {prune} \\) -prune "
-            f"-o -type f {match}-printf '%d\\t%p\\n' "
-            f"| sort -n | head -n {capped + 1}"
-        )
-        return ["bash", "-lc", pipeline]
+        from .services.files import build_find_files_command as _impl
+
+        return _impl(query, limit)
 
     async def find_files(
         self,
@@ -4321,42 +1991,12 @@ class WorkspaceService:
 
         Returns ``{"paths": [{"path", "name"}], "truncated": bool}``. Results
         are capped at ``FIND_FILES_DEFAULT_LIMIT``.
+
+        Step 4: thin facade over ``FileManager.find_files``.
         """
-        safe_query = self.sanitize_find_query(query)
-        capped = max(1, min(int(limit), FIND_FILES_DEFAULT_LIMIT))
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-
-        command = self.build_find_files_command(safe_query, capped)
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=command,
-            workdir="/workspace",
+        return await self._files_manager.find_files(
+            workspace_id, query=query, limit=limit
         )
-        if exit_code not in _FIND_FILES_SUCCESS_EXIT_CODES:
-            raise RuntimeError(f"Failed to find files: {output}")
-
-        paths: list[dict] = []
-        for line in output.strip().splitlines():
-            parts = line.split("\t", 1)
-            file_path = parts[-1].strip()
-            if not file_path:
-                continue
-            if file_path != "/workspace" and not file_path.startswith(
-                "/workspace/"
-            ):
-                continue
-            paths.append(
-                {
-                    "name": os.path.basename(file_path),
-                    "path": file_path,
-                }
-            )
-
-        truncated = len(paths) > capped
-        return {"paths": paths[:capped], "truncated": truncated}
 
     async def read_file(
         self,
@@ -4372,84 +2012,12 @@ class WorkspaceService:
         Concurrent reads are throttled via a per-workspace semaphore to
         avoid exceeding the SSH server's MaxSessions limit when many images
         are fetched simultaneously.
+
+        Step 4: thin facade over ``FileManager.read_file``.
         """
-        safe_path = self._sanitize_path(path)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-
-        # One semaphore per workspace; created lazily.
-        sem = self._file_read_semaphores.get(workspace_id)
-        if sem is None:
-            sem = asyncio.Semaphore(4)
-            self._file_read_semaphores[workspace_id] = sem
-
-        if max_size is None:
-            read_limit = FILE_READ_DEFAULT_MAX_SIZE
-        else:
-            read_limit = int(max_size)
-            if read_limit <= 0:
-                raise ValueError("max_size must be a positive integer")
-            if read_limit > FILE_READ_ABSOLUTE_MAX_SIZE:
-                raise ValueError(
-                    f"max_size exceeds allowed maximum ({FILE_READ_ABSOLUTE_MAX_SIZE} bytes)"
-                )
-
-        async with sem:
-            safe_path = await self._realpath_under_workspace(
-                runtime, info.instance_id, safe_path
-            )
-            # Combine stat + read into a single SSH exec to halve the number
-            # of SSH channels opened compared to two sequential commands.
-            # Output format:
-            #   line 1 = file size (bytes)
-            #   line 2 = MIME type
-            #   rest   = base64 content
-            # Paths are embedded via shlex.quote so a quote in the path
-            # cannot break out of the shell quoting.
-            qpath = shlex.quote(safe_path)
-            shell_cmd = (
-                # Guard: exit 1 immediately if the file does not exist.
-                # Without this, the else-branch's `head | base64` pipeline
-                # exits 0 even on a missing file, causing a ValueError when
-                # we try to parse the empty first line as an integer.
-                f"test -f {qpath} || exit 1; "
-                f"SZ=$(stat -c '%s' {qpath}); "
-                f"MT=$(file --mime-type -b {qpath} 2>/dev/null "
-                "|| echo 'application/octet-stream'); "
-                f'echo "$SZ"; '
-                f'echo "$MT"; '
-                f'if [ "$SZ" -le {read_limit} ]; then '
-                f"  base64 {qpath}; "
-                f"else "
-                f"  head -c {read_limit} {qpath} | base64; "
-                f"fi"
-            )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["sh", "-c", shell_cmd],
-                workdir="/workspace",
-            )
-
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to read file: {output}")
-
-        # Parse output: first line is size, second line MIME type, remainder base64.
-        lines = output.splitlines()
-        if len(lines) < 2:
-            raise RuntimeError("Invalid file read response format")
-        file_size = int(lines[0].strip())
-        mime_type = lines[1].strip() or "application/octet-stream"
-        content_output = "\n".join(lines[2:]) if len(lines) > 2 else ""
-        truncated = file_size > read_limit
-
-        return {
-            "content": content_output.strip(),
-            "size": file_size,
-            "truncated": truncated,
-            "mime_type": mime_type,
-        }
+        return await self._files_manager.read_file(
+            workspace_id, path, max_size=max_size
+        )
 
     async def upload_file(
         self,
@@ -4467,58 +2035,20 @@ class WorkspaceService:
             filename: Name of the file to create.
             content_b64: Base64-encoded file content.
             is_directory: If True, content is a tar.gz archive to extract.
+
+        Step 4: thin facade over ``FileManager.upload_file``. The upload
+        cap reads the live ``src.service.FILE_UPLOAD_MAX_SIZE`` value at
+        call time so ``monkeypatch`` on the facade stays effective.
         """
-        safe_path = self._sanitize_path(path)
-        safe_filename = self._sanitize_filename(filename)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
+        import src.service as _service_module
 
-        # Exact cap on decoded bytes: decode + validate first, before any
-        # mkdir side effect. A cheap approximate precheck may reject
-        # obvious oversize early, but it must never reject a valid payload
-        # at/below the cap (padding-aware bound, not a lossy estimate).
-        clean = "".join((content_b64 or "").split())
-        if len(clean) > (FILE_UPLOAD_MAX_SIZE + 2) // 3 * 4 + 4:
-            raise ValueError(
-                f"Upload exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
-            )
-        try:
-            decoded_content = base64.b64decode(clean, validate=True)
-        except Exception as exc:
-            raise ValueError("Invalid base64 upload payload") from exc
-        if len(decoded_content) > FILE_UPLOAD_MAX_SIZE:
-            raise ValueError(
-                f"Upload exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
-            )
-
-        # Ensure target directory exists
-        await runtime.exec_command_wait(
-            info.instance_id,
-            command=["mkdir", "-p", safe_path],
-            workdir="/workspace",
-        )
-
-        if is_directory:
-            archive_data = self._convert_archive_to_tar(decoded_content)
-        else:
-            archive_data = self._build_single_file_tar(safe_filename, decoded_content)
-
-        await runtime.put_archive(
-            info.instance_id,
-            safe_path,
-            archive_data,
-        )
-
-        logger.info(
-            "file_uploaded",
-            workspace_id=str(workspace_id),
-            path=safe_path,
-            filename=safe_filename,
+        return await self._files_manager.upload_file(
+            workspace_id,
+            path,
+            filename,
+            content_b64,
+            is_directory=is_directory,
+            upload_max_size=_service_module.FILE_UPLOAD_MAX_SIZE,
         )
 
     async def download_file(
@@ -4533,101 +2063,10 @@ class WorkspaceService:
         tar.gz archive. Payloads larger than ``FILE_DOWNLOAD_MAX_SIZE``
         raise ``ValueError`` so callers can return a small structured error
         instead of buffering unbounded memory.
+
+        Step 4: thin facade over ``FileManager.download_file``.
         """
-        safe_path = self._sanitize_path(path)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
-
-        # Check if it's a directory
-        exit_code, _ = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["test", "-d", safe_path],
-            workdir="/workspace",
-        )
-        is_dir = exit_code == 0
-
-        if is_dir:
-            qp_dir = shlex.quote(os.path.dirname(safe_path))
-            qp_base = shlex.quote(os.path.basename(safe_path))
-            # Report the archive size first so huge directories fail with a
-            # small error instead of streaming unbounded base64 into memory.
-            size_cmd = (
-                f"tar czf - -C {qp_dir} {qp_base} 2>/dev/null | wc -c"
-            )
-            exit_code, size_output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["sh", "-c", size_cmd],
-                workdir="/workspace",
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to download: {size_output}")
-            try:
-                archive_size = int(size_output.strip().split()[0])
-            except (ValueError, IndexError) as exc:
-                raise RuntimeError(
-                    f"Failed to download: invalid size {size_output!r}"
-                ) from exc
-            if archive_size > FILE_DOWNLOAD_MAX_SIZE:
-                raise ValueError(
-                    "Download exceeds maximum size of "
-                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
-                )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=[
-                    "sh",
-                    "-c",
-                    f"tar czf - -C {qp_dir} {qp_base} | base64",
-                ],
-                workdir="/workspace",
-            )
-            filename = os.path.basename(safe_path) + ".tar.gz"
-            raw_size = archive_size
-        else:
-            qpath = shlex.quote(safe_path)
-            shell_cmd = (
-                f"test -f {qpath} || exit 1; "
-                f"stat -c '%s' {qpath}"
-            )
-            exit_code, size_output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["sh", "-c", shell_cmd],
-                workdir="/workspace",
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to download: {size_output}")
-            try:
-                raw_size = int(size_output.strip().split()[-1])
-            except (ValueError, IndexError) as exc:
-                raise RuntimeError(
-                    f"Failed to download: invalid size {size_output!r}"
-                ) from exc
-            if raw_size > FILE_DOWNLOAD_MAX_SIZE:
-                raise ValueError(
-                    "Download exceeds maximum size of "
-                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
-                )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["base64", safe_path],
-                workdir="/workspace",
-            )
-            filename = os.path.basename(safe_path)
-
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to download: {output}")
-
-        return {
-            "content": output.strip(),
-            "filename": filename,
-            "is_archive": is_dir,
-            "size": raw_size,
-        }
+        return await self._files_manager.download_file(workspace_id, path)
 
     async def stat_path(
         self,
@@ -4637,46 +2076,10 @@ class WorkspaceService:
         """Stat a path inside the workspace container.
 
         Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
-        """
-        safe_path = self._sanitize_path(path)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
 
-        qpath = shlex.quote(safe_path)
-        shell_cmd = (
-            f"if [ -e {qpath} ]; then "
-            f"if [ -d {qpath} ]; then echo 'dir'; "
-            f"du -sb {qpath} | cut -f1; "
-            f"echo 'inode/directory'; "
-            f"else stat -c '%s' {qpath}; "
-            f"file --mime-type -b {qpath} 2>/dev/null "
-            "|| echo 'application/octet-stream'; "
-            f"fi; else echo 'missing'; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["sh", "-c", shell_cmd],
-            workdir="/workspace",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to stat path: {output}")
-        lines = output.strip().splitlines()
-        if not lines or lines[0].strip() == "missing":
-            raise FileNotFoundError(f"No such file or directory: {path}")
-        is_dir = lines[0].strip() == "dir"
-        size = int(lines[1].strip()) if len(lines) > 1 else 0
-        mime_type = lines[2].strip() if len(lines) > 2 else "application/octet-stream"
-        return {
-            "path": safe_path,
-            "is_dir": is_dir,
-            "size": size,
-            "mime_type": mime_type,
-        }
+        Step 4: thin facade over ``FileManager.stat_path``.
+        """
+        return await self._files_manager.stat_path(workspace_id, path)
 
     async def write_file_content(
         self,
@@ -4692,45 +2095,20 @@ class WorkspaceService:
             path: Absolute path under ``/workspace``.
             content_b64: Base64-encoded file content.
             mode: File permission bits applied after the write.
-        """
-        safe_path = self._sanitize_path(path)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
-        )
-        # Exact cap on decoded bytes: decode + validate before writing.
-        # Whitespace is normalized first (base64 output may wrap lines).
-        try:
-            decoded = base64.b64decode("".join(content_b64.split()), validate=True)
-        except Exception as exc:
-            raise ValueError("Invalid base64 file payload") from exc
-        if len(decoded) > FILE_UPLOAD_MAX_SIZE:
-            raise ValueError(
-                f"Write exceeds maximum size of {FILE_UPLOAD_MAX_SIZE} bytes"
-            )
-        if mode < 0 or mode > 0o777:
-            raise ValueError(f"Invalid file mode: {mode!r}")
 
-        archive = self._build_single_file_tar(os.path.basename(safe_path), decoded)
-        await runtime.put_archive(
-            info.instance_id,
-            os.path.dirname(safe_path) or "/workspace",
-            archive,
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["chmod", format(mode, "o"), safe_path],
-            workdir="/workspace",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to set file mode: {output}")
-        logger.info(
-            "file_written",
-            workspace_id=str(workspace_id),
-            path=safe_path,
+        Step 4: thin facade over ``FileManager.write_file_content``. The
+        write cap reads the live ``src.service.FILE_UPLOAD_MAX_SIZE``
+        value at call time so ``monkeypatch`` on the facade stays
+        effective.
+        """
+        import src.service as _service_module
+
+        return await self._files_manager.write_file_content(
+            workspace_id,
+            path,
+            content_b64,
+            mode=mode,
+            upload_max_size=_service_module.FILE_UPLOAD_MAX_SIZE,
         )
 
     async def exec_harness_command(
@@ -4745,43 +2123,12 @@ class WorkspaceService:
         Runs the command via a shell wrapper that multiplexes the two
         streams into tagged base64 frames, then decodes them back into
         separate buffers. Returns ``(exit_code, stdout, stderr)``.
+
+        Step 4: thin facade over ``HarnessExecService.exec_harness_command``.
         """
-        safe_workdir = self._sanitize_exec_workdir(workdir)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if isinstance(command, str):
-            argv: list[str] = ["bash", "-lc", command]
-        else:
-            argv = [str(arg) for arg in command]
-            if not argv:
-                raise ValueError("command must not be empty")
-        marker_out = "OPENCURIA_STDOUT"
-        marker_err = "OPENCURIA_STDERR"
-        inner = " ".join(shlex.quote(arg) for arg in argv)
-        source = (
-            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
-            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
+        return await self._harness.exec_harness_command(
+            workspace_id, command, workdir=workdir, env=env
         )
-        wrapper = (
-            f"{source}"
-            f"__oc_out=$(mktemp); __oc_err=$(mktemp); "
-            f'sh -c {shlex.quote(inner)} >"$__oc_out" 2>"$__oc_err"; '
-            f"__oc_code=$?; "
-            f'echo {marker_out}; base64 "$__oc_out"; '
-            f'echo {marker_err}; base64 "$__oc_err"; '
-            f'echo "EXIT:$__oc_code"; rm -f "$__oc_out" "$__oc_err"; '
-            f"exit $__oc_code"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["sh", "-lc", wrapper],
-            workdir=safe_workdir,
-            env=env,
-        )
-        stdout, stderr = self._parse_harness_exec_output(output)
-        return exit_code, stdout, stderr
 
     async def exec_harness_command_stream(
         self,
@@ -4794,96 +2141,39 @@ class WorkspaceService:
 
         Yields ``("stdout", text)`` / ``("stderr", text)`` tuples while the
         command runs, then a final ``("exit", str(exit_code))`` tuple.
+
+        Step 4: thin facade over
+        ``HarnessExecService.exec_harness_command_stream``.
         """
-        safe_workdir = self._sanitize_exec_workdir(workdir)
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if isinstance(command, str):
-            argv: list[str] = ["bash", "-lc", command]
-        else:
-            argv = [str(arg) for arg in command]
-            if not argv:
-                raise ValueError("command must not be empty")
-        marker_out = "OPENCURIA_LINE_STDOUT:"
-        marker_err = "OPENCURIA_LINE_STDERR:"
-        inner = " ".join(shlex.quote(arg) for arg in argv)
-        source = (
-            f"if [ -f {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)} ]; then "
-            f". {shlex.quote(WORKSPACE_CREDENTIAL_ENV_FILE)}; fi; "
-        )
-        # Portable fifo-based streaming wrapper: multiplexes the child
-        # stdout/stderr into tagged lines on the combined output stream,
-        # then reports the exit code on the last line.
-        portable = (
-            f"{source}"
-            "__oc_dir=$(mktemp -d); "
-            "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
-            'mkfifo "$__oc_o" "$__oc_e"; '
-            f"(sh -c {shlex.quote(inner)} "
-            '>"$__oc_o" 2>"$__oc_e"; echo $? >"$__oc_dir/code") & '
-            "__oc_pid=$!; "
-            "(while IFS= read -r __oc_l; do "
-            f"printf '{marker_out}%s\\n' \"$__oc_l\"; "
-            'done <"$__oc_o" & '
-            "while IFS= read -r __oc_m; do "
-            f"printf '{marker_err}%s\\n' \"$__oc_m\"; "
-            'done <"$__oc_e" & wait); '
-            'wait $__oc_pid; __oc_code=$(cat "$__oc_dir/code"); '
-            'rm -rf "$__oc_dir"; '
-            'echo "OPENCURIA_EXIT:$__oc_code"'
-        )
-        exit_code = 0
-        async for line in runtime.exec_command(
-            info.instance_id,
-            command=["sh", "-lc", portable],
-            workdir=safe_workdir,
-            env=env,
+        async for chunk in self._harness.exec_harness_command_stream(
+            workspace_id, command, workdir=workdir, env=env
         ):
-            if line.startswith(marker_out):
-                yield ("stdout", line[len(marker_out) :])
-            elif line.startswith(marker_err):
-                yield ("stderr", line[len(marker_err) :])
-            elif line.startswith("OPENCURIA_EXIT:"):
-                exit_code = int(line.split(":", 1)[1].strip() or 0)
-                yield ("exit", str(exit_code))
-            else:
-                yield ("stdout", line)
+            yield chunk
 
     @staticmethod
     def _parse_harness_exec_output(output: str) -> tuple[str, str]:
-        """Split tagged exec wrapper output into (stdout, stderr)."""
-        marker_out = "OPENCURIA_STDOUT"
-        marker_err = "OPENCURIA_STDERR"
-        if marker_out not in output or marker_err not in output:
-            return output, ""
-        stdout_b64 = output.split(marker_out, 1)[1].split(marker_err, 1)[0]
-        remainder = output.split(marker_err, 1)[1]
-        stderr_b64 = remainder.split("EXIT:", 1)[0]
-        import base64 as _b64
+        """Split tagged exec wrapper output into (stdout, stderr).
 
-        def _decode(payload: str) -> str:
-            cleaned = "".join(payload.split())
-            if not cleaned:
-                return ""
-            return _b64.b64decode(cleaned).decode("utf-8", errors="replace")
-
-        return _decode(stdout_b64), _decode(stderr_b64)
+        Step 4: thin facade over
+        ``HarnessExecService._parse_harness_exec_output``.
+        """
+        return HarnessExecService._parse_harness_exec_output(output)
 
     # ── Git operations (dumb-executor git service) ──────────────────────
+    # Step 7: thin facade over ``GitService`` (canonical
+    # ``src.services.git_service``). State (``_git_lock_map``) is owned
+    # by the manager and exposed via the ``git`` / ``_git_lock_map`` /
+    # ``_git_locks`` / ``_git_locks_guard`` aliases above; every method
+    # here delegates with the same name/signature/messages.
 
     async def _git_lock(
         self, workspace_id: uuid.UUID, repo_root: str
     ) -> asyncio.Lock:
-        """Return the serialising lock for one workspace/repo pair."""
-        key = (workspace_id, repo_root)
-        async with self._git_locks_guard:
-            lock = self._git_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._git_locks[key] = lock
-            return lock
+        """Return the serialising lock for one workspace/repo pair.
+
+        Step 7: thin facade over ``GitService._git_lock``.
+        """
+        return await self._git._git_lock(workspace_id, repo_root)
 
     async def _git_exec(
         self,
@@ -4898,72 +2188,9 @@ class WorkspaceService:
     ) -> tuple[int, str]:
         """Run one git argv inside the workspace with a timeout.
 
-        Every git argv runs behind the fixed sourcing wrapper
-        (:func:`src.git.git_exec_wrapper_argv`) so the persistent
-        credential file is sourced and ``GITHUB_TOKEN`` is inherited by
-        git and its askpass child — without ever appearing in argv, URLs
-        or logs.  User-controlled git arguments stay separate argv
-        elements behind ``exec "$@"`` and are never shell-interpreted.
-        Only non-git probes (``realpath``/``find``/``test``/``rm``) run
-        unwrapped.  Raises :class:`GitError` with code ``missing_git``
-        when the git binary is absent.
+        Step 7: thin facade over ``GitService._git_exec``.
         """
-        if argv[:1] == ["git"]:
-            command = git_ops.git_exec_wrapper_argv(list(argv))
-        else:
-            command = list(argv)
-        try:
-            exit_code, output = await asyncio.wait_for(
-                runtime.exec_command_wait(
-                    instance_id,
-                    command=command,
-                    workdir=workdir,
-                    env=env,
-                ),
-                timeout,
-            )
-        except asyncio.TimeoutError as exc:
-            raise git_ops.GitError("timeout", "Git operation timed out") from exc
-        # Missing-binary detection is deliberately narrow: only a nonzero
-        # exit of 126/127 *plus* a binary marker counts as missing_git.
-        # Plain "not found" text from successful (exit 0) or exit-1 git
-        # output — e.g. filenames or git's own messages — must stay a
-        # normal operation result, never a false-positive missing_git.
-        # _git_exec wraps git argv (sh -c wrapper) but inspects the
-        # unwrapped argv, so both wrapped ["git", ...] and bare
-        # ["realpath", "-m", ...] probes are covered here.
-        lowered = output.lower() if isinstance(output, str) else ""
-        missing_markers = (
-            "command not found",
-            "not recognized",
-            "no such file or directory",
-            "no such file",
-            "not found",
-        )
-        is_git_argv = argv[:1] == ["git"]
-        is_realpath_probe = argv[:1] == ["realpath", "-m"]
-        if (
-            exit_code in (126, 127)
-            and (is_git_argv or is_realpath_probe)
-            and any(m in lowered for m in missing_markers)
-        ):
-            # Only treat as missing-git when the marker refers to the
-            # binary under test, not to repo content leaking into output.
-            if is_git_argv or "realpath" in lowered:
-                raise git_ops.GitError(
-                    "missing_git",
-                    "git is not available inside the workspace",
-                    exit_code=exit_code,
-                    stderr=output,
-                )
-        if check_git and exit_code != 0 and "not a git repository" in lowered:
-            raise git_ops.GitError(
-                "not_a_repo",
-                "Path is not inside a git repository",
-                exit_code=exit_code,
-                stderr=output,
-            )
-        return exit_code, output if isinstance(output, str) else str(output)
+        return await self._git._git_exec(runtime, instance_id, argv, workdir=workdir, env=env, timeout=timeout, check_git=check_git)
 
     async def _git_realpath_contained(
         self,
@@ -4977,58 +2204,9 @@ class WorkspaceService:
     ) -> str:
         """Resolve *path* via ``realpath -m`` and enforce ``/workspace``.
 
-        *context* is ``"repo"`` for worktree roots and ``"metadata"`` for
-        gitdir/common-dir values.  Fail-closed: realpath errors, empty or
-        multiline output, and containment escapes all raise.  Messages only
-        ever carry ``/workspace`` paths (never external host paths):
-        metadata failures echo *display* (the repo root), never *path*.
+        Step 7: thin facade over ``GitService._git_realpath_contained``.
         """
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            ["realpath", "-m", path],
-            workdir="/workspace",
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        safe_display = display if display is not None else path
-        if exit_code != 0:
-            if context == "repo":
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Could not resolve repo path: {safe_display}",
-                    exit_code=exit_code,
-                    stderr="",
-                )
-            raise git_ops.GitError(
-                "unsafe_repository",
-                f"Repository metadata outside workspace: {safe_display}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        resolved = git_ops.parse_single_path_output(output)
-        if resolved is None:
-            if context == "repo":
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Could not resolve repo path: {safe_display}",
-                    exit_code=exit_code,
-                    stderr="",
-                )
-            raise git_ops.GitError(
-                "unsafe_repository",
-                f"Repository metadata outside workspace: {safe_display}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        if not git_ops.is_workspace_path(resolved):
-            raise git_ops.GitError(
-                "unsafe_repository",
-                f"Repository metadata outside workspace: {safe_display}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        return resolved
+        return await self._git._git_realpath_contained(runtime, instance_id, path, env, context=context, display=display)
 
     async def _git_verify_metadata_paths(
         self,
@@ -5039,153 +2217,9 @@ class WorkspaceService:
     ) -> str:
         """Verify gitdir + common-dir live under ``/workspace`` (fail-closed).
 
-        *repo_root* is an already containment-checked ``/workspace`` path
-        used as ``workdir`` and as the only path echoed in errors.  All
-        rev-parse outputs must be single-line; empty/multiline/unexpected
-        values reject.  ``--absolute-git-dir`` must be absolute; common-dir
-        prefers ``--path-format=absolute`` with a plain ``--git-common-dir``
-        fallback (relative values resolve against the verified git dir —
-        see below — never against the worktree root).  Both values are
-        passed through ``realpath -m`` containment.  Returns the verified
-        (realpath) git dir.  No shell concatenation: all probes are fixed
-        argv lists.
+        Step 7: thin facade over ``GitService._git_verify_metadata_paths``.
         """
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--absolute-git-dir"],
-            workdir=repo_root,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        git_dir_raw = git_ops.parse_single_path_output(output)
-        if git_dir_raw is None or not git_dir_raw.startswith("/"):
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        git_dir = await self._git_realpath_contained(
-            runtime, instance_id, git_dir_raw, env,
-            context="metadata", display=repo_root,
-        )
-        # Common dir: absolute preferred, plain fallback for older git.
-        # ``--path-format`` only affects following args, so it must precede
-        # ``--git-common-dir``.  The plain (no --path-format) output is
-        # relative to the *process cwd* on old git (prefix-relative per
-        # setup.c/relative_path: "../.git" observed from a subdir of a
-        # normal repo, "../../external-gitdir" from a separate-git-dir
-        # root).  The cwd git ran in is *repo_root* — the worktree root
-        # here, so prefix is empty — but when the plain fallback engages,
-        # a relative value may also encode the in-gitdir ``commondir``
-        # indirection ("../.." inside a linked worktree gitdir).  Git
-        # resolves the commondir file relative to the git dir (see
-        # get_common_dir_noenv: "%s/commondir" + "%s/<data>" joined onto
-        # gitdir), never relative to the worktree root, so both candidate
-        # bases (cwd + git dir) are checked: either both must resolve
-        # under /workspace (fail-closed) or the candidate rejects.
-        common_candidate: str | None = None
-        exit_code_c, output_c = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            workdir=repo_root,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_c == 0:
-            parsed = git_ops.parse_single_path_output(output_c)
-            if parsed is None:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_c,
-                    stderr="",
-                )
-            if parsed.startswith("/"):
-                common_candidate = parsed
-            else:
-                # Explicit --path-format=absolute must yield an absolute
-                # path; anything else is unexpected (or hostile) output.
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_c,
-                    stderr="",
-                )
-        else:
-            exit_code_f, output_f = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "rev-parse", "--git-common-dir"],
-                workdir=repo_root,
-                env=env,
-                timeout=git_ops.GIT_READ_TIMEOUT_S,
-            )
-            if exit_code_f != 0:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_f,
-                    stderr="",
-                )
-            parsed_f = git_ops.parse_single_path_output(output_f)
-            if parsed_f is None:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_f,
-                    stderr="",
-                )
-            if parsed_f.startswith("/"):
-                common_candidate = os.path.normpath(parsed_f)
-            else:
-                # Old-git plain fallback: the value is cwd-relative (the
-                # cwd being *repo_root*), but the same ".."-shaped value
-                # can also encode a gitdir-relative commondir indirection
-                # (git joins commondir content onto the git dir, see
-                # get_common_dir_noenv).  Resolve against BOTH bases and
-                # require both contained: realpath containment below still
-                # runs on the chosen candidate, and the extra base check
-                # here closes the gap where resolving only against
-                # repo_root would normalise "../.." to "/".
-                cwd_candidate = os.path.normpath(
-                    os.path.join(repo_root, parsed_f)
-                )
-                gitdir_candidate = os.path.normpath(
-                    os.path.join(git_dir, parsed_f)
-                )
-                if not (
-                    git_ops.is_workspace_path(cwd_candidate)
-                    and git_ops.is_workspace_path(gitdir_candidate)
-                ):
-                    raise git_ops.GitError(
-                        "unsafe_repository",
-                        f"Repository metadata outside workspace: {repo_root}",
-                        exit_code=exit_code_f,
-                        stderr="",
-                    )
-                common_candidate = cwd_candidate
-        if common_candidate is None or not common_candidate.startswith("/"):
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code_c,
-                stderr="",
-            )
-        await self._git_realpath_contained(
-            runtime, instance_id, common_candidate, env,
-            context="metadata", display=repo_root,
-        )
-        return git_dir
+        return await self._git._git_verify_metadata_paths(runtime, instance_id, repo_root, env)
 
     async def _git_verify_repo_root(
         self,
@@ -5196,38 +2230,9 @@ class WorkspaceService:
     ) -> str:
         """Verify *resolved* is a repo root with in-workspace metadata.
 
-        Central root+metadata check shared by explicit resolution and
-        discovery: ``--show-toplevel`` must equal *resolved*, then gitdir +
-        common-dir must resolve under ``/workspace``.  *resolved* must
-        already be a ``/workspace`` path (realpath-contained by the caller).
+        Step 7: thin facade over ``GitService._git_verify_repo_root``.
         """
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--show-toplevel"],
-            workdir=resolved,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {resolved}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        toplevel = git_ops.parse_single_path_output(output)
-        if toplevel is None or toplevel != resolved:
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a repository root: {resolved}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        await self._git_verify_metadata_paths(
-            runtime, instance_id, resolved, env
-        )
-        return resolved
+        return await self._git._git_verify_repo_root(runtime, instance_id, resolved, env)
 
     async def _git_resolve_repo_root(
         self,
@@ -5238,26 +2243,9 @@ class WorkspaceService:
     ) -> str:
         """Resolve *repo_arg* to a verified repository root (fail-closed).
 
-        Steps: normalise under ``/workspace`` → ``realpath -m`` symlink
-        containment (a realpath failure is fatal — no unsandboxed
-        fallback, symlinks must resolve) → ``git rev-parse
-        --show-toplevel`` must equal the resolved path (no
-        ``.git``-outside access, no subdirectories) → gitdir + common-dir
-        must resolve under ``/workspace`` (no external ``.git`` file,
-        symlink, ``--separate-git-dir``, worktree or submodule metadata).
-        See :meth:`_git_verify_repo_root` for the shared check.
+        Step 7: thin facade over ``GitService._git_resolve_repo_root``.
         """
-        normalized = git_ops.normalize_repo_arg(repo_arg)
-        resolved = await self._git_realpath_contained(
-            runtime, instance_id, normalized, env, context="repo"
-        )
-        # Extra lexical guard so ``ValueError`` (invalid_argument) still
-        # surfaces for direct escapes even if realpath mapping changes.
-        if not git_ops.is_workspace_path(resolved):
-            raise ValueError(f"Repo path escapes /workspace: {repo_arg!r}")
-        return await self._git_verify_repo_root(
-            runtime, instance_id, resolved, env
-        )
+        return await self._git._git_resolve_repo_root(runtime, instance_id, repo_arg, env)
 
     async def _git_discover_repos(
         self,
@@ -5267,75 +2255,18 @@ class WorkspaceService:
     ) -> list[str]:
         """Discover repository roots under ``/workspace`` (capped).
 
-        Detects a repo directly in ``/workspace`` plus cloned repos at any
-        depth (``find -prune`` never descends into ``.git`` internals).
-        Every candidate goes through the central root+metadata check
-        (:meth:`_git_verify_repo_root`); unsafe/unresolvable candidates
-        (external gitdir/common-dir, symlink escapes, subdirectories) are
-        omitted fail-closed.
+        Step 7: thin facade over ``GitService._git_discover_repos``.
         """
-        roots: list[str] = []
-        try:
-            verified = await self._git_verify_repo_root(
-                runtime, instance_id, "/workspace", env
-            )
-        except (git_ops.GitError, ValueError):
-            verified = None
-        if verified is not None:
-            roots.append("/workspace")
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            git_ops.discovery_find_args("/workspace"),
-            workdir="/workspace",
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code == 0 and output.strip():
-            candidates = git_ops.discovery_repo_roots(output)
-            for candidate in candidates:
-                if candidate in roots:
-                    continue
-                try:
-                    resolved = await self._git_realpath_contained(
-                        runtime, instance_id, candidate, env, context="repo"
-                    )
-                except (git_ops.GitError, ValueError):
-                    # Fail closed: unresolvable candidates are skipped,
-                    # never trusted unresolved.
-                    continue
-                if not git_ops.is_workspace_path(resolved):
-                    continue
-                if "/.git/" in resolved:
-                    continue
-                # The workspace root itself is only listed once (verified
-                # above); skip the duplicate find hit.
-                if resolved == "/workspace":
-                    continue
-                try:
-                    await self._git_verify_repo_root(
-                        runtime, instance_id, resolved, env
-                    )
-                except (git_ops.GitError, ValueError):
-                    continue
-                roots.append(resolved)
-                if len(roots) >= git_ops.GIT_DISCOVERY_MAX_REPOS:
-                    break
-        return sorted(set(roots))[: git_ops.GIT_DISCOVERY_MAX_REPOS]
+        return await self._git._git_discover_repos(runtime, instance_id, env)
 
     async def list_git_repositories(
         self, workspace_id: uuid.UUID
     ) -> list[str]:
-        """Return discovered repository roots for *workspace_id* (internal)."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with git_ops.github_askpass_context(runtime, info.instance_id):
-            env = git_ops.build_git_env()
-            return await self._git_discover_repos(runtime, info.instance_id, env)
+        """Return discovered repository roots for *workspace_id* (internal).
 
-    # -- git snapshot helpers -------------------------------------------------
+        Step 7: thin facade over ``GitService.list_git_repositories``.
+        """
+        return await self._git.list_git_repositories(workspace_id)
 
     async def _git_list_entry(
         self,
@@ -5346,49 +2277,9 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Build a lightweight list entry for one repository root.
 
-        Only ``rev-parse --abbrev-ref HEAD`` + ``rev-parse HEAD`` (no
-        status, no log, no for-each-ref).  Detached HEAD (abbrev ``HEAD``)
-        and unborn repos (no ``HEAD`` commit) map to
-        ``current_branch=None``; unborn additionally maps to
-        ``head_hash=None``.
+        Step 7: thin facade over ``GitService._git_list_entry``.
         """
-        timeout = git_ops.GIT_READ_TIMEOUT_S
-        exit_code_b, abbrev_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        current_branch: str | None = None
-        if exit_code_b == 0 and abbrev_out.strip():
-            head_name = abbrev_out.strip().splitlines()[0].strip()
-            # Detached HEAD reports literally "HEAD".
-            current_branch = None if head_name in {"", "HEAD"} else head_name
-        exit_code_h, head_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "HEAD"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        head_hash: str | None = None
-        if exit_code_h == 0 and head_out.strip():
-            head_hash = head_out.strip().splitlines()[0].strip() or None
-        if head_hash is None:
-            # Unborn repo: no commit exists, so no branch is meaningful
-            # even when rev-parse --abbrev-ref echoed one.
-            current_branch = None
-        name = repo_root.rstrip("/").rsplit("/", 1)[-1] or "workspace"
-        return {
-            "id": repo_root,
-            "name": name,
-            "path": repo_root,
-            "current_branch": current_branch,
-            "head_hash": head_hash,
-        }
+        return await self._git._git_list_entry(runtime, instance_id, repo_root, env)
 
     async def _git_repo_snapshot_no_log(
         self,
@@ -5397,160 +2288,11 @@ class WorkspaceService:
         repo_root: str,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        """Build the snapshot dict for one repository root (no history)."""
-        timeout = git_ops.GIT_READ_TIMEOUT_S
+        """Build the snapshot dict for one repository root (no history).
 
-        exit_code, status_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "status", "--porcelain=v2", "--branch",
-             "--untracked-files=all", "-z"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        changes: list[dict[str, Any]] = []
-        branch_header: dict[str, Any] = {
-            "oid": None, "head": None, "upstream": None, "ahead": 0, "behind": 0,
-        }
-        status_ok = exit_code == 0
-        if status_ok:
-            changes, branch_header = git_ops.changes_from_status_v2(status_out)
-        else:
-            # Fall back to v1 when v2 is unavailable (old git).
-            exit_code1, v1_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "status", "--porcelain=v1", "-b", "-z"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
-            )
-            if exit_code1 != 0:
-                raise git_ops.GitError(
-                    "git_failed",
-                    "git status failed",
-                    exit_code=exit_code,
-                    stderr=status_out,
-                )
-            exit_code_h, head_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "rev-parse", "HEAD"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
-            )
-            head_hash = head_out.strip().splitlines()[0].strip() if exit_code_h == 0 else ""
-            changes, branch_header = git_ops.parse_status_v1(v1_out, head_hash)
-            branch_header["oid"] = head_hash or None
-
-        if branch_header.get("oid") is None:
-            exit_code_h, head_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "rev-parse", "HEAD"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
-            )
-            if exit_code_h == 0 and head_out.strip():
-                branch_header["oid"] = head_out.strip().splitlines()[0].strip()
-
-        # Branch list with upstream tracking + remote refs.
-        us = git_ops._GIT_US
-        rs = git_ops._GIT_RS
-        ref_format = (
-            f"%(refname){us}%(refname:short){us}%(objectname){us}"
-            f"%(objecttype){us}%(upstream:short){us}%(upstream:track){us}%(HEAD)"
-        )
-        exit_code_r, refs_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "for-each-ref", f"--format={ref_format}{rs}",
-             "refs/heads", "refs/remotes", "refs/tags"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        branches: list[dict[str, Any]] = []
-        remote_refs: list[dict[str, Any]] = []
-        if exit_code_r == 0:
-            parsed_branches, parsed_remotes = git_ops.parse_for_each_ref(refs_out)
-            for item in parsed_branches:
-                ahead, behind = git_ops.parse_ahead_behind(item.get("track", ""))
-                branches.append(
-                    {
-                        "name": item["name"],
-                        "tip_hash": item["tip_hash"],
-                        "upstream": item.get("upstream"),
-                        "ahead": ahead,
-                        "behind": behind,
-                    }
-                )
-            branches.sort(key=lambda item: item["name"])
-            for item in parsed_remotes:
-                remote_refs.append({"name": item["name"], "tip_hash": item["tip_hash"]})
-            remote_refs.sort(key=lambda item: item["name"])
-
-        exit_code_m, remotes_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "remote"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        remotes: list[str] = []
-        if exit_code_m == 0:
-            remotes = sorted(
-                line.strip() for line in remotes_out.splitlines() if line.strip()
-            )
-
-        exit_code_d, default_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        default_remote: str | None = None
-        if exit_code_d == 0 and default_out.strip():
-            default_remote = default_out.strip().splitlines()[0].strip() or None
-
-        # Merge / rebase / cherry-pick state.
-        merge_state = await self._git_merge_state(runtime, instance_id, repo_root, env)
-
-        name = repo_root.rstrip("/").rsplit("/", 1)[-1] or "workspace"
-        return {
-            "id": repo_root,
-            "name": name,
-            "path": repo_root,
-            "current_branch": branch_header.get("head"),
-            "head_hash": branch_header.get("oid"),
-            "branches": branches,
-            "remote_refs": remote_refs,
-            "remotes": remotes,
-            "default_remote": default_remote,
-            "upstream": branch_header.get("upstream"),
-            "ahead": int(branch_header.get("ahead", 0)),
-            "behind": int(branch_header.get("behind", 0)),
-            "merge_state": merge_state,
-            "changes": [
-                {
-                    "path": item["path"],
-                    "old_path": item.get("old_path"),
-                    "status": item["status"],
-                    "staged": item.get("staged") is not None,
-                    "staged_kind": item.get("staged"),
-                    "unstaged": item.get("unstaged"),
-                    "conflict": item.get("conflict"),
-                    "diff": [],
-                }
-                for item in changes
-            ],
-        }
+        Step 7: thin facade over ``GitService._git_repo_snapshot_no_log``.
+        """
+        return await self._git._git_repo_snapshot_no_log(runtime, instance_id, repo_root, env)
 
     async def _git_repo_history(
         self,
@@ -5565,92 +2307,9 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Return one paginated history page for a repository root.
 
-        Only ``git log --max-count limit+1 --skip skip`` (``--all`` when
-        *branch* is None, else ``refs/heads/<branch>``).  The extra probe
-        commit yields ``has_more``.
+        Step 7: thin facade over ``GitService._git_repo_history``.
         """
-        timeout = git_ops.GIT_READ_TIMEOUT_S
-        capped_limit = max(1, min(int(limit), git_ops.GIT_HISTORY_MAX_LIMIT))
-        capped_skip = max(0, int(skip))
-        # Paginated history (newest first) + has_more probe.
-        # ``--all --date-order`` covers every local branch, remote-tracking
-        # ref, tag and stash entry — like vscode-git-graph — while detached
-        # HEAD commits stay included (HEAD is an implicit starting point).
-        # ``--exclude`` precedes ``--all`` (option order matters) to hide
-        # only the internal notes fan-out (refs/notes/*); stash (refs/stash)
-        # remains visible on purpose.
-        us = git_ops._GIT_US
-        rs = git_ops._GIT_RS
-        log_format = (
-            f"%H{us}%h{us}%P{us}%aN{us}%aE{us}%aI{us}"
-            f"%cN{us}%cE{us}%cI{us}%s{us}%b{rs}"
-        )
-        argv = [
-            "git", "log", "--exclude=refs/notes/*",
-        ]
-        if branch is not None:
-            argv.append(f"refs/heads/{branch}")
-        else:
-            argv.append("--all")
-        argv += [
-            "--date-order", f"--format={log_format}",
-            f"--max-count={capped_limit + 1}", f"--skip={capped_skip}",
-        ]
-        exit_code_l, log_out = await self._git_exec(
-            runtime,
-            instance_id,
-            argv,
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
-        commits: list[dict[str, Any]] = []
-        has_more = False
-        if exit_code_l == 0 and log_out.strip():
-            parsed = git_ops.parse_log_us_rs(log_out)
-            has_more = len(parsed) > capped_limit
-            for item in parsed[:capped_limit]:
-                commits.append(
-                    {
-                        "hash": item["hash"],
-                        "message": item["message"],
-                        "body": item.get("body", ""),
-                        "author": item.get("author", ""),
-                        "author_email": item.get("author_email", ""),
-                        "timestamp": item.get("author_date", ""),
-                        "author_date": item.get("author_date", ""),
-                        "committer": item.get("committer", ""),
-                        "committer_email": item.get("committer_email", ""),
-                        "committer_date": item.get("committer_date", ""),
-                        "parents": item.get("parents", []),
-                    }
-                )
-        if exit_code_l != 0:
-            # Unborn repo: no commits exist yet — empty page, not an error.
-            exit_code_h, _ = await self._git_exec(
-                runtime, instance_id,
-                ["git", "rev-parse", "--verify", "HEAD"],
-                workdir=repo_root, env=env, timeout=timeout,
-            )
-            if exit_code_h != 0:
-                return {
-                    "commits": [],
-                    "has_more": False,
-                    "history_skip": capped_skip,
-                    "history_limit": capped_limit,
-                }
-            raise git_ops.GitError(
-                "git_failed",
-                "git log failed",
-                exit_code=exit_code_l,
-                stderr=log_out,
-            )
-        return {
-            "commits": commits,
-            "has_more": has_more,
-            "history_skip": capped_skip,
-            "history_limit": capped_limit,
-        }
+        return await self._git._git_repo_history(runtime, instance_id, repo_root, env, limit=limit, skip=skip, branch=branch)
 
     async def _git_merge_state(
         self,
@@ -5661,57 +2320,9 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Detect MERGE_HEAD / rebase / cherry-pick state files.
 
-        Re-resolves the verified git dir (already sandbox-checked before
-        every operation) fail-closed so the ``test -e`` probes below can
-        never touch external metadata.  Any verification failure yields
-        the neutral (no-merge) state.
+        Step 7: thin facade over ``GitService._git_merge_state``.
         """
-        state: dict[str, Any] = {
-            "merging": False,
-            "rebasing": False,
-            "cherry_picking": False,
-        }
-        exit_code, git_dir_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--absolute-git-dir"],
-            workdir=repo_root,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            return state
-        git_dir_raw = git_ops.parse_single_path_output(git_dir_out)
-        if git_dir_raw is None or not git_dir_raw.startswith("/"):
-            return state
-        try:
-            git_dir = await self._git_realpath_contained(
-                runtime, instance_id, git_dir_raw, env,
-                context="metadata", display=repo_root,
-            )
-        except (git_ops.GitError, ValueError):
-            return state
-        checks = {
-            "merging": ["MERGE_HEAD"],
-            "rebasing": ["rebase-merge", "rebase-apply"],
-            "cherry_picking": ["CHERRY_PICK_HEAD"],
-        }
-        for flag, names in checks.items():
-            for name in names:
-                exit_code_t, _ = await self._git_exec(
-                    runtime,
-                    instance_id,
-                    ["test", "-e", f"{git_dir}/{name}"],
-                    workdir=repo_root,
-                    env=env,
-                    timeout=git_ops.GIT_READ_TIMEOUT_S,
-                )
-                if exit_code_t == 0:
-                    state[flag] = True
-                    break
-        return state
-
-    # -- git diff assembly -----------------------------------------------------
+        return await self._git._git_merge_state(runtime, instance_id, repo_root, env)
 
     async def _git_working_diff(
         self,
@@ -5721,95 +2332,11 @@ class WorkspaceService:
         env: dict[str, str],
         changes: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Build staged/unstaged/untracked diff entries for a repo."""
-        timeout = git_ops.GIT_READ_TIMEOUT_S
-        if changes is None:
-            exit_code, status_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "status", "--porcelain=v2", "--branch",
-                 "--untracked-files=all", "-z"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
-            )
-            if exit_code != 0:
-                raise git_ops.GitError(
-                    "git_failed", "git status failed",
-                    exit_code=exit_code, stderr=status_out,
-                )
-            changes, _ = git_ops.changes_from_status_v2(status_out)
+        """Build staged/unstaged/untracked diff entries for a repo.
 
-        staged_entries: list[dict[str, Any]] = []
-        unstaged_entries: list[dict[str, Any]] = []
-
-        staged_paths = sorted(
-            {item["path"] for item in changes if item.get("staged") is not None}
-        )
-        unstaged_paths = sorted(
-            {
-                item["path"]
-                for item in changes
-                if item.get("unstaged") not in (None,)
-            }
-        )
-
-        if staged_paths:
-            staged_patches = await self._git_diff_paths(
-                runtime, instance_id, repo_root, env,
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--src-prefix=a/", "--dst-prefix=b/",
-                 f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                 "--patch", "--no-commit-id", "--", *staged_paths],
-            )
-            staged_numstat = await self._git_diff_numstat_raw(
-                runtime, instance_id, repo_root, env,
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--numstat", "-z", "--", *staged_paths],
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--raw", "-z", "--", *staged_paths],
-            )
-            staged_entries = self._git_join_diff_parts(staged_patches, staged_numstat)
-
-        if unstaged_paths:
-            tracked_unstaged = sorted(
-                item["path"]
-                for item in changes
-                if item.get("unstaged") not in (None, "untracked")
-            )
-            untracked = sorted(
-                item["path"]
-                for item in changes
-                if item.get("unstaged") == "untracked"
-            )
-            combined: list[dict[str, Any]] = []
-            if tracked_unstaged:
-                entries = await self._git_diff_paths(
-                    runtime, instance_id, repo_root, env,
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--src-prefix=a/", "--dst-prefix=b/",
-                     f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                     "--patch", "--no-commit-id", "--", *tracked_unstaged],
-                )
-                numstat = await self._git_diff_numstat_raw(
-                    runtime, instance_id, repo_root, env,
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--numstat", "-z", "--", *tracked_unstaged],
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--raw", "-z", "--", *tracked_unstaged],
-                )
-                combined.extend(self._git_join_diff_parts(entries, numstat))
-            for rel in untracked:
-                combined.append(
-                    await self._git_untracked_entry(
-                        runtime, instance_id, repo_root, env, rel
-                    )
-                )
-            combined.sort(key=lambda item: item["new_path"])
-            unstaged_entries = combined
-
-        staged_entries.sort(key=lambda item: item["new_path"])
-        return {"staged": staged_entries, "unstaged": unstaged_entries}
+        Step 7: thin facade over ``GitService._git_working_diff``.
+        """
+        return await self._git._git_working_diff(runtime, instance_id, repo_root, env, changes)
 
     async def _git_diff_paths(
         self,
@@ -5819,17 +2346,11 @@ class WorkspaceService:
         env: dict[str, str],
         argv: list[str],
     ) -> dict[str, str]:
-        """Run a patch diff argv and split per-file patches."""
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git diff failed",
-                exit_code=exit_code, stderr=output,
-            )
-        return git_ops.split_patch_per_file(output)
+        """Run a patch diff argv and split per-file patches.
+
+        Step 7: thin facade over ``GitService._git_diff_paths``.
+        """
+        return await self._git._git_diff_paths(runtime, instance_id, repo_root, env, argv)
 
     async def _git_diff_numstat_raw(
         self,
@@ -5840,31 +2361,22 @@ class WorkspaceService:
         numstat_argv: list[str],
         raw_argv: list[str],
     ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Run numstat + raw diff argvs and parse them."""
-        exit_code_n, numstat_out = await self._git_exec(
-            runtime, instance_id, numstat_argv,
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        numstat: dict[str, dict[str, Any]] = {}
-        if exit_code_n == 0:
-            numstat = git_ops.parse_numstat_z(numstat_out)
-        exit_code_r, raw_out = await self._git_exec(
-            runtime, instance_id, raw_argv,
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        raw: dict[str, dict[str, Any]] = {}
-        if exit_code_r == 0:
-            raw = git_ops.parse_raw_z(raw_out)
-        return numstat, raw
+        """Run numstat + raw diff argvs and parse them.
+
+        Step 7: thin facade over ``GitService._git_diff_numstat_raw``.
+        """
+        return await self._git._git_diff_numstat_raw(runtime, instance_id, repo_root, env, numstat_argv, raw_argv)
 
     def _git_join_diff_parts(
         self,
         patches: dict[str, str],
         numstat_raw: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        """Join patch/numstat/raw parts into file change dicts."""
-        numstat, raw = numstat_raw
-        return git_ops.build_file_changes(raw=raw, numstat=numstat, patches=patches)
+        """Join patch/numstat/raw parts into file change dicts.
+
+        Step 7: thin facade over ``GitService._git_join_diff_parts``.
+        """
+        return self._git._git_join_diff_parts(patches, numstat_raw)
 
     async def _git_untracked_entry(
         self,
@@ -5874,43 +2386,11 @@ class WorkspaceService:
         env: dict[str, str],
         rel: str,
     ) -> dict[str, Any]:
-        """Render an untracked path as an added-file diff entry."""
-        rel_validated = git_ops.normalize_relative_path(rel)
-        timeout = git_ops.GIT_READ_TIMEOUT_S
-        exit_code, output = await self._git_exec(
-            runtime, instance_id,
-            ["git", "diff", "--no-index", "--no-color", "--no-ext-diff",
-             "--src-prefix=a/", "--dst-prefix=b/",
-             f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-             "--patch", "--", "/dev/null", rel_validated],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        # --no-index exits 1 when a diff exists; that is the happy path.
-        if exit_code not in {0, 1}:
-            # Fall back to a capped direct read when diff fails (e.g. the
-            # path is a directory or unreadable).
-            return await self._git_untracked_fallback(
-                runtime, instance_id, repo_root, env, rel_validated
-            )
-        patches = git_ops.split_patch_per_file(output)
-        # --no-index labels paths oddly; take the single patch if present.
-        patch_text = next(iter(patches.values()), "")
-        hunks, has_textual = git_ops.parse_patch_hunks(patch_text[: git_ops.GIT_MAX_DIFF_BYTES + 64])
-        truncated = len(patch_text.encode("utf-8", "ignore")) > git_ops.GIT_MAX_DIFF_BYTES
-        binary = bool(patch_text) and not has_textual and "Binary files " in patch_text
-        return {
-            "old_path": rel_validated,
-            "new_path": rel_validated,
-            "status": "A",
-            "additions": sum(
-                1 for hunk in hunks for line in hunk["lines"] if line["type"] == "add"
-            ),
-            "deletions": 0,
-            "binary": binary,
-            "truncated": truncated,
-            "has_textual_diff": has_textual and not binary,
-            "diff": hunks,
-        }
+        """Render an untracked path as an added-file diff entry.
+
+        Step 7: thin facade over ``GitService._git_untracked_entry``.
+        """
+        return await self._git._git_untracked_entry(runtime, instance_id, repo_root, env, rel)
 
     async def _git_untracked_fallback(
         self,
@@ -5920,18 +2400,11 @@ class WorkspaceService:
         env: dict[str, str],
         rel: str,
     ) -> dict[str, Any]:
-        """Render an unreadable/odd untracked path without patch text."""
-        return {
-            "old_path": rel,
-            "new_path": rel,
-            "status": "A",
-            "additions": 0,
-            "deletions": 0,
-            "binary": False,
-            "truncated": False,
-            "has_textual_diff": False,
-            "diff": [],
-        }
+        """Render an unreadable/odd untracked path without patch text.
+
+        Step 7: thin facade over ``GitService._git_untracked_fallback``.
+        """
+        return await self._git._git_untracked_fallback(runtime, instance_id, repo_root, env, rel)
 
     async def _git_commit_details(
         self,
@@ -5941,88 +2414,11 @@ class WorkspaceService:
         env: dict[str, str],
         commit_hash: str,
     ) -> dict[str, Any]:
-        """Build commit details with file changes, numstat and hunks."""
-        timeout = git_ops.GIT_READ_TIMEOUT_S
-        full_hash = git_ops.validate_commit_hash(commit_hash)
-        us = "\x1f"
-        rs = "\x1e"
-        header_format = (
-            f"%H{us}%P{us}%aN{us}%aE{us}%aI{us}%cN{us}%cE{us}%cI{us}%s{us}%b{rs}"
-        )
-        exit_code, header_out = await self._git_exec(
-            runtime, instance_id,
-            ["git", "show", "--no-patch", f"--format={header_format}", full_hash, "--"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "unknown_commit", f"Unknown commit: {commit_hash}",
-                exit_code=exit_code, stderr=header_out,
-            )
-        fields = header_out.split(rs)[0].split(us)
-        if len(fields) < 10:
-            raise git_ops.GitError(
-                "unknown_commit", f"Unknown commit: {commit_hash}",
-                exit_code=exit_code, stderr=header_out,
-            )
-        full, parents_raw, author, author_email, author_date = fields[0].strip(), fields[1], fields[2].strip(), fields[3].strip(), fields[4].strip()
-        committer, committer_email, committer_date = fields[5].strip(), fields[6].strip(), fields[7].strip()
-        subject, body = fields[8].strip(), fields[9].strip("\n")
-        exit_code_r, parents_check = await self._git_exec(
-            runtime, instance_id,
-            ["git", "rev-list", "--parents", "-n", "1", full],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        parents = parents_raw.split() if parents_raw.strip() else []
-        if exit_code_r == 0 and parents_check.strip():
-            tokens = parents_check.strip().split()
-            parents = tokens[1:] if len(tokens) > 1 else []
+        """Build commit details with file changes, numstat and hunks.
 
-        is_root = len(parents) == 0
-        if is_root:
-            numstat_argv = ["git", "diff-tree", "--root", "--no-commit-id",
-                            "--numstat", "-z", "-r", "-M", full, "--"]
-            raw_argv = ["git", "diff-tree", "--root", "--no-commit-id",
-                        "--raw", "-z", "-r", "-M", full, "--"]
-            patch_argv = ["git", "show", "--no-color", "--no-ext-diff",
-                          "--pretty=format:", "--patch",
-                          f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                          "--src-prefix=a/", "--dst-prefix=b/", "-M", full, "--"]
-        else:
-            numstat_argv = ["git", "diff-tree", "--no-commit-id",
-                            "--numstat", "-z", "-r", "-M",
-                            f"{parents[0]}", full, "--"]
-            raw_argv = ["git", "diff-tree", "--no-commit-id",
-                        "--raw", "-z", "-r", "-M",
-                        f"{parents[0]}", full, "--"]
-            patch_argv = ["git", "diff", "--no-color", "--no-ext-diff",
-                          f"{parents[0]}", full, "--patch",
-                          f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                          "--src-prefix=a/", "--dst-prefix=b/", "-M", "--"]
-        numstat, raw = await self._git_diff_numstat_raw(
-            runtime, instance_id, repo_root, env, numstat_argv, raw_argv
-        )
-        exit_code_p, patch_out = await self._git_exec(
-            runtime, instance_id, patch_argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        patches = git_ops.split_patch_per_file(patch_out) if exit_code_p == 0 else {}
-        file_changes = git_ops.build_file_changes(raw=raw, numstat=numstat, patches=patches)
-        return {
-            "hash": full,
-            "message": subject,
-            "body": body,
-            "author": author,
-            "author_email": author_email,
-            "author_date": author_date,
-            "committer": committer,
-            "committer_email": committer_email,
-            "committer_date": committer_date,
-            "parents": parents,
-            "file_changes": file_changes,
-        }
-
-    # -- git RPC entry point ---------------------------------------------------
+        Step 7: thin facade over ``GitService._git_commit_details``.
+        """
+        return await self._git._git_commit_details(runtime, instance_id, repo_root, env, commit_hash)
 
     async def execute_git_operation(
         self,
@@ -6033,67 +2429,9 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Execute one whitelisted git operation inside a workspace.
 
-        Single RPC entry point for productive git integration.  All repo
-        paths are resolved fail-closed under ``/workspace`` and verified
-        as repository roots.  Mutations return a fresh ``snapshot`` so the
-        backend/webapp can update atomically.
-
-        Args:
-            workspace_id: Target workspace.
-            operation: Whitelisted operation name (see
-                :data:`src.git.GIT_OPERATIONS`).
-            repo_path: Absolute repo path under ``/workspace``.  Omitted
-                for ``list_repos`` (discovers all repos).
-            args: Operation-specific arguments (paths, branch names,
-                messages, pagination cursors).
-
-        Returns:
-            JSON-serialisable dict with ``ok`` plus ``snapshot`` /
-            ``repos`` / ``diff`` / ``details`` payloads, or a structured
-            error (``ok=False``, ``code``, ``message``, ``stderr``).
+        Step 7: thin facade over ``GitService.execute_git_operation``.
         """
-        params = dict(args or {})
-        if operation not in git_ops.GIT_OPERATIONS:
-            return {
-                "ok": False,
-                "code": "unknown_operation",
-                "message": f"Unknown git operation: {operation}",
-                "stderr": "",
-                "exit_code": None,
-            }
-        try:
-            info = self._get_cached(workspace_id)
-            runtime = self._get_runtime(workspace_id)
-            if not info.instance_id:
-                raise RuntimeError("Workspace has no instance assigned")
-        except (ValueError, RuntimeError) as exc:
-            return git_ops.git_error_payload(exc)
-
-        timeout = git_ops.git_timeout_for(operation)
-        try:
-            outcome = await asyncio.wait_for(
-                self._execute_git_operation_inner(
-                    workspace_id, info.instance_id, runtime,
-                    operation, repo_path, params,
-                ),
-                timeout + 30.0,
-            )
-            if not isinstance(outcome, dict):
-                return {
-                    "ok": False, "code": "git_failed",
-                    "message": "Git operation returned no result",
-                    "stderr": "", "exit_code": None,
-                }
-            outcome.setdefault("ok", True)
-            return outcome
-        except asyncio.TimeoutError:
-            return {
-                "ok": False, "code": "timeout",
-                "message": "Git operation timed out",
-                "stderr": "", "exit_code": None,
-            }
-        except Exception as exc:  # noqa: BLE001 - contract is structured errors
-            return git_ops.git_error_payload(exc)
+        return await self._git.execute_git_operation(workspace_id, operation, repo_path, args)
 
     async def _execute_git_operation_inner(
         self,
@@ -6106,122 +2444,9 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Run the git operation body (locks + auth + dispatch).
 
-        The Git RPC accepts no caller-provided env and no unknown
-        operation-specific args: both are rejected fail-closed via
-        :func:`src.git.check_git_args_allowed` before any askpass/repo
-        work, so ``env``/``GIT_CONFIG_*``/``PATH``/token injection via a
-        future REST/MCP caller is impossible.  Auth comes only from the
-        secure base env plus the persistent workspace credential file
-        (sourced inside the workspace by the exec wrapper) and the
-        throwaway askpass script derived from it.
+        Step 7: thin facade over ``GitService._execute_git_operation_inner``.
         """
-        timeout = git_ops.git_timeout_for(operation)
-        # Defense-in-depth strict allow-list (mirrors the backend map).
-        # Runs before any askpass probe or repo command.
-        git_ops.check_git_args_allowed(operation, params)
-        # Pull contract: branch without remote is a strict reject before
-        # any askpass/repo work (mirrors backend/MCP/REST validation).
-        if operation == "pull" and params.get("branch") not in (None, ""):
-            remote = params.get("remote")
-            if remote is None or str(remote).strip() == "":
-                raise ValueError("remote is required when branch is set for pull")
-        async with git_ops.github_askpass_context(
-            runtime, instance_id
-        ) as askpass:
-            env = git_ops.build_git_env(askpass_script=askpass)
-            if operation == "list_repos":
-                repos = await self._git_discover_repos(runtime, instance_id, env)
-                entries: list[dict[str, Any]] = []
-                for root in repos:
-                    lock = await self._git_lock(workspace_id, root)
-                    async with lock:
-                        entries.append(
-                            await self._git_list_entry(
-                                runtime, instance_id, root, env
-                            )
-                        )
-                return {"ok": True, "repos": entries}
-
-            # All other operations require an explicit repository root.
-            if not repo_path:
-                raise ValueError(f"repo_path is required for operation {operation!r}")
-            repo_root = await self._git_resolve_repo_root(
-                runtime, instance_id, repo_path, env
-            )
-            if operation in ("repo_snapshot", "repo_history"):
-                lock = await self._git_lock(workspace_id, repo_root)
-                async with lock:
-                    if operation == "repo_snapshot":
-                        snapshot = await self._git_repo_snapshot_no_log(
-                            runtime, instance_id, repo_root, env
-                        )
-                        history = await self._git_repo_history(
-                            runtime, instance_id, repo_root, env,
-                            limit=git_ops.GIT_HISTORY_PAGE_SIZE,
-                            skip=0,
-                        )
-                        snapshot.update(history)
-                        return {"ok": True, "snapshot": snapshot}
-                    branch = git_ops.validate_optional_branch(
-                        params.get("branch")
-                    )
-                    if branch is not None and not await self._git_verify_branch_exists(
-                        runtime, instance_id, repo_root, env, branch
-                    ):
-                        raise git_ops.GitError(
-                            "unknown_branch", f"Unknown branch: {branch}",
-                            exit_code=None, stderr="",
-                        )
-                    try:
-                        history_limit = int(
-                            params.get(
-                                "history_limit",
-                                git_ops.GIT_HISTORY_DEFAULT_LIMIT,
-                            )
-                        )
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"Invalid history_limit: {params.get('history_limit')!r}"
-                        ) from exc
-                    try:
-                        history_skip = int(params.get("history_skip", 0))
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"Invalid history_skip: {params.get('history_skip')!r}"
-                        ) from exc
-                    history = await self._git_repo_history(
-                        runtime, instance_id, repo_root, env,
-                        limit=history_limit, skip=history_skip,
-                        branch=branch,
-                    )
-                    return {"ok": True, "repo_path": repo_root, **history}
-            lock = await self._git_lock(workspace_id, repo_root)
-            async with lock:
-                handler = {
-                    "working_diff": self._git_op_working_diff,
-                    "commit_details": self._git_op_commit_details,
-                    "stage": self._git_op_stage,
-                    "unstage": self._git_op_unstage,
-                    "discard": self._git_op_discard,
-                    "commit": self._git_op_commit,
-                    "fetch": self._git_op_fetch,
-                    "pull": self._git_op_pull,
-                    "push": self._git_op_push,
-                    "sync": self._git_op_sync,
-                    "checkout_branch": self._git_op_checkout_branch,
-                    "checkout_commit": self._git_op_checkout_commit,
-                    "checkout_remote_branch": self._git_op_checkout_remote_branch,
-                    "create_branch": self._git_op_create_branch,
-                    "rename_branch": self._git_op_rename_branch,
-                    "delete_branch": self._git_op_delete_branch,
-                    "merge_into_current": self._git_op_merge_into_current,
-                    "merge_current_into": self._git_op_merge_current_into,
-                    "merge_abort": self._git_op_merge_abort,
-                }[operation]
-                return await handler(
-                    runtime, instance_id, repo_root, env, params, timeout,
-                    workspace_id=workspace_id,
-                )
+        return await self._git._execute_git_operation_inner(workspace_id, instance_id, runtime, operation, repo_path, params)
 
     async def _git_fresh_snapshot(
         self,
@@ -6230,703 +2455,222 @@ class WorkspaceService:
         repo_root: str,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        """Return a fresh single-repo snapshot after a mutation."""
-        snapshot = await self._git_repo_snapshot_no_log(
-            runtime, instance_id, repo_root, env
-        )
-        history = await self._git_repo_history(
-            runtime, instance_id, repo_root, env,
-            limit=git_ops.GIT_HISTORY_PAGE_SIZE, skip=0,
-        )
-        snapshot.update(history)
-        return snapshot
+        """Return a fresh single-repo snapshot after a mutation.
+
+        Step 7: thin facade over ``GitService._git_fresh_snapshot``.
+        """
+        return await self._git._git_fresh_snapshot(runtime, instance_id, repo_root, env)
 
     def _git_mutation_result(
         self, snapshot: dict[str, Any], **extra: Any
     ) -> dict[str, Any]:
-        """Wrap a mutation outcome with its fresh snapshot."""
-        return {"ok": True, "snapshot": snapshot, **extra}
+        """Wrap a mutation outcome with its fresh snapshot.
 
-    # -- read operations --------------------------------------------------------
+        Step 7: thin facade over ``GitService._git_mutation_result``.
+        """
+        return self._git._git_mutation_result(snapshot, **extra)
 
     async def _git_op_working_diff(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Return staged vs unstaged working-tree diffs."""
-        diff = await self._git_working_diff(runtime, instance_id, repo_root, env)
-        return {"ok": True, "repo_path": repo_root, "diff": diff}
+        """Return staged vs unstaged working-tree diffs.
+
+        Step 7: thin facade over ``GitService._git_op_working_diff``.
+        """
+        return await self._git._git_op_working_diff(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_commit_details(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Return full details for one commit."""
-        commit = params.get("commit") or ""
-        if not commit:
-            raise ValueError("commit is required for commit_details")
-        details = await self._git_commit_details(
-            runtime, instance_id, repo_root, env, str(commit)
-        )
-        return {"ok": True, "repo_path": repo_root, "details": details}
+        """Return full details for one commit.
 
-    # -- staging operations -----------------------------------------------------
+        Step 7: thin facade over ``GitService._git_op_commit_details``.
+        """
+        return await self._git._git_op_commit_details(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     @staticmethod
     def _git_require_paths(params: dict[str, Any], operation: str) -> list[str]:
-        """Extract and validate repo-relative paths from *params*."""
-        raw = params.get("paths", [])
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list) or not raw:
-            raise ValueError(f"paths is required for operation {operation!r}")
-        paths = [git_ops.normalize_relative_path(str(item)) for item in raw]
-        if len(paths) > 256:
-            raise ValueError("Too many paths (max 256)")
-        return paths
+        """Extract and validate repo-relative paths from *params*.
+
+        Step 7: thin facade over ``GitService._git_require_paths``.
+        """
+        return GitService._git_require_paths(params, operation)
 
     async def _git_op_stage(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Stage paths via ``git add -- <paths>``."""
-        paths = self._git_require_paths(params, "stage")
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "add", "--", *paths],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git add failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Stage paths via ``git add -- <paths>``.
+
+        Step 7: thin facade over ``GitService._git_op_stage``.
+        """
+        return await self._git._git_op_stage(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_unstage(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Unstage paths (unborn-safe via ``rm --cached`` fallback)."""
-        paths = self._git_require_paths(params, "unstage")
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "restore", "--staged", "--", *paths],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0 and "could not resolve HEAD" in output:
-            # Unborn HEAD: nothing to restore from; staged additions are
-            # dropped from the index instead (matches VS Code behaviour).
-            exit_code, output = await self._git_exec(
-                runtime, instance_id, ["git", "rm", "--cached", "-r", "--", *paths],
-                workdir=repo_root, env=env, timeout=timeout,
-            )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git unstage failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Unstage paths (unborn-safe via ``rm --cached`` fallback).
+
+        Step 7: thin facade over ``GitService._git_op_unstage``.
+        """
+        return await self._git._git_op_unstage(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_discard(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Discard worktree changes; untracked paths are cleaned exactly."""
-        paths = self._git_require_paths(params, "discard")
-        exit_code, status_out = await self._git_exec(
-            runtime, instance_id,
-            ["git", "status", "--porcelain=v2", "--branch",
-             "--untracked-files=all", "-z"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git status failed",
-                exit_code=exit_code, stderr=status_out,
-            )
-        changes, _ = git_ops.changes_from_status_v2(status_out)
-        by_path = {item["path"]: item for item in changes}
-        to_restore: list[str] = []
-        to_clean: list[str] = []
-        for rel in paths:
-            state = by_path.get(rel)
-            if state is None:
-                continue
-            if state.get("unstaged") == "untracked":
-                to_clean.append(rel)
-            else:
-                to_restore.append(rel)
-        if to_restore:
-            exit_code, output = await self._git_exec(
-                runtime, instance_id,
-                ["git", "restore", "--worktree", "--", *to_restore],
-                workdir=repo_root, env=env, timeout=timeout,
-            )
-            if exit_code != 0:
-                raise git_ops.GitError(
-                    "git_failed", "git discard failed",
-                    exit_code=exit_code, stderr=output,
-                )
-        for rel in to_clean:
-            exit_code, output = await self._git_exec(
-                runtime, instance_id, ["git", "clean", "-f", "--", rel],
-                workdir=repo_root, env=env, timeout=timeout,
-            )
-            if exit_code != 0:
-                raise git_ops.GitError(
-                    "git_failed", "git clean failed",
-                    exit_code=exit_code, stderr=output,
-                )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Discard worktree changes; untracked paths are cleaned exactly.
 
-    # -- commit ------------------------------------------------------------------
+        Step 7: thin facade over ``GitService._git_op_discard``.
+        """
+        return await self._git._git_op_discard(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_commit(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
         """Commit the index only; message passed as a single argv element.
 
-        Git argv runs behind the fixed sourcing wrapper (persistent
-        credentials only), and both runtimes preserve the argv boundary
-        behind ``exec "$@"`` (Docker exec argv, SSH single-quote
-        escaping), so ``-m <message>`` cannot inject flags or shell
-        operators.  Plain ``message`` is the transport (argv-safe).
+        Step 7: thin facade over ``GitService._git_op_commit``.
         """
-        text = str(params.get("message", "") or "")
-        if not text.strip():
-            raise ValueError("message is required for commit")
-        # Identity fallback per missing field only: an existing
-        # user.name/user.email repo value is respected as-is; only the
-        # missing side is supplied via ``-c`` from the backend fallback.
-        extra: list[str] = []
-        exit_code_n, _ = await self._git_exec(
-            runtime, instance_id, ["git", "config", "--get", "user.name"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        exit_code_e, _ = await self._git_exec(
-            runtime, instance_id, ["git", "config", "--get", "user.email"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_n != 0 or exit_code_e != 0:
-            # Backend-supplied fallback identity; only actually used
-            # fields are validated here before ``-c`` argv use (no
-            # NUL/CR/LF, length-capped).
-            if exit_code_n != 0:
-                author_name = git_ops.validate_author_name(
-                    str(params.get("author_name", "") or "opencuria"),
-                )
-                extra += ["-c", f"user.name={author_name}"]
-            if exit_code_e != 0:
-                author_email = git_ops.validate_author_email(
-                    str(params.get("author_email", "") or "opencuria@localhost"),
-                )
-                extra += ["-c", f"user.email={author_email}"]
-        commit_argv = ["git", *extra, "commit", "--quiet",
-                       "--allow-empty-message", "-m", text]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, commit_argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if "nothing to commit" in lowered or "no changes added" in lowered:
-                raise git_ops.GitError(
-                    "nothing_to_commit", "Nothing to commit",
-                    exit_code=exit_code, stderr=output,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git commit failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
-
-    # -- network operations --------------------------------------------------------
+        return await self._git._git_op_commit(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     def _git_remote_arg(self, params: dict[str, Any]) -> str | None:
-        """Return the validated remote name, if any."""
-        remote = params.get("remote")
-        if remote is None or str(remote).strip() == "":
-            return None
-        name = str(remote).strip()
-        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", name):
-            raise ValueError(f"Invalid remote: {remote!r}")
-        return name
+        """Return the validated remote name, if any.
+
+        Step 7: thin facade over ``GitService._git_remote_arg``.
+        """
+        return self._git._git_remote_arg(params)
 
     async def _git_op_fetch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Fetch with prune (non-interactive, PAT via askpass)."""
-        argv = ["git", "fetch", "--prune"]
-        remote = self._git_remote_arg(params)
-        if remote:
-            argv.append(remote)
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "network_failed", "git fetch failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Fetch with prune (non-interactive, PAT via askpass).
+
+        Step 7: thin facade over ``GitService._git_op_fetch``.
+        """
+        return await self._git._git_op_fetch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_current_branch(
         self, runtime, instance_id, repo_root, env
     ) -> str | None:
-        """Return the current branch name, or None when detached/unborn."""
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "branch", "--show-current"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            return None
-        name = output.strip().splitlines()[0].strip() if output.strip() else ""
-        return name or None
+        """Return the current branch name, or None when detached/unborn.
+
+        Step 7: thin facade over ``GitService._git_current_branch``.
+        """
+        return await self._git._git_current_branch(runtime, instance_id, repo_root, env)
 
     async def _git_op_pull(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Pull following repo config (ff/merge), never interactive."""
-        argv = ["git", "pull", "--no-edit"]
-        remote = self._git_remote_arg(params)
-        branch = params.get("branch")
-        if branch not in (None, "") and remote is None:
-            raise ValueError("remote is required when branch is set for pull")
-        if remote:
-            argv.append(remote)
-            if branch:
-                argv.append(git_ops.validate_branch_name(str(branch)))
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if "no tracking information" in lowered or "no upstream" in lowered:
-                raise git_ops.GitError(
-                    "no_upstream", "No upstream configured for the current branch",
-                    exit_code=exit_code, stderr=output,
-                )
-            if "conflict" in lowered or "automatic merge failed" in lowered:
-                snapshot = await self._git_fresh_snapshot(
-                    runtime, instance_id, repo_root, env
-                )
-                result = self._git_mutation_result(snapshot, repo_path=repo_root)
-                result["conflict"] = True
-                result["ok"] = False
-                result["code"] = "conflict"
-                result["message"] = "Merge conflict — resolve or run merge_abort"
-                return result
-            raise git_ops.GitError(
-                "network_failed", "git pull failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Pull following repo config (ff/merge), never interactive.
+
+        Step 7: thin facade over ``GitService._git_op_pull``.
+        """
+        return await self._git._git_op_pull(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_push(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
         """Push following the branch upstream when one exists.
 
-        Matches VS Code/Git semantics: with an upstream configured and
-        no explicit remote (and ``set_upstream`` not true), run plain
-        ``git push`` so branch push config/upstream wins.  An explicit
-        remote is honoured as ``git push <remote>``.  Without upstream
-        (or when ``set_upstream`` is true) set it via
-        ``git push -u <explicit remote or origin> <current>``.
+        Step 7: thin facade over ``GitService._git_op_push``.
         """
-        current = await self._git_current_branch(runtime, instance_id, repo_root, env)
-        if current is None:
-            raise git_ops.GitError(
-                "detached_head", "Cannot push while HEAD is detached",
-                exit_code=None, stderr="",
-            )
-        explicit_remote = self._git_remote_arg(params)
-        exit_code_u, upstream_out = await self._git_exec(
-            runtime, instance_id,
-            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        has_upstream = exit_code_u == 0 and bool(upstream_out.strip())
-        set_upstream = bool(params.get("set_upstream"))
-        if has_upstream and not set_upstream:
-            if explicit_remote is not None:
-                argv = ["git", "push", explicit_remote]
-            else:
-                argv = ["git", "push"]
-        else:
-            argv = ["git", "push", "-u", explicit_remote or "origin", current]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "network_failed", "git push failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        return await self._git._git_op_push(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_sync(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Sync = pull, then push when ahead of upstream."""
-        pull_result = await self._git_op_pull(
-            runtime, instance_id, repo_root, env, params, timeout
-        )
-        if pull_result.get("ok") is False:
-            return pull_result
-        snapshot = pull_result.get("snapshot", {})
-        if int(snapshot.get("ahead", 0)) > 0:
-            return await self._git_op_push(
-                runtime, instance_id, repo_root, env, params, timeout
-            )
-        return pull_result
+        """Sync = pull, then push when ahead of upstream.
 
-    # -- branch operations ---------------------------------------------------------
+        Step 7: thin facade over ``GitService._git_op_sync``.
+        """
+        return await self._git._git_op_sync(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_verify_branch_exists(
         self, runtime, instance_id, repo_root, env, branch: str
     ) -> bool:
-        """Return True when local branch *branch* exists."""
-        exit_code, _ = await self._git_exec(
-            runtime, instance_id,
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        return exit_code == 0
+        """Return True when local branch *branch* exists.
+
+        Step 7: thin facade over ``GitService._git_verify_branch_exists``.
+        """
+        return await self._git._git_verify_branch_exists(runtime, instance_id, repo_root, env, branch)
 
     async def _git_verify_ref_exists(
         self, runtime, instance_id, repo_root, env, ref: str
     ) -> bool:
-        """Return True when *ref* resolves (branch, tag or commit)."""
-        exit_code, _ = await self._git_exec(
-            runtime, instance_id,
-            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        return exit_code == 0
+        """Return True when *ref* resolves (branch, tag or commit).
+
+        Step 7: thin facade over ``GitService._git_verify_ref_exists``.
+        """
+        return await self._git._git_verify_ref_exists(runtime, instance_id, repo_root, env, ref)
 
     async def _git_op_checkout_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Checkout a local branch (dirty-worktree errors surface)."""
-        branch = git_ops.validate_branch_name(str(params.get("branch", "")))
-        exit_code_c, _ = await self._git_exec(
-            runtime, instance_id, ["git", "check-ref-format", "--branch", branch],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_c != 0:
-            raise ValueError(f"Invalid branch: {branch!r}")
-        if not await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, branch
-        ):
-            raise git_ops.GitError(
-                "unknown_branch", f"Unknown branch: {branch}",
-                exit_code=None, stderr="",
-            )
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "checkout", branch, "--"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if "commit your changes or stash them" in lowered:
-                raise git_ops.GitError(
-                    "dirty_worktree",
-                    "Working tree has uncommitted changes",
-                    exit_code=exit_code, stderr=output,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git checkout failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Checkout a local branch (dirty-worktree errors surface).
+
+        Step 7: thin facade over ``GitService._git_op_checkout_branch``.
+        """
+        return await self._git._git_op_checkout_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_checkout_commit(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Detach HEAD at *commit* (dirty-worktree errors surface)."""
-        commit = git_ops.validate_commit_hash(str(params.get("commit", "")))
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "checkout", "--detach", commit, "--"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if "commit your changes or stash them" in lowered:
-                raise git_ops.GitError(
-                    "dirty_worktree",
-                    "Working tree has uncommitted changes",
-                    exit_code=exit_code, stderr=output,
-                )
-            if "unknown revision" in lowered or "bad revision" in lowered:
-                raise git_ops.GitError(
-                    "unknown_commit", f"Unknown commit: {commit}",
-                    exit_code=exit_code, stderr=output,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git checkout failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Detach HEAD at *commit* (dirty-worktree errors surface).
+
+        Step 7: thin facade over ``GitService._git_op_checkout_commit``.
+        """
+        return await self._git._git_op_checkout_commit(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_checkout_remote_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Track a remote branch locally (fetch + checkout/create)."""
-        remote_ref = git_ops.validate_remote_ref(str(params.get("remote_ref", "")))
-        # Default local branch: strip only the remote prefix
-        # ("origin/feat/x" -> "feat/x", like `git switch <remote_ref>`).
-        _remote, _, _short = remote_ref.partition("/")
-        local_raw = params.get("local_name")
-        local = (
-            git_ops.validate_local_branch(str(local_raw))
-            if local_raw not in (None, "")
-            else git_ops.validate_local_branch(_short)
-        )
-        exit_code_f, fetch_out = await self._git_exec(
-            runtime, instance_id, ["git", "fetch", _remote],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_NETWORK_TIMEOUT_S,
-        )
-        if exit_code_f != 0:
-            raise git_ops.GitError(
-                "network_failed", "git fetch failed",
-                exit_code=exit_code_f, stderr=fetch_out,
-            )
-        exit_code_r, _ = await self._git_exec(
-            runtime, instance_id,
-            ["git", "show-ref", "--verify", "--quiet",
-             f"refs/remotes/{remote_ref}"],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_r != 0:
-            raise git_ops.GitError(
-                "unknown_branch", f"Unknown remote branch: {remote_ref}",
-                exit_code=exit_code_r, stderr="",
-            )
-        if await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, local
-        ):
-            argv = ["git", "checkout", local, "--"]
-        else:
-            argv = ["git", "checkout", "-b", local, "--track", remote_ref, "--"]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if (
-                "commit your changes or stash them" in lowered
-                or "overwritten by checkout" in lowered
-            ):
-                raise git_ops.GitError(
-                    "dirty_worktree",
-                    "Working tree has uncommitted changes",
-                    exit_code=exit_code, stderr=output,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git checkout failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Track a remote branch locally (fetch + checkout/create).
+
+        Step 7: thin facade over ``GitService._git_op_checkout_remote_branch``.
+        """
+        return await self._git._git_op_checkout_remote_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_create_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Create a branch; optionally check it out (``checkout=True``)."""
-        branch = git_ops.validate_branch_name(str(params.get("branch", "")))
-        exit_code_c, _ = await self._git_exec(
-            runtime, instance_id, ["git", "check-ref-format", "--branch", branch],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_c != 0:
-            raise ValueError(f"Invalid branch: {branch!r}")
-        if await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, branch
-        ):
-            raise git_ops.GitError(
-                "branch_exists", f"Branch already exists: {branch}",
-                exit_code=None, stderr="",
-            )
-        start = params.get("start_point")
-        argv = ["git", "branch", "--", branch]
-        if start:
-            start_ref = str(start).strip()
-            # Accept hashes or validated branch names as start points.
-            try:
-                start_ref = git_ops.validate_commit_hash(start_ref)
-            except ValueError:
-                start_ref = git_ops.validate_branch_name(start_ref, field="start_point")
-            if not await self._git_verify_ref_exists(
-                runtime, instance_id, repo_root, env, start_ref
-            ):
-                raise git_ops.GitError(
-                    "unknown_commit", f"Unknown start point: {start}",
-                    exit_code=None, stderr="",
-                )
-            argv.append(start_ref)
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git branch failed",
-                exit_code=exit_code, stderr=output,
-            )
-        if params.get("checkout"):
-            exit_code_o, output_o = await self._git_exec(
-                runtime, instance_id, ["git", "checkout", branch, "--"],
-                workdir=repo_root, env=env, timeout=timeout,
-            )
-            if exit_code_o != 0:
-                raise git_ops.GitError(
-                    "git_failed", "git checkout failed",
-                    exit_code=exit_code_o, stderr=output_o,
-                )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Create a branch; optionally check it out (``checkout=True``).
+
+        Step 7: thin facade over ``GitService._git_op_create_branch``.
+        """
+        return await self._git._git_op_create_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_rename_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Rename a branch (defaults to the current branch)."""
-        old = str(params.get("old_branch") or "").strip()
-        new = git_ops.validate_branch_name(str(params.get("new_branch", "")), field="new_branch")
-        exit_code_c, _ = await self._git_exec(
-            runtime, instance_id, ["git", "check-ref-format", "--branch", new],
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code_c != 0:
-            raise ValueError(f"Invalid branch: {new!r}")
-        if await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, new
-        ):
-            raise git_ops.GitError(
-                "branch_exists", f"Branch already exists: {new}",
-                exit_code=None, stderr="",
-            )
-        if old:
-            old_validated = git_ops.validate_branch_name(old, field="old_branch")
-            if not await self._git_verify_branch_exists(
-                runtime, instance_id, repo_root, env, old_validated
-            ):
-                raise git_ops.GitError(
-                    "unknown_branch", f"Unknown branch: {old_validated}",
-                    exit_code=None, stderr="",
-                )
-            argv = ["git", "branch", "-m", "--", old_validated, new]
-        else:
-            current = await self._git_current_branch(runtime, instance_id, repo_root, env)
-            if current is None:
-                raise git_ops.GitError(
-                    "detached_head", "Cannot rename while HEAD is detached",
-                    exit_code=None, stderr="",
-                )
-            argv = ["git", "branch", "-m", "--", new]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git branch rename failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Rename a branch (defaults to the current branch).
+
+        Step 7: thin facade over ``GitService._git_op_rename_branch``.
+        """
+        return await self._git._git_op_rename_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_delete_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Safe-delete a branch (``-d`` only; current branch protected)."""
-        branch = git_ops.validate_branch_name(str(params.get("branch", "")))
-        current = await self._git_current_branch(runtime, instance_id, repo_root, env)
-        if current is not None and current == branch:
-            raise git_ops.GitError(
-                "current_branch", "Cannot delete the current branch",
-                exit_code=None, stderr="",
-            )
-        if not await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, branch
-        ):
-            raise git_ops.GitError(
-                "unknown_branch", f"Unknown branch: {branch}",
-                exit_code=None, stderr="",
-            )
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "branch", "-d", "--", branch],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            if "not fully merged" in lowered:
-                raise git_ops.GitError(
-                    "not_merged", f"Branch is not fully merged: {branch}",
-                    exit_code=exit_code, stderr=output,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git branch delete failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Safe-delete a branch (``-d`` only; current branch protected).
 
-    # -- merge operations ----------------------------------------------------------
+        Step 7: thin facade over ``GitService._git_op_delete_branch``.
+        """
+        return await self._git._git_op_delete_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     def _git_merge_msg(self, params: dict[str, Any], default: str) -> list[str]:
-        """Return ``-m <message>`` argv for merges (single argv element)."""
-        message = params.get("message")
-        if message is None or str(message).strip() == "":
-            return []
-        text = str(message)
-        if len(text) > 4096:
-            raise ValueError("merge message too long (max 4096 chars)")
-        return ["-m", text]
+        """Return ``-m <message>`` argv for merges (single argv element).
+
+        Step 7: thin facade over ``GitService._git_merge_msg``.
+        """
+        return self._git._git_merge_msg(params, default)
 
     async def _git_op_merge_into_current(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Merge *branch* into the current branch (fast-forward allowed)."""
-        branch = git_ops.validate_branch_name(str(params.get("branch", "")))
-        if not await self._git_verify_ref_exists(
-            runtime, instance_id, repo_root, env, branch
-        ):
-            raise git_ops.GitError(
-                "unknown_branch", f"Unknown branch: {branch}",
-                exit_code=None, stderr="",
-            )
-        argv = ["git", "merge", "--no-edit", *self._git_merge_msg(params, branch),
-                "--", branch]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        if exit_code != 0:
-            lowered = output.lower()
-            if "conflict" in lowered or "automatic merge failed" in lowered:
-                result = self._git_mutation_result(snapshot, repo_path=repo_root)
-                result["conflict"] = True
-                result["ok"] = False
-                result["code"] = "conflict"
-                result["message"] = "Merge conflict — resolve or run merge_abort"
-                result["stderr"] = git_ops._redact(output)
-                return result
-            raise git_ops.GitError(
-                "git_failed", "git merge failed",
-                exit_code=exit_code, stderr=output,
-            )
-        result = self._git_mutation_result(snapshot, repo_path=repo_root)
-        result["conflict"] = False
-        return result
+        """Merge *branch* into the current branch (fast-forward allowed).
+
+        Step 7: thin facade over ``GitService._git_op_merge_into_current``.
+        """
+        return await self._git._git_op_merge_into_current(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     async def _git_op_merge_current_into(
         self, runtime, instance_id, repo_root, env, params, timeout,
@@ -6934,123 +2678,18 @@ class WorkspaceService:
     ) -> dict[str, Any]:
         """Merge the current branch into *target* and return to the start branch.
 
-        The target branch is checked out temporarily and the original
-        (source) branch is merged into it.  On success the runner checks
-        back out to the original branch.  On conflict it *stays* on the
-        target so the user can resolve/abort there — the result payload
-        reports ``stayed_on_target=True`` and the conflict flag.  On a
-        non-conflict merge failure the runner makes a best-effort return
-        to the source branch (conflict state, if any, stays for manual
-        resolution).
+        Step 7: thin facade over ``GitService._git_op_merge_current_into``.
         """
-        target = git_ops.validate_branch_name(str(params.get("target", "")), field="target")
-        if not await self._git_verify_branch_exists(
-            runtime, instance_id, repo_root, env, target
-        ):
-            raise git_ops.GitError(
-                "unknown_branch", f"Unknown branch: {target}",
-                exit_code=None, stderr="",
-            )
-        source = await self._git_current_branch(runtime, instance_id, repo_root, env)
-        if source is None:
-            raise git_ops.GitError(
-                "detached_head", "Cannot merge while HEAD is detached",
-                exit_code=None, stderr="",
-            )
-        if source == target:
-            raise ValueError("source and target branches must differ")
-        exit_code_o, output_o = await self._git_exec(
-            runtime, instance_id, ["git", "checkout", target, "--"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code_o != 0:
-            lowered = output_o.lower()
-            if "commit your changes or stash them" in lowered:
-                raise git_ops.GitError(
-                    "dirty_worktree",
-                    "Working tree has uncommitted changes",
-                    exit_code=exit_code_o, stderr=output_o,
-                )
-            raise git_ops.GitError(
-                "git_failed", "git checkout failed",
-                exit_code=exit_code_o, stderr=output_o,
-            )
-        argv = ["git", "merge", "--no-edit", *self._git_merge_msg(params, source),
-                "--", source]
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            lowered = output.lower()
-            snapshot = await self._git_fresh_snapshot(
-                runtime, instance_id, repo_root, env
-            )
-            if "conflict" in lowered or "automatic merge failed" in lowered:
-                result = self._git_mutation_result(snapshot, repo_path=repo_root)
-                result["conflict"] = True
-                result["stayed_on_target"] = True
-                result["target"] = target
-                result["source"] = source
-                result["ok"] = False
-                result["code"] = "conflict"
-                result["message"] = (
-                    f"Merge conflict on {target} — resolve or run merge_abort"
-                )
-                result["stderr"] = git_ops._redact(output)
-                return result
-            # Non-conflict failure: best-effort return to the source branch.
-            try:
-                await self._git_exec(
-                    runtime, instance_id, ["git", "checkout", source, "--"],
-                    workdir=repo_root, env=env, timeout=timeout,
-                )
-            except Exception:  # noqa: BLE001 - best effort return
-                pass
-            raise git_ops.GitError(
-                "git_failed", "git merge failed",
-                exit_code=exit_code, stderr=output,
-            )
-        # Success: return to the original branch.
-        exit_code_b, output_b = await self._git_exec(
-            runtime, instance_id, ["git", "checkout", source, "--"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code_b != 0:
-            raise git_ops.GitError(
-                "git_failed",
-                f"Merged into {target} but could not return to {source}",
-                exit_code=exit_code_b, stderr=output_b,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        result = self._git_mutation_result(snapshot, repo_path=repo_root)
-        result["conflict"] = False
-        result["stayed_on_target"] = False
-        result["target"] = target
-        result["source"] = source
-        return result
+        return await self._git._git_op_merge_current_into(runtime, instance_id, repo_root, env, params, timeout, workspace_id, **_)
 
     async def _git_op_merge_abort(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
     ) -> dict[str, Any]:
-        """Abort an in-progress merge (no-op error when none active)."""
-        state = await self._git_merge_state(runtime, instance_id, repo_root, env)
-        if not state.get("merging"):
-            raise git_ops.GitError(
-                "no_merge", "No merge in progress",
-                exit_code=None, stderr="",
-            )
-        exit_code, output = await self._git_exec(
-            runtime, instance_id, ["git", "merge", "--abort"],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git merge --abort failed",
-                exit_code=exit_code, stderr=output,
-            )
-        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
-        return self._git_mutation_result(snapshot, repo_path=repo_root)
+        """Abort an in-progress merge (no-op error when none active).
+
+        Step 7: thin facade over ``GitService._git_op_merge_abort``.
+        """
+        return await self._git._git_op_merge_abort(runtime, instance_id, repo_root, env, params, timeout, **_)
 
     # ── Image artifact operations ─────────────────────────────────────
 
@@ -7069,64 +2708,19 @@ class WorkspaceService:
         """Build runtime image from definition payload.
 
         Returns a dict containing ``image_tag`` and/or ``image_path``.
+
+        Step 2: thin facade over ``ImageManager.build_image``.
         """
-        if runtime_type == "docker":
-            if not dockerfile_content.strip():
-                raise RuntimeError(
-                    "dockerfile_content is required for docker image builds"
-                )
-            if not image_tag.strip():
-                raise RuntimeError("image_tag is required for docker image builds")
-            try:
-                import docker  # type: ignore[import-not-found]
-            except Exception as exc:
-                raise RuntimeError("docker SDK is not available") from exc
-
-            context_stream = io.BytesIO()
-            with tarfile.open(fileobj=context_stream, mode="w") as tar:
-                df_bytes = dockerfile_content.encode("utf-8")
-                df_info = tarfile.TarInfo(name="Dockerfile")
-                df_info.size = len(df_bytes)
-                tar.addfile(df_info, io.BytesIO(df_bytes))
-
-            context_stream.seek(0)
-            client = docker.from_env()
-            image, logs = await asyncio.to_thread(
-                client.images.build,
-                fileobj=context_stream,
-                custom_context=True,
-                rm=True,
-                tag=image_tag,
-                pull=False,
-                forcerm=True,
-            )
-            for entry in logs:
-                if progress_callback is None:
-                    continue
-                line = ""
-                if isinstance(entry, dict):
-                    line = str(entry.get("stream") or entry.get("status") or "").strip()
-                else:
-                    line = str(entry).strip()
-                if line:
-                    await progress_callback(line)
-            return {"image_tag": image_tag}
-
-        if runtime_type == "qemu":
-            if not image_path.strip():
-                raise RuntimeError("image_path is required for qemu image builds")
-            runtime = self._get_runtime_by_type("qemu")
-            build_image = getattr(runtime, "build_image", None)
-            if build_image is None:
-                raise RuntimeError("QEMU runtime does not support image builds")
-            return await build_image(
-                base_distro=base_distro,
-                init_script=init_script,
-                image_path=image_path,
-                progress_callback=progress_callback,
-            )
-
-        raise RuntimeError(f"Unsupported runtime_type for image build: {runtime_type}")
+        return await self._images.build_image(
+            runtime_type=runtime_type,
+            build_job_id=build_job_id,
+            dockerfile_content=dockerfile_content,
+            image_tag=image_tag,
+            base_distro=base_distro,
+            init_script=init_script,
+            image_path=image_path,
+            progress_callback=progress_callback,
+        )
 
     async def create_image_artifact(
         self,
@@ -7136,51 +2730,31 @@ class WorkspaceService:
         """Create an image artifact from a workspace.
 
         The runtime must support artifact capture.
+
+        Step 2: thin facade over ``ImageManager.create_image_artifact``.
         """
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' does not support image artifact capture"
-            )
-        artifact = await runtime.create_image_artifact(info.instance_id, name)
-        logger.info(
-            "image_artifact_created",
-            workspace_id=str(workspace_id),
-            image_artifact_id=artifact.artifact_id,
-            name=name,
-        )
-        return artifact
+        return await self._images.create_image_artifact(workspace_id, name)
 
     async def list_image_artifacts(
         self,
         workspace_id: uuid.UUID,
     ) -> list["ImageArtifactInfo"]:
-        """List all captured image artifacts for a workspace."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            return []
-        return await runtime.list_image_artifacts(info.instance_id)
+        """List all captured image artifacts for a workspace.
+
+        Step 2: thin facade over ``ImageManager.list_image_artifacts``.
+        """
+        return await self._images.list_image_artifacts(workspace_id)
 
     async def delete_image_artifact(
         self,
         workspace_id: uuid.UUID,
         image_artifact_id: str,
     ) -> None:
-        """Delete a captured image artifact."""
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' does not support image artifact deletion"
-            )
-        await runtime.delete_image_artifact(image_artifact_id)
-        logger.info(
-            "image_artifact_deleted",
-            workspace_id=str(workspace_id),
-            image_artifact_id=image_artifact_id,
-        )
+        """Delete a captured image artifact.
+
+        Step 2: thin facade over ``ImageManager.delete_image_artifact``.
+        """
+        await self._images.delete_image_artifact(workspace_id, image_artifact_id)
 
     async def delete_image_reference(
         self,
@@ -7191,41 +2765,12 @@ class WorkspaceService:
         """Delete a concrete runtime image reference without requiring a workspace.
 
         Returns 'deleted' or 'already_absent' to indicate the result.
+
+        Step 2: thin facade over ``ImageManager.delete_image_reference``.
         """
-        if runtime_type == "docker":
-            if not image_ref.strip():
-                raise RuntimeError("image_ref is required for docker image deletion")
-            try:
-                import docker  # type: ignore[import-not-found]
-                from docker.errors import ImageNotFound  # type: ignore[import-not-found]
-            except Exception as exc:
-                raise RuntimeError("docker SDK is not available") from exc
-
-            client = docker.from_env()
-            try:
-                await asyncio.to_thread(
-                    client.images.remove, image=image_ref, force=True
-                )
-                logger.info("docker_image_deleted", image_ref=image_ref)
-                return "deleted"
-            except ImageNotFound:
-                logger.info("docker_image_already_absent", image_ref=image_ref)
-                return "already_absent"
-
-        if runtime_type == "qemu":
-            if not image_ref.strip():
-                raise RuntimeError("image_ref is required for qemu image deletion")
-            runtime = self._get_runtime_by_type("qemu")
-            try:
-                await runtime.delete_image_artifact(image_ref)
-                logger.info("qemu_image_deleted", image_ref=image_ref)
-                return "deleted"
-            except FileNotFoundError:
-                logger.info("qemu_image_already_absent", image_ref=image_ref)
-                return "already_absent"
-
-        raise RuntimeError(
-            f"Unsupported runtime_type for image deletion: {runtime_type}"
+        return await self._images.delete_image_reference(
+            runtime_type=runtime_type,
+            image_ref=image_ref,
         )
 
     async def create_workspace_from_image_artifact(
@@ -7243,41 +2788,18 @@ class WorkspaceService:
         """Create a workspace from an image artifact and inject credentials.
 
         Credentials remain on disk until a controlled stop.
-        """
-        runtime = self._get_runtime_by_type(runtime_type)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{runtime_type}' does not support image artifact cloning"
-            )
 
-        instance_id = await runtime.create_workspace_from_image_artifact(
+        Step 2: thin facade over
+        ``ImageManager.create_workspace_from_image_artifact``.
+        """
+        return await self._images.create_workspace_from_image_artifact(
             image_artifact_id,
-            str(new_workspace_id),
+            new_workspace_id,
+            runtime_type,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            env_vars=env_vars,
+            files=files,
+            ssh_keys=ssh_keys,
         )
-
-        self._cache[new_workspace_id] = WorkspaceInfo(
-            workspace_id=new_workspace_id,
-            instance_id=instance_id,
-            status="running",
-            runtime_type=runtime_type,
-        )
-
-        log = logger.bind(
-            workspace_id=str(new_workspace_id),
-            image_artifact_id=image_artifact_id,
-            runtime_type=runtime_type,
-        )
-        log.info("workspace_created_from_image_artifact")
-
-        credentials_present = await self.inject_workspace_credentials(
-            runtime,
-            instance_id,
-            env_vars,
-            files,
-            ssh_keys,
-            log,
-        )
-        return new_workspace_id, credentials_present

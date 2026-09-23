@@ -292,16 +292,20 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             order.append("ensure-exit")
             ensure_done.set()
-            return await WorkspaceService._ensure_desktop_process_locked(
-                self.service, workspace_id, **kwargs
-            )
+            return await orig_ensure(workspace_id, **kwargs)
 
         async def _racing_remove() -> None:
             await self.service.remove_workspace(self.workspace_id)
             order.append("remove-done")
 
-        orig_ensure = self.service._ensure_desktop_process_locked
-        self.service._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
+        # Patch the manager (canonical owner since Step 6a): the facade
+        # ``ensure_desktop_process`` delegates to
+        # ``service.desktop.ensure_desktop_process``, which calls the
+        # manager's ``_ensure_desktop_process_locked`` internally — so
+        # blocking the manager method serialises the facade ensure the
+        # same way the old facade-level patch did.
+        orig_ensure = self.service.desktop._ensure_desktop_process_locked
+        self.service.desktop._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
         try:
             ensure_task = asyncio.create_task(
                 self.service.ensure_desktop_process(self.workspace_id)
@@ -316,7 +320,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.gather(ensure_task, remove_task), timeout=5
             )
         finally:
-            self.service._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
+            self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
         # Ensure completed before remove popped the cache and cleared state.
         self.assertEqual(
             order, ["ensure-enter", "ensure-exit", "remove-done"]
@@ -336,14 +340,14 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         ensure_started = asyncio.Event()
         release_ensure = asyncio.Event()
 
-        orig_ensure_locked = self.service._ensure_desktop_process_locked
+        orig_ensure_locked = self.service.desktop._ensure_desktop_process_locked
 
         async def _blocking_ensure(workspace_id, **kwargs):
             ensure_started.set()
             await asyncio.wait_for(release_ensure.wait(), timeout=5)
             return await orig_ensure_locked(workspace_id, **kwargs)
 
-        self.service._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
+        self.service.desktop._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
         try:
             ensure_task = asyncio.create_task(
                 self.service.ensure_desktop_process(self.workspace_id)
@@ -369,7 +373,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "not found"):
                 await asyncio.wait_for(queued_task, timeout=5)
         finally:
-            self.service._ensure_desktop_process_locked = orig_ensure_locked  # type: ignore[method-assign]
+            self.service.desktop._ensure_desktop_process_locked = orig_ensure_locked  # type: ignore[method-assign]
         self.assertNotIn(self.workspace_id, self.service._cache)
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
         # Same retained lock object throughout.
@@ -401,7 +405,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         observed_locked_during_interrupt: list[bool] = []
         interrupt_reached = asyncio.Event()
 
-        orig_exec = self.service._exec_desktop_shell
+        orig_exec = self.service.desktop._exec_desktop_shell
 
         async def _spying_exec(workspace_id, command):
             if "kill -INT 4242" in command:
@@ -426,11 +430,11 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                     pass
             return await orig_exec(workspace_id, command)
 
-        self.service._exec_desktop_shell = _spying_exec  # type: ignore[method-assign]
+        self.service.desktop._exec_desktop_shell = _spying_exec  # type: ignore[method-assign]
         try:
             await self.service.remove_workspace(self.workspace_id)
         finally:
-            self.service._exec_desktop_shell = orig_exec  # type: ignore[method-assign]
+            self.service.desktop._exec_desktop_shell = orig_exec  # type: ignore[method-assign]
         self.assertTrue(interrupt_reached.is_set())
         # The interrupt ran while remove held the desktop lock.
         self.assertEqual(observed_locked_during_interrupt, [True])
@@ -457,7 +461,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         async def _failing_interrupt(workspace_id):
             raise RuntimeError("boom")
 
-        self.service._interrupt_desktop_recordings = _failing_interrupt  # type: ignore[method-assign]
+        self.service.desktop._interrupt_desktop_recordings = _failing_interrupt  # type: ignore[method-assign]
         await self.service.remove_workspace(self.workspace_id)
 
         self.assertNotIn(self.workspace_id, self.service._cache)
@@ -481,12 +485,12 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             order.append("ensure-enter")
             await asyncio.sleep(0.1)
             order.append("ensure-exit")
-            return await WorkspaceService._ensure_desktop_process_locked(
-                self.service, workspace_id, **kwargs
-            )
+            return await orig_ensure(workspace_id, **kwargs)
 
-        orig_ensure = self.service._ensure_desktop_process_locked
-        self.service._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
+        # Patch the manager (canonical owner since Step 6a); see
+        # ``test_held_lock_blocks_remove_cache_pop`` for the rationale.
+        orig_ensure = self.service.desktop._ensure_desktop_process_locked
+        self.service.desktop._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
         try:
             ensure_task = asyncio.create_task(
                 self.service.ensure_desktop_process(self.workspace_id)
@@ -502,7 +506,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 asyncio.gather(ensure_task, cleanup_task), timeout=5
             )
         finally:
-            self.service._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
+            self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
         self.assertEqual(
             order, ["ensure-enter", "ensure-exit"]
         )
@@ -578,7 +582,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         )
         entered_second, proceed_second = release_second
 
-        orig_ensure = self.service._ensure_desktop_process_locked
+        orig_ensure = self.service.desktop._ensure_desktop_process_locked
 
         async def _blocking_ensure(workspace_id, **kwargs):
             entry = await self.service._desktop_lock(workspace_id)
@@ -591,7 +595,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(proceed_second.wait(), timeout=5)
             return await orig_ensure(workspace_id, **kwargs)
 
-        self.service._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
+        self.service.desktop._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
         try:
             first = asyncio.create_task(
                 self.service.acquire_desktop(
@@ -619,7 +623,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             proceed_second.set()
             await asyncio.gather(first, second)
         finally:
-            self.service._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
+            self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
         self.assertIs(
             await self.service._desktop_lock(self.workspace_id), lock
         )
@@ -637,13 +641,13 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         lock = await self.service._desktop_lock(self.workspace_id)
         seen_locks: list = []
 
-        orig_ensure = self.service._ensure_desktop_process_locked
+        orig_ensure = self.service.desktop._ensure_desktop_process_locked
 
         async def _spying_ensure(workspace_id, **kwargs):
             seen_locks.append(await self.service._desktop_lock(workspace_id))
             return await orig_ensure(workspace_id, **kwargs)
 
-        self.service._ensure_desktop_process_locked = _spying_ensure  # type: ignore[method-assign]
+        self.service.desktop._ensure_desktop_process_locked = _spying_ensure  # type: ignore[method-assign]
         try:
             await asyncio.gather(
                 self.service.acquire_desktop(
@@ -654,7 +658,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         finally:
-            self.service._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
+            self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
         self.assertTrue(seen_locks)
         for entry in seen_locks:
             self.assertIs(entry, lock)
