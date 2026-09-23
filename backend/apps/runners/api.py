@@ -295,7 +295,7 @@ async def _get_owned_workspace_artifact_async(
     """Return a workspace-scoped image artifact only for the workspace owner."""
     service = _get_service()
     workspace = await _get_owned_workspace_async(request, org_id, workspace_id)
-    artifact = await sync_to_async(service.image_instances.get_by_id)(
+    artifact = await sync_to_async(service.get_image_artifact)(
         image_artifact_id
     )
     if artifact is None:
@@ -1792,7 +1792,7 @@ def list_image_artifacts(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    service.image_instances.timeout_stale(timeout_hours=1)
+    service.timeout_stale_image_artifacts(timeout_hours=1)
     artifacts = service.list_image_artifacts_for_user(user=request.user)
     return [_image_artifact_to_out(artifact) for artifact in artifacts]
 
@@ -1844,7 +1844,7 @@ async def rename_image_artifact(
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
-    artifact = await sync_to_async(service.image_instances.get_by_id)(
+    artifact = await sync_to_async(service.get_image_artifact)(
         image_artifact_id
     )
     if artifact is None:
@@ -1855,10 +1855,10 @@ async def rename_image_artifact(
             code="forbidden",
         )
 
-    await sync_to_async(service.image_instances.update_name)(
+    await sync_to_async(service.rename_image_artifact)(
         image_artifact_id, payload.name.strip()
     )
-    updated = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
+    updated = await sync_to_async(service.get_image_artifact)(image_artifact_id)
     return 200, _image_artifact_to_out(updated)
 
 
@@ -1878,7 +1878,7 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(
+        artifact = await sync_to_async(service.get_image_artifact)(
             image_artifact_id
         )
         if artifact is None:
@@ -1919,7 +1919,7 @@ async def create_workspace_from_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(
+        artifact = await sync_to_async(service.get_image_artifact)(
             image_artifact_id
         )
         if artifact is None:
@@ -2363,7 +2363,7 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     service = _get_service()
     try:
         await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
+        definition = await sync_to_async(service.get_image_definition)(
             definition_id
         )
         if definition is None:
@@ -2397,7 +2397,7 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     service = _get_service()
     try:
         await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
+        definition = await sync_to_async(service.get_image_definition)(
             definition_id
         )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
@@ -2427,7 +2427,7 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     service = _get_service()
     try:
         await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
+        definition = await sync_to_async(service.get_image_definition)(
             definition_id
         )
         return 200, await sync_to_async(_image_definition_to_out)(definition)
@@ -2525,7 +2525,7 @@ async def update_image_definition_runner_build(
     service = _get_service()
     if action == "deactivate":
         try:
-            service._ensure_definition_mutable(build.image_definition)
+            service.ensure_definition_mutable(build.image_definition)
         except ConflictError as e:
             return 409, ErrorOut(detail=e.message, code=e.code)
         build.status = ImageBuildJob.Status.DEACTIVATED

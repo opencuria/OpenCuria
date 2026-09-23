@@ -1937,7 +1937,20 @@ async def create_harness_accessor(
         WorkspaceNotFoundError,
     )
 
-    workspace = await sync_to_async(service.workspaces.get_by_id)(
+    def _service_workspace_lookup(workspace_uuid):
+        """Look up a workspace via the public service API (Phase 4).
+
+        Prefers ``service.get_workspace_or_none`` (public delegation, no
+        repository leak); falls back to ``service.workspaces.get_by_id``
+        for foreign service doubles that only expose the repository
+        (e.g. harness test doubles).
+        """
+        public_lookup = getattr(service, "get_workspace_or_none", None)
+        if callable(public_lookup):
+            return public_lookup(workspace_uuid)
+        return service.workspaces.get_by_id(workspace_uuid)
+
+    workspace = await sync_to_async(_service_workspace_lookup)(
         _uuid.UUID(workspace_id)
     )
     if workspace is None:
@@ -1948,7 +1961,7 @@ async def create_harness_accessor(
 
     async def _emit(event: str, payload: dict[str, Any]) -> None:
         """Emit *event* to the workspace's current runner SID."""
-        current = await sync_to_async(service.workspaces.get_by_id)(
+        current = await sync_to_async(_service_workspace_lookup)(
             _uuid.UUID(workspace_id)
         )
         if current is None:
@@ -1972,7 +1985,7 @@ async def create_harness_accessor(
 
     async def _desktop_geometry() -> tuple[int, int]:
         """Return the workspace's configured desktop framebuffer size."""
-        current = await sync_to_async(service.workspaces.get_by_id)(
+        current = await sync_to_async(_service_workspace_lookup)(
             _uuid.UUID(workspace_id)
         )
         if current is None:
@@ -1983,7 +1996,7 @@ async def create_harness_accessor(
         event: str, payload: dict[str, Any], timeout: float | None = None
     ) -> dict[str, Any]:
         """ACKed call to the workspace's current runner (stream control)."""
-        current = await sync_to_async(service.workspaces.get_by_id)(
+        current = await sync_to_async(_service_workspace_lookup)(
             _uuid.UUID(workspace_id)
         )
         if current is None:
