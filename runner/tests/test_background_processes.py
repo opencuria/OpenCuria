@@ -649,6 +649,67 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(runtime.calls), calls_before)
         self.assertNotIn(ws_id, service._background_processes)
 
+    async def test_kill_all_unknown_workspace_drops_tracking_without_raising(
+        self,
+    ) -> None:
+        """_kill_all stays best-effort when the cache no longer has the id.
+
+        Regression test for the WorkspaceService decomposition (54c0a70):
+        the old body used tolerant ``self._cache.get(...)`` /
+        ``self._runtimes.get(...)`` lookups, so orphaned tracking
+        (workspace evicted by ``sync_from_runtime`` or a double remove)
+        logged ``background_processes_kill_skipped`` and dropped the
+        tracking. The split must preserve that: no raise, no runtime
+        touch, tracking cleared.
+        """
+        service, runtime, ws_id = _service_with_workspace()
+        await service.start_background_process(ws_id, "p1", "sleep 10")
+        self.assertIn(ws_id, service._background_processes)
+        # Evict the cache entry (e.g. sync_from_runtime dropped it while
+        # in-memory background tracking survived the restart window).
+        service._cache.pop(ws_id, None)
+        calls_before = len(runtime.calls)
+
+        await service._kill_all_background_processes(ws_id, reason="test")
+
+        self.assertNotIn(ws_id, service._background_processes)
+        # Nothing left to signal: no runtime probes/kills after eviction.
+        self.assertEqual(len(runtime.calls), calls_before)
+
+    async def test_kill_all_propagates_unexpected_lookup_errors(self) -> None:
+        """_kill_all does not swallow unexpected errors from the lookups."""
+        service, _runtime, ws_id = _service_with_workspace()
+        await service.start_background_process(ws_id, "p1", "sleep 10")
+
+        def _boom(_workspace_id: uuid.UUID):
+            raise OSError("store exploded")
+
+        service._background._get_cached = _boom  # type: ignore[method-assign]
+        service._background._get_runtime = _boom  # type: ignore[method-assign]
+
+        with self.assertRaises(OSError):
+            await service._kill_all_background_processes(
+                ws_id, reason="test"
+            )
+
+    async def test_remove_workspace_with_evicted_cache_still_cleans_up(
+        self,
+    ) -> None:
+        """remove_workspace completes when the cache was already evicted.
+
+        Covers the teardown fan-out through the real kill-all path
+        (previously only exercised with a mocked kill-all): orphaned
+        background tracking is dropped and the removal returns normally.
+        """
+        service, _runtime, ws_id = _service_with_workspace()
+        await service.start_background_process(ws_id, "p1", "sleep 10")
+        service._cache.pop(ws_id, None)
+
+        await service.remove_workspace(ws_id)
+
+        self.assertNotIn(ws_id, service._background_processes)
+        self.assertNotIn(ws_id, service._cache)
+
     async def test_concurrent_same_id_starts_do_not_orphan(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
         await asyncio.gather(

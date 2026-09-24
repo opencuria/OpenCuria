@@ -1,5 +1,6 @@
 import io
 import tarfile
+import uuid
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -194,3 +195,56 @@ def test_wrap_command_sources_persistent_env() -> None:
     snippet = wrapped["args"][2]
     assert WORKSPACE_CREDENTIAL_ENV_FILE in snippet
     assert "EXTRA" in snippet
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_from_image_artifact_honors_inject_override() -> None:
+    """Image-create path honors post-construction inject overrides (late-bound).
+
+    Regression test: ``WorkspaceService.__init__`` used to capture the
+    bound ``self.inject_workspace_credentials`` method eagerly in
+    ``ImageManager(credentials_injector=...)``, so an after-construction
+    override (e.g. a test/security wrapper assigning
+    ``service.inject_workspace_credentials = ...``) was ignored by
+    ``create_workspace_from_image_artifact`` while the lifecycle path
+    (``create_workspace``/``resume``/``inject_credentials`` via the
+    late-bound ``_lifecycle.inject_hook``) honored it. The composer now
+    wires a late-bound closure, matching the old god-class behaviour
+    where the call was ``self.inject_workspace_credentials(...)`` at
+    call time.
+    """
+
+    new_workspace_id = uuid.uuid4()
+
+    class DummyRuntime:
+        supports_image_artifacts = True
+
+        async def create_workspace_from_image_artifact(
+            self, image_artifact_id, forwarded_workspace_id, **kwargs
+        ):
+            assert image_artifact_id == "artifact-1"
+            assert forwarded_workspace_id == str(new_workspace_id)
+            return "instance-1"
+
+    runtime = DummyRuntime()
+    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service.inject_workspace_credentials = AsyncMock(return_value=True)
+
+    returned_id, credentials_present = (
+        await service.create_workspace_from_image_artifact(
+            "artifact-1",
+            new_workspace_id,
+            "docker",
+            env_vars={"GITHUB_TOKEN": "secret"},
+            files=[],
+            ssh_keys=[],
+        )
+    )
+
+    assert returned_id == new_workspace_id
+    assert credentials_present is True
+    service.inject_workspace_credentials.assert_awaited_once()
+    inject_args = service.inject_workspace_credentials.await_args.args
+    assert inject_args[0] is runtime
+    assert inject_args[1] == "instance-1"
+    assert inject_args[2] == {"GITHUB_TOKEN": "secret"}

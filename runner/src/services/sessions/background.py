@@ -876,12 +876,30 @@ class BackgroundProcessManager:
         if not entries:
             return
         kill_attempted = False
-        info = self._get_cached(workspace_id) if self._get_cached is not None else None
+        try:
+            info = (
+                self._get_cached(workspace_id)
+                if self._get_cached is not None
+                else None
+            )
+        except ValueError:
+            # Registry cache miss (``WorkspaceRegistry.get_cached``
+            # raises ``ValueError("... not found")`` for absent ids,
+            # e.g. evicted by ``sync_from_runtime`` or a double
+            # remove). Nothing left to signal — fall through to the
+            # kill-skipped path below. Narrow on purpose: unexpected
+            # errors must propagate, not be silently swallowed.
+            info = None
         runtime = None
         if info is not None and self._get_runtime is not None:
             try:
                 runtime = self._get_runtime(workspace_id)
-            except Exception:
+            except (ValueError, RuntimeError):
+                # Expected resolution failures: cache miss in the
+                # ``get_cached``-inside-``get_runtime`` race, or a
+                # missing runtime type. Both mean nothing left to
+                # signal — fall through to kill-skipped. Narrow on
+                # purpose: unexpected errors must propagate.
                 runtime = None
         # Mirror the facade's direct-cache lookup semantics: when the
         # workspace is unknown to the cache (or its runtime is missing /

@@ -344,7 +344,16 @@ class WorkspaceService:
             self._get_runtime_by_type,
             None,
             lambda info: self._cache.__setitem__(info.workspace_id, info),
-            self.inject_workspace_credentials,
+            # Late-bound closure over the ``inject_workspace_credentials``
+            # facade (like ``_lifecycle.inject_hook`` below) so
+            # instance-attribute overrides and ``monkeypatch`` on the
+            # service keep working exactly like the pre-extraction
+            # ``self.inject_workspace_credentials`` call.
+            lambda runtime, instance_id, env_vars, files, ssh_keys, log: (
+                self.inject_workspace_credentials(
+                    runtime, instance_id, env_vars, files, ssh_keys, log
+                )
+            ),
         )
         # Step 3: stateful leaf clusters own stream + background state.
         # The managers are wired with bound lookups (no service import in
