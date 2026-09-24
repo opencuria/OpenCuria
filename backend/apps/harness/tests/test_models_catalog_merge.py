@@ -34,18 +34,20 @@ def test_parse_model_ref_namespaced_and_legacy() -> None:
 def test_chatgpt_models_static_catalog() -> None:
     """ChatGPT allowlist is namespaced and tool-capable."""
     models = chatgpt_models()
-    assert len(models) == 4
+    assert len(models) == 6
     assert [model.id for model in models] == [
         "chatgpt/gpt-5.6-sol",
         "chatgpt/gpt-5.6-terra",
         "chatgpt/gpt-5.6-luna",
         "chatgpt/gpt-6-astra",
+        "chatgpt/gpt-6-sol",
+        "chatgpt/gpt-6-luna",
     ]
     assert models[0].provider == "chatgpt"
     assert models[0].supports_tools is True
     assert models[0].context_length == 1_050_000
     assert models[0].max_output_tokens == 128_000
-    assert models[0].reasoning_efforts == (
+    full_efforts = (
         "none",
         "low",
         "medium",
@@ -53,13 +55,25 @@ def test_chatgpt_models_static_catalog() -> None:
         "xhigh",
         "max",
     )
-    assert models[3].reasoning_efforts == (
+    assert models[0].reasoning_efforts == full_efforts
+    astra = next(model for model in models if model.id == "chatgpt/gpt-6-astra")
+    assert astra.reasoning_efforts == (
         "low",
         "medium",
         "high",
         "xhigh",
         "max",
     )
+    sol = next(model for model in models if model.id == "chatgpt/gpt-6-sol")
+    luna = next(model for model in models if model.id == "chatgpt/gpt-6-luna")
+    assert sol.name == "GPT-6 Sol"
+    assert luna.name == "GPT-6 Luna"
+    assert sol.reasoning_efforts == full_efforts
+    assert luna.reasoning_efforts == full_efforts
+    assert sol.default_effort == "medium"
+    assert luna.default_effort == "medium"
+    assert sol.context_length == 1_050_000
+    assert luna.max_output_tokens == 128_000
 
 
 def test_bedrock_models_region_prefixing() -> None:
