@@ -352,6 +352,36 @@ _CHATGPT_MODEL_SPECS: tuple[dict[str, Any], ...] = (
         "context_length": 1_050_000,
         "max_output_tokens": 128_000,
     },
+    {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
 )
 
 
