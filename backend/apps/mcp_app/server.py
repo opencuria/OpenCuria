@@ -1499,7 +1499,7 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    svc.image_instances.timeout_stale(timeout_hours=1)
+    svc.timeout_stale_image_artifacts(timeout_hours=1)
     artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
     result = [
         {
@@ -1930,7 +1930,7 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     if action == "deactivate":
         try:
             svc = get_runner_service()
-            svc._ensure_definition_mutable(build.image_definition)
+            svc.ensure_definition_mutable(build.image_definition)
         except ConflictError as e:
             return _error(e.message)
         build.status = ImageBuildJob.Status.DEACTIVATED
