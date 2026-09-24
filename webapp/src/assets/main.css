@@ -51,6 +51,7 @@
   --git-branch-6: #b91c1c;
   --git-branch-7: #4d7c0f;
   --git-branch-8: #7e22ce;
+  --git-branch-active-foreground: #ffffff;
   --radius: 0.625rem;
   --sidebar: #f4f4f5;
   --sidebar-foreground: #18181b;
@@ -106,6 +107,7 @@
   --git-branch-6: #f87171;
   --git-branch-7: #a3e635;
   --git-branch-8: #c084fc;
+  --git-branch-active-foreground: #18181b;
   --sidebar: #17171a;
   --sidebar-foreground: #fafafa;
   --sidebar-primary: #534ab7;

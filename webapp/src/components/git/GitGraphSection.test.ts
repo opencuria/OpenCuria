@@ -174,7 +174,23 @@ describe('GitGraphSection', () => {
     // Exactly one badge for the shared commit — no separate remote badge.
     expect(wrapper.find('[data-testid="git-ref-tag-origin/main"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="git-remote-chip-origin/main"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="git-remote-chip-origin/main"]').text()).toBe('origin')
+    const chip = wrapper.find('[data-testid="git-remote-chip-origin/main"]')
+    expect(chip.text()).toBe('origin')
+    // The chip inherits the badge foreground instead of overriding it with
+    // muted text (which was illegible on filled branch-colour badges).
+    expect(chip.classes()).toContain('font-medium')
+    expect(chip.classes()).not.toContain('text-muted-foreground')
+    expect(chip.classes()).not.toContain('italic')
+    expect(badge.attributes('style')).toContain('color: var(--git-branch-active-foreground)')
+  })
+
+  it('keeps remote-only refs muted against the unfilled badge', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    const remoteBadge = wrapper.find('[data-testid="git-ref-tag-origin/main"]')
+    expect(remoteBadge.attributes('style')).toContain('color: var(--muted-foreground)')
   })
 
   it('checks out a commit via its context menu with a typed payload', async () => {
