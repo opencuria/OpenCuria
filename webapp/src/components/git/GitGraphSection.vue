@@ -225,7 +225,7 @@ function tagStyle(tag: GitRefTag, colour: number): CSSProperties {
     return {
       backgroundColor: color,
       borderColor: color,
-      color: 'var(--primary-foreground)',
+      color: 'var(--git-branch-active-foreground)',
     }
   }
   return {
@@ -754,7 +754,7 @@ function copyRefName(name: string): void {
                                 <span
                                   v-for="chip in (group.local ? group.remotes : [])"
                                   :key="chip.full"
-                                  class="inline-flex h-full shrink-0 items-center border-l border-[rgba(128,128,128,0.45)] px-1 text-[11px] italic text-muted-foreground"
+                                  class="inline-flex h-full shrink-0 items-center border-l border-[rgba(128,128,128,0.45)] px-1 text-[11px] font-medium"
                                   :data-remote="chip.remote"
                                   :data-testid="`git-remote-chip-${chip.full}`"
                                   :title="chip.full"
