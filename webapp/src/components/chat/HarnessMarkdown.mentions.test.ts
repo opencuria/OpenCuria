@@ -108,52 +108,32 @@ describe('HarnessMarkdown mentions', () => {
 
     expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
     expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
   })
 
-  it('shows an image thumbnail above the text and opens the lightbox', async () => {
-    const store = useWorkspaceImageStore()
-    store.imageCache['/workspace/cat.png'] = 'data:image/png;base64,abc'
-
+  it('reports rendered image mentions to the message view instead of drawing them inside prose', async () => {
     const wrapper = mountMarkdown('Look @file:/workspace/cat.png cute', 'ws-mentions', {
       mentions: true,
     })
     await flushBadges()
 
-    const strip = wrapper.find('[data-testid="mention-images"]')
-    expect(strip.exists()).toBe(true)
-    const thumb = wrapper.find('[data-testid="mention-image"]')
-    expect(thumb.exists()).toBe(true)
-    expect(thumb.attributes('src')).toBe('data:image/png;base64,abc')
-    // Thumbnail sits above the markdown text (first in DOM order).
-    expect(strip.element.compareDocumentPosition(wrapper.get('[data-md-html]').element)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    )
-
-    await wrapper.get('[data-testid="mention-image-button"]').trigger('click')
-    const lightbox = wrapper.findComponent(ImageLightbox)
-    expect(lightbox.exists()).toBe(true)
-    expect(lightbox.props('src')).toBe('data:image/png;base64,abc')
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([
+      expect.objectContaining({ path: '/workspace/cat.png' }),
+    ])
+    expect(wrapper.find('[data-testid="mention-badge-file"]').exists()).toBe(true)
   })
 
-  it('fetches the mention image when the cache is cold', async () => {
-    mountMarkdown('Look @file:/workspace/cat.png', 'ws-mentions', {
+  it('does not fetch preview media inside markdown itself', async () => {
+    const wrapper = mountMarkdown('Look @file:/workspace/cat.png', 'ws-mentions', {
       mentions: true,
     })
     await flushBadges()
 
-    expect(vi.mocked(sendFilesRead)).toHaveBeenCalled()
-    const [, , path] = vi.mocked(sendFilesRead).mock.calls[0]!
-    expect(path).toBe('/workspace/cat.png')
-  })
-
-  it('shows a fallback tile when the image is absent and never fetches without a workspace', async () => {
-    const wrapper = mountMarkdown('Look @file:/workspace/cat.png', '', { mentions: true })
-    await flushBadges()
-
-    expect(wrapper.find('[data-testid="mention-image-fallback"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="mention-image-loading"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="mention-image"]').exists()).toBe(false)
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([
+      expect.objectContaining({ path: '/workspace/cat.png' }),
+    ])
     expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
   })
 
@@ -168,6 +148,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(0)
     expect(wrapper.findAll('[data-testid="mention-badge-agent"]')).toHaveLength(0)
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
     expect(wrapper.text()).toContain('stuck@email.com')
     expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
   })
@@ -184,6 +165,7 @@ describe('HarnessMarkdown mentions', () => {
     const imageCode = mountMarkdown('`@file:/workspace/secret.png`', 'ws-mentions', { mentions: true })
     await flushBadges()
     expect(imageCode.find('[data-testid="mention-images"]').exists()).toBe(false)
+    expect(imageCode.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
     expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
 
     const assistant = mountMarkdown('Fix @file:/workspace/a.ts with @agent:plan', 'ws-mentions')
@@ -240,6 +222,24 @@ describe('HarnessMentionImages', () => {
     })
   }
 
+  it('bounds wide and tall previews and opens the full image in the lightbox', async () => {
+    const store = useWorkspaceImageStore()
+    store.imageCache['/workspace/wide.png'] = 'data:image/png;base64,abc'
+    store.imageCache['/workspace/tall.png'] = 'data:image/png;base64,def'
+    const wrapper = mountStrip([
+      fileToken('/workspace/wide.png'),
+      fileToken('/workspace/tall.png', { start: 40 }),
+    ])
+    const tiles = wrapper.findAll('.relative.w-20')
+    expect(tiles).toHaveLength(2)
+    const buttons = wrapper.findAll('[data-testid="mention-image-button"]')
+    expect(buttons[0]!.classes()).toContain('h-14')
+    expect(buttons[0]!.classes()).toContain('w-full')
+    expect(wrapper.findAll('[data-testid="mention-image"]')[0]!.classes()).toContain('object-contain')
+    await buttons[0]!.trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe('data:image/png;base64,abc')
+  })
+
   it('renders a loading skeleton while the image fetches', () => {
     const store = useWorkspaceImageStore()
     store.fetchingPaths['/workspace/cat.png'] = true
@@ -247,7 +247,16 @@ describe('HarnessMentionImages', () => {
     const wrapper = mountStrip([fileToken('/workspace/cat.png')])
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mention-image-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="mention-image-loading"]').classes()).toContain('h-14')
+    expect(wrapper.find('[data-testid="mention-image-loading"]').classes()).toContain('w-full')
     expect(wrapper.find('[data-testid="mention-image"]').exists()).toBe(false)
+  })
+
+  it('shows a bounded fallback tile without fetching when the workspace is absent', () => {
+    const wrapper = mountStrip([fileToken('/workspace/missing.png')], '')
+    expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('h-14')
+    expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('w-full')
+    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
   })
 
   it('ignores non-image and escaping tokens without fetching', () => {

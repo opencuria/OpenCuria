@@ -106,6 +106,26 @@ describe('HarnessMessageView mentions', () => {
       'data:image/png;base64,abc',
     )
     expect(wrapper.find('[data-testid="mention-image-remove"]').exists()).toBe(false)
+    const bubble = wrapper.get('.bg-primary')
+    const strip = wrapper.get('[data-testid="mention-images"]')
+    expect(bubble.element.compareDocumentPosition(strip.element)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(bubble.element.contains(strip.element)).toBe(false)
+    expect(strip.classes()).toContain('justify-end')
+    expect(wrapper.get('[data-testid="mention-badge-file"]').classes()).toContain('h-5')
+  })
+
+  it('updates thumbnails when a user message changes and hides them during editing', async () => {
+    const wrapper = mountView(makeUser('See @file:/workspace/old.png'))
+    await flush()
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
+    await wrapper.setProps({ message: makeUser('Just text') })
+    await flush()
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+    await wrapper.setProps({ message: makeUser('See @file:/workspace/new.png') })
+    await flush()
+    expect(wrapper.get('[data-testid="mention-images"] .relative').classes()).toContain('w-20')
+    await wrapper.get('[data-testid="message-edit"]').trigger('click')
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
   })
 
   it('leaves assistant messages untouched even when they contain mention-like text', async () => {

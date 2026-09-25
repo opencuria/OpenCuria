@@ -245,6 +245,7 @@ describe('HarnessChatInput', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.png')
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="mention-images"] .relative').classes()).toContain('w-20')
     await wrapper.get('[data-testid="mention-image-remove"]').trigger('click')
     expect(editorText(wrapper)).toBe('See now')
     expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)

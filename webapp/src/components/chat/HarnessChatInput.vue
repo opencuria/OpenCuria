@@ -838,7 +838,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
         :tokens="imageTokens"
         :workspace-id="workspaceId ?? ''"
         removable
-        class="px-4 pt-3"
+        strip-class="px-4 pt-3"
         @remove="removeImageToken"
       />
       <div class="relative">

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * HarnessMentionImages — image thumbnail strip for `@file:` mention tokens.
+ * HarnessMentionImages — compact image thumbnails for `@file:` mention tokens.
  *
  * Published prop API for composer reuse:
  * - `tokens`: file tokens (`{ kind:'file', path, raw?, name?, start, end }`,
@@ -43,10 +43,12 @@ const props = withDefaults(
     workspaceId: string
     removable?: boolean
     onPrimary?: boolean
+    stripClass?: string
   }>(),
   {
     removable: false,
     onPrimary: false,
+    stripClass: '',
   },
 )
 
@@ -154,19 +156,20 @@ function requestRemove(token: MentionFileToken): void {
   <div
     v-if="safeImages.length > 0"
     data-testid="mention-images"
-    class="mb-2 flex flex-wrap gap-2"
+    class="flex min-w-0 flex-wrap gap-1.5"
+    :class="stripClass"
   >
     <div
       v-for="token in safeImages"
       :key="`${token.path}-${token.start}`"
-      class="relative"
+      class="relative w-20 shrink-0"
     >
       <button
         v-if="imageUrl(token.path)"
         type="button"
         data-testid="mention-image-button"
         :aria-label="`Open image preview ${displayName(token.path)}`"
-        class="block overflow-hidden rounded-md border transition hover:opacity-90"
+        class="flex h-14 w-full items-center justify-center overflow-hidden rounded-lg border bg-muted/30 shadow-sm transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="onPrimary ? 'border-primary-foreground/30' : 'border-border'"
         @click="openLightbox(token.path)"
       >
@@ -175,20 +178,20 @@ function requestRemove(token: MentionFileToken): void {
           :alt="displayName(token.path)"
           :data-path="token.path"
           data-testid="mention-image"
-          class="max-h-28 max-w-full cursor-zoom-in object-contain"
+          class="h-full w-full cursor-zoom-in object-contain"
           draggable="false"
         />
       </button>
       <Skeleton
         v-else-if="isLoading(token.path)"
         data-testid="mention-image-loading"
-        class="h-20 w-28"
+        class="h-14 w-full rounded-lg"
       />
       <span
         v-else
         data-testid="mention-image-fallback"
         :data-path="token.path"
-        class="inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs"
+        class="flex h-14 w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-lg border px-1.5 text-[10px]"
         :class="
           onPrimary
             ? 'border-primary-foreground/30 bg-primary-foreground/10 text-primary-foreground'
@@ -197,7 +200,7 @@ function requestRemove(token: MentionFileToken): void {
         :title="token.path"
       >
         <WorkspaceFileIcon :path="token.path" :size="14" />
-        <span class="min-w-0 truncate">{{ displayName(token.path) }}</span>
+        <span class="w-full truncate text-center">{{ displayName(token.path) }}</span>
       </span>
       <button
         v-if="removable"

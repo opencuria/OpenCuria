@@ -129,7 +129,7 @@ function chip(token: ComposerToken): HTMLElement {
   badge.dataset.mentionRaw = token.raw
   badge.dataset.testid = token.kind === 'file' ? 'composer-file-badge' : 'composer-agent-badge'
   badge.setAttribute('contenteditable', 'false')
-  badge.className = 'mx-0.5 inline-flex max-w-[min(100%,24rem)] items-center gap-1 align-baseline rounded-lg border border-border bg-muted/70 px-1.5 py-0.5 text-sm font-medium text-foreground'
+  badge.className = 'mx-0.5 inline-flex max-w-[min(100%,12rem)] items-center gap-1 align-middle rounded-md border border-border bg-muted/70 px-1.5 py-0.5 text-xs font-medium text-foreground'
   badge.title = token.kind === 'file' ? token.path : token.raw
   const icon = document.createElement('span')
   icon.className = 'group/icon relative inline-flex size-4 shrink-0 items-center justify-center'

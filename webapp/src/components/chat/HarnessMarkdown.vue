@@ -12,8 +12,9 @@ import {
   type ComposerToken,
 } from '@/lib/composerTokens'
 import { workspaceFileIconUrl } from '@/lib/fileIconAssets'
-import HarnessMentionImages from './HarnessMentionImages.vue'
 import type { HarnessPart } from '@/types/harness'
+
+const emit = defineEmits<{ 'mention-images': [tokens: ComposerFileToken[]] }>()
 
 const props = withDefaults(
   defineProps<{
@@ -23,7 +24,7 @@ const props = withDefaults(
     onPrimary?: boolean
     /**
      * Render `@file:` / `@agent:` mention tokens as inline badges plus
-     * image thumbnails above the text. Only the user history bubble sets
+     * image tokens reported to the message view. Only the user history bubble sets
      * this; assistant responses keep plain markdown (`false`).
      */
     mentions?: boolean
@@ -196,6 +197,7 @@ function showMediaFallback(segment: MediaSegment): boolean {
 // Derive previews from badges actually rendered in prose, not raw prompt text:
 // a mention inside inline/fenced code or a link must not fetch an image.
 const imageTokens = ref<ComposerFileToken[]>([])
+watch(imageTokens, (tokens) => emit('mention-images', tokens))
 
 const rootEl = ref<HTMLElement | null>(null)
 
@@ -209,6 +211,9 @@ function badgeTone(kind: 'file' | 'agent'): string {
     ? ' bg-muted text-foreground border-border'
     : ' bg-primary/10 text-primary border-primary/20'
 }
+
+const mentionBadgeClass =
+  'mention-badge inline-flex h-5 max-w-[min(100%,12rem)] items-center gap-1 rounded-md border px-1.5 align-middle text-[11px] leading-none font-medium whitespace-nowrap'
 
 function createMentionBadge(token: ComposerToken): HTMLElement {
   const span = document.createElement('span')
@@ -225,8 +230,7 @@ function createMentionBadge(token: ComposerToken): HTMLElement {
     span.setAttribute('title', `@agent:${token.name}`)
   }
   span.className =
-    'mention-badge inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium align-baseline whitespace-nowrap border' +
-    badgeTone(token.kind)
+    mentionBadgeClass + badgeTone(token.kind)
   if (token.kind === 'file') {
     try {
       const url = workspaceFileIconUrl(token.path)
@@ -331,8 +335,7 @@ function refreshMentionBadgeTones(): void {
   for (const badge of Array.from(root.querySelectorAll('[data-mention-badge]'))) {
     const kind = badge.getAttribute('data-mention-badge') === 'agent' ? 'agent' : 'file'
     badge.className =
-      'mention-badge inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium align-baseline whitespace-nowrap border' +
-      badgeTone(kind as 'file' | 'agent')
+      mentionBadgeClass + badgeTone(kind as 'file' | 'agent')
   }
 }
 
@@ -423,12 +426,6 @@ export type { HarnessPart }
 
 <template>
   <div ref="rootEl" :class="rootClass">
-    <HarnessMentionImages
-      v-if="mentions && imageTokens.length > 0"
-      :tokens="imageTokens"
-      :workspace-id="workspaceId"
-      :on-primary="onPrimary"
-    />
     <template v-for="(segment, index) in segments" :key="index">
       <div v-if="segment.kind === 'html'" data-md-html v-html="segment.html" />
       <template v-else>

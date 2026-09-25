@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, ref, watch } from 'vue'
 import { BookText, GitFork, Pencil } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
+import type { ComposerFileToken } from '@/lib/composerTokens'
 import {
   buildMessageBlocks,
   type MessageRenderBlock,
@@ -18,6 +19,8 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
+import HarnessMentionImages from './HarnessMentionImages.vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
@@ -37,6 +40,9 @@ const emit = defineEmits<{
   edit: [messageId: string, text: string]
   fork: [messageId: string]
 }>()
+
+const workspaceId = inject(harnessWorkspaceIdKey, ref(''))
+const mentionImages = ref<ComposerFileToken[]>([])
 
 const finished = computed(() => props.streaming !== true)
 
@@ -193,7 +199,13 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         v-if="!editing"
         class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-3 py-2 text-sm break-words"
       >
-        <HarnessMarkdown :text="message.content" compact :on-primary="true" mentions />
+        <HarnessMarkdown
+          :text="message.content"
+          compact
+          :on-primary="true"
+          mentions
+          @mention-images="mentionImages = $event"
+        />
       </div>
       <div v-else class="flex flex-col gap-2">
         <Textarea
@@ -224,6 +236,12 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           </Button>
         </div>
       </div>
+      <HarnessMentionImages
+        v-if="!editing && mentionImages.length"
+        :tokens="mentionImages"
+        :workspace-id="workspaceId"
+        strip-class="mt-1.5 justify-end"
+      />
       <div
         v-if="messageSkills.length > 0"
         class="mt-1.5 flex flex-wrap justify-end gap-1.5"
