@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { FileText } from '@lucide/vue'
+
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 import type { HarnessPart } from '@/types/harness'
 import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
@@ -128,10 +129,12 @@ function closeLightbox(): void {
 
 <template>
   <div data-testid="tool-detail-read" class="min-w-0 space-y-1">
-    <code
-      v-if="path"
-      class="block truncate font-mono text-[11px] text-muted-foreground"
-    >{{ path }}</code>
+    <div v-if="path" class="flex items-center gap-1.5">
+      <WorkspaceFileIcon :path="path" :size="14" />
+      <code class="block min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+        >{{ path }}</code
+      >
+    </div>
     <div v-if="images.length" class="flex flex-wrap gap-2">
       <button
         v-for="(attachment, index) in images"
@@ -160,7 +163,7 @@ function closeLightbox(): void {
         data-testid="tool-detail-read-pdf"
         class="flex items-center gap-1.5 font-mono text-[11px] text-primary hover:underline"
       >
-        <FileText :size="12" class="shrink-0" />
+        <WorkspaceFileIcon :path="pdfFileNameFor(attachment)" :size="14" class="shrink-0" />
         <span class="truncate">{{ pdfLabel(attachment) }} · {{ pdfFileNameFor(attachment) }}</span>
       </a>
     </div>

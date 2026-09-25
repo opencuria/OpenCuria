@@ -3,6 +3,8 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
+import ComposerRichEditor from './ComposerRichEditor.vue'
+import type { VueWrapper } from '@vue/test-utils'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -82,11 +84,32 @@ const dropdownStubs = {
   DropdownMenuSeparator: { template: '<hr />' },
 }
 
-function mountInput(props: Record<string, unknown> = {}) {
+function mountInput(props: Record<string, unknown> = {}, attachTo?: Element) {
   return mount(HarnessChatInput, {
     props: { workspaceId: 'ws-1', ...props },
+    ...(attachTo ? { attachTo } : {}),
     global: { stubs: dropdownStubs },
   })
+}
+
+/** Drive the contenteditable exactly as a plain-text browser input. */
+async function setEditorText(wrapper: VueWrapper, text: string): Promise<void> {
+  const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
+  el.textContent = text
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(false)
+  const selection = window.getSelection()!
+  selection.removeAllRanges()
+  selection.addRange(range)
+  await wrapper.get('[data-testid="composer-textarea"]').trigger('input')
+}
+function editorText(wrapper: VueWrapper): string {
+  return (wrapper.findComponent(ComposerRichEditor).vm as unknown as { value(): string }).value()
+}
+function editorCursor(wrapper: VueWrapper, offset: number): void {
+  const editor = wrapper.findComponent(ComposerRichEditor).vm as unknown as { setCursor(offset: number): void }
+  editor.setCursor(offset)
 }
 
 describe('HarnessChatInput', () => {
@@ -138,7 +161,7 @@ describe('HarnessChatInput', () => {
       Node.DOCUMENT_POSITION_FOLLOWING,
     )
     expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="composer-textarea"]').attributes('placeholder')).toContain(
+    expect(wrapper.find('[data-testid="composer-textarea"]').attributes('data-placeholder')).toContain(
       '/ for skills',
     )
   })
@@ -164,9 +187,9 @@ describe('HarnessChatInput', () => {
 
   it('clamps autosize height at 200px when content overflows', async () => {
     const wrapper = mountInput()
-    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
     Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 500 })
-    await wrapper.find('textarea').setValue('line\n'.repeat(20))
+    await setEditorText(wrapper, 'line\n'.repeat(20))
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('200px')
     expect(el.style.overflowY).toBe('auto')
@@ -174,15 +197,65 @@ describe('HarnessChatInput', () => {
 
   it('resets to one line after send', async () => {
     const wrapper = mountInput()
-    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
     Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 80 })
-    await wrapper.find('textarea').setValue('hello world')
+    await setEditorText(wrapper, 'hello world')
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('80px')
-    await wrapper.find('textarea').trigger('keydown', { key: 'Enter' })
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('')
     expect(el.style.overflowY).toBe('')
+  })
+
+  it('renders inline badges and removes only the selected mention via its icon X', async () => {
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('Review @file:/workspace/src/shell.py with @agent:plan please')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('shell.py')
+    expect(wrapper.get('[data-testid="composer-file-badge"]').attributes('title')).toBe('/workspace/src/shell.py')
+    expect(wrapper.get('[data-testid="composer-agent-badge"]').text()).toContain('plan')
+    expect(editorText(wrapper)).toBe('Review @file:/workspace/src/shell.py with @agent:plan please')
+    await wrapper.get('[data-testid="composer-file-badge"] [data-testid="composer-badge-remove"]').trigger('click')
+    expect(editorText(wrapper)).toBe('Review with @agent:plan please')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Review with @agent:plan please')
+  })
+
+  it('keeps Shift+Enter as a single newline when editing before a badge', async () => {
+    const wrapper = mountInput({}, document.body)
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('before @file:/workspace/a.py after')
+    await wrapper.vm.$nextTick()
+    ;(wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement).focus()
+    editorCursor(wrapper, 0)
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter', shiftKey: true })
+    expect(editorText(wrapper)).toBe('\nbefore @file:/workspace/a.py after')
+    wrapper.unmount()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.py')
+    expect(wrapper.emitted('send')).toBeUndefined()
+  })
+
+  it('shows image thumbnail above inline badge and removes both with thumbnail X', async () => {
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('See @file:/workspace/a.png now')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.png')
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="mention-image-remove"]').trigger('click')
+    expect(editorText(wrapper)).toBe('See now')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+  })
+
+  it('leaves unsafe or incomplete tokens as editable plain text', async () => {
+    const wrapper = mountInput()
+    await setEditorText(wrapper, 'See @file:/workspace/../secret.png and @file:')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
   })
 
   it('opens the provider tab via event (no router navigation) when provider config is missing', async () => {
@@ -256,8 +329,8 @@ describe('HarnessChatInput', () => {
 
   it('sends prompt, mode, model, skill ids, and effort', async () => {
     const wrapper = mountInput({ mode: 'plan' })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('hello world')
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, 'hello world')
     await textarea.trigger('keydown', { key: 'Enter' })
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
@@ -286,15 +359,15 @@ describe('HarnessChatInput', () => {
       expect(getProviderConfigMock).toHaveBeenCalled()
     })
 
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('/Lin')
-    textarea.element.setSelectionRange(4, 4)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
     await textarea.trigger('input')
     expect(wrapper.find('[role="listbox"]').text()).toContain('Lint rules')
     await textarea.trigger('keydown', { key: 'Enter' })
     expect(wrapper.text()).toContain('Lint rules')
 
-    await textarea.setValue('use skills')
+    await setEditorText(wrapper, 'use skills')
     await textarea.trigger('keydown', { key: 'Enter' })
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
@@ -306,9 +379,9 @@ describe('HarnessChatInput', () => {
       mentionControlled: true,
       files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@a')
-    textarea.element.setSelectionRange(2, 2)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@a')
+    editorCursor(wrapper, 2)
     await textarea.trigger('input')
 
     const changes = wrapper.emitted('mention-change') ?? []
@@ -325,9 +398,9 @@ describe('HarnessChatInput', () => {
       mentionControlled: true,
       files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@a')
-    textarea.element.setSelectionRange(2, 2)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@a')
+    editorCursor(wrapper, 2)
     await textarea.trigger('input')
     await textarea.trigger('keydown', { key: 'Enter' })
 
@@ -339,9 +412,9 @@ describe('HarnessChatInput', () => {
     const store = useFileExplorerStore()
     const findFiles = vi.spyOn(store, 'findFiles').mockResolvedValue(['/workspace/src/a.ts'])
     const wrapper = mountInput()
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@src')
-    textarea.element.setSelectionRange(4, 4)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@src')
+    editorCursor(wrapper, 4)
     await textarea.trigger('input')
     expect(findFiles).toHaveBeenCalledWith('ws-1', 'src', 50)
   })
@@ -355,9 +428,9 @@ describe('HarnessChatInput', () => {
         { name: 'b.ts', path: '/workspace/b.ts', type: 'file', size: 1 },
       ],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@')
-    textarea.element.setSelectionRange(1, 1)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@')
+    editorCursor(wrapper, 1)
     await textarea.trigger('input')
     const options = wrapper.findAll('[role="option"]')
     expect(options.length).toBeGreaterThan(1)
@@ -521,7 +594,7 @@ describe('HarnessChatInput chat upload', () => {
     expect(filename).toBe('my_notes.txt')
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(wrapper.find('textarea').element.value).toContain(
+      expect(editorText(wrapper)).toContain(
         `@file:${CHAT_UPLOAD_DIR}/my_notes.txt `,
       )
     })
@@ -556,7 +629,7 @@ describe('HarnessChatInput chat upload', () => {
     expect(fetchSpy).not.toHaveBeenCalledWith('ws-1', CHAT_UPLOAD_DIR)
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(wrapper.find('textarea').element.value).toContain(`@file:${CHAT_UPLOAD_DIR}/a_1.txt `)
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/a_1.txt `)
     })
   })
 
@@ -579,7 +652,7 @@ describe('HarnessChatInput chat upload', () => {
     expect(vi.mocked(sendFilesUpload).mock.calls[0]![2]).toBe(CHAT_UPLOAD_DIR)
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(wrapper.find('textarea').element.value).toContain(
+      expect(editorText(wrapper)).toContain(
         `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
       )
     })
@@ -627,11 +700,11 @@ describe('HarnessChatInput chat upload', () => {
     expect(trackSpy).toHaveBeenCalledTimes(1)
 
     await vi.waitFor(() => {
-      expect(wrapper.find('textarea').element.value).toContain(
+      expect(editorText(wrapper)).toContain(
         `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
       )
     })
-    const value = wrapper.find('textarea').element.value as string
+    const value = editorText(wrapper) as string
     expect(value.match(/@file:/g)).toHaveLength(1)
   })
 
@@ -647,7 +720,7 @@ describe('HarnessChatInput chat upload', () => {
     await wrapper.vm.$nextTick()
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
-    expect(wrapper.find('textarea').element.value).toBe('')
+    expect(editorText(wrapper)).toBe('')
   })
 
   it('skips >10 MiB files before arrayBuffer() with a visible toast and no send', async () => {
@@ -672,7 +745,7 @@ describe('HarnessChatInput chat upload', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
 
     expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
-    expect(wrapper.find('textarea').element.value).toBe('')
+    expect(editorText(wrapper)).toBe('')
     const { toast } = await import('vue-sonner')
     expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
       'Upload failed',
@@ -700,7 +773,7 @@ describe('HarnessChatInput chat upload', () => {
     })
     expect(failSpy.mock.calls[0]![1]).toContain('10 MB')
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(wrapper.find('textarea').element.value).toBe('')
+    expect(editorText(wrapper)).toBe('')
   })
 
   it('highlights the composer card while an external file drag is active', async () => {

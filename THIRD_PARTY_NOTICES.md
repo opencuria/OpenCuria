@@ -86,3 +86,58 @@ The full text of the Apache License, Version 2.0 — under which Simular AI
 and the Agent-S contributors published the upstream work — is available at
 `http://www.apache.org/licenses/LICENSE-2.0`. A copy may also be found in
 the upstream repository (https://github.com/simular-ai/Agent-S).
+
+## material-icon-theme (VS Code file/folder icons)
+
+The webapp bundles a small curated subset of colored file/folder SVGs
+(~147 icons under `webapp/src/assets/file-icons/`, resolved by
+`webapp/src/lib/fileIcons.ts` and rendered by
+`webapp/src/components/files/WorkspaceFileIcon.vue`) copied from:
+
+- **Project:** Material Icon Theme (`material-icon-theme` on npm —
+  Material Design Icons for Visual Studio Code)
+- **Authors / copyright holders:** Material Extensions
+- **License of the upstream work:** MIT License
+  (`Copyright (c) 2025 Material Extensions` — full text in
+  `webapp/node_modules/material-icon-theme/LICENSE`, installed as the
+  `material-icon-theme` npm dependency pinned in `webapp/package.json`)
+- **Upstream URL:** https://github.com/material-extensions/vscode-material-icon-theme
+- **Pinned version vendored from:** `5.38.1`
+
+### Nature of the use
+
+- Only individual `icons/*.svg` files are copied verbatim into
+  `webapp/src/assets/file-icons/`; the upstream `material-icons.json`
+  manifest, theme engine, and VS Code extension code are **not** bundled.
+- The copied SVGs keep their upstream fills/paths unmodified; the mapping
+  from file names / extensions / folder names to icon files is a small
+  hand-written subset in `webapp/src/lib/fileIcons.ts` (not the upstream
+  manifest).
+- The npm package is a regular runtime dependency so the copy source and
+  license travel with the install (`webapp/package.json`,
+  `webapp/package-lock.json`, `webapp/node_modules/material-icon-theme/LICENSE`).
+
+### Upstream license text (MIT)
+
+```text
+The MIT License (MIT)
+Copyright (c) 2025 Material Extensions
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```

@@ -11,7 +11,8 @@ import { computed } from 'vue'
 import type { GitCommitFile, GitDiffHunk, GitFileStatus } from '@/types/git'
 import { useGitStore } from '@/stores/git'
 import { Button } from '@/components/ui/button'
-import { FileCode2, FileText, RefreshCw, X } from '@lucide/vue'
+import { RefreshCw, X } from '@lucide/vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 /**
  * Workspace context only: the git store is already bound to a workspace via
@@ -68,17 +69,6 @@ const directoryPath = computed(() => {
   if (!activePath.value) return ''
   const parts = activePath.value.split('/')
   return parts.length > 1 ? parts.slice(0, -1).join('/') : '/'
-})
-
-const CODE_EXTENSIONS = new Set([
-  'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'c', 'h', 'cpp',
-  'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'sh', 'sql', 'html', 'css',
-  'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'md',
-])
-
-const fileIcon = computed(() => {
-  const ext = fileName.value.split('.').pop()?.toLowerCase() ?? ''
-  return CODE_EXTENSIONS.has(ext) ? FileCode2 : FileText
 })
 
 const STATUS_LABELS: Record<string, string> = {
@@ -185,9 +175,9 @@ function handleClose(): void {
          selection exists, even while the lazy hunks are still loading. -->
     <div class="flex shrink-0 items-center gap-3 border-b border-border bg-card px-4 py-2">
       <div
-        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-xs)] border border-border bg-muted/50 text-muted-foreground"
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-xs)] border border-border bg-muted/50"
       >
-        <component :is="fileIcon" :size="15" />
+        <WorkspaceFileIcon :path="activePath" :name="fileName" :size="20" />
       </div>
       <div class="min-w-0 flex-1">
         <div class="truncate text-sm font-medium text-foreground" data-testid="git-diff-name">

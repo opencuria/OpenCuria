@@ -193,7 +193,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         v-if="!editing"
         class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-3 py-2 text-sm break-words"
       >
-        <HarnessMarkdown :text="message.content" compact :on-primary="true" />
+        <HarnessMarkdown :text="message.content" compact :on-primary="true" mentions />
       </div>
       <div v-else class="flex flex-col gap-2">
         <Textarea

@@ -10,7 +10,7 @@
  * diff in the main area when clicked (staged vs unstaged side aware).
  */
 import { computed, ref } from 'vue'
-import type { GitFileChange, GitFileStatus } from '@/types/git'
+import type { GitFileStatus } from '@/types/git'
 import { useGitStore } from '@/stores/git'
 import { copyToClipboard } from '@/lib/clipboard'
 import { Textarea } from '@/components/ui/textarea'
@@ -44,17 +44,15 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   AlertTriangle,
   ArrowDown,
-  ArrowUp,
   Check,
   ChevronDown,
-  FileCode2,
-  FileText,
   Minus,
   Plus,
   RefreshCw,
   Undo2,
   Upload,
 } from '@lucide/vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const store = useGitStore()
 
@@ -226,17 +224,6 @@ function confirmDiscard(): void {
 
 function copyPath(path: string): void {
   void copyToClipboard(path, 'file path')
-}
-
-const CODE_EXTENSIONS = new Set([
-  'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'c', 'h', 'cpp',
-  'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'sh', 'sql', 'html', 'css',
-  'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'md',
-])
-
-function fileIcon(change: GitFileChange) {
-  const ext = change.path.split('.').pop()?.toLowerCase() ?? ''
-  return CODE_EXTENSIONS.has(ext) ? FileCode2 : FileText
 }
 
 function fileName(path: string): string {
@@ -485,11 +472,7 @@ const changesOpen = ref(true)
               :data-testid="`git-staged-file`"
               @click="void store.openDiff(change.path, true)"
             >
-              <component
-                :is="fileIcon(change)"
-                :size="13"
-                class="shrink-0 text-muted-foreground"
-              />
+              <WorkspaceFileIcon :path="change.path" :size="15" />
               <span
                 class="min-w-0 flex-1 truncate text-xs text-foreground"
                 :title="change.path"
@@ -567,11 +550,7 @@ const changesOpen = ref(true)
               data-testid="git-changed-file"
               @click="void store.openDiff(change.path, false)"
             >
-              <component
-                :is="fileIcon(change)"
-                :size="13"
-                class="shrink-0 text-muted-foreground"
-              />
+              <WorkspaceFileIcon :path="change.path" :size="15" />
               <span
                 class="min-w-0 flex-1 truncate text-xs text-foreground"
                 :title="change.path"

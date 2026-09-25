@@ -50,7 +50,7 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('boom')
   })
 
-  it('renders a read path and file body', () => {
+  it('renders a read path with a colored file icon and the file body', () => {
     const wrapper = mount(ToolDetailRead, {
       props: {
         part: makePart({
@@ -63,6 +63,8 @@ describe('tool detail components', () => {
 
     expect(wrapper.text()).toContain('/workspace/a.ts')
     expect(wrapper.text()).toContain('export const x = 1')
+    const icon = wrapper.get('[data-testid="workspace-file-icon"]')
+    expect(icon.attributes('data-icon')).toBe('typescript')
   })
 
   it('renders image attachments as thumbnails that open the lightbox', async () => {
@@ -110,6 +112,10 @@ describe('tool detail components', () => {
     expect(link.attributes('download')).toBe('doc.pdf')
     expect(link.text()).toContain('PDF attachment')
     expect(wrapper.text()).toContain('PDF read successfully')
+    expect(
+      wrapper.get('[data-testid="tool-detail-read-pdf"] [data-testid="workspace-file-icon"]')
+        .attributes('data-icon'),
+    ).toBe('pdf')
   })
 
   it('prefers attachment.filename over meta.path and tool args for the PDF name', () => {

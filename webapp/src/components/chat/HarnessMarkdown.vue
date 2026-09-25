@@ -1,19 +1,39 @@
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { Skeleton } from '@/components/ui/skeleton'
 import { classifyWorkspaceFile, resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
+import {
+  parseComposerSegments,
+  type ComposerFileToken,
+  type ComposerToken,
+} from '@/lib/composerTokens'
+import { workspaceFileIconUrl } from '@/lib/fileIconAssets'
+import HarnessMentionImages from './HarnessMentionImages.vue'
 import type { HarnessPart } from '@/types/harness'
 
-const props = defineProps<{
-  text: string
-  compact?: boolean
-  /** White text for dark primary backgrounds (user prompt bubble). */
-  onPrimary?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    text: string
+    compact?: boolean
+    /** White text for dark primary backgrounds (user prompt bubble). */
+    onPrimary?: boolean
+    /**
+     * Render `@file:` / `@agent:` mention tokens as inline badges plus
+     * image thumbnails above the text. Only the user history bubble sets
+     * this; assistant responses keep plain markdown (`false`).
+     */
+    mentions?: boolean
+  }>(),
+  {
+    compact: false,
+    onPrimary: false,
+    mentions: false,
+  },
+)
 
 const rootClass = computed(() => {
   const classes = [
@@ -161,14 +181,256 @@ function showMediaFallback(segment: MediaSegment): boolean {
   return !isMediaLoading(segment)
 }
 
+// ---------------------------------------------------------------------------
+// Mention rendering (sent-user history only, `mentions === true`).
+//
+// Tokens come from the shared `src/lib/composerTokens.ts`
+// (`parseComposerSegments` / `imageMentionTokens`) and badge icons from the
+// shared `src/lib/fileIconAssets.ts` (`workspaceFileIconUrl`), so history
+// badges match composer chips. Badges are applied as a safe DOM text-node
+// enhancement after marked+DOMPurify render the HTML (code blocks and links
+// are skipped); `data-md-html` containers are re-rendered from `segments`
+// whenever the text changes, so badges can never go stale.
+// ---------------------------------------------------------------------------
+
+// Derive previews from badges actually rendered in prose, not raw prompt text:
+// a mention inside inline/fenced code or a link must not fetch an image.
+const imageTokens = ref<ComposerFileToken[]>([])
+
+const rootEl = ref<HTMLElement | null>(null)
+
+function badgeTone(kind: 'file' | 'agent'): string {
+  if (props.onPrimary) {
+    return kind === 'file'
+      ? ' bg-primary-foreground/15 text-primary-foreground border-primary-foreground/30'
+      : ' bg-primary-foreground/15 text-primary-foreground border-primary-foreground/30 font-semibold'
+  }
+  return kind === 'file'
+    ? ' bg-muted text-foreground border-border'
+    : ' bg-primary/10 text-primary border-primary/20'
+}
+
+function createMentionBadge(token: ComposerToken): HTMLElement {
+  const span = document.createElement('span')
+  span.setAttribute('data-mention-badge', token.kind)
+  span.setAttribute(
+    'data-testid',
+    token.kind === 'file' ? 'mention-badge-file' : 'mention-badge-agent',
+  )
+  if (token.kind === 'file') {
+    span.setAttribute('data-path', token.path)
+    span.setAttribute('title', token.path)
+  } else {
+    span.setAttribute('data-agent', token.name)
+    span.setAttribute('title', `@agent:${token.name}`)
+  }
+  span.className =
+    'mention-badge inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium align-baseline whitespace-nowrap border' +
+    badgeTone(token.kind)
+  if (token.kind === 'file') {
+    try {
+      const url = workspaceFileIconUrl(token.path)
+      if (url) {
+        const img = document.createElement('img')
+        img.setAttribute('src', url)
+        img.setAttribute('alt', '')
+        img.setAttribute('aria-hidden', 'true')
+        img.setAttribute('draggable', 'false')
+        img.setAttribute('data-testid', 'mention-badge-icon')
+        img.className = 'shrink-0 object-contain'
+        img.style.width = '12px'
+        img.style.height = '12px'
+        span.appendChild(img)
+      }
+    } catch {
+      // Icon is decorative; badge text still renders.
+    }
+    // Badge label is the filename only; the full path stays in `title`.
+    const label = document.createElement('span')
+    label.textContent = token.name
+    label.className = 'min-w-0 truncate'
+    span.appendChild(label)
+  } else {
+    span.textContent = `@agent:${token.name}`
+  }
+  return span
+}
+
+function isSkippedMentionAncestor(node: Node): boolean {
+  let el = node.parentElement
+  while (el) {
+    const tag = el.tagName
+    if (
+      tag === 'CODE' ||
+      tag === 'PRE' ||
+      tag === 'A' ||
+      tag === 'SCRIPT' ||
+      tag === 'STYLE' ||
+      tag === 'TEXTAREA'
+    ) {
+      return true
+    }
+    if (el.hasAttribute?.('data-mention-badge')) return true
+    if (el.hasAttribute?.('data-md-html')) break
+    el = el.parentElement
+  }
+  return false
+}
+
+function replaceTokensInTextNode(textNode: Text, tokens: ComposerToken[]): void {
+  const text = textNode.nodeValue ?? ''
+  if (!text.includes('@')) return
+  const matches: Array<{ index: number; token: ComposerToken }> = []
+  for (const token of tokens) {
+    const raw = token.raw
+    if (!raw || !text.includes(raw)) continue
+    let from = 0
+    while (true) {
+      const idx = text.indexOf(raw, from)
+      if (idx < 0) break
+      const before = idx > 0 ? (text[idx - 1] ?? '') : ''
+      const after = idx + raw.length < text.length ? (text[idx + raw.length] ?? '') : ''
+      const beforeOk = !before || /\s/.test(before) || before === '(' || before === '['
+      const afterOk = !after || /\s/.test(after) || /[.,;:!?)\]]/.test(after)
+      if (beforeOk && afterOk) matches.push({ index: idx, token })
+      from = idx + raw.length
+    }
+  }
+  if (matches.length === 0) return
+  matches.sort((a, b) => a.index - b.index || b.token.raw.length - a.token.raw.length)
+  const filtered: typeof matches = []
+  let lastEnd = -1
+  for (const m of matches) {
+    if (m.index < lastEnd) continue
+    filtered.push(m)
+    lastEnd = m.index + m.token.raw.length
+  }
+  if (filtered.length === 0) return
+  const frag = document.createDocumentFragment()
+  let cursor = 0
+  for (const m of filtered) {
+    if (m.index > cursor) {
+      frag.appendChild(document.createTextNode(text.slice(cursor, m.index)))
+    }
+    try {
+      frag.appendChild(createMentionBadge(m.token))
+    } catch {
+      frag.appendChild(document.createTextNode(m.token.raw))
+    }
+    cursor = m.index + m.token.raw.length
+  }
+  if (cursor < text.length) {
+    frag.appendChild(document.createTextNode(text.slice(cursor)))
+  }
+  textNode.parentNode?.replaceChild(frag, textNode)
+}
+
+function refreshMentionBadgeTones(): void {
+  const root = rootEl.value
+  if (!root || typeof document === 'undefined') return
+  for (const badge of Array.from(root.querySelectorAll('[data-mention-badge]'))) {
+    const kind = badge.getAttribute('data-mention-badge') === 'agent' ? 'agent' : 'file'
+    badge.className =
+      'mention-badge inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium align-baseline whitespace-nowrap border' +
+      badgeTone(kind as 'file' | 'agent')
+  }
+}
+
+function enhanceMentionBadges(): void {
+  imageTokens.value = []
+  if (!props.mentions) return
+  const root = rootEl.value
+  if (!root || typeof document === 'undefined') return
+  let tokens: ComposerToken[]
+  try {
+    tokens = parseComposerSegments(props.text).filter(
+      (segment): segment is ComposerToken => segment.kind !== 'text',
+    )
+  } catch {
+    return
+  }
+  if (tokens.length === 0) return
+  const containers = root.querySelectorAll('[data-md-html]')
+  if (containers.length === 0) return
+  for (const container of Array.from(containers)) {
+    // Collect text nodes manually (works in browsers and jsdom); the
+    // containers re-render from `segments` on text changes, so a single
+    // enhancement pass per render is enough and badges never go stale.
+    const textNodes: Text[] = []
+    const visit = (node: Node): void => {
+      if (node.nodeType === 3) {
+        if (
+          node.nodeValue?.includes('@') &&
+          !isSkippedMentionAncestor(node as Text)
+        ) {
+          textNodes.push(node as Text)
+        }
+        return
+      }
+      for (const child of Array.from(node.childNodes)) visit(child)
+    }
+    visit(container)
+    for (const textNode of textNodes) {
+      replaceTokensInTextNode(textNode, tokens)
+    }
+  }
+  const renderedPaths = Array.from(root.querySelectorAll('[data-mention-badge="file"]'))
+    .map((badge) => badge.getAttribute('data-path'))
+  imageTokens.value = tokens.filter(
+    (token): token is ComposerFileToken =>
+      token.kind === 'file' &&
+      classifyWorkspaceFile(token.path) === 'image' &&
+      renderedPaths.includes(token.path),
+  )
+}
+
+function scheduleMentionEnhance(): void {
+  if (!props.mentions || typeof document === 'undefined') return
+  void nextTick(() => {
+    try {
+      enhanceMentionBadges()
+    } catch {
+      // Badge enhancement is cosmetic; never break markdown rendering.
+    }
+  })
+}
+
+// The `segments` computed re-renders the `data-md-html` containers on text
+// changes, so one post-render pass is enough (no retry timers).
+watch(
+  () => [props.text, props.mentions, segments.value] as const,
+  () => {
+    scheduleMentionEnhance()
+  },
+)
+
+watch(
+  () => props.onPrimary,
+  () => {
+    void nextTick(() => {
+      refreshMentionBadgeTones()
+    })
+  },
+)
+
+onMounted(() => {
+  scheduleMentionEnhance()
+})
+
 defineExpose({ renderMarkdown })
 export type { HarnessPart }
 </script>
 
 <template>
-  <div :class="rootClass">
+  <div ref="rootEl" :class="rootClass">
+    <HarnessMentionImages
+      v-if="mentions && imageTokens.length > 0"
+      :tokens="imageTokens"
+      :workspace-id="workspaceId"
+      :on-primary="onPrimary"
+    />
     <template v-for="(segment, index) in segments" :key="index">
-      <div v-if="segment.kind === 'html'" v-html="segment.html" />
+      <div v-if="segment.kind === 'html'" data-md-html v-html="segment.html" />
       <template v-else>
         <img
           v-if="segment.kind === 'image' && mediaUrl(segment)"

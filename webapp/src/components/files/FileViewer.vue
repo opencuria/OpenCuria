@@ -8,11 +8,8 @@ import {
   Download,
   AlertTriangle,
   FileX,
-  FileText,
-  FileCode2,
-  Image as ImageIcon,
-  FileType2,
 } from '@lucide/vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -27,34 +24,15 @@ const store = useFileExplorerStore()
 const file = computed(() => store.viewingFile)
 
 const fileName = computed(() => file.value?.path.split('/').pop() ?? '')
+const filePath = computed(() => file.value?.path ?? '')
 const directoryPath = computed(() => {
   if (!file.value) return ''
   return file.value.path.split('/').slice(0, -1).join('/') || '/'
 })
 
-const CODE_EXTENSIONS = new Set([
-  'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'c', 'h', 'cpp',
-  'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'sh', 'bash', 'zsh', 'sql', 'html',
-  'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'md', 'dockerfile',
-])
-
 const fileExtension = computed(() => {
   const dot = fileName.value.lastIndexOf('.')
   return dot >= 0 ? fileName.value.slice(dot + 1).toLowerCase() : ''
-})
-
-const fileIcon = computed(() => {
-  if (!file.value) return FileText
-  switch (file.value.mediaType) {
-    case 'image':
-      return ImageIcon
-    case 'pdf':
-      return FileType2
-    case 'binary':
-      return FileX
-    default:
-      return CODE_EXTENSIONS.has(fileExtension.value) ? FileCode2 : FileText
-  }
 })
 
 const fileSizeLabel = computed(() => {
@@ -139,9 +117,9 @@ function handleDownload(): void {
     <!-- Header -->
     <div class="flex shrink-0 items-center gap-3 border-b border-border bg-card px-4 py-2">
       <div
-        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-xs)] border border-border bg-muted/50 text-muted-foreground"
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-xs)] border border-border bg-muted/50"
       >
-        <component :is="fileIcon" :size="15" />
+        <WorkspaceFileIcon :path="filePath" :name="fileName" :size="20" />
       </div>
       <div class="min-w-0 flex-1">
         <div class="truncate text-sm font-medium text-foreground" data-testid="file-viewer-name">

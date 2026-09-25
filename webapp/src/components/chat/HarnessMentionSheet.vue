@@ -4,6 +4,7 @@ import {
   createPointerHoverGate,
   type MentionCandidate,
 } from '@/lib/harnessMentions'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const props = defineProps<{
   candidates: MentionCandidate[]
@@ -65,7 +66,13 @@ watch(
         @mousedown.prevent="emit('select', candidate)"
         @mousemove="onOptionMouseMove($event, idx)"
       >
+        <WorkspaceFileIcon
+          v-if="candidate.kind === 'file'"
+          :path="candidate.insert.startsWith('file:') ? candidate.insert.slice('file:'.length) : candidate.insert"
+          :size="15"
+        />
         <span
+          v-else
           class="rounded px-1 py-0.5 text-[10px] font-medium"
           :class="
             candidate.kind === 'agent' || candidate.kind === 'skill'
