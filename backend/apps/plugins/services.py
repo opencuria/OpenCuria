@@ -54,7 +54,7 @@ PLAYWRIGHT_MCP_ARGS = [
     "--executable-path",
     "/usr/bin/google-chrome-stable",
     "--output-dir",
-    "/tmp/.opencuria/playwright",
+    "/workspace/.opencuria/playwright",
 ]
 #: DISPLAY is allowed through the stream env sanitizer (not in the
 #: blocked HOME/PATH/LD_… set); XAUTHORITY pins the runner-owned file

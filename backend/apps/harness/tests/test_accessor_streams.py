@@ -60,6 +60,51 @@ async def test_open_process_sends_validated_start() -> None:
     await stream.aclose()
 
 
+async def test_open_process_passes_control_timeout() -> None:
+    class RecordingCall(FakeCallTransport):
+        async def call(self, event, payload, timeout=None):
+            self.timeout = timeout
+            return await super().call(event, payload, timeout)
+
+    transport = RecordingCall()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["slow-mcp"], timeout=120)
+    assert transport.timeout == 120
+    await stream.aclose()
+
+
+async def test_cancelled_open_cleans_up_remote_and_routing() -> None:
+    class HangingCall(FakeCallTransport):
+        async def call(self, event, payload, timeout=None):
+            self.calls.append((event, payload))
+            if event == "workspace:stream_start":
+                await asyncio.Event().wait()
+            return {"ok": True}
+
+    transport = HangingCall()
+    emitted = []
+
+    async def emit(event, payload):
+        emitted.append((event, payload))
+
+    accessor = RunnerWorkspaceAccessor("ws-1", emit=emit, call=transport.call)
+    task = asyncio.create_task(accessor.open_process(["slow-mcp"], timeout=120))
+    await asyncio.sleep(0)
+    conn = transport.calls[0][1]["connection_id"]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(20):
+        if emitted:
+            break
+        await asyncio.sleep(0.01)
+    assert conn not in accessor._byte_streams
+    assert emitted[0] == (
+        "workspace:stream_close",
+        {"connection_id": conn, "workspace_id": "ws-1"},
+    )
+
+
 async def test_open_process_rejects_empty_command() -> None:
     transport = FakeCallTransport()
     accessor = _accessor(transport)

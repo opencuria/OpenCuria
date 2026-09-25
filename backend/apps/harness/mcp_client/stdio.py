@@ -38,6 +38,7 @@ from anyio.streams.memory import (
 from mcp.shared.message import SessionMessage
 
 from ..access.base import StreamClosedError
+from ..access.runner_accessor import STREAM_CHUNK_SIZE
 
 logger = structlog.get_logger(__name__)
 
@@ -129,6 +130,7 @@ async def workspace_stdio_client(
     cwd: str = "/workspace",
     env: dict[str, str] | None = None,
     server_desc: str = "",
+    timeout: float | None = None,
 ) -> AsyncIterator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],
@@ -154,7 +156,9 @@ async def workspace_stdio_client(
     """
     read_tx, read_rx = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_tx, write_rx = anyio.create_memory_object_stream[SessionMessage](0)
-    stream = await accessor.open_process(list(command), cwd, dict(env or {}))
+    stream = await accessor.open_process(
+        list(command), cwd, dict(env or {}), timeout=timeout
+    )
     desc = server_desc or " ".join(list(command)[:1]) or "stdio-server"
     supervisor_should_run = True
 
@@ -337,8 +341,19 @@ async def workspace_stdio_client(
                                     + "\n"
                                 )
                                 try:
-                                    await stream.send(payload.encode("utf-8"))
-                                except anyio.ClosedResourceError:
+                                    # The generic workspace stream accepts at
+                                    # most 64 KiB per input event. MCP JSON
+                                    # (e.g. tool args or prompts) may be much
+                                    # larger; framing is byte-stream based, so
+                                    # split without inserting newlines.
+                                    encoded = payload.encode("utf-8")
+                                    for offset in range(
+                                        0, len(encoded), STREAM_CHUNK_SIZE
+                                    ):
+                                        await stream.send(
+                                            encoded[offset : offset + STREAM_CHUNK_SIZE]
+                                        )
+                                except (anyio.ClosedResourceError, StreamClosedError):
                                     break
                     except anyio.get_cancelled_exc_class():
                         raise

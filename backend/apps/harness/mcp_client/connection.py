@@ -42,7 +42,8 @@ MAX_TOOLS_PER_SERVER = 256
 MAX_SCHEMA_SERIALIZED_BYTES = 256 * 1024
 
 #: Hard cap for decoded MCP image bytes (never unbounded into the model).
-MAX_MCP_IMAGE_BYTES = 2 * 1024 * 1024
+# Fits both the 8 MiB stdio line cap and 8M-character persisted attachment cap.
+MAX_MCP_IMAGE_BYTES = 5 * 1024 * 1024
 
 #: Marker for MCP-backed tools (permission key + evaluator rules).
 MCP_TOOL_PREFIX = "mcp_"
@@ -278,8 +279,8 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
     - ``TextContent`` blocks are joined; ``structuredContent`` is appended
       as JSON when no text exists (or supplements it).
     - ``ResourceLink``/``EmbeddedResource`` become readable descriptors.
-    - JPEG ``ImageContent`` (hard size cap) maps to
-      ``ToolResult.image_jpeg``; other images become text descriptors.
+    - Bounded image blocks become tool attachments for the model and
+      persisted chat; JPEG also retains the legacy ``image_jpeg`` field.
     """
     if getattr(result, "isError", False):
         texts = [
@@ -290,6 +291,7 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         message = "\n".join(texts).strip() or "MCP tool reported an error"
         raise ToolError(message[:2000], tool="")
     texts: list[str] = []
+    attachments: list[dict[str, str]] = []
     image_jpeg: bytes | None = None
     for block in result.content or []:
         block_type = getattr(block, "type", "")
@@ -298,7 +300,11 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         elif block_type == "image":
             mime = str(getattr(block, "mimeType", "") or "").lower()
             data = str(getattr(block, "data", "") or "")
-            image_jpeg, descriptor = _decode_image_block(mime, data, image_jpeg)
+            image_jpeg, descriptor, attachment = _decode_image_block(
+                mime, data, image_jpeg, len(attachments)
+            )
+            if attachment:
+                attachments.append(attachment)
             if descriptor:
                 texts.append(descriptor)
         elif block_type == "resource_link":
@@ -326,43 +332,61 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
     output = "\n".join(part for part in texts if part).strip()
     if not output:
         output = "[MCP tool returned no text output]"
-    return ToolResult(output=output, metadata={}, image_jpeg=image_jpeg)
+    return ToolResult(
+        output=output,
+        metadata={"attachments": attachments} if attachments else {},
+        image_jpeg=image_jpeg,
+        attachments=attachments,
+    )
 
 
 def _decode_image_block(
-    mime: str, data: str, current_jpeg: bytes | None
-) -> tuple[bytes | None, str]:
-    """Decode one image block; first JPEG maps to ``image_jpeg``.
+    mime: str, data: str, current_jpeg: bytes | None, attachment_count: int
+) -> tuple[bytes | None, str, dict[str, str] | None]:
+    """Decode a bounded image into a model-visible attachment.
 
-    Later JPEGs become short descriptors (``ToolResult`` carries at
-    most one ``image_jpeg``). The base64 length is bounded before any
-    decode so huge payloads never inflate memory.
+    Keep at most two images (the persistence cap) and the legacy first
+    JPEG. Restrict MIME to formats accepted by our image provider path;
+    never send untrusted/unsupported MIME data URLs to a provider.
     """
     import base64 as _base64
 
+    supported = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    normalized_mime = "image/jpeg" if mime == "image/jpg" else mime
+    if normalized_mime not in supported:
+        return current_jpeg, f"[image ({mime or 'unknown'}) not supported]", None
     if not data:
-        return current_jpeg, "[empty image content]"
+        return current_jpeg, "[empty image content]", None
     if len(data) > (MAX_MCP_IMAGE_BYTES * 4) // 3 + 16:
-        return current_jpeg, (
-            f"[image ({mime or 'unknown'}) exceeds {MAX_MCP_IMAGE_BYTES} byte limit]"
+        return (
+            current_jpeg,
+            (f"[image ({mime}) exceeds {MAX_MCP_IMAGE_BYTES} byte limit]"),
+            None,
         )
-    raw: bytes
+    if attachment_count >= 2:
+        return current_jpeg, f"[additional image ({mime}) omitted]", None
     try:
         raw = _base64.b64decode(data, validate=True)
     except Exception:
-        return current_jpeg, f"[image ({mime or 'unknown'}) with undecodable data]"
+        return current_jpeg, f"[image ({mime}) with undecodable data]", None
     if len(raw) > MAX_MCP_IMAGE_BYTES:
-        return current_jpeg, (
-            f"[image ({mime or 'unknown'}, {len(raw)} bytes) exceeds "
-            f"{MAX_MCP_IMAGE_BYTES} byte limit]"
+        return (
+            current_jpeg,
+            (
+                f"[image ({mime}, {len(raw)} bytes) exceeds "
+                f"{MAX_MCP_IMAGE_BYTES} byte limit]"
+            ),
+            None,
         )
-    if mime in ("image/jpeg", "image/jpg"):
-        if current_jpeg is not None:
-            return current_jpeg, (
-                f"[additional image (image/jpeg, {len(raw)} bytes) omitted]"
-            )
-        return raw, ""
-    return current_jpeg, f"[image ({mime or 'unknown'}, {len(raw)} bytes)]"
+    attachment = {
+        "type": "file",
+        "mime": normalized_mime,
+        "url": f"data:{normalized_mime};base64,{data}",
+        "filename": "",
+    }
+    if normalized_mime == "image/jpeg" and current_jpeg is None:
+        current_jpeg = raw
+    return current_jpeg, "", attachment
 
 
 def _embedded_resource_text(resource: Any) -> str:
@@ -530,6 +554,7 @@ class McpServerConnection:
                 cwd=self.cwd,
                 env=dict(self.env),
                 server_desc=self.desc,
+                timeout=float(self.startup_timeout_seconds or 30.0),
             )
             read, write = await stack.enter_async_context(ctx)
             self._read, self._write = read, write

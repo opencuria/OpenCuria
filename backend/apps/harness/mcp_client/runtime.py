@@ -119,7 +119,6 @@ class McpRuntime:
                     prepared.snapshot, workspace=prepared.workspace
                 )
             )
-        resolved = prepared.plaintexts
         snapshot = prepared.snapshot
         await self._stack.__aenter__()
         try:

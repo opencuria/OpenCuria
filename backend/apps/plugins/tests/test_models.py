@@ -205,8 +205,8 @@ def test_playwright_seed_shape():
     assert server is not None
     assert server.transport == "stdio"
     assert server.command == "npx"
-    for required_arg in PLAYWRIGHT_MCP_ARGS:
-        assert required_arg in list(server.args or [])
+    assert list(server.args or []) == PLAYWRIGHT_MCP_ARGS
+    assert server.args[server.args.index("--output-dir") + 1].startswith("/workspace/")
     # Headed on the shared desktop: no --headless, DISPLAY/XAUTHORITY set.
     assert "--headless" not in list(server.args or [])
     for key, value in PLAYWRIGHT_MCP_ENV.items():
@@ -215,6 +215,42 @@ def test_playwright_seed_shape():
     # Explicit opt-in: no org activations created by the seed.
     assert not OrgPluginActivation.objects.filter(plugin=plugin).exists()
     assert PluginService().plugins.get_global_by_slug("playwright") is not None
+
+
+@pytest.mark.django_db
+def test_playwright_artifact_migration_preserves_custom_commands():
+    """Upgrade only the untouched global seed; leave edited servers alone."""
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    migration = importlib.import_module(
+        "apps.plugins.migrations.0005_playwright_workspace_artifacts"
+    )
+    seeded = PluginMcpServer.objects.get(
+        plugin__slug="playwright", plugin__organization__isnull=True,
+        slug="playwright",
+    )
+    custom = Plugin.objects.create(name="Custom", slug="custom-playwright")
+    other = PluginMcpServer.objects.create(
+        plugin=custom, name="Playwright", slug="playwright", transport="stdio",
+        command="npx", args=migration.OLD_ARGS,
+    )
+    seeded.args = migration.OLD_ARGS
+    seeded.save(update_fields=["args"])
+
+    migration.upgrade_playwright_artifacts(django_apps, None)
+    seeded.refresh_from_db()
+    other.refresh_from_db()
+    assert seeded.args == migration.NEW_ARGS
+    assert other.args == migration.OLD_ARGS
+
+    # Later user edits must survive a re-run and a rollback.
+    seeded.args = ["--my-custom-command"]
+    seeded.save(update_fields=["args"])
+    migration.restore_playwright_artifacts(django_apps, None)
+    seeded.refresh_from_db()
+    assert seeded.args == ["--my-custom-command"]
 
 
 @pytest.mark.django_db

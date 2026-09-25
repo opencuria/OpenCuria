@@ -146,6 +146,9 @@ def test_normalize_jpeg_image_maps_to_image_jpeg():
     )
     normalized = normalize_call_result(result)
     assert normalized.image_jpeg == tiny_jpeg
+    assert normalized.attachments[0]["url"] == (
+        f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
+    )
     png = types.CallToolResult(
         content=[
             types.ImageContent(
@@ -157,7 +160,15 @@ def test_normalize_jpeg_image_maps_to_image_jpeg():
     )
     out = normalize_call_result(png)
     assert out.image_jpeg is None
-    assert "image/png" in out.output
+    assert out.attachments[0]["mime"] == "image/png"
+    from apps.harness.images import (
+        build_tool_message_content,
+        select_persisted_tool_attachments,
+    )
+
+    parts = build_tool_message_content(out.output, out.attachments)
+    assert parts[1]["type"] == "image_url"
+    assert select_persisted_tool_attachments(out.attachments) == out.attachments
 
 
 def test_normalize_oversize_image_is_descriptor():
@@ -175,7 +186,25 @@ def test_normalize_oversize_image_is_descriptor():
     )
     out = normalize_call_result(result)
     assert out.image_jpeg is None
+    assert out.attachments == []
     assert "exceeds" in out.output
+
+
+def test_normalize_mcp_image_rejects_unsupported_and_caps_count():
+    encoded = base64.b64encode(b"image").decode()
+    result = types.CallToolResult(
+        content=[
+            types.ImageContent(type="image", data=encoded, mimeType="image/svg+xml"),
+            *[
+                types.ImageContent(type="image", data=encoded, mimeType="image/png")
+                for _ in range(3)
+            ],
+        ]
+    )
+    out = normalize_call_result(result)
+    assert len(out.attachments) == 2
+    assert "not supported" in out.output
+    assert "omitted" in out.output
 
 
 def test_discovery_caps_constants_sane():

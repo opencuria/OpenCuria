@@ -94,6 +94,22 @@ def _http_response(  # noqa: E501
     return [head, body, b""]
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_splits_large_writes_into_runner_chunks():
+    from apps.harness.access.runner_accessor import STREAM_CHUNK_SIZE
+
+    class BoundedStream(FakeByteStream):
+        async def send(self, data: bytes) -> None:
+            assert 0 < len(data) <= STREAM_CHUNK_SIZE
+            await super().send(data)
+
+    stream = BoundedStream([])
+    bridge = WorkspaceNetworkStream(stream)
+    payload = b"x" * (STREAM_CHUNK_SIZE * 2 + 7)
+    await bridge.write(payload)
+    assert stream.sent == payload
+
+
 def test_parse_mcp_http_url_supports_path_query():
     scheme, host, port, target = parse_mcp_http_url(
         "http://localhost:8123/mcp/v1?key=1"

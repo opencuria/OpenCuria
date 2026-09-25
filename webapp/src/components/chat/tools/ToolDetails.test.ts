@@ -50,6 +50,25 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('boom')
   })
 
+  it('shows MCP screenshot attachments in the generic tool detail', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailDefault, {
+      props: {
+        part: makePart({
+          tool: 'mcp_playwright_playwright_browser_take_screenshot',
+          output: 'Screenshot saved',
+          meta: { attachments: [{ type: 'file', mime: 'image/png', url }] },
+        }),
+      },
+      global: { stubs: { teleport: true } },
+    })
+
+    expect(wrapper.get('[data-testid="tool-detail-default-image"]').attributes('src')).toBe(url)
+    expect(wrapper.text()).toContain('Screenshot saved')
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(url)
+  })
+
   it('renders a read path and file body', () => {
     const wrapper = mount(ToolDetailRead, {
       props: {

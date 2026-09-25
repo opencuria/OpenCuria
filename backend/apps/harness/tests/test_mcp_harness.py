@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -17,9 +18,7 @@ import pytest
 
 from apps.harness.agents.definitions import get_agent
 from apps.harness.harness_service import HarnessService, _merge_skill_bodies
-from apps.harness.mcp_client.connection import (
-    McpTool,
-)
+from apps.harness.mcp_client.connection import McpTool, normalize_call_result
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
     Delta,
@@ -39,6 +38,7 @@ class FakeProvider(ProviderAdapter):
 
     def __init__(self) -> None:
         self.seen_schemas: list[list[ToolSchema]] = []
+        self.tool_content: str | list[dict[str, Any]] | None = None
         self.calls = 0
 
     async def chat_stream(  # type: ignore[no-untyped-def]
@@ -60,6 +60,9 @@ class FakeProvider(ProviderAdapter):
                 usage=Usage(2, 3, 5),
             )
             return
+        self.tool_content = next(
+            (m.content for m in messages if m.role == "tool"), None
+        )
         yield Delta(text="done", usage=Usage(1, 1, 2))
 
 
@@ -162,6 +165,61 @@ async def test_runner_run_with_fake_mcp_tool_round_trip():
     # Provider schema carries the original inputSchema (object here).
     schema = next(s for s in provider.seen_schemas[0] if s.name == "mcp_demo_srv_echo")
     assert schema.parameters.get("type") == "object"
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_mcp_screenshot_to_provider_and_persistence_event():
+    import mcp.types as types
+
+    fake_tool = FakeMcpTool("mcp_demo_srv_echo")
+    connection = FakeMcpConnection(fake_tool)
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nexample").decode()
+
+    async def screenshot(_name: str, _args: dict[str, Any]) -> ToolResult:
+        return normalize_call_result(
+            types.CallToolResult(
+                content=[
+                    types.ImageContent(type="image", mimeType="image/png", data=png)
+                ]
+            )
+        )
+
+    connection.call_tool = screenshot  # type: ignore[method-assign]
+    registry = default_tool_registry()
+    registry.register(fake_tool)
+    provider = FakeProvider()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    from apps.harness.providers.resolver import ResolvedModel
+
+    runner = HarnessRunner(
+        model_resolver=lambda ref: ResolvedModel(
+            adapter=provider,
+            model_id="m",
+            provider="fake",
+            context_length=0,
+            max_output_tokens=0,
+        ),
+        tools=registry,
+        accessor=None,
+        emit=emit,
+    )
+    await runner.run(
+        "hi",
+        "build",
+        "m",
+        "build",
+        RunOptions(session_id="s", workspace_id="w", auto_approve=True),
+    )
+    assert isinstance(provider.tool_content, list)
+    assert (
+        provider.tool_content[1]["image_url"]["url"] == f"data:image/png;base64,{png}"
+    )
+    completed = next(e for e in events if e["type"] == "tool_completed")
+    assert completed["attachments"][0]["mime"] == "image/png"
 
 
 @pytest.mark.asyncio

@@ -1803,7 +1803,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             result = await self._stream_call(
                 "workspace:stream_start", start_payload, timeout
             )
-        except Exception:
+        except BaseException:
+            # Startup deadlines and user aborts cancel the open task.
+            # Release routing state and close any late runner spawn just
+            # as for an ordinary open failure.
             self._request_remote_close(connection_id)
             self._unregister_byte_stream(connection_id)
             raise
@@ -2010,7 +2013,10 @@ async def create_harness_accessor(
             )
         try:
             return await service.call_stream_event(
-                live_runner, event, payload, timeout=STREAM_CALL_TIMEOUT
+                live_runner,
+                event,
+                payload,
+                timeout=timeout if timeout is not None else STREAM_CALL_TIMEOUT,
             )
         except RunnerOfflineError as exc:
             raise RunnerAccessorError(f"{event} failed: {exc}") from exc

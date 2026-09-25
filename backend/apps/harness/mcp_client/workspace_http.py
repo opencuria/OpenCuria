@@ -39,6 +39,8 @@ import anyio
 import httpcore
 import httpx
 
+from ..access.runner_accessor import STREAM_CHUNK_SIZE
+
 logger = logging.getLogger(__name__)
 
 REQUIRED_SCHEMES = ("http", "https")
@@ -123,7 +125,10 @@ class WorkspaceNetworkStream(httpcore.AsyncNetworkStream):
         """Write raw bytes to the workspace stream."""
         if self._closed:
             raise OSError("stream is closed")
-        await self._stream.send(bytes(buffer))
+        # The generic runner accepts <=64 KiB per input event. httpcore
+        # can write larger POST bodies (notably MCP tool arguments).
+        for offset in range(0, len(buffer), STREAM_CHUNK_SIZE):
+            await self._stream.send(bytes(buffer[offset : offset + STREAM_CHUNK_SIZE]))
 
     async def aclose(self) -> None:
         """Close the workspace stream (idempotent)."""

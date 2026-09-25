@@ -56,7 +56,7 @@ class FakeAccessor:
         self.opened: list[tuple] = []
 
     async def open_process(self, command, workdir="/workspace", env=None, timeout=None):
-        self.opened.append((list(command), workdir, dict(env or {})))
+        self.opened.append((list(command), workdir, dict(env or {}), timeout))
         return self.stream
 
 
@@ -133,7 +133,9 @@ async def test_stdio_end_to_end_initialize_list_call():
                 result = await session.call_tool("echo", {"text": "hi"})
                 assert result.content[0].text == "echo:hi"
         task_group.cancel_scope.cancel()
-    assert accessor.opened == [(["fake-mcp", "--flag"], "/workspace", {"A": "b"})]
+    assert accessor.opened == [
+        (["fake-mcp", "--flag"], "/workspace", {"A": "b"}, None)
+    ]
     assert stream.eof_sent is True
     assert stream.closed is True
 
@@ -262,6 +264,33 @@ async def test_stdio_cancellation_closes_stream():
         task_group.cancel_scope.cancel()
     assert stream.eof_sent is True
     assert stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_stdio_writer_splits_large_json_rpc_frames():
+    from apps.harness.access.runner_accessor import STREAM_CHUNK_SIZE
+
+    class BoundedStream(FakeByteStream):
+        async def send(self, data: bytes) -> None:
+            assert 0 < len(data) <= STREAM_CHUNK_SIZE
+            await super().send(data)
+
+    stream = BoundedStream()
+    accessor = FakeAccessor(stream)
+    large_text = "x" * (STREAM_CHUNK_SIZE * 2)
+    async with workspace_stdio_client(accessor, ["cap"]) as (_read, write):
+        request = types.JSONRPCRequest(
+            jsonrpc="2.0", id=1, method="ping", params={"text": large_text}
+        )
+        await write.send(SessionMessage(request))
+        chunks = []
+        while True:
+            chunk = await asyncio.wait_for(stream.to_server.get(), 2)
+            chunks.append(chunk)
+            if chunk.endswith(b"\n"):
+                break
+        assert len(chunks) >= 3
+        assert json.loads(b"".join(chunks))["params"]["text"] == large_text
 
 
 @pytest.mark.asyncio

@@ -914,7 +914,8 @@ def test_normalize_second_jpeg_is_descriptor():
     )
     out = normalize_call_result(result)
     assert out.image_jpeg is not None
-    assert "additional image" in out.output
+    assert len(out.attachments) == 2
+    assert out.output == "[MCP tool returned no text output]"
 
 
 def test_normalize_oversize_base64_bounded_pre_decode():
@@ -1186,6 +1187,29 @@ class _NestedScopeSession:
 
     async def list_tools(self, cursor=None):
         return types.ListToolsResult(tools=list(self._tools), nextCursor=None)
+
+
+@pytest.mark.asyncio
+async def test_stdio_open_uses_configured_startup_budget():
+    """Cold npx startup gets the server budget, not the 15s stream default."""
+    conn = _connection(transport="stdio")
+    conn.startup_timeout_seconds = 120.0
+    session = _NestedScopeSession(tools=[])
+    real_session_cls = conn_module.ClientSession
+    conn_module.ClientSession = lambda *a, **k: session  # type: ignore[assignment]
+
+    class RecordingAccessor(_ProcAccessor):
+        async def open_process(self, command, workdir="/workspace", env=None, timeout=None):
+            self.timeout = timeout
+            return await super().open_process(command, workdir, env, timeout)
+
+    accessor = RecordingAccessor(_ProcStream([b""]))
+    try:
+        await conn.open(accessor)
+        assert accessor.timeout == 120.0
+    finally:
+        conn_module.ClientSession = real_session_cls
+        await conn.aclose()
 
 
 @pytest.mark.asyncio
