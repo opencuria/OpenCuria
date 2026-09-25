@@ -14,9 +14,14 @@ import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
 import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useTerminalStore } from '@/stores/terminal'
+
+// Media URLs are keyed by path in the store. Keep them across Home → chat
+// transitions for the same workspace, but never reuse them in another one.
+let mediaWorkspaceId: string | null = null
 
 const props = defineProps<{
   workspaceId: string
@@ -26,6 +31,11 @@ const props = defineProps<{
 const sidePanelStore = useSidePanelStore()
 const desktopStore = useDesktopStore()
 const fileExplorerStore = useFileExplorerStore()
+const workspaceImageStore = useWorkspaceImageStore()
+if (props.workspaceId && mediaWorkspaceId !== props.workspaceId) {
+  workspaceImageStore.reset()
+  mediaWorkspaceId = props.workspaceId
+}
 const gitStore = useGitStore()
 const terminalStore = useTerminalStore()
 
@@ -65,6 +75,10 @@ watch(
   (newId, oldId) => {
     if (!oldId || newId === oldId) return
     resetToolStores()
+    if (newId && newId !== mediaWorkspaceId) {
+      workspaceImageStore.reset()
+      mediaWorkspaceId = newId
+    }
   },
 )
 

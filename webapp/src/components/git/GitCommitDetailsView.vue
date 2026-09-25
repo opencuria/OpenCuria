@@ -17,14 +17,11 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  FileCode2,
-  FileText,
-  Folder,
-  FolderOpen,
   FolderTree,
   List,
   X,
 } from '@lucide/vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const props = defineProps<{
   hash: string
@@ -211,17 +208,6 @@ const listRows = computed<GitCommitFile[]>(() =>
 )
 
 // --- File row helpers ---
-
-const CODE_EXTENSIONS = new Set([
-  'js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'c', 'h', 'cpp',
-  'hpp', 'cs', 'rb', 'php', 'swift', 'kt', 'sh', 'sql', 'html', 'css',
-  'scss', 'json', 'yaml', 'yml', 'toml', 'xml', 'md',
-])
-
-function fileIcon(path: string) {
-  const ext = path.split('.').pop()?.toLowerCase() ?? ''
-  return CODE_EXTENSIONS.has(ext) ? FileCode2 : FileText
-}
 
 function fileName(path: string): string {
   return path.split('/').pop() ?? path
@@ -505,10 +491,12 @@ function onResizeUp(event: PointerEvent): void {
                 :size="12"
                 class="shrink-0 text-muted-foreground"
               />
-              <component
-                :is="row.open ? FolderOpen : Folder"
-                :size="12"
-                class="shrink-0 text-muted-foreground"
+              <WorkspaceFileIcon
+                :path="row.fullPath"
+                :name="row.name"
+                :directory="true"
+                :expanded="row.open"
+                :size="14"
               />
               <span class="min-w-0 truncate text-xs text-foreground">{{ row.name }}</span>
             </div>
@@ -521,11 +509,7 @@ function onResizeUp(event: PointerEvent): void {
               :title="row.file.oldPath !== row.file.newPath ? `${row.file.oldPath} → ${row.file.newPath}` : row.file.newPath"
               @click="selectFile(row.file)"
             >
-              <component
-                :is="fileIcon(row.file.newPath)"
-                :size="13"
-                class="shrink-0 text-muted-foreground"
-              />
+              <WorkspaceFileIcon :path="row.file.newPath" :size="15" />
               <span class="min-w-0 flex-1 truncate text-xs text-foreground">
                 {{ fileName(row.file.newPath) }}
                 <span class="text-muted-foreground">{{ dirName(row.file.newPath) }}</span>
@@ -566,11 +550,7 @@ function onResizeUp(event: PointerEvent): void {
             :title="file.oldPath !== file.newPath ? `${file.oldPath} → ${file.newPath}` : file.newPath"
             @click="selectFile(file)"
           >
-            <component
-              :is="fileIcon(file.newPath)"
-              :size="13"
-              class="shrink-0 text-muted-foreground"
-            />
+            <WorkspaceFileIcon :path="file.newPath" :size="15" />
             <span class="min-w-0 flex-1 truncate text-xs text-foreground">
               {{ fileName(file.newPath) }}
               <span class="text-muted-foreground">{{ dirName(file.newPath) }}</span>

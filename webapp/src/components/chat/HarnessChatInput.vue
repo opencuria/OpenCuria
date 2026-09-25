@@ -7,7 +7,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Textarea } from '@/components/ui/textarea'
+import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
+import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
+import { imageMentionTokens, removeComposerToken } from '@/lib/composerTokens'
 import {
   BookText,
   Check,
@@ -29,6 +31,7 @@ import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { loadRecentModels, recentCatalogModels, useRecentModels } from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 import {
   appendUploadMentions,
   CHAT_UPLOAD_DIR,
@@ -116,7 +119,13 @@ const emit = defineEmits<{
 }>()
 
 const prompt = ref('')
-const textareaRef = ref<{ $el?: unknown } | null>(null)
+const textareaRef = ref<InstanceType<typeof ComposerRichEditor> | null>(null)
+const imageTokens = computed(() => imageMentionTokens(prompt.value))
+function removeImageToken(start: number, end: number): void {
+  const next = removeComposerToken(prompt.value, start, end)
+  prompt.value = next.text
+  void nextTick(() => { textareaRef.value?.focus(); textareaRef.value?.setCursor(next.cursor) })
+}
 const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
@@ -468,10 +477,7 @@ async function runChatUpload(files: File[]): Promise<void> {
 }
 
 function focusTextarea(): void {
-  const el = textareaEl()
-  if (!el) return
-  el.focus()
-  el.setSelectionRange(el.value.length, el.value.length)
+  textareaRef.value?.focus(true)
 }
 
 /** Paperclip: open the native system file dialog for upload only. */
@@ -619,38 +625,11 @@ function onMentionPopupMouseMove(event: MouseEvent, index: number): void {
   mentionIndex.value = index
 }
 
-function textareaEl(): HTMLTextAreaElement | null {
-  const root = textareaRef.value
-  if (!root) return null
-  const el = (root as { $el?: unknown }).$el
-  return el instanceof HTMLTextAreaElement ? el : null
-}
-
-const MAX_COMPOSER_HEIGHT = 200
 let textareaResizeObserver: ResizeObserver | null = null
-
-/**
- * Grow the composer to fit its content, capped at MAX_COMPOSER_HEIGHT.
- * Empty input resets to CSS min-height so it stays one line.
- */
-function resizeTextarea(): void {
-  const el = textareaEl()
-  if (!el) return
-  if (!el.value) {
-    el.style.height = ''
-    el.style.overflowY = ''
-    return
-  }
-  el.style.height = 'auto'
-  const content = el.scrollHeight
-  if (content <= 0) return
-  el.style.height = `${Math.min(content, MAX_COMPOSER_HEIGHT)}px`
-  el.style.overflowY = content > MAX_COMPOSER_HEIGHT ? 'auto' : 'hidden'
-}
-
+function resizeTextarea(): void { textareaRef.value?.resize() }
 function observeTextareaResize(): void {
   if (typeof ResizeObserver === 'undefined') return
-  const el = textareaEl()
+  const el = textareaRef.value?.el
   if (!el) return
   textareaResizeObserver?.disconnect()
   let lastWidth = el.offsetWidth
@@ -708,10 +687,11 @@ function scheduleMentionFileSearch(rawQuery: string): void {
 }
 
 function refreshComposerQuery(): void {
-  const el = textareaEl()
+  const el = textareaRef.value
   if (!el) return
-  const cursor = el.selectionStart ?? el.value.length
-  const mention = detectMentionQuery(el.value, cursor)
+  const cursor = el.cursor()
+  const text = el.value()
+  const mention = detectMentionQuery(text, cursor)
   if (mention !== null) {
     composerKind.value = 'mention'
     mentionQuery.value = mention
@@ -720,7 +700,7 @@ function refreshComposerQuery(): void {
     scheduleMentionFileSearch(mention)
     return
   }
-  const slash = detectSlashQuery(el.value, cursor)
+  const slash = detectSlashQuery(text, cursor)
   if (slash !== null) {
     composerKind.value = 'skill'
     mentionQuery.value = slash
@@ -732,26 +712,27 @@ function refreshComposerQuery(): void {
 }
 
 function chooseMention(candidate: MentionCandidate): void {
-  const el = textareaEl()
+  const el = textareaRef.value
   if (!el) return
-  const cursor = el.selectionStart ?? el.value.length
+  const cursor = el.cursor()
+  const text = el.value()
   if (candidate.kind === 'skill') {
     addSkill(candidate.insert)
-    const next = consumeSlashQuery(el.value, cursor)
+    const next = consumeSlashQuery(text, cursor)
     prompt.value = next.text
     closeComposerQuery()
     void nextTick(() => {
       el.focus()
-      el.setSelectionRange(next.cursor, next.cursor)
+      el.setCursor(next.cursor)
     })
     return
   }
-  const next = applyMentionCandidate(el.value, cursor, candidate)
+  const next = applyMentionCandidate(text, cursor, candidate)
   prompt.value = next.text
   closeComposerQuery()
   void nextTick(() => {
     el.focus()
-    el.setSelectionRange(next.cursor, next.cursor)
+    el.setCursor(next.cursor)
   })
 }
 
@@ -792,6 +773,7 @@ function onPromptKeydown(e: KeyboardEvent): void {
       return
     }
   }
+  if (e.isComposing) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
@@ -851,15 +833,20 @@ function onComposerKeydown(e: KeyboardEvent): void {
         </span>
       </div>
 
+      <HarnessMentionImages
+        v-if="imageTokens.length"
+        :tokens="imageTokens"
+        :workspace-id="workspaceId ?? ''"
+        removable
+        strip-class="px-4 pt-3"
+        @remove="removeImageToken"
+      />
       <div class="relative">
-        <Textarea
+        <ComposerRichEditor
           ref="textareaRef"
           v-model="prompt"
           :disabled="disabled"
-          :rows="1"
           placeholder="Plan, Build, / for skills, @ for context"
-          class="min-h-10 max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-2 text-base !shadow-none !outline-none !ring-0 transition-[height] duration-100 ease-out focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0 md:min-h-9"
-          data-testid="composer-textarea"
           @keydown="handleKeydown"
           @input="onPromptInput"
         />
@@ -886,7 +873,13 @@ function onComposerKeydown(e: KeyboardEvent): void {
             @mousedown.prevent="requestMentionSelect(candidate)"
             @mousemove="onMentionPopupMouseMove($event, idx)"
           >
+            <WorkspaceFileIcon
+              v-if="candidate.kind === 'file'"
+              :path="candidate.insert.startsWith('file:') ? candidate.insert.slice('file:'.length) : candidate.insert"
+              :size="15"
+            />
             <span
+              v-else
               class="rounded px-1 py-0.5 text-[10px] font-medium"
               :class="
                 candidate.kind === 'agent' || candidate.kind === 'skill'
