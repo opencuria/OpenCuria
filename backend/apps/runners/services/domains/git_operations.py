@@ -66,6 +66,10 @@ class GitOperationsMixin:
         "merge_into_current",
         "merge_current_into",
         "merge_abort",
+        "stash_apply",
+        "stash_pop",
+        "stash_drop",
+        "stash_branch",
     )
 
     #: Read-only operations (short timeout budget).
@@ -407,6 +411,10 @@ class GitOperationsMixin:
         "merge_into_current": frozenset({"branch", "message"}),
         "merge_current_into": frozenset({"target", "message"}),
         "merge_abort": frozenset(),
+        "stash_apply": frozenset({"stash"}),
+        "stash_pop": frozenset({"stash"}),
+        "stash_drop": frozenset({"stash"}),
+        "stash_branch": frozenset({"stash", "branch"}),
     }
 
     @staticmethod
@@ -425,6 +433,14 @@ class GitOperationsMixin:
         cleaned = str(value or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{4,64}", cleaned):
             raise ValueError("Invalid commit hash (must be 4-64 hex chars)")
+        return cleaned
+
+    @staticmethod
+    def _validate_git_stash_selector(value: object) -> str:
+        """Validate a stash selector (``stash@{n}``) fail-closed."""
+        cleaned = str(value or "").strip()
+        if not re.fullmatch(r"stash@\{\d{1,9}\}", cleaned):
+            raise ValueError("Invalid stash (must be stash@{n})")
         return cleaned
 
     @staticmethod
@@ -618,6 +634,22 @@ class GitOperationsMixin:
             return out
         if operation == "merge_abort":
             return {}
+        if operation in {"stash_apply", "stash_pop", "stash_drop"}:
+            stash = str(incoming.get("stash", "") or "").strip()
+            if not stash:
+                raise ValueError(f"stash is required for {operation}")
+            return {"stash": cls._validate_git_stash_selector(stash)}
+        if operation == "stash_branch":
+            stash = str(incoming.get("stash", "") or "").strip()
+            if not stash:
+                raise ValueError("stash is required for stash_branch")
+            branch = str(incoming.get("branch", "") or "").strip()
+            if not branch:
+                raise ValueError("branch is required for stash_branch")
+            return {
+                "stash": cls._validate_git_stash_selector(stash),
+                "branch": cls._validate_git_branch_name(branch),
+            }
         if operation == "working_diff":
             return {}
         raise ValueError(f"Unknown git operation: {operation!r}")

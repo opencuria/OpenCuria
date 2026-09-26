@@ -983,6 +983,10 @@ _TOOLS: list[Tool] = [
                         "merge_into_current",
                         "merge_current_into",
                         "merge_abort",
+                        "stash_apply",
+                        "stash_pop",
+                        "stash_drop",
+                        "stash_branch",
                     ],
                     "description": (
                         "Whitelisted mutation-only git operation. Reads use "
@@ -1045,6 +1049,10 @@ _TOOLS: list[Tool] = [
                 "set_upstream": {
                     "type": "boolean",
                     "description": "Set upstream on push (push).",
+                },
+                "stash": {
+                    "type": "string",
+                    "description": "Stash selector, e.g. stash@{0} (stash_apply/stash_pop/stash_drop/stash_branch).",
                 },
             },
             "required": ["workspace_id", "operation"],
@@ -3188,6 +3196,10 @@ _GIT_OPERATIONS: tuple[str, ...] = (
     "merge_into_current",
     "merge_current_into",
     "merge_abort",
+    "stash_apply",
+    "stash_pop",
+    "stash_drop",
+    "stash_branch",
 )
 
 #: Read-only git operations — callable via ``git_operation`` with only
@@ -3206,6 +3218,8 @@ _GIT_MUTATION_OPERATIONS: tuple[str, ...] = tuple(
 )
 
 _GIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
+
+_GIT_STASH_SELECTOR_RE = re.compile(r"^stash@\{\d{1,9}\}$")
 
 #: Allowed arg keys per git operation (excludes envelope keys
 #: ``workspace_id``/``operation``/``repo_path`` handled separately).
@@ -3234,6 +3248,10 @@ _GIT_MCP_ALLOWED_ARGS: dict[str, frozenset] = {
     "merge_into_current": frozenset({"branch", "message"}),
     "merge_current_into": frozenset({"target", "message"}),
     "merge_abort": frozenset(),
+    "stash_apply": frozenset({"stash"}),
+    "stash_pop": frozenset({"stash"}),
+    "stash_drop": frozenset({"stash"}),
+    "stash_branch": frozenset({"stash", "branch"}),
 }
 
 #: Envelope keys accepted by ``git_operation`` (everything else rejected).
@@ -3483,6 +3501,22 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
         return out, None
     if operation == "merge_abort":
         return {}, None
+    if operation in {"stash_apply", "stash_pop", "stash_drop"}:
+        stash = str(args.get("stash", "") or "").strip()
+        if not stash or not _GIT_STASH_SELECTOR_RE.match(stash):
+            return None, _error(f"stash is required for {operation} (stash@{{n}})")
+        out["stash"] = stash
+        return out, None
+    if operation == "stash_branch":
+        stash = str(args.get("stash", "") or "").strip()
+        if not stash or not _GIT_STASH_SELECTOR_RE.match(stash):
+            return None, _error("stash is required for stash_branch (stash@{n})")
+        branch = str(args.get("branch", "") or "").strip()
+        if not branch or len(branch) > 255:
+            return None, _error("branch is required for stash_branch")
+        out["stash"] = stash
+        out["branch"] = branch
+        return out, None
     if operation == "working_diff":
         return {}, None
     return None, _error(f"Unknown git operation: {operation!r}")

@@ -1422,6 +1422,8 @@ def _git_operation_args(payload: GitOperationIn) -> dict:
         args["branch"] = data["branch"]
     if data.get("commit") is not None:
         args["commit"] = data["commit"]
+    if data.get("stash") is not None:
+        args["stash"] = data["stash"]
     if data.get("target") is not None:
         args["target"] = data["target"]
     if data.get("new_branch") is not None:

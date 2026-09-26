@@ -830,11 +830,14 @@ class GitService:
         capped_skip = max(0, int(skip))
         # Paginated history (newest first) + has_more probe.
         # ``--all --date-order`` covers every local branch, remote-tracking
-        # ref, tag and stash entry — like vscode-git-graph — while detached
-        # HEAD commits stay included (HEAD is an implicit starting point).
+        # ref and tag — like vscode-git-graph — while detached HEAD
+        # commits stay included (HEAD is an implicit starting point).
         # ``--exclude`` precedes ``--all`` (option order matters) to hide
-        # only the internal notes fan-out (refs/notes/*); stash (refs/stash)
-        # remains visible on purpose.
+        # the internal notes fan-out (refs/notes/*) AND the stash ref
+        # (refs/stash): like vscode-git-graph, stashes are enumerated
+        # separately (``_git_stash_list``) so that exactly one row per
+        # stash can be rendered — never the raw WIP commit plus its
+        # internal ``index on …`` / ``untracked files on …`` parents.
         us = git_ops._GIT_US
         rs = git_ops._GIT_RS
         log_format = (
@@ -842,7 +845,7 @@ class GitService:
             f"%cN{us}%cE{us}%cI{us}%s{us}%b{rs}"
         )
         argv = [
-            "git", "log", "--exclude=refs/notes/*",
+            "git", "log", "--exclude=refs/notes/*", "--exclude=refs/stash",
         ]
         if branch is not None:
             argv.append(f"refs/heads/{branch}")
@@ -907,6 +910,82 @@ class GitService:
             "history_skip": capped_skip,
             "history_limit": capped_limit,
         }
+
+    async def _git_stash_list(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        repo_root: str,
+        env: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """List stash entries newest first (like vscode-git-graph).
+
+        Uses ``git stash list`` with the US/RS record format so parsing
+        never depends on the human-readable reflog subject.  Each entry
+        carries its selector (``stash@{n}``), the WIP commit hash and the
+        base commit hash (first stash parent); the internal ``index on
+        …`` / ``untracked files on …`` parents never become rows — the
+        frontend splices exactly one node per stash above its base.
+        Empty/missing stash (exit != 0) yields ``[]``, never an error.
+        """
+        timeout = git_ops.GIT_READ_TIMEOUT_S
+        us = git_ops._GIT_US
+        rs = git_ops._GIT_RS
+        stash_format = (
+            f"%gd{us}%H{us}%P{us}%aN{us}%aE{us}%aI{us}"
+            f"%cN{us}%cE{us}%cI{us}%s{rs}"
+        )
+        exit_code, stash_out = await self._git_exec(
+            runtime,
+            instance_id,
+            ["git", "stash", "list", f"--format={stash_format}"],
+            workdir=repo_root,
+            env=env,
+            timeout=timeout,
+        )
+        stashes: list[dict[str, Any]] = []
+        if exit_code != 0 or not stash_out.strip():
+            return stashes
+        for record in stash_out.split(rs):
+            record = record.strip("\n")
+            if not record.strip():
+                continue
+            fields = record.split(us)
+            if len(fields) < 10:
+                continue
+            selector_raw, full, parents = (
+                fields[0].strip(), fields[1].strip(), fields[2],
+            )
+            try:
+                selector = git_ops.validate_stash_selector(selector_raw)
+            except ValueError:
+                continue
+            if not full:
+                continue
+            parent_hashes = [p for p in parents.split() if p]
+            author, author_email, author_date = (
+                fields[3].strip(), fields[4].strip(), fields[5].strip(),
+            )
+            committer, committer_email, committer_date = (
+                fields[6].strip(), fields[7].strip(), fields[8].strip(),
+            )
+            message = fields[9].strip()
+            stashes.append(
+                {
+                    "selector": selector,
+                    "hash": full,
+                    "base_hash": parent_hashes[0] if parent_hashes else None,
+                    "message": message,
+                    "author": author,
+                    "author_email": author_email,
+                    "timestamp": author_date,
+                    "author_date": author_date,
+                    "committer": committer,
+                    "committer_email": committer_email,
+                    "committer_date": committer_date,
+                }
+            )
+        return stashes
 
     async def _git_merge_state(
         self,
@@ -1417,6 +1496,9 @@ class GitService:
                             limit=git_ops.GIT_HISTORY_PAGE_SIZE,
                             skip=0,
                         )
+                        history["stashes"] = await self._git_stash_list(
+                            runtime, instance_id, repo_root, env
+                        )
                         snapshot.update(history)
                         return {"ok": True, "snapshot": snapshot}
                     branch = git_ops.validate_optional_branch(
@@ -1451,6 +1533,13 @@ class GitService:
                         limit=history_limit, skip=history_skip,
                         branch=branch,
                     )
+                    # Stash list is unpaginated and tiny (only loaded on the
+                    # first page; later pages reuse the snapshot copy).
+                    history["stashes"] = (
+                        await self._git_stash_list(runtime, instance_id, repo_root, env)
+                        if history_skip == 0
+                        else []
+                    )
                     return {"ok": True, "repo_path": repo_root, **history}
             lock = await self._git_lock(workspace_id, repo_root)
             async with lock:
@@ -1474,6 +1563,10 @@ class GitService:
                     "merge_into_current": self._git_op_merge_into_current,
                     "merge_current_into": self._git_op_merge_current_into,
                     "merge_abort": self._git_op_merge_abort,
+                    "stash_apply": self._git_op_stash_apply,
+                    "stash_pop": self._git_op_stash_pop,
+                    "stash_drop": self._git_op_stash_drop,
+                    "stash_branch": self._git_op_stash_branch,
                 }[operation]
                 return await handler(
                     runtime, instance_id, repo_root, env, params, timeout,
@@ -1494,6 +1587,9 @@ class GitService:
         history = await self._git_repo_history(
             runtime, instance_id, repo_root, env,
             limit=git_ops.GIT_HISTORY_PAGE_SIZE, skip=0,
+        )
+        history["stashes"] = await self._git_stash_list(
+            runtime, instance_id, repo_root, env
         )
         snapshot.update(history)
         return snapshot
@@ -2304,6 +2400,135 @@ class GitService:
         if exit_code != 0:
             raise git_ops.GitError(
                 "git_failed", "git merge --abort failed",
+                exit_code=exit_code, stderr=output,
+            )
+        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
+        return self._git_mutation_result(snapshot, repo_path=repo_root)
+
+    # -- stash operations ---------------------------------------------------------
+
+    def _git_stash_conflict_result(
+        self, snapshot: dict[str, Any], repo_root: str, output: str, verb: str
+    ) -> dict[str, Any]:
+        """Wrap a stash apply/pop conflict (fresh snapshot, 409-ready)."""
+        result = self._git_mutation_result(snapshot, repo_path=repo_root)
+        result["conflict"] = True
+        result["ok"] = False
+        result["code"] = "conflict"
+        result["message"] = (
+            f"Stash {verb} conflict — resolve or restore the stash entry"
+        )
+        result["stderr"] = git_ops._redact(output)
+        return result
+
+    async def _git_op_stash_apply(
+        self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
+    ) -> dict[str, Any]:
+        """Apply a stash entry without dropping it (conflicts surface)."""
+        selector = git_ops.validate_stash_selector(str(params.get("stash", "")))
+        exit_code, output = await self._git_exec(
+            runtime, instance_id, ["git", "stash", "apply", "--", selector],
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
+        if exit_code != 0:
+            lowered = output.lower()
+            if (
+                "conflict" in lowered
+                or "could not restore" in lowered
+                or "commit your changes or stash them" in lowered
+                or "overwritten by merge" in lowered
+                or "needs merge" in lowered
+            ):
+                return self._git_stash_conflict_result(
+                    snapshot, repo_root, output, "apply"
+                )
+            raise git_ops.GitError(
+                "git_failed", "git stash apply failed",
+                exit_code=exit_code, stderr=output,
+            )
+        return self._git_mutation_result(snapshot, repo_path=repo_root)
+
+    async def _git_op_stash_pop(
+        self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
+    ) -> dict[str, Any]:
+        """Apply a stash entry and drop it (conflicts surface, entry kept)."""
+        selector = git_ops.validate_stash_selector(str(params.get("stash", "")))
+        exit_code, output = await self._git_exec(
+            runtime, instance_id, ["git", "stash", "pop", "--", selector],
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
+        if exit_code != 0:
+            lowered = output.lower()
+            if (
+                "conflict" in lowered
+                or "could not restore" in lowered
+                or "already exists, no checkout" in lowered
+                or "commit your changes or stash them" in lowered
+                or "overwritten by merge" in lowered
+                or "needs merge" in lowered
+            ):
+                return self._git_stash_conflict_result(
+                    snapshot, repo_root, output, "pop"
+                )
+            raise git_ops.GitError(
+                "git_failed", "git stash pop failed",
+                exit_code=exit_code, stderr=output,
+            )
+        return self._git_mutation_result(snapshot, repo_path=repo_root)
+
+    async def _git_op_stash_drop(
+        self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
+    ) -> dict[str, Any]:
+        """Drop a stash entry (no worktree changes)."""
+        selector = git_ops.validate_stash_selector(str(params.get("stash", "")))
+        exit_code, output = await self._git_exec(
+            runtime, instance_id, ["git", "stash", "drop", "--", selector],
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        if exit_code != 0:
+            raise git_ops.GitError(
+                "git_failed", "git stash drop failed",
+                exit_code=exit_code, stderr=output,
+            )
+        snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)
+        return self._git_mutation_result(snapshot, repo_path=repo_root)
+
+    async def _git_op_stash_branch(
+        self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
+    ) -> dict[str, Any]:
+        """Create + checkout a branch from a stash, dropping the entry."""
+        selector = git_ops.validate_stash_selector(str(params.get("stash", "")))
+        branch = git_ops.validate_branch_name(str(params.get("branch", "")))
+        exit_code_c, _ = await self._git_exec(
+            runtime, instance_id, ["git", "check-ref-format", "--branch", branch],
+            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
+        )
+        if exit_code_c != 0:
+            raise ValueError(f"Invalid branch: {branch!r}")
+        if await self._git_verify_branch_exists(
+            runtime, instance_id, repo_root, env, branch
+        ):
+            raise git_ops.GitError(
+                "branch_exists", f"Branch already exists: {branch}",
+                exit_code=None, stderr="",
+            )
+        exit_code, output = await self._git_exec(
+            runtime, instance_id,
+            ["git", "stash", "branch", "--", branch, selector],
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        if exit_code != 0:
+            lowered = output.lower()
+            if "commit your changes or stash them" in lowered:
+                raise git_ops.GitError(
+                    "dirty_worktree",
+                    "Working tree has uncommitted changes",
+                    exit_code=exit_code, stderr=output,
+                )
+            raise git_ops.GitError(
+                "git_failed", "git stash branch failed",
                 exit_code=exit_code, stderr=output,
             )
         snapshot = await self._git_fresh_snapshot(runtime, instance_id, repo_root, env)

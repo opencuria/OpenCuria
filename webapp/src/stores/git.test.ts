@@ -9,6 +9,7 @@ import {
   makeCommitFile,
   makeRawChange,
   makeRawCommit,
+  makeRawStash,
   makeRepoSnapshot,
   makeRepoSummary,
 } from './git.fixtures'
@@ -943,6 +944,54 @@ describe('git store (productive)', () => {
       skip: 1,
       branch: 'feature/git-panel',
     })
+  })
+
+  it('normalizes stashes and merges the first-page stash list when paging', async () => {
+    const store = await initWith([
+      makeRepoSnapshot({
+        hasMore: true,
+        commits: [makeRawCommit('c2', { parents: ['c1'] }), makeRawCommit('c1')],
+        stashes: [makeRawStash('stash@{0}', 'wip1', 'c1')],
+      }),
+    ])
+    expect(store.stashes.map((s) => s.selector)).toEqual(['stash@{0}'])
+    expect(store.stashes[0]?.baseHash).toBe('c1')
+    getHistory.mockResolvedValueOnce({
+      ok: true,
+      repo_path: '/workspace/repo-app',
+      commits: [makeRawCommit('c1')],
+      stashes: [makeRawStash('stash@{0}', 'wip1', 'c1')],
+      has_more: false,
+      history_skip: 2,
+      history_limit: 50,
+    })
+    expect(await store.loadMoreHistory()).toBe(true)
+    expect(store.stashes.map((s) => s.selector)).toEqual(['stash@{0}'])
+  })
+
+  it('sends stash payloads and rejects invalid selectors locally', async () => {
+    const store = await initWith()
+    runOp.mockResolvedValue({ ok: true, snapshot: makeRepoSnapshot() } as never)
+
+    expect(await store.applyStash('stash@{0}')).toBe(true)
+    expect(opPayload()).toMatchObject({ operation: 'stash_apply', stash: 'stash@{0}' })
+    expect(await store.popStash('stash@{1}')).toBe(true)
+    expect(opPayload()).toMatchObject({ operation: 'stash_pop', stash: 'stash@{1}' })
+    expect(await store.dropStash('stash@{2}')).toBe(true)
+    expect(opPayload()).toMatchObject({ operation: 'stash_drop', stash: 'stash@{2}' })
+    expect(await store.createBranchFromStash('stash@{0}', 'feature/from-stash')).toBe(true)
+    expect(opPayload()).toMatchObject({
+      operation: 'stash_branch',
+      stash: 'stash@{0}',
+      branch: 'feature/from-stash',
+    })
+
+    const calls = runOp.mock.calls.length
+    expect(await store.applyStash('HEAD')).toBe(false)
+    expect(await store.popStash('stash@{0}; evil')).toBe(false)
+    expect(await store.dropStash('')).toBe(false)
+    expect(await store.createBranchFromStash('stash@{0}', '  ')).toBe(false)
+    expect(runOp.mock.calls.length).toBe(calls)
   })
 
   it('closes diff/commit selections gracefully on repo switches and lazy-loads details', async () => {

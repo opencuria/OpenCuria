@@ -85,6 +85,28 @@ export function makeRawChange(
   }
 }
 
+export function makeRawStash(
+  selector: string,
+  hash: string,
+  baseHash: string | null,
+  overrides: Partial<RawGitStash> = {},
+): RawGitStash {
+  return {
+    selector,
+    hash,
+    base_hash: baseHash,
+    message: `WIP on main: base ${baseHash}`,
+    author: 'Timo Kamphaus',
+    author_email: 'timo@opencuria.local',
+    timestamp: '2026-09-26T11:00:00Z',
+    author_date: '2026-09-26T11:00:00Z',
+    committer: 'Timo Kamphaus',
+    committer_email: 'timo@opencuria.local',
+    committer_date: '2026-09-26T11:00:00Z',
+    ...overrides,
+  }
+}
+
 export interface RepoFixtureOptions {
   id?: string
   name?: string
@@ -92,6 +114,7 @@ export interface RepoFixtureOptions {
   currentBranch?: string | null
   headHash?: string | null
   commits?: RawGitCommit[]
+  stashes?: RawGitRepoSnapshot['stashes']
   changes?: RawGitChange[]
   hasMore?: boolean
   branches?: RawGitRepoSnapshot['branches']
@@ -143,6 +166,7 @@ export function makeRepoSnapshot(options: RepoFixtureOptions = {}): RawGitRepoSn
     has_more: options.hasMore ?? false,
     history_skip: 0,
     history_limit: 50,
+    stashes: options.stashes ?? [],
     changes:
       options.changes ??
       [

@@ -60,6 +60,33 @@ export interface GitCommit {
   committerDate?: string
   /** Full commit message body beyond the subject line. */
   body?: string
+  /**
+   * Stash metadata when this row is a synthetic stash node (exactly one
+   * row per stash entry, spliced above its base commit — never the raw
+   * WIP/index/untracked commits). Mirrors vscode-git-graph's
+   * `GitCommit.stash` (`GitCommitStash`: selector/baseHash/...).
+   */
+  stash?: GitStashInfo | null
+}
+
+/**
+ * One stash entry (`stash@{n}`), enumerated separately from the commit
+ * log. `hash` is the WIP commit, `baseHash` its first parent (the commit
+ * the stash was created on). Index/untracked sub-commits never surface.
+ */
+export interface GitStashInfo {
+  /** Selector, e.g. `stash@{0}`. */
+  selector: string
+  /** WIP commit hash. */
+  hash: string
+  /** Base commit hash (first stash parent), null when unknown. */
+  baseHash: string | null
+  /** Stash message (the `WIP on …` subject). */
+  message: string
+  author: string
+  authorEmail: string
+  /** ISO date string. */
+  timestamp: string
 }
 
 export type GitCommitFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'U'
@@ -143,6 +170,8 @@ export interface GitRepo {
   mergeState: GitMergeState
   /** Commits sorted newest first. */
   commits: GitCommit[]
+  /** Stash entries newest first (separate from commits, unpaginated). */
+  stashes: GitStashInfo[]
   hasMore: boolean
   historySkip: number
   historyLimit: number

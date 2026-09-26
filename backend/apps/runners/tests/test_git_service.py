@@ -335,6 +335,17 @@ class TestStrictGitArgs:
             ("delete_branch", {}),
             ("merge_into_current", {}),
             ("merge_current_into", {}),
+            ("stash_apply", {}),
+            ("stash_apply", {"stash": "HEAD"}),
+            ("stash_apply", {"stash": "stash@{0}; rm -rf /"}),
+            ("stash_pop", {}),
+            ("stash_pop", {"stash": "stash@{9999999999}"}),
+            ("stash_drop", {"stash": ""}),
+            ("stash_drop", {"stash": "stash@{0} --force"}),
+            ("stash_branch", {}),
+            ("stash_branch", {"stash": "stash@{0}"}),
+            ("stash_branch", {"stash": "stash@{0}", "branch": ""}),
+            ("stash_branch", {"branch": "feature/x"}),
         ],
     )
     async def test_missing_and_invalid_fields_rejected(

@@ -71,6 +71,10 @@ GIT_OPERATIONS = (
     "merge_into_current",
     "merge_current_into",
     "merge_abort",
+    "stash_apply",
+    "stash_pop",
+    "stash_drop",
+    "stash_branch",
 )
 
 #: Allowed operation-specific arg keys per git operation (defense-in-depth:
@@ -102,6 +106,10 @@ GIT_ALLOWED_ARGS: dict[str, frozenset] = {
     "merge_into_current": frozenset({"branch", "message"}),
     "merge_current_into": frozenset({"target", "message"}),
     "merge_abort": frozenset(),
+    "stash_apply": frozenset({"stash"}),
+    "stash_pop": frozenset({"stash"}),
+    "stash_drop": frozenset({"stash"}),
+    "stash_branch": frozenset({"stash", "branch"}),
 }
 
 
@@ -407,6 +415,27 @@ def validate_remote_ref(value: str) -> str:
 def validate_local_branch(value: str, *, field: str = "local_name") -> str:
     """Validate the local branch name for remote checkout."""
     return validate_branch_name(value, field=field)
+
+
+#: Stash selector pattern (``stash@{0}`` … ``stash@{n}``).  Strict enough
+#: that a validated selector can be appended to git argv as a single
+#: element without option injection (``--`` separator used regardless).
+_STASH_SELECTOR_RE = re.compile(r"^stash@\{\d{1,9}\}$")
+
+
+def validate_stash_selector(value: str, *, field: str = "stash") -> str:
+    """Validate a stash selector (``stash@{n}``) fail-closed.
+
+    Only the plain ``stash@{n}`` form is accepted — no ranges, no ``@{...}``
+    suffixes, no paths.  A validated selector is safe as one argv element;
+    callers must still separate it from options with ``--``.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {field}: {value!r}")
+    cleaned = value.strip()
+    if not _STASH_SELECTOR_RE.match(cleaned):
+        raise ValueError(f"Invalid {field}: {value!r}")
+    return cleaned
 
 
 def validate_optional_branch(value: Any, *, field: str = "branch") -> str | None:
@@ -1656,4 +1685,5 @@ __all__ = [
     "validate_local_branch",
     "validate_optional_branch",
     "validate_remote_ref",
+    "validate_stash_selector",
 ]

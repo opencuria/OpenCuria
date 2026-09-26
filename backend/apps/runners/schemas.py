@@ -567,6 +567,10 @@ GitOperation = Literal[
     "merge_into_current",
     "merge_current_into",
     "merge_abort",
+    "stash_apply",
+    "stash_pop",
+    "stash_drop",
+    "stash_branch",
 ]
 
 _HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
@@ -623,6 +627,17 @@ def _validate_commit_hash(value: str) -> str:
     cleaned = str(value or "").strip().lower()
     if not _HASH_RE.match(cleaned):
         raise ValueError("Invalid commit hash (must be 4-64 hex chars)")
+    return cleaned
+
+
+_STASH_SELECTOR_RE = re.compile(r"^stash@\{\d{1,9}\}$")
+
+
+def _validate_stash_selector(value: str, *, field: str = "stash") -> str:
+    """Validate a stash selector (``stash@{n}``; runner re-validates strictly)."""
+    cleaned = str(value or "").strip()
+    if not _STASH_SELECTOR_RE.match(cleaned):
+        raise ValueError(f"Invalid {field} (must be stash@{{n}})")
     return cleaned
 
 
@@ -732,6 +747,7 @@ class GitOperationIn(Schema):
     set_upstream: bool | None = None
     history_limit: int | None = Field(default=None, ge=1, le=500)
     history_skip: int | None = Field(default=None, ge=0)
+    stash: str | None = Field(default=None, max_length=32)
 
     @field_validator("repo_path")
     @classmethod
@@ -774,6 +790,13 @@ class GitOperationIn(Schema):
         if value is None:
             return None
         return _validate_commit_hash(value)
+
+    @field_validator("stash")
+    @classmethod
+    def _check_stash(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_stash_selector(value)
 
     @field_validator("message")
     @classmethod
@@ -827,6 +850,13 @@ class GitOperationIn(Schema):
             raise ValueError("target is required for merge_current_into")
         if op == "pull" and (self.branch or "").strip() and not (self.remote or "").strip():
             raise ValueError("remote is required when branch is set for pull")
+        if op in {"stash_apply", "stash_pop", "stash_drop"} and not (self.stash or "").strip():
+            raise ValueError(f"stash is required for {op}")
+        if op == "stash_branch":
+            if not (self.stash or "").strip():
+                raise ValueError("stash is required for stash_branch")
+            if not (self.branch or "").strip():
+                raise ValueError("branch is required for stash_branch")
         if (
             op in {"merge_into_current", "merge_current_into"}
             and self.message is not None

@@ -2,6 +2,12 @@
 /**
  * Git graph section — async commit expansion now lazy-loads details.
  *
+ * Stash entries render like vscode-git-graph: exactly one synthetic
+ * single-parent row per stash, spliced directly above its base commit
+ * (ring node + `stash@{n}` badge, stash context menu). The internal
+ * `index on …` / `untracked files on …` commits never reach the backend
+ * history, so they cannot appear as rows.
+ *
  * Header offers a branch filter and a create-branch action (disabled for
  * unborn repos without a base commit). Local branch tags open a dropdown
  * with checkout / rename / delete / merge actions; remote refs open a
@@ -23,6 +29,7 @@ import {
   filterReachableCommits,
   vertexPixel,
 } from '@/lib/gitGraph'
+import { insertStashCommits } from '@/lib/gitStash'
 import { useGitStore } from '@/stores/git'
 import { copyToClipboard } from '@/lib/clipboard'
 import { formatRelativeTime } from '@/lib/utils'
@@ -49,6 +56,7 @@ import {
 } from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
+  Archive,
   Check,
   ChevronDown,
   Copy,
@@ -63,6 +71,7 @@ import {
 import GitBranchDialog from './GitBranchDialog.vue'
 import GitCommitDetailsView from './GitCommitDetailsView.vue'
 import GitDeleteBranchDialog from './GitDeleteBranchDialog.vue'
+import GitDropStashDialog from './GitDropStashDialog.vue'
 import GitMergeDialog from './GitMergeDialog.vue'
 
 const store = useGitStore()
@@ -88,17 +97,20 @@ const activeFilter = computed(() => {
 
 const repo = computed(() => store.currentRepo)
 
-/** Commits in display order (honours the branch filter). */
+/** Commits in display order (honours the branch filter, then stash splice). */
 const commits = computed(() => {
   const current = repo.value
   if (!current) return []
+  let base = current.commits
   if (activeFilter.value) {
     const branch = current.branches.find((b) => b.name === activeFilter.value)
     if (branch) {
-      return filterReachableCommits(current.commits, branch.tipHash)
+      base = filterReachableCommits(current.commits, branch.tipHash)
     }
   }
-  return current.commits
+  // One synthetic row per stash directly above its base commit (stashes
+  // whose base is filtered out or not yet loaded are skipped).
+  return insertStashCommits(base, current.stashes ?? [])
 })
 
 const headHash = computed(() => repo.value?.headHash ?? null)
@@ -146,6 +158,21 @@ const hoveredHash = ref<string | null>(null)
 
 function isHead(hash: string): boolean {
   return repo.value?.headHash === hash
+}
+
+/** True when the row at `hash` is a synthetic stash node. */
+function nodeIsStash(hash: string): boolean {
+  return commits.value.some((c) => c.hash === hash && c.stash != null)
+}
+
+/** Selector for a synthetic stash node hash (null for real commits). */
+function stashSelectorForHash(hash: string): string | null {
+  return commits.value.find((c) => c.hash === hash)?.stash?.selector ?? null
+}
+
+/** Short label for a stash badge (drops the `stash` prefix: `@{0}`). */
+function stashBadgeLabel(selector: string): string {
+  return selector.startsWith('stash') ? selector.slice('stash'.length) : selector
 }
 
 function isExpanded(hash: string): boolean {
@@ -241,11 +268,18 @@ const branchDialogOpen = ref(false)
 const branchDialogMode = ref<'create' | 'rename'>('create')
 const branchDialogBranch = ref('')
 const branchDialogFromHash = ref('')
+/**
+ * Non-empty while the create-branch dialog runs in "from stash" mode:
+ * submit calls `createBranchFromStash(selector, name)` instead of the
+ * regular `createBranch`. Cleared on close/submit.
+ */
+const stashBranchSelector = ref('')
 
 function openCreateBranch(fromHash: string): void {
   branchDialogMode.value = 'create'
   branchDialogFromHash.value = fromHash
   branchDialogBranch.value = ''
+  stashBranchSelector.value = ''
   branchDialogOpen.value = true
 }
 
@@ -273,6 +307,35 @@ function openDeleteBranch(name: string): void {
   if (name === store.currentRepo?.currentBranch) return
   deleteBranchName.value = name
   deleteDialogOpen.value = true
+}
+
+// --- Stash actions & dialogs -------------------------------------------------
+
+const dropStashDialogOpen = ref(false)
+const dropStashSelector = ref('')
+
+/** Selector (`stash@{n}`) for a synthetic stash row, else null. */
+function stashSelectorFor(commit: GitCommit): string | null {
+  return commit.stash?.selector ?? null
+}
+
+function openDropStash(selector: string): void {
+  dropStashSelector.value = selector
+  dropStashDialogOpen.value = true
+}
+
+function openCreateBranchFromStash(selector: string): void {
+  // Reuse the create-branch dialog; the submit path detects stash mode
+  // via `stashSelector` and calls createBranchFromStash instead.
+  stashBranchSelector.value = selector
+  branchDialogMode.value = 'create'
+  branchDialogFromHash.value = ''
+  branchDialogBranch.value = ''
+  branchDialogOpen.value = true
+}
+
+function copyStashSelector(selector: string): void {
+  void copyToClipboard(selector, 'stash selector')
 }
 
 function copyHash(hash: string): void {
@@ -662,12 +725,13 @@ function copyRefName(name: string): void {
             :cx="node.cx"
             :cy="node.cy"
             :r="hoveredHash === node.hash ? GIT_GRAPH_NODE_R + 1 : GIT_GRAPH_NODE_R"
-            :fill="node.isCurrent ? 'var(--card)' : branchColor(node.colour)"
-            :stroke="node.isCurrent ? branchColor(node.colour) : 'var(--card)'"
-            :stroke-opacity="node.isCurrent ? undefined : 0.75"
-            :stroke-width="node.isCurrent ? 2 : 1"
+            :fill="nodeIsStash(node.hash) ? 'var(--card)' : node.isCurrent ? 'var(--card)' : branchColor(node.colour)"
+            :stroke="branchColor(node.colour)"
+            :stroke-opacity="node.isCurrent || nodeIsStash(node.hash) ? undefined : 0.75"
+            :stroke-width="node.isCurrent || nodeIsStash(node.hash) ? 2 : 1"
             class="pointer-events-auto cursor-pointer"
             :data-testid="`git-graph-node-${node.hash}`"
+            :data-stash="nodeIsStash(node.hash) ? stashSelectorForHash(node.hash) : undefined"
             @mouseenter="hoveredHash = node.hash"
             @mouseleave="hoveredHash = null"
             @click.stop="void store.toggleCommitDetails(node.hash)"
@@ -727,6 +791,15 @@ function copyRefName(name: string): void {
                     <td />
                     <td class="max-w-0 px-1">
                       <span class="flex min-w-0 items-center gap-1 leading-6">
+                        <span
+                          v-if="commit.stash"
+                          class="inline-flex h-[18px] shrink-0 items-center gap-0.5 overflow-hidden rounded-[5px] border border-dashed px-1 text-[11px] leading-[16px] text-muted-foreground"
+                          :title="commit.stash.selector"
+                          :data-testid="`git-stash-tag-${commit.stash.selector}`"
+                        >
+                          <Archive :size="10" class="shrink-0" />
+                          <span class="truncate">{{ stashBadgeLabel(commit.stash.selector) }}</span>
+                        </span>
                         <template v-for="group in groupsFor(commit.hash)" :key="group.key">
                           <span
                             v-if="group.isHead"
@@ -845,6 +918,45 @@ function copyRefName(name: string): void {
                   </tr>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
+                  <template v-if="stashSelectorFor(commit)">
+                    <ContextMenuItem
+                      :data-testid="`git-stash-apply-${commit.hash}`"
+                      @click="void store.applyStash(stashSelectorFor(commit)!)"
+                    >
+                      <Check :size="13" />
+                      Apply Stash
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      :data-testid="`git-stash-pop-${commit.hash}`"
+                      @click="void store.popStash(stashSelectorFor(commit)!)"
+                    >
+                      <Check :size="13" />
+                      Pop Stash
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      :data-testid="`git-stash-branch-${commit.hash}`"
+                      @click="openCreateBranchFromStash(stashSelectorFor(commit)!)"
+                    >
+                      <GitBranchPlus :size="13" />
+                      Create Branch From Stash
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      :data-testid="`git-stash-copy-${commit.hash}`"
+                      @click="copyStashSelector(stashSelectorFor(commit)!)"
+                    >
+                      <Copy :size="13" />
+                      Copy Stash Name
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      :data-testid="`git-stash-drop-${commit.hash}`"
+                      @click="openDropStash(stashSelectorFor(commit)!)"
+                    >
+                      <Trash2 :size="13" />
+                      Drop Stash
+                    </ContextMenuItem>
+                  </template>
+                  <template v-else>
                   <ContextMenuItem
                     :data-testid="`git-commit-checkout-${commit.hash}`"
                     @click="void store.checkoutCommit(commit.hash)"
@@ -868,6 +980,7 @@ function copyRefName(name: string): void {
                     <Copy :size="13" />
                     Copy Commit Hash
                   </ContextMenuItem>
+                  </template>
                 </ContextMenuContent>
               </ContextMenu>
               <tr
@@ -925,6 +1038,12 @@ function copyRefName(name: string): void {
       :mode="branchDialogMode"
       :branch-name="branchDialogBranch"
       :from-hash="branchDialogFromHash"
+      :stash-selector="stashBranchSelector"
+      @update:open="(v) => { if (!v) stashBranchSelector = '' }"
+    />
+    <GitDropStashDialog
+      v-model:open="dropStashDialogOpen"
+      :selector="dropStashSelector"
     />
     <GitDeleteBranchDialog
       v-model:open="deleteDialogOpen"

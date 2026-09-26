@@ -71,6 +71,20 @@ export interface RawGitCommit {
   parents: string[]
 }
 
+export interface RawGitStash {
+  selector: string
+  hash: string
+  base_hash: string | null
+  message: string
+  author: string
+  author_email: string
+  timestamp: string
+  author_date: string
+  committer: string
+  committer_email: string
+  committer_date: string
+}
+
 export interface RawGitBranch {
   name: string
   tip_hash: string
@@ -105,6 +119,7 @@ export interface RawGitRepoSnapshot {
   behind: number
   merge_state: RawGitMergeState
   commits: RawGitCommit[]
+  stashes: RawGitStash[]
   has_more: boolean
   history_skip: number
   history_limit: number
@@ -134,6 +149,8 @@ export interface RawGitHistoryResponse {
   ok: boolean
   repo_path: string
   commits: RawGitCommit[]
+  /** Present on the first page only; later pages carry `[]`. */
+  stashes?: RawGitStash[]
   has_more: boolean
   history_skip: number
   history_limit: number
@@ -223,6 +240,10 @@ export type GitOperationName =
   | 'merge_into_current'
   | 'merge_current_into'
   | 'merge_abort'
+  | 'stash_apply'
+  | 'stash_pop'
+  | 'stash_drop'
+  | 'stash_branch'
 
 export interface GitOperationRequest {
   operation: GitOperationName
@@ -232,6 +253,8 @@ export interface GitOperationRequest {
   message?: string
   branch?: string
   commit?: string
+  /** Stash selector (`stash@{n}`) for stash_apply/pop/drop/branch. */
+  stash?: string
   target?: string
   new_branch?: string
   old_branch?: string
@@ -321,6 +344,7 @@ export function buildGitOperationBody(payload: GitOperationRequest): Record<stri
     message: payload.message,
     branch: payload.branch,
     commit: payload.commit,
+    stash: payload.stash,
     target: payload.target,
     new_branch: payload.new_branch,
     old_branch: payload.old_branch,

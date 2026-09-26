@@ -2406,12 +2406,18 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(empty["has_more"])
 
     async def test_repo_history_includes_all_branches_remotes_and_stash(self) -> None:
-        """History spans every ref (all branches incl. remotes + stash).
+        """History spans every branch ref; stashes arrive separately.
 
         Regression test: the history previously listed only ``HEAD`` (the
-        current branch).  It must instead cover all refs — like
+        current branch).  It must instead cover all branch refs — like
         vscode-git-graph — while internal ``refs/notes/*`` fan-out stays
         hidden and detached commits remain included via HEAD.
+
+        Stashes are NOT part of ``commits`` (``refs/stash`` is excluded
+        from ``git log``): the WIP tip arrives in ``stashes`` with its
+        selector/base hash, and the internal ``index on …`` /
+        ``untracked files on …`` parents never surface — the frontend
+        splices exactly one row per stash above its base commit.
         """
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(os.path.join(tmp, "repo"))
@@ -2479,8 +2485,31 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["ok"], result)
             by_hash = {c["hash"]: c for c in result["commits"]}
             self.assertIn(feature_tip, by_hash)
-            self.assertIn(stash_tip, by_hash)
+            # Stash internals stay out of the commit list …
+            self.assertNotIn(stash_tip, by_hash)
+            messages = [c["message"] for c in result["commits"]]
+            self.assertFalse(
+                any(
+                    m.startswith("index on ") or m.startswith("untracked files on ")
+                    for m in messages
+                ),
+                messages,
+            )
             self.assertNotIn(notes_tip, by_hash)
+            # … and the entry arrives separately with selector + base.
+            stashes = result.get("stashes", [])
+            self.assertEqual(len(stashes), 1)
+            entry = stashes[0]
+            self.assertEqual(entry["selector"], "stash@{0}")
+            self.assertEqual(entry["hash"], stash_tip)
+            main_tip = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "main"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(entry["base_hash"], main_tip)
+            self.assertIn("stash entry", entry["message"])
             # Remote refs still surface via repo_snapshot (not history).
             snap = await service.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
@@ -2554,6 +2583,215 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(snap["ok"], snap)
             self.assertIsNone(snap["snapshot"]["current_branch"])
             self.assertEqual(snap["snapshot"]["head_hash"], head)
+
+
+class GitStashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stash_list_syncs_with_history_snapshot(self) -> None:
+        """Snapshot + first history page carry the same stash entries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            _git_config_identity(repo)
+            Path(repo, "README.md").write_text("# stashed\n")
+            Path(repo, "new.txt").write_text("untracked\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-u", "-m", "stash entry"],
+                check=True,
+                capture_output=True,
+            )
+            service, _runtime, ws_id = _service_for(tmp)
+            snap = await service.execute_git_operation(
+                ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
+            )
+            self.assertTrue(snap["ok"], snap)
+            stashes = snap["snapshot"]["stashes"]
+            self.assertEqual(len(stashes), 1)
+            entry = stashes[0]
+            self.assertEqual(entry["selector"], "stash@{0}")
+            self.assertIn("stash entry", entry["message"])
+            self.assertTrue(entry["hash"])
+            self.assertTrue(entry["base_hash"])
+            history = await service.execute_git_operation(
+                ws_id, "repo_history", _ws_repo(tmp, "repo"), {}
+            )
+            self.assertTrue(history["ok"], history)
+            self.assertEqual(history["stashes"], stashes)
+            # Untracked-file stash: 3 internal parents, still hidden rows.
+            by_hash = {c["hash"]: c for c in history["commits"]}
+            self.assertNotIn(entry["hash"], by_hash)
+            self.assertFalse(
+                any(
+                    c["message"].startswith("index on ")
+                    or c["message"].startswith("untracked files on ")
+                    for c in history["commits"]
+                )
+            )
+            # Later pages carry no stash copy (snapshot copy is reused).
+            page2 = await service.execute_git_operation(
+                ws_id, "repo_history", _ws_repo(tmp, "repo"),
+                {"history_skip": 1, "history_limit": 10},
+            )
+            self.assertTrue(page2["ok"], page2)
+            self.assertEqual(page2["stashes"], [])
+
+    async def test_stash_empty_repo_yields_no_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            service, _runtime, ws_id = _service_for(tmp)
+            snap = await service.execute_git_operation(
+                ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
+            )
+            self.assertTrue(snap["ok"], snap)
+            self.assertEqual(snap["snapshot"]["stashes"], [])
+
+    async def test_stash_apply_pop_drop_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            _git_config_identity(repo)
+            Path(repo, "README.md").write_text("# stashed\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-m", "roundtrip"],
+                check=True,
+                capture_output=True,
+            )
+            service, _runtime, ws_id = _service_for(tmp)
+            applied = await service.execute_git_operation(
+                ws_id, "stash_apply", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}"},
+            )
+            self.assertTrue(applied["ok"], applied)
+            self.assertEqual(
+                Path(repo, "README.md").read_text(), "# stashed\n"
+            )
+            self.assertEqual(len(applied["snapshot"]["stashes"]), 1)
+            subprocess.run(
+                ["git", "-C", repo, "checkout", "--", "README.md"],
+                check=True,
+                capture_output=True,
+            )
+            popped = await service.execute_git_operation(
+                ws_id, "stash_pop", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}"},
+            )
+            self.assertTrue(popped["ok"], popped)
+            self.assertEqual(popped["snapshot"]["stashes"], [])
+            self.assertEqual(
+                Path(repo, "README.md").read_text(), "# stashed\n"
+            )
+
+    async def test_stash_drop_and_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            _git_config_identity(repo)
+            Path(repo, "README.md").write_text("# stashed\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-m", "entry one"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "README.md").write_text("# second\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-m", "entry two"],
+                check=True,
+                capture_output=True,
+            )
+            service, _runtime, ws_id = _service_for(tmp)
+            dropped = await service.execute_git_operation(
+                ws_id, "stash_drop", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}"},
+            )
+            self.assertTrue(dropped["ok"], dropped)
+            remaining = dropped["snapshot"]["stashes"]
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["selector"], "stash@{0}")
+            self.assertIn("entry one", remaining[0]["message"])
+            branched = await service.execute_git_operation(
+                ws_id, "stash_branch", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}", "branch": "from-stash"},
+            )
+            self.assertTrue(branched["ok"], branched)
+            self.assertEqual(branched["snapshot"]["current_branch"], "from-stash")
+            self.assertEqual(branched["snapshot"]["stashes"], [])
+
+    async def test_stash_invalid_selector_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            service, _runtime, ws_id = _service_for(tmp)
+            for operation in ("stash_apply", "stash_pop", "stash_drop"):
+                result = await service.execute_git_operation(
+                    ws_id, operation, _ws_repo(tmp, "repo"),
+                    {"stash": "stash@{0}; rm -rf /"},
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "invalid_argument")
+            result = await service.execute_git_operation(
+                ws_id, "stash_branch", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}", "branch": ""},
+            )
+            self.assertFalse(result["ok"])
+            # Unknown operation-specific keys stay rejected (allow-list).
+            result = await service.execute_git_operation(
+                ws_id, "stash_drop", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}", "env": {}},
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "invalid_argument")
+
+    async def test_stash_pop_conflict_keeps_entry_and_snapshot(self) -> None:
+        """A conflicting pop reports conflict + snapshot (409-ready)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            _git_config_identity(repo)
+            Path(repo, "README.md").write_text("# stashed\n")
+            subprocess.run(
+                ["git", "-C", repo, "stash", "push", "-m", "conflict entry"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "README.md").write_text("# divergent\n")
+            subprocess.run(
+                ["git", "-C", repo, "add", "README.md"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", repo, "commit", "-m", "divergent"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "README.md").write_text("# local\n")
+            service, _runtime, ws_id = _service_for(tmp)
+            result = await service.execute_git_operation(
+                ws_id, "stash_pop", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}"},
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "conflict")
+            self.assertTrue(result["conflict"])
+            self.assertIn("snapshot", result)
+            # Entry is kept (git does not drop on conflict).
+            selectors = [
+                s["selector"] for s in result["snapshot"]["stashes"]
+            ]
+            self.assertIn("stash@{0}", selectors)
+            # A real merge-driven conflict also maps (stash kept by git).
+            Path(repo, "README.md").write_text("# conflicting\n")
+            subprocess.run(
+                ["git", "-C", repo, "add", "README.md"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", repo, "commit", "-m", "divergent base"],
+                check=True,
+                capture_output=True,
+            )
+            Path(repo, "README.md").write_text("# local change\n")
+            conflict = await service.execute_git_operation(
+                ws_id, "stash_pop", _ws_repo(tmp, "repo"),
+                {"stash": "stash@{0}"},
+            )
+            self.assertFalse(conflict["ok"])
+            self.assertEqual(conflict["code"], "conflict")
 
 
 class GitDiffTests(unittest.IsolatedAsyncioTestCase):

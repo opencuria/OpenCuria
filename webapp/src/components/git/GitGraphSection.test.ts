@@ -9,6 +9,7 @@ import { useGitStore } from '@/stores/git'
 import {
   makeCommitDetails,
   makeRawCommit,
+  makeRawStash,
   makeRepoSnapshot,
   setupGitRepos,
 } from '@/stores/git.fixtures'
@@ -77,12 +78,16 @@ const runOp = vi.mocked(gitApi.runGitOperation)
 
 const dialogStubs = {
   GitBranchDialog: {
-    props: ['open', 'mode', 'branchName', 'fromHash'],
+    props: ['open', 'mode', 'branchName', 'fromHash', 'stashSelector'],
     template: '<div v-if="open" data-testid="stub-branch-dialog" />',
   },
   GitDeleteBranchDialog: {
     props: ['open', 'branch'],
     template: '<div v-if="open" data-testid="stub-delete-dialog" :data-branch="branch" />',
+  },
+  GitDropStashDialog: {
+    props: ['open', 'selector'],
+    template: '<div v-if="open" data-testid="stub-drop-stash-dialog" :data-selector="selector" />',
   },
   GitMergeDialog: {
     props: ['open', 'direction', 'branch'],
@@ -191,6 +196,95 @@ describe('GitGraphSection', () => {
 
     const remoteBadge = wrapper.find('[data-testid="git-ref-tag-origin/main"]')
     expect(remoteBadge.attributes('style')).toContain('color: var(--muted-foreground)')
+  })
+
+  it('renders one synthetic stash row above its base with badge and ring node', async () => {
+    setupGitRepos(getRepos, getRepo, getHistory, [
+      makeRepoSnapshot({
+        commits: [
+          makeRawCommit('f4a9c21', { message: 'Fix terminal resize flicker', parents: ['e8b7d3a'] }),
+          makeRawCommit('e8b7d3a', { message: 'Polish settings sheet spacing', parents: [] }),
+        ],
+        stashes: [makeRawStash('stash@{0}', 'wip1', 'e8b7d3a')],
+      }),
+    ])
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    // Exactly one row per stash (no index/untracked rows), spliced above base.
+    const rows = wrapper.findAll('[data-testid="git-graph-row"]')
+    expect(rows).toHaveLength(3)
+    expect(rows.map((r) => r.attributes('data-hash'))).toEqual(['f4a9c21', 'wip1', 'e8b7d3a'])
+    // Stash badge with archive label.
+    const badge = wrapper.find('[data-testid="git-stash-tag-stash@{0}"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toBe('@{0}')
+    // Ring node: card fill + branch-colour stroke (not a filled dot).
+    const node = wrapper.find('[data-testid="git-graph-node-wip1"]')
+    expect(node.exists()).toBe(true)
+    expect(node.attributes('fill')).toBe('var(--card)')
+    expect(node.attributes('stroke-width')).toBe('2')
+    // Regular commit nodes stay filled…
+    const regular = wrapper.find('[data-testid="git-graph-node-f4a9c21"]')
+    expect(regular.exists()).toBe(true)
+    // … but f4a9c21 is HEAD here (branch tag `main`), and HEAD nodes are
+    // also drawn as rings. The non-HEAD e8b7d3a node is a filled dot.
+    const plain = wrapper.find('[data-testid="git-graph-node-e8b7d3a"]')
+    expect(plain.exists()).toBe(true)
+    expect(plain.attributes('stroke-width')).toBe('1')
+    expect(plain.attributes('fill')).not.toBe('var(--card)')
+  })
+
+  it('skips stashes whose base is filtered out and offers stash actions', async () => {
+    setupGitRepos(getRepos, getRepo, getHistory, [
+      makeRepoSnapshot({
+        commits: [
+          makeRawCommit('f4a9c21', { message: 'Fix terminal resize flicker', parents: ['e8b7d3a'] }),
+          makeRawCommit('e8b7d3a', { message: 'Polish settings sheet spacing', parents: ['9c2f1e7'] }),
+          makeRawCommit('9c2f1e7', { message: "Merge branch 'feature/login-form'", parents: [] }),
+          makeRawCommit('g5h1k83', { message: 'Add git panel layout', parents: ['9c2f1e7'] }),
+        ],
+        stashes: [makeRawStash('stash@{0}', 'wip1', 'e8b7d3a')],
+      }),
+    ])
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-stash-tag-stash@{0}"]').exists()).toBe(true)
+    // Stash context menu (apply/pop/branch/copy/drop) instead of the commit menu.
+    // The apply op returns a fresh snapshot; keep the stash fixture alive.
+    runOp.mockImplementation(async (_ws, payload) => ({
+      ok: true,
+      snapshot: makeRepoSnapshot({
+        commits: [
+          makeRawCommit('f4a9c21', { message: 'Fix terminal resize flicker', parents: ['e8b7d3a'] }),
+          makeRawCommit('e8b7d3a', { message: 'Polish settings sheet spacing', parents: ['9c2f1e7'] }),
+          makeRawCommit('9c2f1e7', { message: "Merge branch 'feature/login-form'", parents: [] }),
+          makeRawCommit('g5h1k83', { message: 'Add git panel layout', parents: ['9c2f1e7'] }),
+        ],
+        stashes: [makeRawStash('stash@{0}', 'wip1', 'e8b7d3a')],
+      }),
+      repo_path: '/workspace/repo-app',
+      operation: payload.operation,
+    }) as never)
+    await wrapper.find('[data-testid="git-stash-apply-wip1"]').trigger('click')
+    await flushPromises()
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'stash_apply',
+      stash: 'stash@{0}',
+    })
+    await wrapper.find('[data-testid="git-stash-pop-wip1"]').trigger('click')
+    await flushPromises()
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'stash_pop',
+      stash: 'stash@{0}',
+    })
+    // Branch filter to the feature tip hides the stash base → stash skipped.
+    await wrapper.find('[data-testid="git-graph-filter-branch-feature/git-panel"]').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-testid="git-stash-tag-stash@{0}"]').exists()).toBe(false)
   })
 
   it('checks out a commit via its context menu with a typed payload', async () => {

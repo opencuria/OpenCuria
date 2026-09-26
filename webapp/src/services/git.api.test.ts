@@ -42,6 +42,7 @@ function makeSnapshot(overrides: Partial<RawGitRepoSnapshot> = {}): RawGitRepoSn
     behind: 0,
     merge_state: { merging: false, rebasing: false, cherry_picking: false },
     commits: [],
+    stashes: [],
     has_more: false,
     history_skip: 0,
     history_limit: 50,

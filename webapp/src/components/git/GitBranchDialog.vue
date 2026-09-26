@@ -3,9 +3,12 @@
  * GitBranchDialog — create or rename a branch in the Git tab graph.
  *
  * Create mode shows the base commit and a "check out" checkbox; rename
- * mode prefills the current name. Operations run against the productive
- * git store (async); the dialog only closes after success and a local
- * `submitting` flag prevents double submits.
+ * mode prefills the current name. When `stashSelector` is set, create
+ * mode runs "create branch from stash" instead (`stash branch <name>
+ * <selector>` on the backend, which also checks the new branch out).
+ * Operations run against the productive git store (async); the dialog
+ * only closes after success and a local `submitting` flag prevents
+ * double submits.
  */
 import { computed, ref, watch } from 'vue'
 import { useGitStore } from '@/stores/git'
@@ -30,6 +33,8 @@ const props = defineProps<{
   branchName?: string
   /** Base commit hash (create mode). */
   fromHash?: string
+  /** Stash selector (create-from-stash mode); empty for regular create. */
+  stashSelector?: string
 }>()
 
 const emit = defineEmits<{
@@ -52,9 +57,10 @@ watch(
   },
 )
 
-const title = computed(() =>
-  props.mode === 'create' ? 'Create branch' : 'Rename branch',
-)
+const title = computed(() => {
+  if (props.mode === 'rename') return 'Rename branch'
+  return props.stashSelector ? 'Create branch from stash' : 'Create branch'
+})
 const isBusy = computed(() => store.busyOperation !== null)
 const isValid = computed(() => name.value.trim().length > 0)
 const canSubmit = computed(
@@ -62,6 +68,7 @@ const canSubmit = computed(
 )
 
 const baseLabel = computed(() => {
+  if (props.stashSelector) return props.stashSelector
   if (!props.fromHash) return ''
   const repo = store.currentRepo
   const branch = repo?.branches.find((b) => b.tipHash === props.fromHash)
@@ -79,11 +86,13 @@ async function handleSubmit(): Promise<void> {
   try {
     const ok =
       props.mode === 'create'
-        ? await store.createBranch(
-            name.value,
-            props.fromHash ?? store.currentRepo?.headHash ?? '',
-            checkout.value,
-          )
+        ? props.stashSelector
+          ? await store.createBranchFromStash(props.stashSelector, name.value)
+          : await store.createBranch(
+              name.value,
+              props.fromHash ?? store.currentRepo?.headHash ?? '',
+              checkout.value,
+            )
         : await store.renameBranch(props.branchName ?? '', name.value)
     if (ok) emit('update:open', false)
   } finally {
@@ -100,7 +109,7 @@ async function handleSubmit(): Promise<void> {
         <DialogDescription v-if="mode === 'create'">
           Create a new branch at
           <span class="font-medium text-foreground">{{ baseLabel }}</span
-          >.
+          ><span v-if="stashSelector"> (the stash is applied onto the new branch)</span>.
         </DialogDescription>
         <DialogDescription v-else>
           Rename
@@ -126,7 +135,7 @@ async function handleSubmit(): Promise<void> {
               data-testid="git-branch-name"
             />
           </div>
-          <div v-if="mode === 'create'" class="flex items-center gap-2">
+          <div v-if="mode === 'create' && !stashSelector" class="flex items-center gap-2">
             <Checkbox
               id="git-branch-checkout"
               v-model:checked="checkout"

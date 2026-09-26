@@ -45,6 +45,7 @@ import type {
   GitRepo,
   GitRepoSummary,
   GitStagedKind,
+  GitStashInfo,
   GitUnstagedKind,
 } from '@/types/git'
 import { ApiRequestError } from '@/services/api'
@@ -65,6 +66,7 @@ import {
   type RawGitDiffHunk,
   type RawGitRepoSnapshot,
   type RawGitRepoSummary,
+  type RawGitStash,
 } from '@/services/git.api'
 import { useNotificationStore } from '@/stores/notifications'
 
@@ -267,6 +269,18 @@ export function normalizeCommit(raw: RawGitCommit): GitCommit {
   }
 }
 
+export function normalizeStash(raw: RawGitStash): GitStashInfo {
+  return {
+    selector: raw.selector,
+    hash: raw.hash,
+    baseHash: raw.base_hash ?? null,
+    message: raw.message ?? '',
+    author: raw.author ?? '',
+    authorEmail: raw.author_email ?? '',
+    timestamp: raw.timestamp || raw.author_date || '',
+  }
+}
+
 export function normalizeCommitDetails(raw: RawGitCommitDetails): GitCommitDetails {
   return {
     hash: raw.hash,
@@ -315,6 +329,7 @@ export function normalizeRepoSnapshot(raw: RawGitRepoSnapshot): GitRepo {
     behind: raw.behind ?? 0,
     mergeState,
     commits: (raw.commits ?? []).map(normalizeCommit),
+    stashes: (raw.stashes ?? []).map(normalizeStash),
     hasMore: raw.has_more === true,
     historySkip: raw.history_skip ?? 0,
     historyLimit: raw.history_limit ?? GIT_HISTORY_LIMIT,
@@ -461,6 +476,7 @@ export const useGitStore = defineStore('git', () => {
       behind: 0,
       mergeState: { merging: false, rebasing: false, cherryPicking: false },
       commits: [],
+      stashes: [],
       hasMore: true,
       historySkip: 0,
       historyLimit: GIT_HISTORY_LIMIT,
@@ -1659,6 +1675,89 @@ export const useGitStore = defineStore('git', () => {
     })
   }
 
+  // -- actions: stash ----------------------------------------------------------
+
+  /** Stash entries of the current repo (newest first). */
+  const stashes = computed<GitStashInfo[]>(() => currentRepo.value?.stashes ?? [])
+
+  /** Strict `stash@{n}` selector check (client-side guard only). */
+  function isValidStashSelector(selector: string): boolean {
+    return /^stash@\{\d{1,9}\}$/.test(selector.trim())
+  }
+
+  function applyStash(selector: string): Promise<boolean> {
+    const trimmed = selector.trim()
+    if (!isValidStashSelector(trimmed)) {
+      notifications.error('Invalid stash selector')
+      return Promise.resolve(false)
+    }
+    return runOperation(
+      'apply_stash',
+      () => ({ operation: 'stash_apply', stash: trimmed }),
+      {
+        successTitle: `Applied ${trimmed}`,
+        errorTitle: 'Apply stash failed',
+      },
+    )
+  }
+
+  function popStash(selector: string): Promise<boolean> {
+    const trimmed = selector.trim()
+    if (!isValidStashSelector(trimmed)) {
+      notifications.error('Invalid stash selector')
+      return Promise.resolve(false)
+    }
+    return runOperation(
+      'pop_stash',
+      () => ({ operation: 'stash_pop', stash: trimmed }),
+      {
+        successTitle: `Popped ${trimmed}`,
+        errorTitle: 'Pop stash failed',
+      },
+    )
+  }
+
+  function dropStash(selector: string): Promise<boolean> {
+    const trimmed = selector.trim()
+    if (!isValidStashSelector(trimmed)) {
+      notifications.error('Invalid stash selector')
+      return Promise.resolve(false)
+    }
+    return runOperation(
+      'drop_stash',
+      () => ({ operation: 'stash_drop', stash: trimmed }),
+      {
+        successTitle: `Dropped ${trimmed}`,
+        errorTitle: 'Drop stash failed',
+      },
+    )
+  }
+
+  function createBranchFromStash(selector: string, branch: string): Promise<boolean> {
+    const trimmedSelector = selector.trim()
+    const trimmedBranch = branch.trim()
+    if (!isValidStashSelector(trimmedSelector)) {
+      notifications.error('Invalid stash selector')
+      return Promise.resolve(false)
+    }
+    if (!trimmedBranch) {
+      notifications.error('Branch name is empty')
+      return Promise.resolve(false)
+    }
+    return runOperation(
+      'create_branch_from_stash',
+      () => ({
+        operation: 'stash_branch',
+        stash: trimmedSelector,
+        branch: trimmedBranch,
+      }),
+      {
+        successTitle: `Created branch ${trimmedBranch} from ${trimmedSelector}`,
+        errorTitle: 'Create branch from stash failed',
+      },
+    )
+  }
+
   // -- actions: history paging ------------------------------------------------------
 
   /**
@@ -1693,6 +1792,12 @@ export const useGitStore = defineStore('git', () => {
           merged.push(commit)
         }
       }
+      // Stash list is unpaginated (first page only): merge it in, keyed by
+      // selector (selectors shift on drop, hashes are stable per entry).
+      let stashes = current.stashes
+      if (skip === 0 && res.stashes) {
+        stashes = res.stashes.map(normalizeStash)
+      }
       // Merge ONLY history fields into the live detail row; every other
       // field (changes, branches, mergeState, …) stays untouched.
       repoDetails.value = {
@@ -1700,6 +1805,7 @@ export const useGitStore = defineStore('git', () => {
         [repoPath]: {
           ...current,
           commits: merged,
+          stashes,
           hasMore: res.has_more === true,
           historySkip: res.history_skip ?? skip,
           historyLimit: res.history_limit ?? pageSize,
@@ -1748,6 +1854,7 @@ export const useGitStore = defineStore('git', () => {
     suggestedRemoteAction,
     stagedChanges,
     unstagedChanges,
+    stashes,
     tagsByHash,
     refGroupsByHash,
     refGroupsFor,
@@ -1796,5 +1903,9 @@ export const useGitStore = defineStore('git', () => {
     mergeIntoCurrent,
     mergeCurrentInto,
     mergeAbort,
+    applyStash,
+    popStash,
+    dropStash,
+    createBranchFromStash,
   }
 })
