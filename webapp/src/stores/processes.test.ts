@@ -20,6 +20,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
   return {
     ...actual,
     listProcesses: vi.fn(),
+    listLiveProcesses: vi.fn(),
     stopProcess: vi.fn(),
     startProcess: vi.fn(),
     restartProcess: vi.fn(),
@@ -50,6 +51,7 @@ describe('processes store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    vi.mocked(workspacesApi.listLiveProcesses).mockResolvedValue([])
   })
 
   it('fetches processes into per-workspace state', async () => {
@@ -64,6 +66,52 @@ describe('processes store', () => {
     expect(store.isLoading('workspace-1')).toBe(false)
     expect(store.errorFor('workspace-1')).toBeNull()
     expect(store.runningCountFor('workspace-1')).toBe(2)
+  })
+
+  it('coalesces process list requests and ignores stale results after clearing workspace', async () => {
+    const store = useProcessesStore()
+    let resolve!: (rows: WorkspaceProcess[]) => void
+    vi.mocked(workspacesApi.listProcesses).mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const first = store.fetchProcesses('workspace-1')
+    const second = store.fetchProcesses('workspace-1')
+    expect(workspacesApi.listProcesses).toHaveBeenCalledTimes(1)
+    store.clearWorkspace('workspace-1')
+    resolve([makeProcess()])
+    await Promise.all([first, second])
+    expect(store.processesFor('workspace-1')).toEqual([])
+  })
+
+  it('uses the workspaces API for live process queries', async () => {
+    const store = useProcessesStore()
+    const rows = [makeProcess()]
+    vi.mocked(workspacesApi.listLiveProcesses).mockResolvedValue(rows)
+
+    await store.fetchProcesses('workspace-1', { live: true })
+
+    expect(workspacesApi.listLiveProcesses).toHaveBeenCalledWith('workspace-1')
+    expect(workspacesApi.listProcesses).not.toHaveBeenCalled()
+    expect(store.processesFor('workspace-1')).toEqual(rows)
+  })
+
+  it('preserves socket status events that arrive while a live fetch is pending', async () => {
+    const store = useProcessesStore()
+    const original = makeProcess()
+    store.processesByWorkspace['workspace-1'] = [original]
+    let resolve!: (rows: WorkspaceProcess[]) => void
+    vi.mocked(workspacesApi.listLiveProcesses).mockImplementationOnce(
+      () => new Promise((done) => { resolve = done }),
+    )
+    const fetch = store.fetchProcesses('workspace-1', { live: true })
+    store.handleStatusChanged({
+      workspace_id: 'workspace-1',
+      process_id: original.id,
+      status: ProcessStatus.EXITED,
+      exit_code: 0,
+      pid: original.pid,
+    })
+    resolve([original])
+    await fetch
+    expect(store.processesFor('workspace-1')[0]?.status).toBe(ProcessStatus.EXITED)
   })
 
   it('records fetch errors without throwing', async () => {
@@ -138,7 +186,7 @@ describe('processes store', () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess()]
     const fresh = [makeProcess(), makeProcess({ id: 'process-9' })]
-    vi.mocked(workspacesApi.listProcesses).mockResolvedValue(fresh)
+    vi.mocked(workspacesApi.listLiveProcesses).mockResolvedValue(fresh)
 
     await store.handleStatusChanged({
       workspace_id: 'workspace-1',
@@ -148,7 +196,7 @@ describe('processes store', () => {
       pid: 9999,
     })
 
-    expect(workspacesApi.listProcesses).toHaveBeenCalledWith('workspace-1')
+    expect(workspacesApi.listLiveProcesses).toHaveBeenCalledWith('workspace-1')
     expect(store.processesFor('workspace-1')).toEqual(fresh)
   })
 

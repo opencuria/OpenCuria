@@ -13,9 +13,10 @@ import {
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
-  subscribeToWorkspace: vi.fn(),
+  subscribeToWorkspace: vi.fn(() => () => {}),
   unsubscribeFromWorkspace: vi.fn(),
   onEvent: vi.fn(() => () => {}),
+  onReconnect: vi.fn(() => () => {}),
 }))
 
 vi.mock('@/services/harness.api', async () => {

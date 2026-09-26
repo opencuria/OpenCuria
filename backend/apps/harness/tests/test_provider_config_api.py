@@ -1,11 +1,10 @@
-"""Tests for ProviderConfig REST endpoints (org-scoped + workspace aliases).
+"""Tests for ProviderConfig REST endpoints (org-scoped).
 
 Covers: GET/PUT/DELETE happy paths, empty api_key on create (no connection),
-update without api_key keeps existing key, owner scoping on workspace
-alias (foreign workspace -> 404), unknown org / no membership -> 404,
-missing org header -> 401, key permissions (harness:read for GET,
-harness:run for PUT/DELETE), api_key_hint when key saved, multi-provider
-connection endpoints, ChatGPT OAuth flow, and never leaking plaintext keys.
+update without api_key keeps existing key, canonical endpoint auth and failure
+responses, removed workspace aliases (404), api_key_hint when key saved,
+multi-provider connection endpoints, ChatGPT OAuth flow, and never leaking
+plaintext keys.
 """
 
 from __future__ import annotations
@@ -102,6 +101,13 @@ BOTH = READ + RUN
 ORG_URL = "/api/v1/provider-config/"
 PROVIDERS_URL = "/api/v1/provider-config/providers/"
 WS_URL = "/api/v1/workspaces/{ws}/provider-config/"
+
+
+def _json_body_for(method: str) -> dict[str, str]:
+    """Return JSON request kwargs for mutating endpoint test cases."""
+    if method == "put":
+        return {"data": json.dumps({}), "content_type": "application/json"}
+    return {}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -214,7 +220,7 @@ def test_org_provider_config_empty_api_key_on_create_succeeds(provider_setup):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_get_missing_is_404(provider_setup):
+def test_org_provider_config_get_missing_returns_empty_config(provider_setup):
     """GET without a stored config yields an empty config shape (200)."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
@@ -225,40 +231,42 @@ def test_org_provider_config_get_missing_is_404(provider_setup):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_missing_org_header_is_401(provider_setup):
-    """Missing X-Organization-Id yields 401."""
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_org_provider_config_missing_org_header_is_401(provider_setup, method):
+    """All canonical CRUD methods require X-Organization-Id."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
-    response = Client(
-        HTTP_X_API_KEY=client.defaults["HTTP_X_API_KEY"],
-    ).get(ORG_URL)
+    unaffiliated = Client(HTTP_X_API_KEY=client.defaults["HTTP_X_API_KEY"])
+    response = getattr(unaffiliated, method)(ORG_URL, **_json_body_for(method))
     assert response.status_code == 401
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_no_membership_is_404(provider_setup):
-    """User not in org yields 404 via require_membership."""
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_org_provider_config_no_membership_is_404(provider_setup, method):
+    """Every canonical CRUD method enforces org membership."""
     other_org = Organization.objects.create(
         name=f"Other {uuid.uuid4().hex[:6]}",
         slug=f"other-{uuid.uuid4().hex[:10]}",
     )
     client = _client(user=provider_setup["outsider"], org=other_org, permissions=BOTH)
-    response = client.get(ORG_URL)
+    response = getattr(client, method)(ORG_URL, **_json_body_for(method))
     assert response.status_code == 404
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_unknown_org_is_404(provider_setup):
-    """Unknown org id yields 404 via require_membership."""
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_org_provider_config_unknown_org_is_404(provider_setup, method):
+    """Every canonical CRUD method rejects unknown organization ids."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
-    unknown = str(uuid.uuid4())
-    response = Client(
+    unknown_org = Client(
         HTTP_X_API_KEY=client.defaults["HTTP_X_API_KEY"],
-        HTTP_X_ORGANIZATION_ID=unknown,
-    ).get(ORG_URL)
+        HTTP_X_ORGANIZATION_ID=str(uuid.uuid4()),
+    )
+    response = getattr(unknown_org, method)(ORG_URL, **_json_body_for(method))
     assert response.status_code == 404
 
 
@@ -295,33 +303,37 @@ def test_org_provider_config_unauthenticated_is_401(provider_setup):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_workspace_provider_config_alias_still_works(provider_setup):
-    """Workspace-scoped paths remain as owner-gated aliases."""
+def test_workspace_provider_config_aliases_are_not_found(provider_setup):
+    """Legacy workspace paths are removed, regardless of HTTP method."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
-    ws = provider_setup["owned"].id
+    url = WS_URL.format(ws=provider_setup["owned"].id)
 
-    put = client.put(
-        WS_URL.format(ws=ws),
+    assert client.get(url).status_code == 404
+    assert client.put(
+        url,
         data=json.dumps({"api_key": "sk-alias-key"}),
         content_type="application/json",
-    )
-    assert put.status_code == 200
-
-    get = client.get(WS_URL.format(ws=ws))
-    assert get.status_code == 200
-    assert get.json()["has_api_key"] is True
+    ).status_code == 404
+    assert client.delete(url).status_code == 404
+    assert ProviderConfig.objects.filter(organization=provider_setup["org"]).count() == 0
 
 
 @pytest.mark.django_db(transaction=True)
-def test_workspace_provider_config_foreign_workspace_is_404(provider_setup):
-    """Owner scoping: another user's workspace reads as not found."""
+def test_org_provider_config_canonical_endpoints_work_without_workspace(provider_setup):
+    """The canonical org CRUD remains usable without workspace scoping."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
-    response = client.get(WS_URL.format(ws=provider_setup["foreign"].id))
-    assert response.status_code == 404
+    put = client.put(
+        ORG_URL,
+        data=json.dumps({"default_model": "org-model"}),
+        content_type="application/json",
+    )
+    assert put.status_code == 200, put.content[:500]
+    assert client.get(ORG_URL).json()["default_model"] == "org-model"
+    assert client.delete(ORG_URL).status_code == 204
 
 
 @pytest.mark.django_db(transaction=True)

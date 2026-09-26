@@ -23,6 +23,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
   return {
     ...actual,
     listProcesses: vi.fn(),
+    listLiveProcesses: vi.fn(),
     stopProcess: vi.fn(),
     startProcess: vi.fn(),
     restartProcess: vi.fn(),
@@ -187,11 +188,11 @@ describe('HarnessProcessSheet', () => {
   })
 
   it('refreshes via the store', async () => {
-    vi.mocked(workspacesApi.listProcesses).mockResolvedValue([])
+    vi.mocked(workspacesApi.listLiveProcesses).mockResolvedValue([])
     const wrapper = mountSheet()
     await wrapper.find('[data-testid="composer-process-refresh"]').trigger('click')
     await flushPromises()
-    expect(workspacesApi.listProcesses).toHaveBeenCalledWith('workspace-1')
+    expect(workspacesApi.listLiveProcesses).toHaveBeenCalledWith('workspace-1')
   })
 
   it('stops a running process', async () => {

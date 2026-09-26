@@ -82,22 +82,20 @@ class TestListRunners:
 
 
 @pytest.mark.django_db
-class TestGetRunner:
-    def test_found(self, client, auth_context):
-        """GET /api/v1/runners/{id}/ should return the runner."""
+class TestRunnerDetailRemoved:
+    def test_detail_is_not_a_public_resource(self, client, auth_context):
+        """The runner list replaces the redundant detail GET; PATCH remains available."""
         runner = Runner.objects.create(
             name="test-runner",
             api_token_hash=hash_token("runner-token-2"),
             organization=auth_context["organization"],
         )
-        response = client.get(f"/api/v1/runners/{runner.id}/")
+        # The detail route only supports PATCH now, so a detail GET is
+        # rejected (405) instead of returning a runner payload.
+        assert client.get(f"/api/v1/runners/{runner.id}/").status_code == 405
+        response = client.get("/api/v1/runners/")
         assert response.status_code == 200
-        assert response.json()["id"] == str(runner.id)
-
-    def test_not_found(self, client):
-        """GET /api/v1/runners/{id}/ should return 404 for missing runner."""
-        response = client.get(f"/api/v1/runners/{uuid.uuid4()}/")
-        assert response.status_code == 404
+        assert any(row["id"] == str(runner.id) for row in response.json())
 
 
 @pytest.mark.django_db

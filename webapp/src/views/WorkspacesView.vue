@@ -66,12 +66,10 @@ async function fetchWorkspaceMetrics(): Promise<void> {
   storageBytesByWorkspaceId.value = storageByWorkspace
 }
 
-async function fetchWorkspacesAndWarnings(): Promise<void> {
-  await workspaceStore.fetchWorkspaces()
-  await fetchWorkspaceMetrics()
-}
-
-const { start } = usePolling(fetchWorkspacesAndWarnings, 10000)
+// ChatSidebar owns workspace-list loading/polling across authenticated routes.
+// Keep this view's poll scoped to page-specific runner metrics to avoid a
+// second GET /workspaces request while the shared sidebar is mounted.
+const { start } = usePolling(fetchWorkspaceMetrics, 10000)
 
 const filteredWorkspaces = computed(() => {
   let workspaces = workspaceStore.workspaces

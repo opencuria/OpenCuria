@@ -977,11 +977,13 @@ class ProcessManagerMixin:
         kinds: tuple[str, ...] | None = None,
         running_only: bool = False,
         session_id: uuid.UUID | str | None = None,
+        live: bool = True,
     ) -> list["WorkspaceProcess"]:
-        """Return DB processes, merged with live runner state when online.
+        """Return DB processes, optionally reconciling against live runner state.
 
-        Falls back to plain DB records when the runner is offline or the
-        live lookup times out.
+        ``live`` defaults to True to preserve the existing MCP/service behavior.
+        Callers serving frequent UI polls can disable it; heartbeat updates DB
+        state every 15 seconds. Live lookup falls back to DB on runner errors.
 
         ``session_id`` scopes temp rows to one agent session (the agent
         only sees its own temps); persistent rows are always included.
@@ -993,7 +995,11 @@ class ProcessManagerMixin:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
-        if workspace.status == WorkspaceStatus.RUNNING and workspace.runner.is_online:
+        if (
+            live
+            and workspace.status == WorkspaceStatus.RUNNING
+            and workspace.runner.is_online
+        ):
             try:
                 request_id = uuid.uuid4().hex
                 result = await self._await_process_result(

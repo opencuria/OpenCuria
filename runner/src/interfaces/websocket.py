@@ -321,18 +321,29 @@ class WebSocketInterface(Interface):
 
     # -- heartbeat -------------------------------------------------------------
 
-    async def _heartbeat_loop(self) -> None:
+    async def _heartbeat_loop(
+        self, initial_workspaces: list[dict] | None = None
+    ) -> None:
         """Periodically send workspace container states to the backend."""
         interval = self._settings.heartbeat_interval
+        # Reuse the connection snapshot for the immediate heartbeat: connect()
+        # already refreshed runtime state and checked process/desktop liveness
+        # to reannounce active desktop sessions.
+        pending_workspaces = initial_workspaces
         while True:
             try:
                 if not self._sio.connected:
                     await asyncio.sleep(interval)
                     continue
 
-                # Sync cache from runtime to catch externally killed containers
-                await self._service.sync_from_runtime()
-                workspaces = await self._service.get_workspace_heartbeat_statuses()
+                if pending_workspaces is not None:
+                    workspaces = pending_workspaces
+                    pending_workspaces = None
+                else:
+                    # Refresh each interval to continue detecting external
+                    # container/runtime changes after the initial snapshot.
+                    await self._service.sync_from_runtime()
+                    workspaces = await self._service.get_workspace_heartbeat_statuses()
 
                 await self._sio.emit(
                     "runner:heartbeat",
@@ -484,7 +495,10 @@ class WebSocketInterface(Interface):
             # Re-announce live desktop processes so the backend can
             # reconstruct VNC proxy routing. Do not treat this as a
             # viewer acquire — desktop:started is reserved for that.
-            for workspace in await self._service.get_workspace_heartbeat_statuses():
+            heartbeat_workspaces = (
+                await self._service.get_workspace_heartbeat_statuses()
+            )
+            for workspace in heartbeat_workspaces:
                 desktop = workspace.get("desktop")
                 if not desktop:
                     continue
@@ -499,9 +513,12 @@ class WebSocketInterface(Interface):
                         "computer_use": bool(desktop.get("computer_use")),
                     },
                 )
-            # Start heartbeat
+            # Start heartbeat, reusing the just-collected connect snapshot for
+            # its first payload instead of repeating per-process/desktop execs.
             if self._heartbeat_task is None or self._heartbeat_task.done():
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                self._heartbeat_task = asyncio.create_task(
+                    self._heartbeat_loop(initial_workspaces=heartbeat_workspaces)
+                )
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
                 self._metrics_task = asyncio.create_task(self._metrics_loop())

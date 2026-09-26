@@ -58,8 +58,15 @@ let socket: Socket | null = null
 /** Whether the socket has ever connected (used to distinguish reconnect from initial connect). */
 let hasConnectedOnce = false
 
-/** Workspace IDs currently subscribed — auto-resubscribed on reconnect. */
-const subscribedWorkspaces = new Set<string>()
+/** Workspace subscription owners, keyed by ID. A room is joined once while at least one consumer needs it. */
+const subscribedWorkspaces = new Map<string, number>()
+
+function emitWorkspaceSubscriptions(event: 'frontend:subscribe_workspace' | 'frontend:unsubscribe_workspace', ids: Iterable<string>): void {
+  if (!socket?.connected) return
+  for (const workspaceId of ids) {
+    socket.emit(event, { workspace_id: workspaceId })
+  }
+}
 
 /** Callbacks fired on every socket reconnection (not the initial connect). */
 const reconnectCallbacks = new Set<() => void>()
@@ -156,6 +163,7 @@ type EventMap = {
   'harness.permission_required': HarnessPermissionRequiredEvent
   'harness.question_required': HarnessQuestionRequiredEvent
   'harness.session_status': HarnessSessionStatusEvent
+  'harness.conversations_changed': { workspace_id: string }
   'harness.todo_updated': HarnessTodoUpdatedEvent
   'harness.subtask_started': HarnessSubtaskStartedEvent
   'harness.subtask_finished': HarnessSubtaskFinishedEvent
@@ -224,22 +232,25 @@ export function connect(): void {
     },
   })
 
+  // Attach early listeners that were registered before connect().
+  for (const [event, handlers] of listeners) {
+    for (const handler of handlers) socket.on(event, handler)
+  }
+
   socket.on('connect', () => {
     const isReconnect = hasConnectedOnce
     hasConnectedOnce = true
     isConnected.value = true
     console.debug('[socket] connected to /frontend namespace')
 
+    // Subscribe on the initial connection too: callers may have registered
+    // workspace interest before the transport was ready.
+    console.debug('[socket] connected — subscribing', subscribedWorkspaces.size, 'workspace(s)')
+    emitWorkspaceSubscriptions('frontend:subscribe_workspace', subscribedWorkspaces.keys())
+
     if (isReconnect) {
-      // Re-subscribe all workspaces after reconnect (server-side room memberships are lost on disconnect)
-      console.debug('[socket] reconnected — re-subscribing', subscribedWorkspaces.size, 'workspace(s)')
-      for (const wsId of subscribedWorkspaces) {
-        socket?.emit('frontend:subscribe_workspace', { workspace_id: wsId })
-      }
       // Notify registered reconnect callbacks (e.g. terminal)
-      for (const cb of reconnectCallbacks) {
-        cb()
-      }
+      for (const cb of [...reconnectCallbacks]) cb()
     }
   })
 
@@ -291,17 +302,36 @@ export function disconnect(): void {
  * Tell the server to send events for a specific workspace.
  * The subscription is tracked and automatically restored on reconnect.
  */
-export function subscribeToWorkspace(workspaceId: string): void {
-  subscribedWorkspaces.add(workspaceId)
-  socket?.emit('frontend:subscribe_workspace', { workspace_id: workspaceId })
+export function subscribeToWorkspace(workspaceId: string): () => void {
+  const count = subscribedWorkspaces.get(workspaceId) ?? 0
+  subscribedWorkspaces.set(workspaceId, count + 1)
+  if (count === 0) emitWorkspaceSubscriptions('frontend:subscribe_workspace', [workspaceId])
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const currentCount = subscribedWorkspaces.get(workspaceId) ?? 0
+    if (currentCount <= 1) {
+      subscribedWorkspaces.delete(workspaceId)
+      emitWorkspaceSubscriptions('frontend:unsubscribe_workspace', [workspaceId])
+    } else {
+      subscribedWorkspaces.set(workspaceId, currentCount - 1)
+    }
+  }
 }
 
 /**
  * Stop receiving events for a specific workspace.
  */
 export function unsubscribeFromWorkspace(workspaceId: string): void {
-  subscribedWorkspaces.delete(workspaceId)
-  socket?.emit('frontend:unsubscribe_workspace', { workspace_id: workspaceId })
+  const count = subscribedWorkspaces.get(workspaceId) ?? 0
+  if (count <= 1) {
+    subscribedWorkspaces.delete(workspaceId)
+    emitWorkspaceSubscriptions('frontend:unsubscribe_workspace', [workspaceId])
+  } else {
+    subscribedWorkspaces.set(workspaceId, count - 1)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,21 +346,16 @@ export function onEvent<E extends EventName>(
   event: E,
   callback: (data: EventMap[E]) => void,
 ): () => void {
-  if (!socket) {
-    console.warn('[socket] cannot listen — not connected')
-    return () => {}
-  }
-
   const handler = callback as (...args: unknown[]) => void
-  socket.on(event as string, handler)
-
-  // Track for cleanup
   if (!listeners.has(event)) listeners.set(event, new Set())
   listeners.get(event)!.add(handler)
+  socket?.on(event as string, handler)
 
   return () => {
     socket?.off(event as string, handler)
-    listeners.get(event)?.delete(handler)
+    const handlers = listeners.get(event)
+    handlers?.delete(handler)
+    if (handlers?.size === 0) listeners.delete(event)
   }
 }
 

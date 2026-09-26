@@ -27,6 +27,30 @@ export const useProcessesStore = defineStore('processes', () => {
   const stoppingIds = ref<Set<string>>(new Set())
   const restartingIds = ref<Set<string>>(new Set())
   const deletingIds = ref<Set<string>>(new Set())
+  const fetchFlights = new Map<string, Promise<WorkspaceProcess[]>>()
+  const fetchGenerations = new Map<string, number>()
+  const workspaceFetchGenerations = new Map<string, number>()
+  const activeFetchKeys = new Map<string, string>()
+  const processMutationVersions = new Map<string, number>()
+  const removedProcessVersions = new Map<string, number>()
+  let processMutationClock = 0
+
+  function processMutationKey(workspaceId: string, processId: string): string {
+    return `${workspaceId}:${processId}`
+  }
+
+  function recordProcessMutation(workspaceId: string, processId: string): void {
+    const key = processMutationKey(workspaceId, processId)
+    processMutationVersions.set(key, ++processMutationClock)
+    removedProcessVersions.delete(key)
+  }
+
+  function recordProcessRemoval(workspaceId: string, processId: string): void {
+    const key = processMutationKey(workspaceId, processId)
+    const version = ++processMutationClock
+    processMutationVersions.set(key, version)
+    removedProcessVersions.set(key, version)
+  }
 
   // --- Getters ---
 
@@ -61,17 +85,58 @@ export const useProcessesStore = defineStore('processes', () => {
 
   // --- Actions ---
 
-  async function fetchProcesses(workspaceId: string): Promise<void> {
-    loadingByWorkspace.value[workspaceId] = true
-    errorByWorkspace.value[workspaceId] = null
-    try {
-      processesByWorkspace.value[workspaceId] = await workspacesApi.listProcesses(workspaceId)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to load processes'
-      errorByWorkspace.value[workspaceId] = msg
-    } finally {
-      loadingByWorkspace.value[workspaceId] = false
+  async function fetchProcesses(workspaceId: string, options: { live?: boolean } = {}): Promise<void> {
+    const key = `${workspaceId}:${options.live ? 'live' : 'db'}`
+    let flight = fetchFlights.get(key)
+    if (flight) {
+      await flight
+      return
     }
+    const generation = (fetchGenerations.get(key) ?? 0) + 1
+    fetchGenerations.set(key, generation)
+    const workspaceGeneration = (workspaceFetchGenerations.get(workspaceId) ?? 0) + 1
+    workspaceFetchGenerations.set(workspaceId, workspaceGeneration)
+    const mutationSnapshot = new Map(processMutationVersions)
+    loadingByWorkspace.value[workspaceId] = true
+    activeFetchKeys.set(workspaceId, key)
+    errorByWorkspace.value[workspaceId] = null
+    flight = (options.live
+      ? workspacesApi.listLiveProcesses(workspaceId)
+      : workspacesApi.listProcesses(workspaceId)
+    ).then((rows) => {
+      if (
+        fetchGenerations.get(key) === generation &&
+        workspaceFetchGenerations.get(workspaceId) === workspaceGeneration
+      ) {
+        processesByWorkspace.value[workspaceId] = mergeFetchedProcesses(
+          workspaceId,
+          processesByWorkspace.value[workspaceId] ?? [],
+          rows,
+          mutationSnapshot,
+        )
+      }
+      return rows
+    }).catch((e: unknown) => {
+      if (
+        fetchGenerations.get(key) === generation &&
+        workspaceFetchGenerations.get(workspaceId) === workspaceGeneration
+      ) {
+        errorByWorkspace.value[workspaceId] = e instanceof Error ? e.message : 'Failed to load processes'
+      }
+      return []
+    }).finally(() => {
+      if (fetchFlights.get(key) === flight) fetchFlights.delete(key)
+      if (
+        fetchGenerations.get(key) === generation &&
+        workspaceFetchGenerations.get(workspaceId) === workspaceGeneration &&
+        activeFetchKeys.get(workspaceId) === key
+      ) {
+        loadingByWorkspace.value[workspaceId] = false
+        activeFetchKeys.delete(workspaceId)
+      }
+    })
+    fetchFlights.set(key, flight)
+    await flight
   }
 
   async function stopProcess(
@@ -179,9 +244,43 @@ export const useProcessesStore = defineStore('processes', () => {
     }
   }
 
+  function mergeFetchedProcesses(
+    workspaceId: string,
+    current: WorkspaceProcess[],
+    fetched: WorkspaceProcess[],
+    mutationSnapshot: Map<string, number>,
+  ): WorkspaceProcess[] {
+    const currentById = new Map(current.map((process) => [process.id, process]))
+    const fetchedIds = new Set(fetched.map((process) => process.id))
+    const merged = fetched.map((process) => {
+      const current = currentById.get(process.id)
+      const mutationKey = processMutationKey(workspaceId, process.id)
+      const currentVersion = processMutationVersions.get(mutationKey) ?? 0
+      const mutatedSinceRequest = currentVersion > (mutationSnapshot.get(mutationKey) ?? 0)
+      if (mutatedSinceRequest && removedProcessVersions.get(mutationKey) === currentVersion) {
+        return null
+      }
+      return mutatedSinceRequest && current ? current : process
+    }).filter((process): process is WorkspaceProcess => process !== null)
+    for (const current of currentById.values()) {
+      const mutationKey = processMutationKey(workspaceId, current.id)
+      const mutatedSinceRequest =
+        (processMutationVersions.get(mutationKey) ?? 0) >
+        (mutationSnapshot.get(mutationKey) ?? 0)
+      const currentVersion = processMutationVersions.get(mutationKey) ?? 0
+      const removedSinceRequest =
+        mutatedSinceRequest && removedProcessVersions.get(mutationKey) === currentVersion
+      if (mutatedSinceRequest && !removedSinceRequest && !fetchedIds.has(current.id)) {
+        merged.unshift(current)
+      }
+    }
+    return merged
+  }
+
   function upsertProcess(workspaceId: string, process: WorkspaceProcess): void {
     const list = processesByWorkspace.value[workspaceId] ?? []
     const idx = list.findIndex((p) => p.id === process.id)
+    recordProcessMutation(workspaceId, process.id)
     if (idx >= 0) {
       list[idx] = process
     } else {
@@ -192,6 +291,7 @@ export const useProcessesStore = defineStore('processes', () => {
 
   function removeFromList(workspaceId: string, processId: string): void {
     const list = processesByWorkspace.value[workspaceId]
+    recordProcessRemoval(workspaceId, processId)
     if (!list) return
     processesByWorkspace.value[workspaceId] = list.filter(
       (p) => p.id !== processId && p.name !== processId,
@@ -208,6 +308,7 @@ export const useProcessesStore = defineStore('processes', () => {
     if (!list) return
     const idx = list.findIndex((p) => p.id === event.process_id)
     if (idx >= 0) {
+      recordProcessMutation(event.workspace_id, event.process_id)
       const current = list[idx]!
       const nextStatus = event.status
       const next = {
@@ -232,7 +333,8 @@ export const useProcessesStore = defineStore('processes', () => {
     }
     // Unknown process — refetch so newly started processes appear.
     if (event.status === 'running') {
-      await fetchProcesses(event.workspace_id)
+      recordProcessMutation(event.workspace_id, event.process_id)
+      await fetchProcesses(event.workspace_id, { live: true })
     }
   }
 
@@ -242,18 +344,45 @@ export const useProcessesStore = defineStore('processes', () => {
   }
 
   function clearWorkspace(workspaceId: string): void {
+    workspaceFetchGenerations.set(
+      workspaceId,
+      (workspaceFetchGenerations.get(workspaceId) ?? 0) + 1,
+    )
+    for (const [key, generation] of fetchGenerations) {
+      if (key.startsWith(`${workspaceId}:`)) fetchGenerations.set(key, generation + 1)
+    }
+    for (const key of fetchFlights.keys()) {
+      if (key.startsWith(`${workspaceId}:`)) fetchFlights.delete(key)
+    }
     delete processesByWorkspace.value[workspaceId]
     delete loadingByWorkspace.value[workspaceId]
+    activeFetchKeys.delete(workspaceId)
     delete errorByWorkspace.value[workspaceId]
+    for (const key of processMutationVersions.keys()) {
+      if (key.startsWith(`${workspaceId}:`)) {
+        processMutationVersions.delete(key)
+        removedProcessVersions.delete(key)
+      }
+    }
   }
 
   function reset(): void {
+    for (const [key, generation] of fetchGenerations) fetchGenerations.set(key, generation + 1)
+    for (const [workspaceId, generation] of workspaceFetchGenerations) {
+      workspaceFetchGenerations.set(workspaceId, generation + 1)
+    }
+    fetchFlights.clear()
     processesByWorkspace.value = {}
     loadingByWorkspace.value = {}
+    activeFetchKeys.clear()
     errorByWorkspace.value = {}
     stoppingIds.value = new Set()
     restartingIds.value = new Set()
     deletingIds.value = new Set()
+    processMutationVersions.clear()
+    removedProcessVersions.clear()
+    processMutationClock = 0
+    workspaceFetchGenerations.clear()
   }
 
   return {

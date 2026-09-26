@@ -1784,7 +1784,7 @@ def list_org_provider_models(request: HttpRequest):
 
 @harness_router.put(
     "/provider-config/",
-    response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict},
+    response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Save (upsert) the org-wide provider config",
 )
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
@@ -1797,6 +1797,8 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
         return 200, _save_org_provider_config(org_id, payload)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
 
@@ -2071,64 +2073,5 @@ async def cancel_chatgpt_oauth(request: HttpRequest):
         return 204, None
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={200: ProviderConfigOut, 403: dict, 404: dict},
-    summary="Get the org-wide provider config (api key never returned)",
-)
-def get_provider_config(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return the org provider config (base_url/models only, owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        return 200, _fetch_org_provider_config(org_id)
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.put(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={200: ProviderConfigOut, 400: dict, 403: dict, 404: dict},
-    summary="Save (upsert) the org-wide provider config",
-)
-def save_provider_config(
-    request: HttpRequest, workspace_id: uuid.UUID, payload: ProviderConfigIn
-):
-    """Upsert the org provider config via Fernet encryption (owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        return 200, _save_org_provider_config(org_id, payload)
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, KeyError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.delete(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={204: None, 403: dict, 404: dict},
-    summary="Delete the org-wide provider config",
-)
-def delete_provider_config(request: HttpRequest, workspace_id: uuid.UUID):
-    """Delete the org provider config (owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        _delete_org_provider_config(org_id)
-        return 204, None
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

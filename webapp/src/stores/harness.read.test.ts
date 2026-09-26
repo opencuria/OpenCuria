@@ -80,6 +80,25 @@ describe('harness store read tracking', () => {
     expect(store.sessions[0]?.unread).toBe(false)
   })
 
+  it('coalesces duplicate read requests for the same viewing session', async () => {
+    const store = useHarnessStore()
+    const conversations = useHarnessConversationStore()
+    store.sessions = [makeSession({ status: 'idle', unread: true })]
+    conversations.conversations = [{
+      session_id: 'session-1', workspace_id: 'ws-1', workspace_name: 'Workspace One',
+      title: 'Chat', status: 'idle', mode: 'build', agent_name: 'build', model: 'acme/think',
+      reasoning_effort: 'high', unread: true, updated_at: '2026-03-29T10:00:00.000Z',
+      last_message_at: '2026-03-29T10:00:00.000Z',
+    }]
+    let resolve!: () => void
+    markReadMock.mockImplementationOnce(() => new Promise<void>((r) => { resolve = r }))
+    store.setViewingSession('session-1')
+    store.handleSessionStatus('session-1', 'idle')
+    expect(markReadMock).toHaveBeenCalledTimes(1)
+    resolve()
+    await vi.waitFor(() => expect(markReadMock).toHaveBeenCalledTimes(1))
+  })
+
   it('keeps manual unread when an idle event arrives for the viewing session', () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ status: 'busy', unread: true, manual_unread: true })]
@@ -114,6 +133,24 @@ describe('harness store read tracking', () => {
     vi.mocked(listHarnessSessions).mockResolvedValueOnce([])
     await store.fetchSessions('ws-1')
     expect(store.activeSessionId).toBeNull()
+  })
+
+  it('keeps unread state retryable after a failed persisted read', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle', unread: true })]
+    const conversations = useHarnessConversationStore()
+    conversations.conversations = [{
+      session_id: 'session-1', workspace_id: 'ws-1', workspace_name: 'Workspace One',
+      title: 'Chat', status: 'idle', mode: 'build', agent_name: 'build', model: 'acme/think',
+      reasoning_effort: 'high', unread: true, updated_at: '2026-03-29T10:00:00.000Z',
+      last_message_at: '2026-03-29T10:00:00.000Z',
+    }]
+    markReadMock.mockRejectedValueOnce(new Error('offline'))
+
+    await store.markSessionRead('session-1')
+    await store.markSessionRead('session-1')
+
+    expect(markReadMock).toHaveBeenCalledTimes(2)
   })
 
   it('stamps the running model onto the live assistant message', () => {

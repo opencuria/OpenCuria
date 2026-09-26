@@ -30,63 +30,123 @@ const props = defineProps<{
 const store = useGitStore()
 const sidePanel = useSidePanelStore()
 const fetchBusy = ref(false)
+const gitVisible = computed(
+  () => sidePanel.activeTab === 'git' && sidePanel.isOpen,
+)
 
 /** Throttle for tab-visibility auto-fetches (ms). */
 const AUTO_FETCH_THROTTLE_MS = 10_000
-let lastAutoFetchAt = 0
+let lastAutoFetchAt: number | null = null
+let lastAutoFetchKey: string | null = null
+let activation: { workspaceId: string; generation: number; promise: Promise<void> } | null = null
+let lifecycleGeneration = 0
+let mounted = false
 
 function shouldAutoFetch(): boolean {
-  if (!store.currentRepo) return false
+  const repo = store.currentRepo
+  if (!gitVisible.value || !repo) return false
   if (store.busyOperation !== null || fetchBusy.value) return false
-  return Date.now() - lastAutoFetchAt >= AUTO_FETCH_THROTTLE_MS
+  const key = `${props.workspaceId}:${repo.path}`
+  return lastAutoFetchKey !== key || lastAutoFetchAt === null ||
+    Date.now() - lastAutoFetchAt >= AUTO_FETCH_THROTTLE_MS
 }
 
 function autoFetchSilent(): void {
   if (!shouldAutoFetch()) return
+  const repo = store.currentRepo
+  if (!repo) return
   lastAutoFetchAt = Date.now()
+  lastAutoFetchKey = `${props.workspaceId}:${repo.path}`
   void store.fetchRemote({ silent: true })
 }
 
-onMounted(() => {
-  void store.initialize(props.workspaceId).then(() => {
+/** Initialize or refresh once on activation; timers only run while visible. */
+function activateGitTab(): Promise<void> {
+  if (!mounted || !gitVisible.value) return Promise.resolve()
+  const workspaceId = props.workspaceId
+  const generation = lifecycleGeneration
+  if (activation?.workspaceId === workspaceId && activation.generation === generation) {
+    return activation.promise
+  }
+
+  const promise = (async () => {
+    // Load summaries first, so a hide during that request cannot trigger a
+    // chained details request. Details are requested only after rechecking
+    // the activation token and visibility.
+    if (store.workspaceId !== workspaceId) {
+      await store.initialize(workspaceId, { withDetails: false })
+    } else {
+      await store.refresh({ silent: true, withDetails: false })
+    }
+    if (
+      !mounted || generation !== lifecycleGeneration ||
+      !gitVisible.value || props.workspaceId !== workspaceId
+    ) return
+
+    const repo = store.currentRepo
+    if (repo && !store.repoDetails[repo.path]) {
+      await store.ensureDetails(repo.path, { silent: true })
+    }
+    if (
+      !mounted || generation !== lifecycleGeneration ||
+      !gitVisible.value || props.workspaceId !== workspaceId
+    ) return
     autoFetchSilent()
+    store.startPolling()
+  })()
+  activation = { workspaceId, generation, promise }
+  void promise.finally(() => {
+    if (activation?.promise === promise) activation = null
   })
-  store.startPolling()
+  return promise
+}
+
+watch(
+  () => [props.workspaceId, gitVisible.value] as const,
+  ([workspaceId, visible], [previousWorkspaceId, wasVisible]) => {
+    if (!visible) {
+      lifecycleGeneration += 1
+      activation = null
+      store.stopPolling()
+      return
+    }
+    if (!wasVisible || workspaceId !== previousWorkspaceId) {
+      lifecycleGeneration += 1
+      activation = null
+      if (workspaceId !== previousWorkspaceId) store.stopPolling()
+      void activateGitTab()
+    }
+  },
+)
+
+onMounted(() => {
+  mounted = true
+  if (gitVisible.value) void activateGitTab()
 })
 
-// Auto-fetch when the git tab becomes visible (throttled).
-watch(
-  () => [sidePanel.activeTab, sidePanel.isOpen] as const,
-  ([tab, open], prev) => {
-    if (tab !== 'git' || !open) return
-    if (prev && prev[0] === 'git' && prev[1] === true) return
-    autoFetchSilent()
-  },
-)
-
-watch(
-  () => props.workspaceId,
-  (next, prev) => {
-    if (next === prev) return
-    void store.initialize(next)
-  },
-)
-
 onUnmounted(() => {
+  mounted = false
+  lifecycleGeneration += 1
+  activation = null
   store.stopPolling()
 })
 
 async function handleRetry(): Promise<void> {
+  if (!gitVisible.value) return
   await store.refresh()
 }
 
 async function handleRefreshAll(): Promise<void> {
-  if (fetchBusy.value || store.loading || store.busyOperation !== null) return
+  if (!gitVisible.value || fetchBusy.value || store.loading || store.busyOperation !== null) return
   fetchBusy.value = true
   try {
     // Fetch first (explicit: errors toast), then reload summaries+details.
-    if (store.currentRepo) await store.fetchRemote({ silent: false })
-    await store.refresh()
+    if (store.currentRepo) {
+      lastAutoFetchAt = Date.now()
+      lastAutoFetchKey = `${props.workspaceId}:${store.currentRepo.path}`
+      await store.fetchRemote({ silent: false })
+    }
+    if (gitVisible.value) await store.refresh()
   } finally {
     fetchBusy.value = false
   }

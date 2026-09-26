@@ -47,6 +47,7 @@ import {
   connect as connectSocket,
   disconnect as disconnectSocket,
   onEvent,
+  onReconnect,
   subscribeToWorkspace,
   unsubscribeFromWorkspace,
 } from '@/services/socket'
@@ -175,8 +176,8 @@ function handleOpenSettings(): void {
   window.dispatchEvent(new CustomEvent('opencuria:open-settings'))
 }
 
-const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
-const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 15000)
+const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 30000)
+const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 60000)
 
 const cleanupFns: (() => void)[] = []
 const subscribedWorkspaceIds: string[] = []
@@ -186,6 +187,13 @@ function subscribeVisibleWorkspaces(): void {
     ...workspaceStore.workspaces.map((workspace) => workspace.id),
     ...conversationStore.uniqueWorkspaceIds,
   ])
+  for (const workspaceId of subscribedWorkspaceIds) {
+    if (ids.has(workspaceId)) continue
+    unsubscribeFromWorkspace(workspaceId)
+  }
+  for (let index = subscribedWorkspaceIds.length - 1; index >= 0; index -= 1) {
+    if (!ids.has(subscribedWorkspaceIds[index]!)) subscribedWorkspaceIds.splice(index, 1)
+  }
   for (const workspaceId of ids) {
     if (subscribedWorkspaceIds.includes(workspaceId)) continue
     subscribeToWorkspace(workspaceId)
@@ -195,6 +203,16 @@ function subscribeVisibleWorkspaces(): void {
 
 function setupSocketListeners(): void {
   subscribeVisibleWorkspaces()
+
+  // Mutations and completed runs emit an invalidation once, rather than
+  // requiring a continuous conversations poll while the socket is healthy.
+  cleanupFns.push(onEvent('harness.conversations_changed', () => {
+    conversationStore.scheduleAttentionRefresh()
+  }))
+  cleanupFns.push(onReconnect(() => {
+    void workspaceStore.fetchWorkspaces()
+    void conversationStore.fetchConversations()
+  }))
 
   cleanupFns.push(
     onEvent('harness.session_status', (data) => {
@@ -286,13 +304,12 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
-  startWorkspacePolling()
-  await workspaceStore.fetchWorkspaces()
-  await conversationStore.fetchConversations()
-  startConvPolling()
   setupSocketListeners()
+  // `start()` performs the initial requests; don't issue a second eager fetch.
+  startWorkspacePolling()
+  startConvPolling()
 })
 
 onUnmounted(() => {
@@ -301,10 +318,11 @@ onUnmounted(() => {
 })
 
 watch(
-  () => conversationStore.uniqueWorkspaceIds,
-  () => {
-    subscribeVisibleWorkspaces()
-  },
+  [
+    () => workspaceStore.workspaces.map((workspace) => workspace.id),
+    () => conversationStore.uniqueWorkspaceIds,
+  ],
+  () => subscribeVisibleWorkspaces(),
 )
 </script>
 

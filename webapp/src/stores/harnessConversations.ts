@@ -33,6 +33,12 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
   const error = ref<string | null>(null)
   const searchQuery = ref('')
   let attentionRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  let conversationsGeneration = 0
+  let conversationsContext = localStorage.getItem('kern_active_org_id') ?? ''
+  let activeFetchContext: string | null = null
+  const fetchFlights = new Map<string, Promise<HarnessConversation[]>>()
+  const markReadFlights = new Map<string, Promise<boolean>>()
+  const markUnreadFlights = new Map<string, Promise<void>>()
 
   const filteredConversations = computed(() => {
     const workspaceStore = useWorkspaceStore()
@@ -71,22 +77,50 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
   )
 
   async function fetchConversations(): Promise<void> {
+    const context = localStorage.getItem('kern_active_org_id') ?? ''
+    if (context !== conversationsContext) {
+      conversationsContext = context
+      conversationsGeneration += 1
+      fetchFlights.clear()
+      conversations.value = []
+    }
+    let flight = fetchFlights.get(context)
+    if (!flight) {
+      const generation = ++conversationsGeneration
+      flight = listHarnessConversations().then((raw) => {
+        if (generation === conversationsGeneration && context === (localStorage.getItem('kern_active_org_id') ?? '')) {
+          conversations.value = raw.sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime())
+        }
+        return raw
+      }).finally(() => {
+        if (fetchFlights.get(context) === flight) fetchFlights.delete(context)
+      })
+      fetchFlights.set(context, flight)
+    }
+    const generation = conversationsGeneration
+    activeFetchContext = context
     loading.value = true
     error.value = null
     try {
-      const raw = await listHarnessConversations()
-      conversations.value = raw.sort(
-        (a, b) =>
-          new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
-      )
+      await flight
     } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to load conversations'
+      if (generation === conversationsGeneration && context === (localStorage.getItem('kern_active_org_id') ?? '')) {
+        error.value = e instanceof Error ? e.message : 'Failed to load conversations'
+      }
     } finally {
-      loading.value = false
+      if (generation === conversationsGeneration && activeFetchContext === context) {
+        loading.value = false
+        activeFetchContext = null
+      }
     }
   }
 
-  async function markAsRead(sessionId: string): Promise<void> {
+  async function markAsRead(sessionId: string, force = false): Promise<boolean> {
+    const existing = markReadFlights.get(sessionId)
+    if (existing) {
+      if (!force) return existing
+      return existing.then((persisted) => persisted || markAsRead(sessionId, true))
+    }
     const conv = conversations.value.find((row) => row.session_id === sessionId)
     const previousUnread = conv?.unread ?? false
     const previousManual = conv?.manual_unread ?? false
@@ -94,18 +128,23 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
       conv.unread = false
       conv.manual_unread = false
     }
-
-    try {
-      await markHarnessSessionRead(sessionId)
-    } catch {
-      if (conv) {
+    if (!force && !previousUnread && !previousManual) return true
+    const flight = markHarnessSessionRead(sessionId).then(() => true).catch(() => {
+      if (conv && conversations.value.includes(conv)) {
         conv.unread = previousUnread
         conv.manual_unread = previousManual
       }
-    }
+      return false
+    }).finally(() => {
+      if (markReadFlights.get(sessionId) === flight) markReadFlights.delete(sessionId)
+    })
+    markReadFlights.set(sessionId, flight)
+    return flight
   }
 
   async function markAsUnread(sessionId: string): Promise<void> {
+    const existing = markUnreadFlights.get(sessionId)
+    if (existing) return existing
     const conv = conversations.value.find((row) => row.session_id === sessionId)
     const previousUnread = conv?.unread ?? false
     const previousManual = conv?.manual_unread ?? false
@@ -114,14 +153,16 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
       conv.manual_unread = true
     }
 
-    try {
-      await markHarnessSessionUnread(sessionId)
-    } catch {
-      if (conv) {
+    const flight = markHarnessSessionUnread(sessionId).catch(() => {
+      if (conv && conversations.value.includes(conv)) {
         conv.unread = previousUnread
         conv.manual_unread = previousManual
       }
-    }
+    }).finally(() => {
+      if (markUnreadFlights.get(sessionId) === flight) markUnreadFlights.delete(sessionId)
+    })
+    markUnreadFlights.set(sessionId, flight)
+    return flight
   }
 
   function updateSessionStatus(
@@ -189,6 +230,7 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     updateSessionStatus,
     setAttention,
     clearAttention,
+    scheduleAttentionRefresh,
   }
 })
 

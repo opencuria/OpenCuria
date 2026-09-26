@@ -150,6 +150,34 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
 
 class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_snapshot_is_reused_for_first_heartbeat(self) -> None:
+        """Connect snapshot is not immediately re-probed for the first heartbeat."""
+        import asyncio
+        import contextlib
+
+        service = DummyService()
+        workspaces = [{"workspace_id": str(uuid.uuid4()), "status": "running"}]
+        service.get_workspace_heartbeat_statuses = AsyncMock(return_value=workspaces)
+        interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.connected = True
+        emitted = asyncio.Event()
+
+        async def _emit(event, payload):
+            if event == "runner:heartbeat":
+                emitted.set()
+
+        interface._sio.emit = AsyncMock(side_effect=_emit)
+        heartbeat = asyncio.create_task(
+            interface._heartbeat_loop(initial_workspaces=workspaces)
+        )
+        await asyncio.wait_for(emitted.wait(), timeout=1)
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+
+        service.sync_from_runtime.assert_not_awaited()
+        service.get_workspace_heartbeat_statuses.assert_not_awaited()
+
     async def test_connect_recovers_desktop_sessions_before_reannounce(self) -> None:
         service = DummyService()
         service.get_workspace_heartbeat_statuses = AsyncMock(

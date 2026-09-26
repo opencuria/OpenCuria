@@ -170,9 +170,12 @@ async def test_start_run_persists_messages_parts_and_history(
     emitted = [e["event"] for e in events]
     assert "harness.part_updated" in emitted
     assert "harness.session_status" in emitted
-    # Last status event marks the session idle again.
-    assert events[-1]["event"] == "harness.session_status"
-    assert events[-1]["status"] == "idle"
+    # The run ends idle; the status event is last apart from the trailing
+    # conversation-feed invalidation for root sessions.
+    idle_events = [e for e in events if e["event"] == "harness.session_status"]
+    assert idle_events[-1]["status"] == "idle"
+    assert events[-2]["event"] == "harness.session_status"
+    assert events[-2]["status"] == "idle"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -247,7 +250,9 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     assert reasoning
     assert reasoning[0].state == "completed"
     assert reasoning[0].output == "considering the layout"
-    assert [e["event"] for e in events][-1] == "harness.session_status"
+    idle_events = [e for e in events if e["event"] == "harness.session_status"]
+    assert idle_events
+    assert idle_events[-1]["status"] == "idle"
 
 
 @pytest.mark.django_db(transaction=True)

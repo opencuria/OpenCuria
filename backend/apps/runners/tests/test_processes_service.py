@@ -422,6 +422,74 @@ class TestStopProcess:
             await service.stop_process(workspace.id, process.id)
 
 
+@pytest.mark.django_db(transaction=True)
+class TestListProcesses:
+    @pytest.mark.asyncio
+    async def test_live_false_returns_db_rows_without_runner_rpc(
+        self, service, workspace
+    ):
+        """UI polling can use heartbeat-updated DB state without runner RPC."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        emit = AsyncMock()
+        service._emit_to_runner = emit  # type: ignore[method-assign]
+
+        rows = await service.list_processes(workspace.id, live=False)
+
+        assert [row.id for row in rows] == [process.id]
+        assert rows[0].status == ProcessStatus.RUNNING
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_false_keeps_stale_database_status_explicitly(
+        self, service, workspace
+    ):
+        """DB-only results can be stale between 15-second heartbeats."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        process.refresh_from_db()
+
+        rows = await service.list_processes(workspace.id, live=False)
+
+        assert rows[0].status == ProcessStatus.RUNNING
+        assert rows[0].pid == 4242
+
+    @pytest.mark.asyncio
+    async def test_live_defaults_to_existing_runner_reconciliation(
+        self, service, runner, workspace
+    ):
+        """Agent/MCP consumers retain live reconciliation unless opting out."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        process.refresh_from_db()
+
+        async def _emit(runner_arg, event, payload):
+            assert event == "harness:process_list"
+            _feed_reply(
+                service,
+                "harness:process_list_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {"processes": [{"process_id": str(process.id), "status": "running"}]},
+            )
+
+        service._emit_to_runner = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_emit
+        )
+
+        rows = await service.list_processes(workspace.id)
+
+        assert [row.id for row in rows] == [process.id]
+        service._emit_to_runner.assert_awaited_once()
+
+
 @pytest.mark.django_db
 class TestReconcile:
     def test_runner_reports_exited(self, service, runner, workspace):
@@ -511,8 +579,14 @@ class TestReconcile:
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
 
-        with patch.object(
-            service, "auto_stop_inactive_workspaces", new=AsyncMock(return_value=None)
+        auto_stop = AsyncMock(return_value=None)
+        with (
+            patch.object(service, "auto_stop_inactive_workspaces", new=auto_stop),
+            patch.object(
+                service.workspaces,
+                "list_by_runner",
+                wraps=service.workspaces.list_by_runner,
+            ) as list_by_runner,
         ):
             service.handle_heartbeat(
                 runner=runner,
@@ -526,6 +600,9 @@ class TestReconcile:
                 ],
             )
 
+        list_by_runner.assert_called_once_with(runner.id)
+        auto_stop.assert_awaited_once()
+        assert auto_stop.await_args.kwargs["workspaces"][0].id == workspace.id
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
         assert [row.id for row in service._pending_process_verify[str(workspace.id)]] == [

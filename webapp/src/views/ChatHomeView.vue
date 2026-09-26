@@ -107,7 +107,11 @@ function cleanupHomeSocket(workspaceId: string | null): void {
 function setupHomeFileSearch(workspaceId: string | null): void {
   if (!workspaceId) return
   subscribeToWorkspace(workspaceId)
-  void fileExplorer.fetchDirectory(workspaceId, '/workspace')
+  // The split side-panel (when open) and composer share the root listing.
+  // Avoid overlapping socket requests while retaining an initial root load.
+  if (!fileExplorer.loadingPaths?.has('/workspace')) {
+    void fileExplorer.fetchDirectory(workspaceId, '/workspace')
+  }
 }
 
 /**

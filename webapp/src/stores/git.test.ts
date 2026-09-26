@@ -818,6 +818,60 @@ describe('git store (productive)', () => {
     }
   })
 
+  it('invalidates in-flight polling requests when polling stops', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await initWith()
+      const repoBefore = store.currentRepo
+      let resolveSummaries!: (value: Awaited<ReturnType<typeof gitApi.getGitRepos>>) => void
+      getRepos.mockImplementationOnce(() => new Promise((resolve) => { resolveSummaries = resolve }))
+      store.startPolling(1000, 60_000)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(getRepos).toHaveBeenCalledTimes(2) // initialize + first poll
+
+      store.stopPolling()
+      resolveSummaries({ ok: true, repos: [] })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(store.repos).toHaveLength(1)
+      expect(store.currentRepo?.path).toBe(repoBefore?.path)
+
+      getRepos.mockClear()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(getRepos).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps browser visibility refreshes active only while polling', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = await initWith()
+      vi.clearAllMocks()
+      store.startPolling(60_000, 60_000)
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      expect(getRepos).not.toHaveBeenCalled()
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(getRepos).toHaveBeenCalledTimes(1))
+      expect(getRepo).not.toHaveBeenCalled()
+
+      store.stopPolling()
+      getRepos.mockClear()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+      expect(getRepos).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      vi.useRealTimers()
+    }
+  })
+
   it('polls selected details on the slow timer, skipping while busy', async () => {
     vi.useFakeTimers()
     try {

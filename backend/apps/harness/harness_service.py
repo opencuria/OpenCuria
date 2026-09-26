@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
-from asgiref.sync import ThreadSensitiveContext, sync_to_async
+from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 
 from common.exceptions import ConflictError, NotFoundError
 
@@ -95,6 +95,7 @@ FRONTEND_EVENT_STATUS = "harness.session_status"
 FRONTEND_EVENT_TODO = "harness.todo_updated"
 FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
 FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
+FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
 
 
 class HarnessService:
@@ -216,6 +217,8 @@ class HarnessService:
             skill_ids=normalized_skills,
         )
         log.info("harness_session_created", session_id=str(session.id))
+        if session.parent_id is None:
+            self._emit_conversations_changed_sync(session.workspace_id)
         return session
 
     def get_session(self, session_id: uuid.UUID) -> HarnessSession:
@@ -274,7 +277,10 @@ class HarnessService:
         normalized = (title or "").strip()
         if not normalized:
             raise ValueError("title must not be empty")
-        return self.sessions.set_title(session, normalized)
+        updated = self.sessions.set_title(session, normalized)
+        if updated.parent_id is None:
+            self._emit_conversations_changed_sync(updated.workspace_id)
+        return updated
 
     def update_skill_ids(
         self,
@@ -301,6 +307,8 @@ class HarnessService:
         if self.is_running(session.id):
             await self.abort_run(session.id)
         await sync_to_async(self.sessions.delete)(session)
+        if session.parent_id is None:
+            await self._emit_conversations_changed(session.workspace_id)
 
     async def fork_session(
         self,
@@ -340,6 +348,7 @@ class HarnessService:
             session_id=str(session.id),
             fork_id=str(forked.id),
         )
+        await self._emit_conversations_changed(forked.workspace_id)
         return forked
 
     async def edit_user_message(
@@ -520,12 +529,18 @@ class HarnessService:
     def mark_session_read(self, session_id: uuid.UUID) -> HarnessSession:
         """Persist that the user opened a harness session."""
         session = self.get_session(session_id)
-        return self.sessions.mark_read(session)
+        updated = self.sessions.mark_read(session)
+        if updated.parent_id is None:
+            self._emit_conversations_changed_sync(updated.workspace_id)
+        return updated
 
     def mark_session_unread(self, session_id: uuid.UUID) -> HarnessSession:
         """Persist that the user explicitly marked a session unread."""
         session = self.get_session(session_id)
-        return self.sessions.mark_unread(session)
+        updated = self.sessions.mark_unread(session)
+        if updated.parent_id is None:
+            self._emit_conversations_changed_sync(updated.workspace_id)
+        return updated
 
     def dismiss_notice(
         self, session_id: uuid.UUID, message_id: uuid.UUID
@@ -1644,6 +1659,8 @@ class HarnessService:
                 ),
                 str(session.workspace_id),
             )
+            if session.parent_id is None:
+                await self._emit_conversations_changed(session.workspace_id)
 
     async def _cleanup_session_processes(
         self,
@@ -2520,6 +2537,29 @@ class HarnessService:
             "reasoning_effort": session.reasoning_effort or "",
         }
 
+    async def _emit_conversations_changed(self, workspace_id: uuid.UUID | str) -> None:
+        """Notify workspace subscribers that the conversation feed may have changed."""
+        workspace = str(workspace_id)
+        await self._emit_frontend(
+            FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+            {"workspace_id": workspace},
+            workspace,
+        )
+
+    def _emit_conversations_changed_sync(self, workspace_id: uuid.UUID | str) -> None:
+        """Dispatch a feed change from synchronous service/API entry points.
+
+        ``async_to_sync`` bridges sync Django views and sync-to-async worker
+        threads back to the request loop. If called directly from an async
+        context, schedule on that loop instead of blocking it.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            async_to_sync(self._emit_conversations_changed)(workspace_id)
+        else:
+            loop.create_task(self._emit_conversations_changed(workspace_id))
+
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
@@ -2591,6 +2631,8 @@ class HarnessService:
             if (session.title or "").strip() != auto_title:
                 return
             await sync_to_async(self.sessions.set_title)(session, title)
+            if session.parent_id is None:
+                await self._emit_conversations_changed(session.workspace_id)
         except Exception:  # pragma: no cover - title must never break runs
             log.warning("harness_title_generation_failed", session_id=str(session_id))
 

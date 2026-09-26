@@ -65,7 +65,7 @@ function deleting(processId: string): boolean {
 }
 
 async function handleRefresh(): Promise<void> {
-  await processesStore.fetchProcesses(workspaceId.value)
+  await processesStore.fetchProcesses(workspaceId.value, { live: true })
 }
 
 async function handleStop(process: WorkspaceProcess): Promise<void> {

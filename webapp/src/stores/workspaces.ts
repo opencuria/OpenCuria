@@ -38,6 +38,21 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   const imageArtifacts = ref<ImageArtifact[]>([])
   const pendingWorkspaceOperations = ref<Record<string, PendingWorkspaceOperation>>({})
 
+  // Keep duplicate loads single-flight while isolating organization contexts.
+  const workspaceListFlights = new Map<string, Promise<Workspace[]>>()
+  const workspaceDetailFlights = new Map<string, Promise<WorkspaceDetail>>()
+  let workspaceListGeneration = 0
+  let workspaceListContext = requestContext()
+  let activeListRequestKey: string | null = null
+  let workspaceDetailGeneration = 0
+  let requestedDetailId: string | null = null
+  let requestedDetailContext: string | null = null
+  let activeDetailRequestKey: string | null = null
+
+  function requestContext(): string {
+    return localStorage.getItem('kern_active_org_id') ?? ''
+  }
+
   // --- Getters ---
   const runningWorkspaces = computed(() =>
     workspaces.value.filter((w) => w.status === WorkspaceStatus.RUNNING),
@@ -184,70 +199,105 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   async function fetchWorkspaces(runnerId?: string): Promise<void> {
     const notifications = useNotificationStore()
+    const context = requestContext()
+    const key = `${context}:${runnerId ?? ''}`
+    if (workspaceListContext !== context) {
+      workspaceListContext = context
+      workspaceListFlights.clear()
+      workspaceListGeneration += 1
+      workspaces.value = []
+    }
+    let flight = workspaceListFlights.get(key)
+    if (!flight) {
+      const generation = ++workspaceListGeneration
+      flight = workspacesApi.listWorkspaces(runnerId).then((result) => {
+        const latestContext = requestContext()
+        if (generation === workspaceListGeneration && latestContext === context) {
+          const previousStatuses = new Map(
+            workspaces.value.map((workspace) => [workspace.id, workspace.status]),
+          )
+          const previousWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
+          workspaces.value = result
+          const currentWorkspaceIds = new Set(result.map((workspace) => workspace.id))
+          for (const workspace of result) {
+            reconcilePendingWorkspaceOperation(
+              workspace.id,
+              workspace.status,
+              previousStatuses.get(workspace.id),
+            )
+          }
+          for (const workspaceId of previousWorkspaceIds) {
+            const pending = pendingWorkspaceOperations.value[workspaceId]
+            if (pending?.operation === 'remove' && !currentWorkspaceIds.has(workspaceId)) {
+              notifications.success('Workspace removed', 'The workspace was removed successfully.')
+              clearPendingWorkspaceOperation(workspaceId)
+            }
+          }
+        }
+        return result
+      }).finally(() => {
+        if (workspaceListFlights.get(key) === flight) workspaceListFlights.delete(key)
+      })
+      workspaceListFlights.set(key, flight)
+    }
+    const generation = workspaceListGeneration
+    activeListRequestKey = key
     loading.value = true
     error.value = null
     try {
-      const previousStatuses = new Map(
-        workspaces.value.map((workspace) => [workspace.id, workspace.status]),
-      )
-      const previousWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
-      workspaces.value = await workspacesApi.listWorkspaces(runnerId)
-
-      const currentWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
-
-      for (const workspace of workspaces.value) {
-        reconcilePendingWorkspaceOperation(
-          workspace.id,
-          workspace.status,
-          previousStatuses.get(workspace.id),
-        )
-      }
-
-      for (const workspaceId of previousWorkspaceIds) {
-        const pending = pendingWorkspaceOperations.value[workspaceId]
-        if (!pending) continue
-        if (pending.operation === 'remove' && !currentWorkspaceIds.has(workspaceId)) {
-          notifications.success('Workspace removed', 'The workspace was removed successfully.')
-          clearPendingWorkspaceOperation(workspaceId)
-        }
-      }
+      await flight
     } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to load workspaces'
+      if (context === requestContext() && generation === workspaceListGeneration) {
+        error.value = e instanceof Error ? e.message : 'Failed to load workspaces'
+      }
     } finally {
-      loading.value = false
+      if (context === requestContext() && generation === workspaceListGeneration && activeListRequestKey === key) {
+        loading.value = false
+        activeListRequestKey = null
+      }
     }
   }
 
   async function fetchWorkspaceDetail(id: string): Promise<void> {
+    const context = requestContext()
+    const key = `${context}:${id}`
+    if (requestedDetailId !== id || requestedDetailContext !== context) {
+      requestedDetailId = id
+      requestedDetailContext = context
+      workspaceDetailGeneration += 1
+      workspaceDetailFlights.clear()
+    }
+    let flight = workspaceDetailFlights.get(key)
+    if (!flight) {
+      const generation = workspaceDetailGeneration
+      flight = workspacesApi.getWorkspace(id).then((fresh) => {
+        if (
+          generation === workspaceDetailGeneration &&
+          requestedDetailId === id &&
+          context === requestContext()
+        ) {
+          activeWorkspace.value = fresh
+        }
+        return fresh
+      }).finally(() => {
+        if (workspaceDetailFlights.get(key) === flight) workspaceDetailFlights.delete(key)
+      })
+      workspaceDetailFlights.set(key, flight)
+    }
+    activeDetailRequestKey = key
     loading.value = true
     error.value = null
     try {
-      const fresh = await workspacesApi.getWorkspace(id)
-
-      if (activeWorkspace.value?.id === fresh.id) {
-        activeWorkspace.value.status = fresh.status
-        activeWorkspace.value.active_operation = fresh.active_operation
-        activeWorkspace.value.name = fresh.name
-        activeWorkspace.value.runtime_type = fresh.runtime_type
-        activeWorkspace.value.qemu_vcpus = fresh.qemu_vcpus
-        activeWorkspace.value.qemu_memory_mb = fresh.qemu_memory_mb
-        activeWorkspace.value.qemu_disk_size_gb = fresh.qemu_disk_size_gb
-        activeWorkspace.value.desktop_width = fresh.desktop_width
-        activeWorkspace.value.desktop_height = fresh.desktop_height
-        activeWorkspace.value.last_activity_at = fresh.last_activity_at
-        activeWorkspace.value.auto_stop_timeout_minutes = fresh.auto_stop_timeout_minutes
-        activeWorkspace.value.auto_stop_at = fresh.auto_stop_at
-        activeWorkspace.value.updated_at = fresh.updated_at
-        activeWorkspace.value.has_active_session = fresh.has_active_session
-        activeWorkspace.value.runner_online = fresh.runner_online
-        activeWorkspace.value.credential_ids = fresh.credential_ids
-      } else {
-        activeWorkspace.value = fresh
-      }
+      await flight
     } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to load workspace'
+      if (requestedDetailId === id && context === requestContext()) {
+        error.value = e instanceof Error ? e.message : 'Failed to load workspace'
+      }
     } finally {
-      loading.value = false
+      if (requestedDetailId === id && context === requestContext() && activeDetailRequestKey === key) {
+        loading.value = false
+        activeDetailRequestKey = null
+      }
     }
   }
 

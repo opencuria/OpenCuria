@@ -5,7 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
-import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
+import { onEvent, onReconnect, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 import {
@@ -286,8 +286,30 @@ const busyMessage = computed(() => {
 
 const cleanupFns: Array<() => void> = []
 
+function reconcileActiveSession(): void {
+  const sessionId = harness.activeSessionId
+  if (!sessionId) return
+  void harness.fetchSessions(props.workspaceId).then(() => {
+    if (harness.activeSessionId !== sessionId) return
+    const latest = harness.sessions.find((item) => item.id === sessionId)
+    if (latest) {
+      harness.handleSessionStatus(sessionId, latest.status)
+      refreshSessionDetails(sessionId)
+    }
+  })
+}
+
+function refreshSessionDetails(sessionId: string): void {
+  void harness.fetchParts(sessionId)
+  void harness.fetchTodos(sessionId)
+  // Pending permission/question state is authoritative in parts responses.
+}
+
 function setupSocketListeners(): void {
-  subscribeToWorkspace(props.workspaceId)
+  cleanupFns.push(subscribeToWorkspace(props.workspaceId))
+  cleanupFns.push(onReconnect(() => {
+    reconcileActiveSession()
+  }))
 
   cleanupFns.push(
     onEvent('harness.part_updated', (data) => {
@@ -405,7 +427,6 @@ function setupSocketListeners(): void {
 }
 
 function cleanupSocket(): void {
-  unsubscribeFromWorkspace(props.workspaceId)
   for (const fn of cleanupFns.splice(0)) fn()
 }
 

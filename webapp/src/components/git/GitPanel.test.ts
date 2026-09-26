@@ -6,6 +6,8 @@ import { nextTick } from 'vue'
 import GitPanel from './GitPanel.vue'
 import * as gitApi from '@/services/git.api'
 import { useGitStore } from '@/stores/git'
+import { useSidePanelStore } from '@/stores/sidePanel'
+import { useTerminalStore } from '@/stores/terminal'
 import {
   makeRawChange,
   makeRepoSnapshot,
@@ -83,6 +85,9 @@ describe('GitPanel', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    const sidePanel = useSidePanelStore()
+    sidePanel.isOpen = true
+    sidePanel.activeTab = 'git'
     stubPointerCapture()
     stubContainerRect()
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
@@ -307,6 +312,110 @@ describe('GitPanel', () => {
 
     await dispatchPointer(handle.element, 'pointerup', { pointerId: 1 })
     wrapper.unmount()
+  })
+
+  it('does not initialize or poll while the git tab starts hidden', async () => {
+    vi.useFakeTimers()
+    try {
+      const sidePanel = useSidePanelStore()
+      sidePanel.activeTab = 'desktop'
+      const wrapper = mountPanel()
+      await flushPromises()
+      await nextTick()
+      const store = useGitStore()
+
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+      expect(store.polling).toBe(false)
+
+      sidePanel.activeTab = 'git'
+      await nextTick()
+      await flushPromises()
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepo).toHaveBeenCalledTimes(1)
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+      expect(store.polling).toBe(true)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops all git polling while hidden and refreshes once on return without dropping details', async () => {
+    vi.useFakeTimers()
+    try {
+      const sidePanel = useSidePanelStore()
+      const wrapper = mountPanel()
+      await flushPromises()
+      await nextTick()
+      const store = useGitStore()
+      expect(store.polling).toBe(true)
+      expect(getRepo).toHaveBeenCalledTimes(1)
+
+      const repoDetails = store.repoDetails['/workspace/repo-app']
+      const terminal = useTerminalStore()
+      terminal.setConnected('terminal-1', 'workspace-1')
+
+      sidePanel.activeTab = 'terminal'
+      await nextTick()
+      expect(store.polling).toBe(false)
+      expect(terminal.isConnected).toBe(true)
+      expect(terminal.terminalId).toBe('terminal-1')
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+
+      // Returning performs one summary refresh and at most one auto-fetch;
+      // details stay cached and there is no timer-triggered duplicate.
+      sidePanel.activeTab = 'git'
+      await nextTick()
+      await flushPromises()
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+      expect(store.repoDetails['/workspace/repo-app']).toStrictEqual(repoDetails)
+      expect(store.polling).toBe(true)
+
+      sidePanel.close()
+      await nextTick()
+      expect(store.polling).toBe(false)
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('initializes the new workspace exactly once while visible', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountPanel()
+      await flushPromises()
+      const store = useGitStore()
+      getRepos.mockClear()
+      getRepo.mockClear()
+      runOp.mockClear()
+
+      await wrapper.setProps({ workspaceId: 'workspace-2' })
+      await flushPromises()
+      expect(store.workspaceId).toBe('workspace-2')
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepos).toHaveBeenCalledWith('workspace-2')
+      expect(getRepo).toHaveBeenCalledTimes(1)
+      // The new workspace/repository receives one initial fetch, not duplicate
+      // mount + workspace-watcher fetches.
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+      expect(store.polling).toBe(true)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops polling on unmount', async () => {

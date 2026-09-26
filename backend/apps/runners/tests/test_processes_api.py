@@ -119,14 +119,15 @@ def _full_permissions() -> list[str]:
 
 
 @pytest.mark.django_db
-def test_processes_require_read_permission(client: Client):
-    """Listing without processes_read permission returns 403."""
+@pytest.mark.parametrize("query", ["", "?live=true"])
+def test_processes_require_read_permission(client: Client, query: str):
+    """Listing without processes_read permission returns 403 in both modes."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(
         user=user, permissions=[APIKeyPermission.WORKSPACES_READ.value]
     )
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/processes/",
+        f"/api/v1/workspaces/{workspace.id}/processes/{query}",
         **_auth_headers(token, str(org.id)),
     )
     assert response.status_code == 403
@@ -296,11 +297,12 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
         return workspace
 
     monkeypatch.setattr(runners_api, "_get_owned_workspace_async", AsyncMock(return_value=workspace))
+    list_processes_mock = AsyncMock(return_value=[process])
     monkeypatch.setattr(
         runners_api,
         "_get_service",
         lambda: SimpleNamespace(
-            list_processes=AsyncMock(return_value=[process]),
+            list_processes=list_processes_mock,
             start_process=AsyncMock(return_value=process),
             get_process=AsyncMock(return_value=process),
             stop_process=AsyncMock(return_value=stopped),
@@ -325,6 +327,16 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
     )
     assert listing.status_code == 200
     assert len(listing.json()) == 1
+    assert listing.json()[0]["status"] == ProcessStatus.RUNNING
+    list_processes_mock.assert_awaited_once_with(workspace.id, live=False)
+
+    list_processes_mock.reset_mock()
+    live_listing = client.get(
+        f"/api/v1/workspaces/{workspace.id}/processes/?live=true",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert live_listing.status_code == 200
+    list_processes_mock.assert_awaited_once_with(workspace.id, live=True)
 
     detail = client.get(
         f"/api/v1/workspaces/{workspace.id}/processes/{process.id}/",

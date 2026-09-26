@@ -126,6 +126,7 @@ vi.mock('@/services/socket', () => ({
   subscribeToWorkspace: vi.fn(),
   unsubscribeFromWorkspace: vi.fn(),
   onEvent: () => () => {},
+  onReconnect: () => () => {},
 }))
 
 const SidebarTestWrapper = defineComponent({
@@ -195,6 +196,14 @@ describe('ChatSidebar', () => {
 
     expect(wrapper.text()).toContain('OpenCuria')
     expect(wrapper.text()).not.toContain('Acme')
+  })
+
+  it('starts each shared data poll with a single initial request', () => {
+    const wrapper = mountSidebar()
+
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
+    expect(conversationStore.fetchConversations).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 
   it('shows unread chats in the active section and hides empty stopped workspaces', () => {

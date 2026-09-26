@@ -5,11 +5,10 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
 import { useProcessesStore } from '@/stores/processes'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import { usePolling } from '@/composables/usePolling'
 import {
   subscribeToWorkspace,
-  unsubscribeFromWorkspace,
   onEvent,
+  onReconnect,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -112,7 +111,8 @@ function toggleProcessesPanel(): void {
 const cleanupFns: (() => void)[] = []
 
 function setupSocketListeners(): void {
-  subscribeToWorkspace(workspaceId.value)
+  const releaseSubscription = subscribeToWorkspace(workspaceId.value)
+  cleanupFns.push(releaseSubscription)
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
@@ -161,6 +161,10 @@ function setupSocketListeners(): void {
     }),
   )
 
+  cleanupFns.push(onReconnect(() => {
+    void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
+    if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
+  }))
   cleanupFns.push(
     onEvent('process:status_changed', (data) => {
       if (data.workspace_id === workspaceId.value) {
@@ -179,32 +183,24 @@ function setupSocketListeners(): void {
 }
 
 function cleanupSocket(): void {
-  unsubscribeFromWorkspace(workspaceId.value)
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 }
 
-// Polling for workspace detail (fallback + initial load)
-const { start, stop } = usePolling(
-  () => workspaceStore.fetchWorkspaceDetail(workspaceId.value),
-  5000,
-)
-
-// Polling fallback for background processes (socket is the live path)
-const {
-  start: startProcessesPolling,
-  stop: stopProcessesPolling,
-} = usePolling(() => processesStore.fetchProcesses(workspaceId.value), 10000)
+function reconcileOnVisible(): void {
+  if (document.visibilityState !== 'visible') return
+  void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
+  if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
+}
 
 onMounted(() => {
-  start()
-  startProcessesPolling()
+  void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
   setupSocketListeners()
+  document.addEventListener('visibilitychange', reconcileOnVisible)
 })
 
 onUnmounted(() => {
-  stop()
-  stopProcessesPolling()
+  document.removeEventListener('visibilitychange', reconcileOnVisible)
   cleanupSocket()
   processesStore.reset()
   workspaceImageStore.reset()
@@ -218,8 +214,7 @@ watch(workspaceId, (newId, oldId) => {
     processesStore.clearWorkspace(oldId)
     processesOpen.value = false
     harnessStore.reset()
-    workspaceStore.fetchWorkspaceDetail(newId)
-    void processesStore.fetchProcesses(newId)
+    void workspaceStore.fetchWorkspaceDetail(newId)
     setupSocketListeners()
   }
 })

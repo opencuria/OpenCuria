@@ -85,6 +85,15 @@ export const useHarnessStore = defineStore('harness', () => {
   /** Message ids whose error/abort notice the user dismissed (optimistic local cache; server `notice_dismissed_at` is the source of truth). */
   const dismissedNoticeIds = ref<Record<string, true>>({})
 
+  const sessionFetches = new Map<string, Promise<void>>()
+  const partFetches = new Map<string, Promise<void>>()
+  const todoFetches = new Map<string, Promise<void>>()
+  const partGenerations = new Map<string, number>()
+  const todoGenerations = new Map<string, number>()
+  let sessionsGeneration = 0
+  let activeSessionsWorkspace: string | null = null
+  const readFlights = new Map<string, Promise<boolean>>()
+
   // --- Getters ---
   const activeSession = computed(
     () => sessions.value.find((s) => s.id === activeSessionId.value) ?? null,
@@ -161,23 +170,42 @@ export const useHarnessStore = defineStore('harness', () => {
   // --- Actions ---
 
   async function fetchSessions(workspaceId: string): Promise<void> {
-    loading.value = true
-    error.value = null
-    try {
-      const previous = sessions.value
-      sessions.value = await listHarnessSessions(workspaceId)
-      if (
-        activeSessionId.value &&
-        !sessions.value.some((session) => session.id === activeSessionId.value) &&
-        previous.some((session) => session.id === activeSessionId.value)
-      ) {
+    if (activeSessionsWorkspace !== workspaceId) {
+      const isWorkspaceSwitch = activeSessionsWorkspace !== null
+      activeSessionsWorkspace = workspaceId
+      sessionsGeneration += 1
+      sessionFetches.clear()
+      if (isWorkspaceSwitch) {
+        sessions.value = []
         activeSessionId.value = null
       }
-    } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to load harness sessions'
-    } finally {
-      loading.value = false
     }
+    let flight = sessionFetches.get(workspaceId)
+    if (!flight) {
+      const generation = ++sessionsGeneration
+      flight = listHarnessSessions(workspaceId).then((result) => {
+        if (generation !== sessionsGeneration) return
+        const previous = sessions.value
+        sessions.value = result
+        if (
+          activeSessionId.value &&
+          !result.some((session) => session.id === activeSessionId.value) &&
+          previous.some((session) => session.id === activeSessionId.value)
+        ) activeSessionId.value = null
+      }).catch((e: unknown) => {
+        if (generation === sessionsGeneration) {
+          error.value = e instanceof Error ? e.message : 'Failed to load harness sessions'
+        }
+      }).finally(() => {
+        if (sessionFetches.get(workspaceId) === flight) sessionFetches.delete(workspaceId)
+      })
+      sessionFetches.set(workspaceId, flight)
+    }
+    const generation = sessionsGeneration
+    loading.value = true
+    error.value = null
+    await flight
+    if (generation === sessionsGeneration) loading.value = false
   }
 
   function setActiveSession(sessionId: string | null): void {
@@ -188,78 +216,113 @@ export const useHarnessStore = defineStore('harness', () => {
     viewingSessionId.value = sessionId
     if (!sessionId) return
     const session = sessions.value.find((row) => row.id === sessionId)
-    if (session?.status === 'idle' && !session.manual_unread) {
+    if (session?.status === 'idle' && !session.manual_unread && session.unread) {
       void markSessionRead(sessionId)
     }
   }
 
-  async function markSessionRead(sessionId: string): Promise<void> {
+  async function markSessionRead(sessionId: string, force = false): Promise<void> {
+    const existing = readFlights.get(sessionId)
+    if (existing) {
+      if (!force) {
+        await existing
+        return
+      }
+      const persisted = await existing
+      if (!persisted) await markSessionRead(sessionId, true)
+      return
+    }
     const session = sessions.value.find((row) => row.id === sessionId)
+    const conversationStore = useHarnessConversationStore()
+    const conv = conversationStore.conversations.find((row) => row.session_id === sessionId)
+    const needsPersist = Boolean(force || session?.unread || session?.manual_unread || conv?.unread || conv?.manual_unread)
+    const previousUnread = session?.unread ?? false
+    const previousManualUnread = session?.manual_unread ?? false
     if (session) {
       session.unread = false
       session.manual_unread = false
     }
-    const conversationStore = useHarnessConversationStore()
-    await conversationStore.markAsRead(sessionId)
+    const flight = (async () => {
+      const persisted = !needsPersist || await conversationStore.markAsRead(sessionId, true)
+      if (!persisted && session && sessions.value.includes(session)) {
+        session.unread = previousUnread
+        session.manual_unread = previousManualUnread
+      }
+      return persisted
+    })().finally(() => {
+      if (readFlights.get(sessionId) === flight) readFlights.delete(sessionId)
+    })
+    readFlights.set(sessionId, flight)
+    await flight
   }
 
-  async function fetchParts(
-    sessionId: string,
-    hydrateChildren = true,
-  ): Promise<void> {
-    try {
-      const response = await listHarnessParts(sessionId)
-      const incoming = response.messages.map((message) => ({
-        ...message,
-        session_id: sessionId,
-        parts: (message.parts ?? []).map(hydrateHarnessPart),
-      }))
-      const session = sessions.value.find((item) => item.id === sessionId)
-      messagesBySession.value[sessionId] =
-        session?.status === 'busy'
-          ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
-          : settleOpenStreamParts(incoming)
-      const nextPermissions = { ...pendingPermissions.value }
-      for (const id of Object.keys(nextPermissions)) {
-        if (nextPermissions[id]?.session_id === sessionId) {
-          delete nextPermissions[id]
+  async function fetchParts(sessionId: string, hydrateChildren = true): Promise<void> {
+    const key = `${sessionId}:${hydrateChildren}`
+    let flight = partFetches.get(key)
+    if (!flight) {
+      const generation = (partGenerations.get(sessionId) ?? 0) + 1
+      partGenerations.set(sessionId, generation)
+      flight = (async () => {
+        try {
+          const response = await listHarnessParts(sessionId)
+          if (partGenerations.get(sessionId) !== generation) return
+          const incoming = response.messages.map((message) => ({
+            ...message,
+            session_id: sessionId,
+            parts: (message.parts ?? []).map(hydrateHarnessPart),
+          }))
+          const session = sessions.value.find((item) => item.id === sessionId)
+          messagesBySession.value[sessionId] = session?.status === 'busy'
+            ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
+            : settleOpenStreamParts(incoming)
+          const nextPermissions = { ...pendingPermissions.value }
+          for (const id of Object.keys(nextPermissions)) {
+            if (nextPermissions[id]?.session_id === sessionId) delete nextPermissions[id]
+          }
+          for (const request of response.permissions ?? []) {
+            nextPermissions[request.request_id] = { ...request, status: 'pending' }
+          }
+          pendingPermissions.value = nextPermissions
+          const nextQuestions = { ...pendingQuestions.value }
+          for (const id of Object.keys(nextQuestions)) {
+            if (nextQuestions[id]?.session_id === sessionId) delete nextQuestions[id]
+          }
+          for (const request of response.questions ?? []) {
+            nextQuestions[request.request_id] = { ...request, status: 'pending' }
+          }
+          pendingQuestions.value = nextQuestions
+          if (hydrateChildren) {
+            const childIds = collectRunningChildSessionIds(messagesBySession.value[sessionId] ?? [])
+            await Promise.all(childIds.map((childId) => fetchParts(childId, false)))
+          }
+        } catch (e: unknown) {
+          if (partGenerations.get(sessionId) === generation) {
+            useNotificationStore().error('Failed to load messages', e instanceof Error ? e.message : 'Unknown error')
+          }
         }
-      }
-      for (const request of response.permissions ?? []) {
-        nextPermissions[request.request_id] = { ...request, status: 'pending' }
-      }
-      pendingPermissions.value = nextPermissions
-      const nextQuestions = { ...pendingQuestions.value }
-      for (const id of Object.keys(nextQuestions)) {
-        if (nextQuestions[id]?.session_id === sessionId) {
-          delete nextQuestions[id]
-        }
-      }
-      for (const request of response.questions ?? []) {
-        nextQuestions[request.request_id] = { ...request, status: 'pending' }
-      }
-      pendingQuestions.value = nextQuestions
-      if (hydrateChildren) {
-        const childIds = collectRunningChildSessionIds(
-          messagesBySession.value[sessionId] ?? [],
-        )
-        await Promise.all(childIds.map((childId) => fetchParts(childId, false)))
-      }
-    } catch (e: unknown) {
-      const notifications = useNotificationStore()
-      notifications.error(
-        'Failed to load messages',
-        e instanceof Error ? e.message : 'Unknown error',
-      )
+      })().finally(() => {
+        if (partFetches.get(key) === flight) partFetches.delete(key)
+      })
+      partFetches.set(key, flight)
     }
+    await flight
   }
 
   async function fetchTodos(sessionId: string): Promise<void> {
-    try {
-      todosBySession.value[sessionId] = await listHarnessTodos(sessionId)
-    } catch {
-      todosBySession.value[sessionId] = []
+    let flight = todoFetches.get(sessionId)
+    if (!flight) {
+      const generation = (todoGenerations.get(sessionId) ?? 0) + 1
+      todoGenerations.set(sessionId, generation)
+      flight = listHarnessTodos(sessionId).then((todos) => {
+        if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = todos
+      }).catch(() => {
+        if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = []
+      }).finally(() => {
+        if (todoFetches.get(sessionId) === flight) todoFetches.delete(sessionId)
+      })
+      todoFetches.set(sessionId, flight)
     }
+    await flight
   }
 
   async function createSession(
@@ -574,6 +637,7 @@ export const useHarnessStore = defineStore('harness', () => {
     if (status === 'idle') {
       stampAssistantCompleted(sessionId)
       if (viewingSessionId.value === sessionId && !session?.manual_unread) {
+        if (session) session.unread = true
         void markSessionRead(sessionId)
         return
       }
@@ -728,6 +792,14 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function reset(): void {
     sessions.value = []
+    sessionsGeneration += 1
+    activeSessionsWorkspace = null
+    sessionFetches.clear()
+    for (const [id, generation] of partGenerations) partGenerations.set(id, generation + 1)
+    for (const [id, generation] of todoGenerations) todoGenerations.set(id, generation + 1)
+    partFetches.clear()
+    todoFetches.clear()
+    readFlights.clear()
     messagesBySession.value = {}
     todosBySession.value = {}
     pendingPermissions.value = {}

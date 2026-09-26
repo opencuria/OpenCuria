@@ -7,8 +7,10 @@ import uuid
 from typing import Any
 
 import pytest
+from asgiref.sync import sync_to_async
 
 from apps.harness.harness_service import (
+    FRONTEND_EVENT_CONVERSATIONS_CHANGED,
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_STATUS,
@@ -90,6 +92,66 @@ async def test_socket_event_payloads(harness_workspace) -> None:
     deltas = [e.get("delta", {}) for e in part_events]
     assert any("text" in d for d in deltas)
     assert any("step_finish" in d for d in deltas)
+    changed = by_event[FRONTEND_EVENT_CONVERSATIONS_CHANGED]
+    assert len(changed) == 1  # idle completion only; not once per streamed token
+    assert changed[0] == {
+        "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+        "workspace_id": str(harness_workspace.id),
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_conversation_changes_emit_for_lifecycle_mutations(harness_workspace) -> None:
+    """Synchronous and async mutations notify only the affected workspace."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="Create lifecycle session",
+        title="initial title",
+    )
+    await sync_to_async(service.update_title)(session.id, "Renamed")
+    await sync_to_async(service.mark_session_read)(session.id)
+    await sync_to_async(service.mark_session_unread)(session.id)
+    forked = await service.fork_session(session.id)
+    await service.delete_session(session.id)
+
+    changed = [
+        item
+        for item in emitted
+        if item["event"] == FRONTEND_EVENT_CONVERSATIONS_CHANGED
+    ]
+    assert len(changed) == 6
+    assert all(
+        item == {
+            "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+            "workspace_id": str(harness_workspace.id),
+        }
+        for item in changed
+    )
+    # Fork notifies once, and remains a root conversation in the same workspace.
+    assert forked.parent_id is None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_conversation_change_emit_failure_is_best_effort(harness_workspace) -> None:
+    """A failed socket emit cannot break a synchronous lifecycle mutation."""
+    async def _broken_emit(_event: str, _data: dict[str, Any]) -> None:
+        raise RuntimeError("socket unavailable")
+
+    service = HarnessService(emit=_broken_emit)
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="Emit failure remains harmless",
+    )
+    renamed = await sync_to_async(service.update_title)(session.id, "Still works")
+    assert renamed.title == "Still works"
 
 
 @pytest.mark.django_db(transaction=True)

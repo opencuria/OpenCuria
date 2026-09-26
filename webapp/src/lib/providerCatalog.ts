@@ -5,25 +5,40 @@
 import { listProviderModels } from '@/services/harness.api'
 import type { ProviderModel } from './harnessModels'
 
-let inflight: Promise<ProviderModel[]> | null = null
+interface CatalogCacheEntry {
+  context: string
+  promise: Promise<ProviderModel[]>
+}
 
-/** Load provider models, coalescing concurrent and repeat callers. */
+let cached: CatalogCacheEntry | null = null
+
+function currentContext(): string {
+  return localStorage.getItem('kern_active_org_id') ?? ''
+}
+
+/** Load provider models, coalescing concurrent and repeat callers per organization. */
 export function loadProviderModelsCached(): Promise<ProviderModel[]> {
-  if (inflight == null) {
-    inflight = listProviderModels().catch((error: unknown) => {
-      inflight = null
-      throw error
-    })
+  const context = currentContext()
+  if (cached?.context === context) return cached.promise
+
+  const entry: CatalogCacheEntry = {
+    context,
+    promise: listProviderModels(),
   }
-  return inflight
+  cached = entry
+  entry.promise = entry.promise.catch((error: unknown) => {
+    if (cached === entry) cached = null
+    throw error
+  })
+  return entry.promise
 }
 
 /** Drop the cached promise so the next load refetches. */
 export function invalidateProviderCatalog(): void {
-  inflight = null
+  cached = null
 }
 
 /** Drop the cached promise (tests only). */
 export function resetProviderCatalogCache(): void {
-  inflight = null
+  cached = null
 }

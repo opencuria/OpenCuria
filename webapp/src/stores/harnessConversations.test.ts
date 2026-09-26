@@ -81,6 +81,22 @@ describe('harnessConversations store unread', () => {
     expect(markReadMock).toHaveBeenCalledWith('session-1')
   })
 
+  it('does not persist duplicate reads when already read and coalesces an in-flight mark-read', async () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation({ status: 'idle', unread: false })]
+    await store.markAsRead('session-1')
+    expect(markReadMock).not.toHaveBeenCalled()
+
+    store.conversations[0]!.unread = true
+    let resolve!: () => void
+    markReadMock.mockImplementationOnce(() => new Promise<void>((r) => { resolve = r }))
+    const first = store.markAsRead('session-1')
+    const second = store.markAsRead('session-1')
+    expect(markReadMock).toHaveBeenCalledTimes(1)
+    resolve()
+    await Promise.all([first, second])
+  })
+
   it('persists mark-unread via the API', async () => {
     const store = useHarnessConversationStore()
     store.conversations = [makeConversation({ status: 'idle', unread: false })]

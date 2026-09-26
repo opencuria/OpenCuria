@@ -242,68 +242,69 @@ class WorkspaceRegistry:
 
             session = sessions.get(workspace_id)
             if session is not None:
-                try:
-                    live = (
-                        await self.desktop_live(workspace_id)
-                        if self.desktop_live is not None
-                        else True
-                    )
-                    if live:
-                        if self.desktop_heartbeat_payload is not None:
-                            item["desktop"] = self.desktop_heartbeat_payload(
-                                workspace_id, session
-                            )
-                    else:
-                        sessions.pop(workspace_id, None)
-                        item["desktop"] = None
-                        logger.warning(
-                            "desktop_session_pruned_from_cache",
-                            workspace_id=str(workspace_id),
-                        )
-                except Exception:
+                if info.status != "running":
+                    # The runtime status was freshly synchronized by the
+                    # heartbeat loop. A stopped workspace cannot host a live
+                    # desktop, so prune without another guest exec probe.
                     sessions.pop(workspace_id, None)
                     item["desktop"] = None
-                    logger.exception(
-                        "desktop_session_health_check_failed",
-                        workspace_id=str(workspace_id),
-                    )
+                else:
+                    try:
+                        live = (
+                            await self.desktop_live(workspace_id)
+                            if self.desktop_live is not None
+                            else True
+                        )
+                        if live:
+                            if self.desktop_heartbeat_payload is not None:
+                                item["desktop"] = self.desktop_heartbeat_payload(
+                                    workspace_id, session
+                                )
+                        else:
+                            sessions.pop(workspace_id, None)
+                            item["desktop"] = None
+                            logger.warning(
+                                "desktop_session_pruned_from_cache",
+                                workspace_id=str(workspace_id),
+                            )
+                    except Exception:
+                        sessions.pop(workspace_id, None)
+                        item["desktop"] = None
+                        logger.exception(
+                            "desktop_session_health_check_failed",
+                            workspace_id=str(workspace_id),
+                        )
 
             processes: list[dict[str, Any]] = []
-            for entry in entries.get(workspace_id, {}).values():
-                try:
-                    info_for_proc = self._cache.get(workspace_id)
-                    runtime_for_proc = (
-                        self._runtimes.get(info_for_proc.runtime_type)
-                        if info_for_proc is not None
-                        else None
-                    )
-                    if info_for_proc is None or runtime_for_proc is None:
-                        raise RuntimeError("runtime unavailable")
-                    if not info_for_proc.instance_id:
-                        raise RuntimeError("no instance assigned")
-                    if self.background_status is None:
-                        raise RuntimeError("runtime unavailable")
-                    processes.append(
-                        await self.background_status(
-                            runtime_for_proc,
-                            info_for_proc.instance_id,
-                            entry,
+            if info.status == "running":
+                runtime = self._runtimes.get(info.runtime_type)
+                for entry in entries.get(workspace_id, {}).values():
+                    try:
+                        if runtime is None or not info.instance_id:
+                            raise RuntimeError("runtime unavailable")
+                        if self.background_status is None:
+                            raise RuntimeError("runtime unavailable")
+                        processes.append(
+                            await self.background_status(
+                                runtime,
+                                info.instance_id,
+                                entry,
+                            )
                         )
-                    )
-                except Exception:
-                    logger.exception(
-                        "background_heartbeat_failed",
-                        workspace_id=str(workspace_id),
-                        process_id=entry.process_id,
-                    )
-                    processes.append(
-                        {
-                            "process_id": entry.process_id,
-                            "status": "unknown",
-                            "exit_code": None,
-                            "pid": entry.pid,
-                        }
-                    )
+                    except Exception:
+                        logger.exception(
+                            "background_heartbeat_failed",
+                            workspace_id=str(workspace_id),
+                            process_id=entry.process_id,
+                        )
+                        processes.append(
+                            {
+                                "process_id": entry.process_id,
+                                "status": "unknown",
+                                "exit_code": None,
+                                "pid": entry.pid,
+                            }
+                        )
             item["processes"] = processes
 
             payload.append(item)

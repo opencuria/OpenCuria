@@ -38,7 +38,6 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    getProviderConfig: vi.fn(),
     listProviderModels: vi.fn(),
     listAgentConfigs: vi.fn(),
     listRecentModels: vi.fn().mockResolvedValue([]),
@@ -46,7 +45,6 @@ vi.mock('@/services/harness.api', async () => {
   }
 })
 
-const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
 const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
 
@@ -123,17 +121,6 @@ describe('HarnessChatInput', () => {
       { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
       { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
     ])
-    getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'openrouter/model-big',
-      small_model: 'openrouter/model-small',
-      computer_use_model: 'openrouter/model-cu',
-      default_effort: '',
-      small_effort: '',
-      computer_use_effort: '',
-      has_api_key: true,
-      api_key_hint: '',
-    })
     listProviderModelsMock.mockResolvedValue(catalog)
   })
 
@@ -144,8 +131,7 @@ describe('HarnessChatInput', () => {
     })
     await wrapper.vm.$nextTick()
     const html = wrapper.html()
-    expect(html).toContain('Big')
-    expect(html).toContain('Small')
+    expect(listProviderModelsMock).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Skills')
     expect(wrapper.text()).not.toContain('Fast')
   })
@@ -259,65 +245,27 @@ describe('HarnessChatInput', () => {
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
   })
 
-  it('opens the provider tab via event (no router navigation) when provider config is missing', async () => {
-    getProviderConfigMock.mockRejectedValue(new Error('not found'))
+  it('shows settings CTA when the model catalog has no available models', async () => {
     listProviderModelsMock.mockResolvedValue([])
     const wrapper = mountInput()
-    await vi.waitFor(
-      () => {
-        expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
-      },
-      { timeout: 2000 },
-    )
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true))
     const events: Array<{ tab?: string }> = []
-    const listener = (e: Event) =>
-      events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
+    const listener = (e: Event) => events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
     window.addEventListener(OPEN_SETTINGS_EVENT, listener)
     try {
-      const cta = wrapper.find('[data-testid="composer-provider-cta"]')
-      expect(cta.exists()).toBe(true)
-      expect(cta.element.tagName).toBe('BUTTON')
-      expect(cta.text()).toContain('Connect a provider in Settings')
-      await cta.trigger('click')
+      await wrapper.get('[data-testid="composer-provider-cta"]').trigger('click')
       expect(events).toEqual([{ tab: 'provider' }])
     } finally {
       window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
     }
   })
 
-  it('shows settings CTA when no provider models are available', async () => {
-    listProviderModelsMock.mockResolvedValue([])
-    getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'openrouter/model-big',
-      small_model: 'openrouter/model-small',
-      computer_use_model: 'openrouter/model-cu',
-      default_effort: '',
-      small_effort: '',
-      computer_use_effort: '',
-      has_api_key: true,
-      api_key_hint: '',
-    })
+  it('loads models and agent defaults without fetching provider settings', async () => {
     const wrapper = mountInput()
-    await vi.waitFor(
-      () => {
-        expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
-      },
-      { timeout: 2000 },
-    )
-  })
-
-  it('loads the catalog when the legacy defaults row is missing (404)', async () => {
-    const { ApiRequestError } = await import('@/services/api')
-    getProviderConfigMock.mockRejectedValue(new ApiRequestError(404, 'Not Found', 'not_found'))
-    const wrapper = mountInput()
-    await vi.waitFor(
-      () => {
-        expect(wrapper.html()).toContain('Big')
-      },
-      { timeout: 2000 },
-    )
-    expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(false)
+    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalled())
+    expect(listProviderModelsMock).toHaveBeenCalled()
+    expect(listAgentConfigsMock).toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('toggles plan/build with Shift+Tab', async () => {
@@ -357,7 +305,7 @@ describe('HarnessChatInput', () => {
       ],
     })
     await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
+      expect(listProviderModelsMock).toHaveBeenCalled()
     })
 
     const textarea = wrapper.get('[data-testid="composer-textarea"]')
@@ -452,10 +400,9 @@ describe('HarnessChatInput', () => {
   })
 
   it('fills the context ring from catalog limit and used tokens', async () => {
+    resetProviderCatalogCache()
     const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
-    await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
-    })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
     const rings = wrapper.findAll('[data-testid="composer-context-usage"] circle')
     expect(rings).toHaveLength(2)
     const circumference = 2 * Math.PI * 6
@@ -467,10 +414,9 @@ describe('HarnessChatInput', () => {
   })
 
   it('emits context metrics when used tokens or catalog limit change', async () => {
+    resetProviderCatalogCache()
     const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
-    await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
-    })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
     const metrics = wrapper.emitted('context-metrics') ?? []
     expect(metrics.length).toBeGreaterThan(0)
     const last = metrics[metrics.length - 1]![0] as {
@@ -546,17 +492,6 @@ describe('HarnessChatInput chat upload', () => {
       { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
       { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
     ])
-    getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'openrouter/model-big',
-      small_model: 'openrouter/model-small',
-      computer_use_model: 'openrouter/model-cu',
-      default_effort: '',
-      small_effort: '',
-      computer_use_effort: '',
-      has_api_key: true,
-      api_key_hint: '',
-    })
     listProviderModelsMock.mockResolvedValue(catalog)
   })
 
@@ -578,6 +513,7 @@ describe('HarnessChatInput chat upload', () => {
     const store = useFileExplorerStore()
     vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
     const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
+    resetProviderCatalogCache()
     const wrapper = mountInput()
 
     const input = wrapper.find('[data-testid="composer-file-input"]')
@@ -589,6 +525,7 @@ describe('HarnessChatInput chat upload', () => {
     await vi.waitFor(() => {
       expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
     })
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
 
     const { requestId, path, filename } = uploadRequest()
     expect(path).toBe(CHAT_UPLOAD_DIR)

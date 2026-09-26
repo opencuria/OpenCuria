@@ -24,7 +24,6 @@ import {
 } from '@lucide/vue'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
-import { getProviderConfig } from '@/services/harness.api'
 import { sendFilesUpload } from '@/services/socket'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
@@ -50,6 +49,7 @@ import {
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
+import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
 import {
   applyMentionCandidate,
@@ -132,7 +132,7 @@ const localEffort = ref(props.effort ?? '')
 const catalog = ref<ProviderModel[]>([])
 const { entries: recentEntries } = useRecentModels()
 const recentModels = computed(() => recentCatalogModels(catalog.value))
-const modelLoading = ref(false)
+const modelLoading = ref(true)
 const providerMissing = ref(false)
 const selectedSkillIds = ref<string[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -146,7 +146,9 @@ let uploadQueue: Promise<void> = Promise.resolve()
 /** Target paths with an in-flight or recently finished chat upload. */
 const inFlightUploadPaths = new Set<string>()
 const harness = useHarnessStore()
+const authStore = useAuthStore()
 let applyingDefaults = false
+let modelRequestGeneration = 0
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
@@ -231,29 +233,32 @@ function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolea
 async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
+  const requestGeneration = ++modelRequestGeneration
+  const organizationId = authStore.activeOrganizationId
   try {
-    // Gating fetch that still tolerates a missing legacy ProviderConfig row
-    // (404 until defaults are saved once); the models catalog + agent
-    // configs decide whether a provider is actually available.
-    await getProviderConfig().catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : ''
-      if (!message.toLowerCase().includes('not found')) throw error
-      return null
-    })
     const [models] = await Promise.all([
       loadProviderModelsCached(),
       harness.loadAgentConfigs(),
       loadRecentModels(),
     ])
+    if (
+      requestGeneration !== modelRequestGeneration ||
+      organizationId !== authStore.activeOrganizationId
+    ) return
     catalog.value = models
-    if (catalog.value.length === 0) {
-      providerMissing.value = true
-    }
+    if (catalog.value.length === 0) providerMissing.value = true
   } catch {
+    if (
+      requestGeneration !== modelRequestGeneration ||
+      organizationId !== authStore.activeOrganizationId
+    ) return
     providerMissing.value = true
     catalog.value = []
   } finally {
-    modelLoading.value = false
+    if (
+      requestGeneration === modelRequestGeneration &&
+      organizationId === authStore.activeOrganizationId
+    ) modelLoading.value = false
   }
   if (!harness.composerDirty && !props.model && !props.effort) {
     applyModeDefaults(localMode.value, { resetDirty: true })
@@ -287,6 +292,11 @@ watch(
     prompt.value = loadFromCache()
     void loadProviderModels()
   },
+)
+
+watch(
+  () => authStore.activeOrganizationId,
+  () => void loadProviderModels(),
 )
 
 watch(

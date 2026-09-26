@@ -25,6 +25,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
   return {
     ...actual,
     updateWorkspace: vi.fn(),
+    getWorkspace: vi.fn(),
   }
 })
 
@@ -65,6 +66,25 @@ describe('workspace transition state', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+  })
+
+  it('coalesces workspace detail requests and ignores an older route response', async () => {
+    const store = useWorkspaceStore()
+    const first = makeWorkspace({ id: 'workspace-1', name: 'first' })
+    const second = makeWorkspace({ id: 'workspace-2', name: 'second' })
+    let resolveFirst!: (value: Workspace) => void
+    vi.mocked(workspacesApi.getWorkspace).mockImplementation((id) =>
+      id === 'workspace-1'
+        ? new Promise((resolve) => { resolveFirst = resolve })
+        : Promise.resolve(second as never),
+    )
+    const a = store.fetchWorkspaceDetail('workspace-1')
+    const duplicate = store.fetchWorkspaceDetail('workspace-1')
+    expect(workspacesApi.getWorkspace).toHaveBeenCalledTimes(1)
+    await store.fetchWorkspaceDetail('workspace-2')
+    resolveFirst(first as never)
+    await Promise.all([a, duplicate])
+    expect(store.activeWorkspace?.id).toBe('workspace-2')
   })
 
   it('derives transition labels from backend active_operation', () => {

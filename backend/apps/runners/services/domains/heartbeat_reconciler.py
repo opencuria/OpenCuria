@@ -77,19 +77,23 @@ class HeartbeatReconcilerMixin:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         now: datetime | None = None,
+        workspaces: list | None = None,
     ) -> list["Task"]:
         """Stop running workspaces whose inactivity deadline has elapsed."""
         evaluation_time = now or timezone.now()
-        if runner_id is not None:
-            workspaces = await sync_to_async(
-                lambda: list(self.workspaces.list_by_runner(runner_id))
-            )()
-        elif organization_id is not None:
-            workspaces = await sync_to_async(
-                lambda: list(self.workspaces.list_by_organization(organization_id))
-            )()
-        else:
-            workspaces = await sync_to_async(lambda: list(self.workspaces.list_all()))()
+        if workspaces is None:
+            if runner_id is not None:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_by_runner(runner_id))
+                )()
+            elif organization_id is not None:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_by_organization(organization_id))
+                )()
+            else:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_all())
+                )()
 
         dispatched: list["Task"] = []
         for workspace in workspaces:
@@ -310,7 +314,10 @@ class HeartbeatReconcilerMixin:
                         runner_id=runner_id_str,
                     )
 
-        async_to_sync(self.auto_stop_inactive_workspaces)(runner_id=runner.id)
+        async_to_sync(self.auto_stop_inactive_workspaces)(
+            runner_id=runner.id,
+            workspaces=backend_workspaces,
+        )
         # Stash vanished candidates for the async verify pass: the sync
         # heartbeat cannot do RPCs, so ``reconcile_vanished_processes``
         # (called by the Socket.IO handler) picks them up. Merged per

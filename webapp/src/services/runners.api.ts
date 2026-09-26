@@ -9,10 +9,6 @@ export function listRunners(): Promise<Runner[]> {
   return get<Runner[]>('/runners/')
 }
 
-export function getRunner(id: string): Promise<Runner> {
-  return get<Runner>(`/runners/${id}/`)
-}
-
 export function createRunner(data: RunnerCreateIn): Promise<RunnerCreateOut> {
   return post<RunnerCreateOut>('/runners/', data)
 }

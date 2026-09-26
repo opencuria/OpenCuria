@@ -119,6 +119,11 @@ export function listProcesses(workspaceId: string): Promise<WorkspaceProcess[]> 
   return get<WorkspaceProcess[]>(`/workspaces/${workspaceId}/processes/`)
 }
 
+/** Fetch processes reconciled against the runner's current live state. */
+export function listLiveProcesses(workspaceId: string): Promise<WorkspaceProcess[]> {
+  return get<WorkspaceProcess[]>(`/workspaces/${workspaceId}/processes/?live=true`)
+}
+
 export function getProcess(
   workspaceId: string,
   processId: string,

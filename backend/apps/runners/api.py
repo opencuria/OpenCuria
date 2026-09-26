@@ -398,28 +398,6 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     )
 
 
-@runner_router.get(
-    "/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut}
-)
-def get_runner(request: HttpRequest, runner_id: uuid.UUID):
-    """Return a runner by ID. User must be a member of the runner's organization."""
-    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
-        return _perm_denied(APIKeyPermission.RUNNERS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    try:
-        runner = service.get_runner(runner_id)
-        # Verify runner belongs to the user's active org
-        if runner.organization_id != org_id:
-            raise NotFoundError("Runner", str(runner_id))
-        return 200, runner
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
 @runner_router.patch(
     "/{runner_id}/",
     response={
@@ -1122,11 +1100,16 @@ def _user_visible_processes(processes) -> list:
     response={200: list[ProcessOut], 403: ErrorOut, 404: ErrorOut},
     summary="List background processes",
 )
-async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
-    """List background processes of a workspace (DB + live merge).
+async def list_processes(
+    request: HttpRequest, workspace_id: uuid.UUID, live: bool = False
+):
+    """List background processes, using heartbeat-reconciled DB state by default.
 
-    Users see all persistent processes plus running temp processes;
-    finished temps stay in the DB but are hidden here.
+    The runner heartbeat updates process state every 15 seconds, so a normal
+    listing may reflect state up to one heartbeat interval ago. Pass
+    ``?live=true`` to force a runner reconciliation (for explicit refreshes).
+    Users see all persistent processes plus running temp processes; finished
+    temps stay in the DB but are hidden here.
     """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
@@ -1138,7 +1121,7 @@ async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        processes = await service.list_processes(workspace_id)
+        processes = await service.list_processes(workspace_id, live=live)
         visible = _user_visible_processes(processes)
         return 200, [_process_to_out(process) for process in visible]
     except NotFoundError as e:

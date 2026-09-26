@@ -224,6 +224,19 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await service.start_background_process(ws_id, "p-empty", "   ")
 
+    async def test_heartbeat_skips_process_probes_for_stopped_workspace(self) -> None:
+        """A stopped runtime is definitive; process liveness probes are redundant."""
+        service, runtime, ws_id = _service_with_workspace()
+        await service.start_background_process(ws_id, "p-stopped", "sleep 5")
+        service._cache[ws_id].status = "exited"
+        runtime.exec_command_wait.reset_mock()
+
+        payload = await service.get_workspace_heartbeat_statuses()
+
+        entry = next(item for item in payload if item["workspace_id"] == str(ws_id))
+        self.assertEqual(entry["processes"], [])
+        runtime.exec_command_wait.assert_not_awaited()
+
     async def test_heartbeat_includes_processes(self) -> None:
         service, _runtime, ws_id = _service_with_workspace()
         await service.start_background_process(ws_id, "p-hb", "sleep 5")

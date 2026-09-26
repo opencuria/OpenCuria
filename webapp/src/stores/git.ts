@@ -427,6 +427,12 @@ export const useGitStore = defineStore('git', () => {
   let visibilityListener: (() => void) | null = null
   /** Guards overlapping ensureDetails calls per repo path. */
   const detailsInFlight = new Set<string>()
+  /** Poll lifecycle token invalidates late responses after polling is stopped. */
+  let pollingGeneration = 0
+  /** Guards overlapping selected-details polling requests per request generation. */
+  const detailsPollInFlight = new Set<string>()
+  /** Guards one silent summaries poll at a time, including across restarts. */
+  let summaryPollInFlight = false
 
   // -- getters ------------------------------------------------------------------
 
@@ -894,7 +900,7 @@ export const useGitStore = defineStore('git', () => {
     }
   }
 
-  async function initialize(id: string): Promise<void> {
+  async function initialize(id: string, options?: { withDetails?: boolean }): Promise<void> {
     loadGen += 1
     detailsInFlight.clear()
     workspaceId.value = id
@@ -917,10 +923,13 @@ export const useGitStore = defineStore('git', () => {
     historyLoading.value = false
     busyOperation.value = null
     error.value = null
-    await refresh()
+    await refresh({ withDetails: options?.withDetails })
   }
 
   function stopPolling(): void {
+    // Invalidate responses issued by the timers/visibility listener before
+    // clearing them; a late response must not mutate a hidden tab's cache.
+    pollingGeneration += 1
     if (summaryTimer !== null) {
       clearInterval(summaryTimer)
       summaryTimer = null
@@ -945,29 +954,32 @@ export const useGitStore = defineStore('git', () => {
     )
   }
 
-  /** Silent summaries-only refresh: details rows are never overwritten. */
-  function pollSummaries(): void {
-    if (!workspaceId.value || isRefreshInFlight() || busyOperation.value !== null) return
-    void refresh({ silent: true, withDetails: false })
-  }
-
   /** Silent reload of the selected repo's details (slow timer). */
-  async function pollDetails(): Promise<void> {
+  async function pollDetails(generation: number): Promise<void> {
     const wsId = workspaceId.value
-    if (!wsId || busyOperation.value !== null) return
+    if (generation !== pollingGeneration || !wsId || busyOperation.value !== null) return
     const selected = selectedSummary()
     if (!selected || !repoDetails.value[selected.path]) return
     const gen = loadGen
     const repoPath = selected.path
+    const requestKey = `${gen}:${wsId}:${repoPath}`
+    if (detailsPollInFlight.has(requestKey)) return
+    detailsPollInFlight.add(requestKey)
     try {
       const res = await getGitRepo(wsId, repoPath)
-      if (gen !== loadGen || workspaceId.value !== wsId) return
-      if (selectedSummary()?.path !== repoPath) return
+      if (
+        generation !== pollingGeneration ||
+        gen !== loadGen ||
+        workspaceId.value !== wsId ||
+        selectedSummary()?.path !== repoPath
+      ) return
       // Reload the snapshot but keep diff/commit caches: an open viewer
       // must not lose its hunks on a background refresh.
       applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
     } catch {
       // Silent polling keeps existing details visible.
+    } finally {
+      detailsPollInFlight.delete(requestKey)
     }
   }
 
@@ -975,27 +987,49 @@ export const useGitStore = defineStore('git', () => {
     return typeof document === 'undefined' || document.visibilityState !== 'hidden'
   }
 
+  async function pollSummaries(generation: number): Promise<void> {
+    if (generation !== pollingGeneration || !tabVisible() || summaryPollInFlight) return
+    const wsId = workspaceId.value
+    if (!wsId || isRefreshInFlight() || busyOperation.value !== null) return
+    const gen = loadGen
+    summaryPollInFlight = true
+    try {
+      const res = await getGitRepos(wsId)
+      if (
+        generation !== pollingGeneration || gen !== loadGen ||
+        workspaceId.value !== wsId
+      ) return
+      applyRepoSummaries((res.repos ?? []).map(normalizeRepoSummary))
+    } catch (e: unknown) {
+      if (generation !== pollingGeneration || gen !== loadGen || workspaceId.value !== wsId) return
+      // Silent polling keeps current data and only surfaces a first-load error.
+      if (repos.value.length === 0) error.value = errorMessage(e)
+    } finally {
+      summaryPollInFlight = false
+    }
+  }
+
   function startPolling(
     intervalMs: number = GIT_POLL_INTERVAL_MS,
     detailsIntervalMs: number = GIT_DETAILS_POLL_MS,
   ): void {
     if (summaryTimer !== null || detailsTimer !== null) return
+    const generation = ++pollingGeneration
     polling.value = true
     if (typeof document !== 'undefined') {
       visibilityListener = () => {
-        if (document.visibilityState === 'visible' && workspaceId.value) {
-          void refresh({ silent: true, withDetails: false })
+        if (generation === pollingGeneration && document.visibilityState === 'visible') {
+          pollSummaries(generation)
         }
       }
       document.addEventListener('visibilitychange', visibilityListener)
     }
     summaryTimer = setInterval(() => {
-      if (!tabVisible()) return
-      pollSummaries()
+      pollSummaries(generation)
     }, intervalMs)
     detailsTimer = setInterval(() => {
-      if (!tabVisible()) return
-      pollDetails()
+      if (generation !== pollingGeneration || !tabVisible()) return
+      void pollDetails(generation)
     }, detailsIntervalMs)
   }
 
