@@ -251,6 +251,32 @@ def test_build_converse_body_messages_tools_and_system() -> None:
     assert merged[-1] == {"text": "Thanks"}
 
 
+def test_build_converse_body_assistant_text_before_tool_use() -> None:
+    """Assistant text replays before toolUse (observed provider order)."""
+    adapter, _ = _adapter()
+    _, messages = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="assistant",
+                content="working on it",
+                tool_calls=[
+                    {
+                        "id": "tool-1",
+                        "name": "read",
+                        "arguments": '{"path":"a.txt"}',
+                    }
+                ],
+            )
+        ]
+    )
+    assert messages[0]["role"] == "assistant"
+    content = messages[0]["content"]
+    kinds = ["text" if "text" in block else "toolUse" for block in content]
+    assert kinds == ["text", "toolUse"]
+    assert content[0] == {"text": "working on it"}
+    assert content[1]["toolUse"]["toolUseId"] == "tool-1"
+
+
 def test_build_converse_body_thinking_budget_mapping() -> None:
     """Claude thinking uses effort budgets and bumps maxTokens above budget."""
     adapter, _ = _adapter()
@@ -326,10 +352,11 @@ async def test_chat_stream_text_reasoning_tool_usage_finish() -> None:
 
     assert deltas[0].text == "Hi"
     assert deltas[1].reasoning == "hmm"
-    tool_delta = next(d for d in deltas if d.tool_calls)
-    assert tool_delta.tool_calls[0]["id"] == "t1"
-    assert tool_delta.tool_calls[0]["name"] == "bash"
-    assert tool_delta.tool_calls[0]["arguments"] == '{"cmd":"ls"}'
+    tool_fragments = [call for d in deltas for call in d.tool_calls]
+    assert tool_fragments[0]["id"] == "t1"
+    assert tool_fragments[0]["name"] == "bash"
+    assert tool_fragments[0]["arguments"] == ""
+    assert tool_fragments[1]["arguments"] == '{"cmd":"ls"}'
     finish = deltas[-1]
     assert finish.finish_reason == "tool_calls"
     assert finish.usage is not None
@@ -646,14 +673,14 @@ async def test_chat_stream_parallel_tool_blocks_carry_index() -> None:
     deltas = await _collect(adapter)
 
     tool_deltas = [d for d in deltas if d.tool_calls]
-    assert len(tool_deltas) == 2
-    by_index = {d.tool_calls[0]["index"]: d.tool_calls[0] for d in tool_deltas}
-    assert by_index[1]["id"] == "t1"
-    assert by_index[1]["name"] == "bash"
-    assert by_index[1]["arguments"] == '{"cmd":"a"}'
-    assert by_index[2]["id"] == "t2"
-    assert by_index[2]["name"] == "read"
-    assert by_index[2]["arguments"] == '{"path":"b"}'
+    assert len(tool_deltas) == 4
+    assert [d.tool_calls[0]["index"] for d in tool_deltas] == [1, 2, 1, 2]
+    assert tool_deltas[0].tool_calls[0]["id"] == "t1"
+    assert tool_deltas[0].tool_calls[0]["name"] == "bash"
+    assert tool_deltas[1].tool_calls[0]["id"] == "t2"
+    assert tool_deltas[1].tool_calls[0]["name"] == "read"
+    assert tool_deltas[2].tool_calls[0]["arguments"] == '{"cmd":"a"}'
+    assert tool_deltas[3].tool_calls[0]["arguments"] == '{"path":"b"}'
 
 
 def test_tool_schema_projection_anyof_merges_properties() -> None:
@@ -914,3 +941,24 @@ def test_user_pdf_file_part_becomes_document_block() -> None:
     assert docs and docs[0]["format"] == "pdf"
     assert docs[0]["name"] == "doc.pdf"
     assert docs[0]["source"]["bytes"] == b"%PDF-data"
+
+async def test_chat_stream_tool_position_before_later_text() -> None:
+    """Converse block start anchors a tool before any following text block."""
+    events = [
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "before"}}},
+        {"contentBlockStart": {"contentBlockIndex": 1, "start": {
+            "toolUse": {"toolUseId": "call", "name": "read"}
+        }}},
+        {"contentBlockDelta": {"contentBlockIndex": 2, "delta": {"text": "after"}}},
+        {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {
+            "toolUse": {"input": "{}"}
+        }}},
+        {"contentBlockStop": {"contentBlockIndex": 1}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ]
+    adapter, _ = _adapter(session=_MockSession(events))
+    deltas = await _collect(adapter)
+    observed = ["text" if d.text else "tool" for d in deltas if d.text or d.tool_calls]
+    assert observed == ["text", "tool", "text", "tool"]
+    assert deltas[1].tool_calls[0]["id"] == "call"
+    assert deltas[3].tool_calls[0]["arguments"] == "{}"

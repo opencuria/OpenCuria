@@ -76,8 +76,33 @@ function isAgentBlockConnected(index: number): boolean {
 }
 
 const lastBlockIsText = computed(() => {
+  // Streaming cursor belongs on the trailing answer text. After idle the
+  // final text lives outside the card; while streaming the flat timeline
+  // still ends in that same text block.
   const last = blocks.value[blocks.value.length - 1]
-  return last?.kind === 'text'
+  if (last?.kind === 'text') return true
+  if (last?.kind === 'workedFor') {
+    return last.blocks[last.blocks.length - 1]?.kind === 'text'
+  }
+  return false
+})
+
+/** Cursor offset inside the flat list or inside the finished card. */
+const streamingCursor = computed(() => {
+  if (props.streaming !== true || !lastBlockIsText.value) return null
+  const lastIndex = blocks.value.length - 1
+  const last = blocks.value[lastIndex]
+  if (last?.kind === 'workedFor') {
+    const inner = last.blocks.length - 1
+    // While streaming the flat timeline ends in text; after idle wraps it
+    // the cursor stays on that same trailing text inside the card. When
+    // agent plans split the timeline the cursor belongs on the trailing
+    // top-level text instead (inner stays null).
+    const innerLast = last.blocks[inner]
+    if (innerLast?.kind === 'text') return { topIndex: lastIndex, innerIndex: inner }
+    return null
+  }
+  return { topIndex: lastIndex, innerIndex: null as number | null }
 })
 
 /** Thinking only in idle gaps: busy turn, no live tool/subtask or agent step. */
@@ -112,17 +137,24 @@ onMounted(async () => {
   }
 })
 
-function blockKey(index: number): string {
-  const block = blocks.value[index]
+function blockKey(block: MessageRenderBlock, index: number): string {
   if (!block) return `block-${index}`
   if (block.kind === 'group') {
     return `group-${block.parts[0]?.id ?? index}`
   }
   if (block.kind === 'workedFor') {
+    // Finished card identity follows the message turn plus its span: one
+    // stable node across streaming→idle, no collisions between slices, and
+    // trailing text/cursor never steal the collapsed card's key.
     const first = block.blocks[0]
-    if (!first) return `workedFor-${index}`
-    if (first.kind === 'group') return `workedFor-${first.parts[0]?.id ?? index}`
-    return `workedFor-${first.part.id}`
+    const last = block.blocks[block.blocks.length - 1]
+    const firstId =
+      !first || first.kind === 'group'
+        ? ((first as { parts?: { id: string }[] } | undefined)?.parts?.[0]?.id ?? '')
+        : first.part.id
+    const lastId =
+      !last || last.kind === 'group' ? '' : (last as { part: { id: string } }).part.id
+    return `workedFor-${props.message.id}-${firstId}-${lastId || index}`
   }
   if (block.kind === 'compaction') {
     return `compaction-${block.part.id}`
@@ -306,7 +338,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         v-if="blocks.length"
         class="flex flex-col gap-2 [&>[data-block-kind=workedFor]]:-mb-0.5"
       >
-        <template v-for="(block, index) in blocks" :key="blockKey(index)">
+        <template v-for="(block, index) in blocks" :key="blockKey(block, index)">
           <div
             v-if="block.kind === 'workedFor'"
             data-block-kind="workedFor"
@@ -314,6 +346,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
             <HarnessWorkedFor :elapsed-label="elapsedLabel">
               <HarnessBlockList
                 :blocks="block.blocks"
+                :show-streaming-cursor="Boolean(streamingCursor && streamingCursor.topIndex === index && streamingCursor.innerIndex !== null)"
                 :child-session-ids="childSessionIds"
                 :models="models ?? catalog"
                 @open-subtask="emit('openSubtask', $event)"
@@ -338,7 +371,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           <HarnessBlockList
             v-else
             :blocks="asRenderBlocks(block)"
-            :show-streaming-cursor="Boolean(streaming && lastBlockIsText && index === blocks.length - 1)"
+            :show-streaming-cursor="Boolean(streamingCursor && streamingCursor.topIndex === index && streamingCursor.innerIndex === null)"
             :child-session-ids="childSessionIds"
             :models="models ?? catalog"
             @open-subtask="emit('openSubtask', $event)"

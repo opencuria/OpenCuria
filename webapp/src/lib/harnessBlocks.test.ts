@@ -388,7 +388,7 @@ describe('buildRenderBlocks', () => {
     expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
   })
 
-  it('wraps an answered question into the workedFor shell', () => {
+  it('wraps an answered question and its leading text into the workedFor shell', () => {
     const parts = [
       makePart('text', { id: 't1', output: 'Hello' }),
       makePart('tool', {
@@ -401,10 +401,10 @@ describe('buildRenderBlocks', () => {
     ]
 
     const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
-    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'workedFor', 'text'])
-    const shell = wrapped[1]
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
     if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(shell.blocks.map((block) => block.kind)).toEqual(['card'])
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'card'])
   })
 })
 
@@ -428,7 +428,7 @@ describe('question helpers', () => {
 })
 
 describe('wrapFinishedWork', () => {
-  it('scoops tools, thoughts, and patches into one workedFor shell', () => {
+  it('wraps the initial text plus tools, thoughts, and patches into one workedFor shell', () => {
     const parts = [
       makePart('text', { id: 't1', output: 'Hello' }),
       makePart('tool', { id: 'tool-1', tool: 'read' }),
@@ -439,41 +439,150 @@ describe('wrapFinishedWork', () => {
     ]
 
     const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
-    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'workedFor', 'text'])
-    const shell = wrapped[1]
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
     if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(shell.blocks.map((block) => block.kind)).toEqual(['group', 'single', 'card'])
-  })
-
-  it('leaves compaction outside the workedFor shell', () => {
-    const parts = [
-      makePart('tool', { id: 'tool-1', tool: 'read' }),
-      makePart('compaction', { id: 'compact-1', output: 'summary' }),
-      makePart('tool', { id: 'tool-2', tool: 'grep' }),
-    ]
-
-    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
-    expect(wrapped.map((block) => block.kind)).toEqual([
-      'workedFor',
-      'compaction',
+    expect(shell.blocks.map((block) => block.kind)).toEqual([
+      'text',
+      'group',
+      'single',
+      'card',
     ])
-    const shell = wrapped[0]
-    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'single'])
   })
 
-  it('leaves agent steps outside the workedFor shell', () => {
+  it('keeps interleaved text->tool->text->tool->text in strict chronological order inside one shell', () => {
     const parts = [
-      makePart('tool', { id: 'tool-1', tool: 'read' }),
-      makePart('agent', { id: 'agent-1', output: 'plan' }),
-      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('text', { id: 't1', output: 'Looking' }),
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('text', { id: 't2', output: 'mid note' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+      makePart('text', { id: 't3', output: 'Done' }),
     ]
 
     const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
-    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'agent'])
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
     const shell = wrapped[0]
     if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'single'])
+    // Never hoist tools above the intervening text: exact flat order stays.
+    expect(shell.blocks.map((block) => block.kind)).toEqual([
+      'text',
+      'single',
+      'text',
+      'single',
+    ])
+    expect(
+      shell.blocks.map((block) => (block.kind === 'text' || block.kind === 'single' ? block.part.id : '')),
+    ).toEqual(['t1', 'tool-1', 't2', 'tool-2'])
+  })
+
+  it('keeps subagent and patch adjacency inside one shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Working' }),
+      makePart('subtask', { id: 'sub-1', title: 'Explore renderer' }),
+      makePart('tool', { id: 'read-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('patch', {
+        id: 'patch-1',
+        call_id: 'c-other',
+        title: 'Patch b.ts',
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'card', 'single', 'card'])
+  })
+
+  it('keeps error and answered question cards inside the shell in order', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Trying' }),
+      makePart('tool', {
+        id: 'tool-err',
+        tool: 'bash',
+        state: 'error',
+        title: '$ false',
+        output: 'boom',
+      }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        title: 'Which mode?',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'single', 'card'])
+  })
+
+  it('keeps a genuine leading compaction divider outside while grouping interleaved compaction inside', () => {
+    const leading = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('compaction', { id: 'compact-0', output: 'older summary' }),
+        makePart('text', { id: 't1', output: 'Hello' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('text', { id: 't2', output: 'Done' }),
+      ]),
+    )
+    expect(leading.map((block) => block.kind)).toEqual(['compaction', 'workedFor', 'text'])
+    const leadingShell = leading[1]
+    if (leadingShell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(leadingShell.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+
+    // Interleaved compaction between tool uses moves inside to preserve
+    // chronology instead of splitting the card.
+    const interleaved = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('compaction', { id: 'compact-1', output: 'summary' }),
+        makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      ]),
+    )
+    expect(interleaved.map((block) => block.kind)).toEqual(['workedFor'])
+    const shell = interleaved[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
+  })
+
+  it('keeps leading agent plans outside while interleaved plans stay chronological outside', () => {
+    const leading = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('agent', { id: 'agent-0', output: 'plan zero' }),
+        makePart('text', { id: 't1', output: 'Hello' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('text', { id: 't2', output: 'Done' }),
+      ]),
+    )
+    expect(leading.map((block) => block.kind)).toEqual(['agent', 'workedFor', 'text'])
+    const leadingShell = leading[1]
+    if (leadingShell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(leadingShell.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+
+    // Agent-S plans are the computer-use timeline: an interleaved plan
+    // stays a visible step and each response slice keeps one chronological
+    // card instead of hoisting tools above the plan.
+    const interleaved = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('agent', { id: 'agent-1', output: 'plan' }),
+        makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      ]),
+    )
+    expect(interleaved.map((block) => block.kind)).toEqual(['workedFor', 'agent', 'workedFor'])
+    const first = interleaved[0]
+    const second = interleaved[2]
+    if (first?.kind !== 'workedFor' || second?.kind !== 'workedFor') {
+      throw new Error('expected workedFor shells')
+    }
+    expect(first.blocks.map((block) => block.kind)).toEqual(['single'])
+    expect(second.blocks.map((block) => block.kind)).toEqual(['single'])
   })
 
   it('does not wrap an agent-only timeline', () => {

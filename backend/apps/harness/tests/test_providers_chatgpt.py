@@ -706,6 +706,25 @@ async def test_function_call_replay_authoritative_arguments() -> None:
     assert calls[0]["arguments"] == '{"p": "a"}'
 
 
+def test_assistant_text_with_function_call_replays_text_first() -> None:
+    """Assistant text plus function_call replays text before the call."""
+    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="assistant",
+                content="doing",
+                tool_calls=[{"id": "call_9", "name": "read", "arguments": '{"p":"a"}'}],
+            )
+        ]
+    )
+    assert items[0]["type"] == "message"
+    assert items[0]["role"] == "assistant"
+    assert items[0]["content"] == [{"type": "output_text", "text": "doing"}]
+    assert items[1]["type"] == "function_call"
+    assert items[1]["call_id"] == "call_9"
+
+
 def test_missing_call_id_gets_best_effort_id() -> None:
     """tool_call_id-less tool roles never send an empty call_id."""
     adapter = ChatGPTAdapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))

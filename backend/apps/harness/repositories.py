@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from .models import (
@@ -593,6 +595,15 @@ class HarnessMessageRepository:
     model = HarnessMessage
 
     @staticmethod
+    def _next_message_position(session_id: uuid.UUID) -> int:
+        """Return max(position)+1 for *session_id* (0 when empty)."""
+        row = HarnessMessage.objects.filter(session_id=session_id).aggregate(
+            top=Max("position")
+        )
+        top = row.get("top")
+        return int(top) + 1 if top is not None else 0
+
+    @staticmethod
     def create(
         *,
         session_id: uuid.UUID,
@@ -603,16 +614,35 @@ class HarnessMessageRepository:
         provider: str = "",
         skill_ids: list[str] | None = None,
     ) -> HarnessMessage:
-        """Create a user or assistant message shell."""
-        message = HarnessMessage.objects.create(
-            session_id=session_id,
-            role=role,
-            content=content or "",
-            model=model or "",
-            reasoning_effort=reasoning_effort or "",
-            provider=provider or "",
-            skill_ids=list(skill_ids or []),
-        )
+        """Create a user or assistant message shell.
+
+        ``position`` is allocated as ``max(position)+1`` inside a
+        transaction; on unique-constraint races the allocation retries
+        so concurrent writers never collide (SQLite-safe fallback).
+        """
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                with transaction.atomic():
+                    position = HarnessMessageRepository._next_message_position(
+                        session_id
+                    )
+                    message = HarnessMessage.objects.create(
+                        session_id=session_id,
+                        role=role,
+                        content=content or "",
+                        model=model or "",
+                        reasoning_effort=reasoning_effort or "",
+                        provider=provider or "",
+                        skill_ids=list(skill_ids or []),
+                        position=position,
+                    )
+                break
+            except IntegrityError:
+                if attempts >= 5:
+                    raise
+                continue
         if role == HarnessMessageRole.USER:
             HarnessSessionRepository.touch_last_message_at(
                 session_id, when=message.created_at
@@ -621,9 +651,11 @@ class HarnessMessageRepository:
 
     @staticmethod
     def list_for_session(session_id: uuid.UUID) -> list[HarnessMessage]:
-        """Return all messages of a session ordered by creation."""
+        """Return all messages of a session in timeline order."""
         return list(
-            HarnessMessage.objects.filter(session_id=session_id).order_by("created_at")
+            HarnessMessage.objects.filter(session_id=session_id).order_by(
+                "position", "created_at", "id"
+            )
         )
 
     @staticmethod
@@ -633,10 +665,10 @@ class HarnessMessageRepository:
 
     @staticmethod
     def list_ids_for_session(session_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return message IDs of a session in creation order."""
+        """Return message IDs of a session in timeline order."""
         return list(
             HarnessMessage.objects.filter(session_id=session_id)
-            .order_by("created_at", "id")
+            .order_by("position", "created_at", "id")
             .values_list("id", flat=True)
         )
 
@@ -646,12 +678,12 @@ class HarnessMessageRepository:
     ) -> list[uuid.UUID]:
         """Delete messages from *from_message_id* onward (inclusive).
 
-        Ordering is ``created_at`` (ties broken by ``id``). Related
-        parts are removed via CASCADE. Returns deleted message IDs.
+        Ordering is ``position`` (ties broken by ``created_at``, ``id``).
+        Related parts are removed via CASCADE. Returns deleted message IDs.
         """
         ordered = list(
             HarnessMessage.objects.filter(session_id=session_id).order_by(
-                "created_at", "id"
+                "position", "created_at", "id"
             )
         )
         index = next(
@@ -680,11 +712,13 @@ class HarnessMessageRepository:
         history is copied. New UUIDs are generated; parts are copied
         per message with ``meta.tail_start_id`` remapped via the id
         map (dropped when outside the prefix) and subtask
-        ``child_session_id`` cleared. Returns the message id map.
+        ``child_session_id`` cleared. Positions are reallocated
+        sequentially via repo ``create`` so the fork keeps chronological
+        order. Returns the message id map.
         """
         ordered = list(
             HarnessMessage.objects.filter(session_id=src_session_id).order_by(
-                "created_at", "id"
+                "position", "created_at", "id"
             )
         )
         if cutoff_message_id is not None:
@@ -695,8 +729,10 @@ class HarnessMessageRepository:
             if index is not None:
                 ordered = ordered[:index]
         id_map: dict[uuid.UUID, uuid.UUID] = {}
-        for src in ordered:
-            dst = HarnessMessage.objects.create(
+        # Allocate message positions sequentially in chronological order.
+        snapshots: list[HarnessMessage] = list(ordered)
+        for src in snapshots:
+            dst = HarnessMessageRepository.create(
                 session_id=dst_session_id,
                 role=src.role,
                 content=src.content or "",
@@ -704,6 +740,8 @@ class HarnessMessageRepository:
                 reasoning_effort=src.reasoning_effort or "",
                 provider=src.provider or "",
                 skill_ids=list(getattr(src, "skill_ids", None) or []),
+            )
+            HarnessMessage.objects.filter(id=dst.id).update(
                 cost=float(src.cost or 0.0),
                 tokens=dict(src.tokens or {}),
                 finish=src.finish or "",
@@ -711,12 +749,13 @@ class HarnessMessageRepository:
                 notice_dismissed_at=src.notice_dismissed_at,
                 completed_at=src.completed_at,
             )
+            dst.refresh_from_db()
             id_map[src.id] = dst.id
-        for src in ordered:
+        for src in snapshots:
             dst_id = id_map[src.id]
             parts = list(
                 HarnessPart.objects.filter(message_id=src.id).order_by(
-                    "created_at", "id"
+                    "position", "created_at", "id"
                 )
             )
             for part in parts:
@@ -733,7 +772,7 @@ class HarnessMessageRepository:
                         meta.pop("tail_start_id", None)
                 if part.type == "subtask":
                     meta["child_session_id"] = ""
-                HarnessPart.objects.create(
+                HarnessPartRepository.create(
                     message_id=dst_id,
                     type=part.type,
                     state=part.state,
@@ -846,6 +885,15 @@ class HarnessPartRepository:
     model = HarnessPart
 
     @staticmethod
+    def _next_part_position(message_id: uuid.UUID) -> int:
+        """Return max(position)+1 for *message_id* (0 when empty)."""
+        row = HarnessPart.objects.filter(message_id=message_id).aggregate(
+            top=Max("position")
+        )
+        top = row.get("top")
+        return int(top) + 1 if top is not None else 0
+
+    @staticmethod
     def create(
         *,
         message_id: uuid.UUID,
@@ -857,32 +905,55 @@ class HarnessPartRepository:
         output: str = "",
         meta: dict | None = None,
     ) -> HarnessPart:
-        """Create a streamed part shell for an assistant message."""
-        return HarnessPart.objects.create(
-            message_id=message_id,
-            type=type,
-            state=state,
-            call_id=call_id or "",
-            title=title or "",
-            input=dict(input or {}),
-            output=output or "",
-            meta=dict(meta or {}),
-        )
+        """Create a streamed part shell for an assistant message.
+
+        ``position`` is allocated as ``max(position)+1`` inside a
+        transaction; on unique-constraint races the allocation retries
+        so concurrent writers never collide (SQLite-safe fallback).
+        """
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                with transaction.atomic():
+                    position = HarnessPartRepository._next_part_position(message_id)
+                    return HarnessPart.objects.create(
+                        message_id=message_id,
+                        type=type,
+                        state=state,
+                        call_id=call_id or "",
+                        title=title or "",
+                        input=dict(input or {}),
+                        output=output or "",
+                        meta=dict(meta or {}),
+                        position=position,
+                    )
+            except IntegrityError:
+                if attempts >= 5:
+                    raise
+                continue
 
     @staticmethod
     def list_for_session(session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all parts of a session ordered by creation."""
+        """Return all parts of a session in timeline order."""
         return list(
             HarnessPart.objects.filter(message__session_id=session_id).order_by(
-                "created_at"
+                "message__position",
+                "message__created_at",
+                "message__id",
+                "position",
+                "created_at",
+                "id",
             )
         )
 
     @staticmethod
     def list_for_message(message_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all parts of one message ordered by creation."""
+        """Return all parts of one message in timeline order."""
         return list(
-            HarnessPart.objects.filter(message_id=message_id).order_by("created_at")
+            HarnessPart.objects.filter(message_id=message_id).order_by(
+                "position", "created_at", "id"
+            )
         )
 
     @staticmethod

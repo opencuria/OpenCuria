@@ -226,6 +226,8 @@ class HarnessMessageOut(Schema):
     error: str
     skill_ids: list[str] = []
     notice_dismissed_at: datetime | None = None
+    position: int = 0
+    message_position: int = 0
     created_at: datetime
     completed_at: datetime | None = None
 
@@ -242,6 +244,8 @@ class HarnessPartOut(Schema):
     output: str
     input: dict = {}
     meta: dict = {}
+    position: int = 0
+    message_position: int = 0
 
 
 class HarnessTodoOut(Schema):
@@ -1416,6 +1420,10 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
         _owned_workspace(request, org_id, session.workspace_id)
         messages = service.list_messages(session.id)
         parts = service.list_parts(session.id)
+        message_positions = {
+            str(message.id): int(getattr(message, "position", 0) or 0)
+            for message in messages
+        }
         parts_by_message: dict[str, list] = {}
         for part in parts:
             parts_by_message.setdefault(str(part.message_id), []).append(
@@ -1429,6 +1437,10 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                     output=part.output or "",
                     input=dict(part.input or {}),
                     meta=dict(part.meta or {}),
+                    position=int(getattr(part, "position", 0) or 0),
+                    message_position=message_positions.get(
+                        str(part.message_id), 0
+                    ),
                 )
             )
         return 200, {
@@ -1452,6 +1464,10 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                             for skill_id in (message.skill_ids or [])
                         ],
                         notice_dismissed_at=message.notice_dismissed_at,
+                        position=int(getattr(message, "position", 0) or 0),
+                        message_position=int(
+                            getattr(message, "position", 0) or 0
+                        ),
                         created_at=message.created_at,
                         completed_at=message.completed_at,
                     ).model_dump(mode="json"),

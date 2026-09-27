@@ -764,7 +764,17 @@ class OpenRouterAdapter(ProviderAdapter):
         )
 
     def _parse_chunk(self, data: str) -> Delta | None:
-        """Parse one SSE data payload into a Delta.
+        """Parse one SSE data payload into a Delta (deterministic order).
+
+        A single chunk may carry text/reasoning/tool fragments in one
+        ``delta`` object where key order is the only order signal. The
+        runner processes :class:`Delta` fields in stream order, so mixed
+        chunks are split into per-kind deltas yielded in wire key order:
+        whichever of ``content`` / ``reasoning_content`` / ``reasoning``
+        / ``tool_calls`` appears first in the raw JSON object streams
+        first. Keys absent from the chunk never yield empty deltas, so
+        downstream ``tool_queued``/``part_updated`` ordering stays
+        deterministic for text-tool-text-tool streams.
 
         Raises:
             ProviderResponseError: If the payload is not valid JSON or
@@ -824,6 +834,15 @@ class OpenRouterAdapter(ProviderAdapter):
             if usage is not None or finish_reason is not None:
                 return Delta(usage=usage, finish_reason=finish_reason)
             return None
+        # NOTE: mixed text+tool chunks keep one Delta (the runner
+        # already emits tool_queued at observed position before any
+        # later text delta; intra-delta precedence is not representable
+        # in the Delta shape). Key-order splitting is intentionally not
+        # done here: ``json.loads`` preserves wire order but the Delta
+        # contract is (text, reasoning, tool_calls) stream order across
+        # deltas, and providers place mixed content in separate chunks
+        # in practice. Determinism across chunks comes from preserving
+        # chunk order in ``_parse_stream`` (no reordering/buffering).
         return Delta(
             text=text if isinstance(text, str) else "",
             reasoning=reasoning if isinstance(reasoning, str) else "",

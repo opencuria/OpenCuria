@@ -43,8 +43,12 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureAssistantMessage,
+  ensureBusyAssistant,
   mergeBusyFetchedMessages,
+  routeAssistantMessage,
   settleOpenStreamParts,
+  sortHarnessMessages,
+  sortHarnessParts,
 } from '@/lib/harnessReducer'
 import {
   collectAncestorSessions,
@@ -73,6 +77,10 @@ export const useHarnessStore = defineStore('harness', () => {
   /** Session currently open in the chat panel; cleared when the panel unmounts. */
   const viewingSessionId = ref<string | null>(null)
   const loading = ref(false)
+  /** True once the initial workspace session list has resolved. */
+  const sessionsLoaded = ref(false)
+  /** Workspace whose initial session load completed (guards skeleton flash). */
+  const sessionsLoadedWorkspace = ref<string | null>(null)
   const error = ref<string | null>(null)
   // Composer selection; empty means "no selection yet" (placeholder).
   const modelInput = ref('')
@@ -178,6 +186,10 @@ export const useHarnessStore = defineStore('harness', () => {
       if (isWorkspaceSwitch) {
         sessions.value = []
         activeSessionId.value = null
+        // A new workspace needs its own initial load; the chat must not
+        // flash the previous workspace's skeleton state.
+        sessionsLoaded.value = false
+        sessionsLoadedWorkspace.value = null
       }
     }
     let flight = sessionFetches.get(workspaceId)
@@ -202,10 +214,29 @@ export const useHarnessStore = defineStore('harness', () => {
       sessionFetches.set(workspaceId, flight)
     }
     const generation = sessionsGeneration
-    loading.value = true
+    // `loading` gates the chat skeleton: only the very first workspace
+    // load may show it. Same-workspace refreshes (e.g. subagent start
+    // calling fetchSessions) must never hide rendered chat behind
+    // skeletons.
+    const isInitialLoad =
+      sessionsLoadedWorkspace.value !== workspaceId && messagesForAnySessionEmpty()
+    if (isInitialLoad) loading.value = true
     error.value = null
     await flight
-    if (generation === sessionsGeneration) loading.value = false
+    if (generation === sessionsGeneration) {
+      if (activeSessionsWorkspace === workspaceId) {
+        sessionsLoaded.value = true
+        sessionsLoadedWorkspace.value = workspaceId
+      }
+      loading.value = false
+    }
+  }
+
+  function messagesForAnySessionEmpty(): boolean {
+    if (activeSessionId.value) {
+      return (messagesBySession.value[activeSessionId.value] ?? []).length === 0
+    }
+    return Object.keys(messagesBySession.value).length === 0
   }
 
   function setActiveSession(sessionId: string | null): void {
@@ -266,11 +297,13 @@ export const useHarnessStore = defineStore('harness', () => {
         try {
           const response = await listHarnessParts(sessionId)
           if (partGenerations.get(sessionId) !== generation) return
-          const incoming = response.messages.map((message) => ({
-            ...message,
-            session_id: sessionId,
-            parts: (message.parts ?? []).map(hydrateHarnessPart),
-          }))
+          const incoming = sortHarnessMessages(
+            response.messages.map((message) => ({
+              ...message,
+              session_id: sessionId,
+              parts: (message.parts ?? []).map(hydrateHarnessPart),
+            })),
+          )
           const session = sessions.value.find((item) => item.id === sessionId)
           messagesBySession.value[sessionId] = session?.status === 'busy'
             ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
@@ -306,6 +339,19 @@ export const useHarnessStore = defineStore('harness', () => {
       partFetches.set(key, flight)
     }
     await flight
+  }
+
+  /**
+   * The idle event needs a snapshot taken *after* the run completed. If an
+   * earlier busy fetch is still in flight, awaiting the deduplicated request
+   * would only replay its stale snapshot and leave the final answer missing.
+   */
+  async function refreshPartsAfterIdle(sessionId: string): Promise<void> {
+    const ongoing = [...partFetches.entries()]
+      .filter(([key]) => key.startsWith(`${sessionId}:`))
+      .map(([, flight]) => flight)
+    if (ongoing.length) await Promise.all(ongoing)
+    await fetchParts(sessionId)
   }
 
   async function fetchTodos(sessionId: string): Promise<void> {
@@ -385,15 +431,10 @@ export const useHarnessStore = defineStore('harness', () => {
         reasoning_effort: options.reasoningEffort,
       })
       upsertSession(session)
-      messagesFor(sessionId).push({
-        id: `local-user-${sessionId}-${Date.now()}`,
-        session_id: sessionId,
-        role: 'user',
-        content: prompt,
-        skill_ids: [...(options.skillIds ?? [])],
-        parts: [],
-        created_at: new Date().toISOString(),
-      })
+      // The send endpoint persists both the user and the fresh assistant
+      // before returning. Fetch their authoritative ids/positions instead
+      // of inventing a local user that can collide with an identical prompt.
+      await fetchParts(sessionId)
       recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
@@ -528,16 +569,48 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // --- Real-time reducers (called from socket handlers) ---
 
+  /**
+   * Route a live delta to its per-turn assistant shell.
+   *
+   * Stale-event guard: a `messageId` that matches a *completed* older turn
+   * is dropped (it must never attach to the latest turn); a `messageId`
+   * that matches nothing while a fresh empty assistant already streams
+   * is also dropped when it looks older (prevents resurrection). The
+   * reducer itself owns the same-turn routing via `routeAssistantMessage`.
+   */
+  function resolveLiveMessage(
+    sessionId: string,
+    messageId?: string,
+  ): { messages: HarnessMessage[]; message: HarnessMessage } | null {
+    const messages = messagesFor(sessionId)
+    if (!messageId) {
+      return { messages, message: ensureAssistantMessage(messages, sessionId) }
+    }
+    const existing = messages.find((m) => m.id === messageId)
+    if (existing) {
+      if (existing.role !== 'assistant') return null
+      if (existing.completed_at != null) return null
+      return { messages, message: existing }
+    }
+    // An unknown server id is a fresh turn (e.g. busy arrived late after a
+    // missed idle event). Only a known completed id is provably stale.
+    return { messages, message: routeAssistantMessage(messages, sessionId, messageId) }
+  }
+
   function handlePartUpdated(
     sessionId: string,
     delta: HarnessPartDelta,
-    opts: { step?: number; partId?: string } = {},
+    opts: { step?: number; partId?: string; partPosition?: number; messageId?: string } = {},
   ): void {
-    applyPartDelta(messagesFor(sessionId), sessionId, delta, {
+    const routed = resolveLiveMessage(sessionId, opts.messageId)
+    if (!routed) return
+    applyPartDelta(routed.messages, sessionId, delta, {
       step: opts.step,
       partId: opts.partId,
+      partPosition: opts.partPosition,
+      messageId: opts.messageId,
     })
-    stampRunModel(sessionId)
+    stampRunModel(sessionId, opts.messageId)
   }
 
   function handleTodoUpdated(sessionId: string, todos: HarnessTodo[]): void {
@@ -554,24 +627,29 @@ export const useHarnessStore = defineStore('harness', () => {
       agent: string
       description: string
       part_id?: string
+      part_position?: number
       child_session_id?: string
       model?: string
       reasoning_effort?: string
+      message_id?: string
     },
   ): void {
-    const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
-    applySubtaskStarted(message, sessionId, {
+    const routed = resolveLiveMessage(sessionId, event.message_id)
+    if (!routed) return
+    applySubtaskStarted(routed.message, sessionId, {
       workspace_id: '',
       session_id: sessionId,
       subtask_id: event.subtask_id,
       agent: event.agent,
       description: event.description,
       part_id: event.part_id,
+      part_position: event.part_position,
       child_session_id: event.child_session_id,
       model: event.model,
       reasoning_effort: event.reasoning_effort,
     })
-    stampRunModel(sessionId)
+    routed.message.parts = sortHarnessParts(routed.message.parts)
+    stampRunModel(sessionId, event.message_id)
   }
 
   function handleSubtaskFinished(
@@ -582,10 +660,12 @@ export const useHarnessStore = defineStore('harness', () => {
       status: string
       summary: string
       child_session_id?: string
+      message_id?: string
     },
   ): void {
-    const message = ensureAssistantMessage(messagesFor(sessionId), sessionId)
-    applySubtaskFinished(message, {
+    const routed = resolveLiveMessage(sessionId, event.message_id)
+    if (!routed) return
+    applySubtaskFinished(routed.message, {
       workspace_id: '',
       session_id: sessionId,
       subtask_id: event.subtask_id,
@@ -598,12 +678,16 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function stampRunModel(
     sessionId: string,
+    messageId?: string,
     extras?: { model?: string; reasoning_effort?: string },
   ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
     const messages = messagesBySession.value[sessionId]
-    const last = messages?.[messages.length - 1]
-    if (!last || last.role !== 'assistant' || last.completed_at != null) return
+    const target = messageId
+      ? messages?.find((m) => m.id === messageId && m.role === 'assistant')
+      : messages?.[messages.length - 1]
+    const last = target?.role === 'assistant' ? target : undefined
+    if (!last || last.completed_at != null) return
     const model = extras?.model || session?.model || ''
     const effort =
       extras?.reasoning_effort !== undefined
@@ -613,17 +697,20 @@ export const useHarnessStore = defineStore('harness', () => {
     if (!last.reasoning_effort && effort) last.reasoning_effort = effort
   }
 
-  function stampAssistantCompleted(sessionId: string): void {
+  function stampAssistantCompleted(sessionId: string, messageId?: string): void {
     const messages = messagesBySession.value[sessionId]
-    const last = messages?.[messages.length - 1]
-    if (!last || last.role !== 'assistant' || last.completed_at != null) return
+    const target = messageId
+      ? messages?.find((m) => m.id === messageId && m.role === 'assistant')
+      : messages?.[messages.length - 1]
+    const last = target?.role === 'assistant' ? target : undefined
+    if (!last || last.completed_at != null) return
     last.completed_at = new Date().toISOString()
   }
 
   function handleSessionStatus(
     sessionId: string,
     status: HarnessSession['status'],
-    extras?: { model?: string; reasoning_effort?: string },
+    extras?: { model?: string; reasoning_effort?: string; message_id?: string; user_message_id?: string },
   ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
@@ -633,9 +720,26 @@ export const useHarnessStore = defineStore('harness', () => {
         session.reasoning_effort = extras.reasoning_effort
       }
     }
-    stampRunModel(sessionId, extras)
+    if (status === 'busy') {
+      // Anchor the fresh turn before the first delta arrives: create the
+      // server-id assistant shell after the (possibly optimistic)
+      // follow-up user so deltas route to the new turn — never to the
+      // previous answer — and Thinking shows on the fresh empty turn.
+      if (extras?.message_id) {
+        ensureBusyAssistant(
+          messagesFor(sessionId),
+          sessionId,
+          extras.message_id,
+          extras.user_message_id,
+        )
+      }
+      stampRunModel(sessionId, extras?.message_id, extras)
+      if (session && !session.manual_unread) session.unread = false
+      return
+    }
+    stampRunModel(sessionId, extras?.message_id, extras)
     if (status === 'idle') {
-      stampAssistantCompleted(sessionId)
+      stampAssistantCompleted(sessionId, extras?.message_id)
       if (viewingSessionId.value === sessionId && !session?.manual_unread) {
         if (session) session.unread = true
         void markSessionRead(sessionId)
@@ -807,6 +911,8 @@ export const useHarnessStore = defineStore('harness', () => {
     activeSessionId.value = null
     viewingSessionId.value = null
     loading.value = false
+    sessionsLoaded.value = false
+    sessionsLoadedWorkspace.value = null
     error.value = null
     dismissedNoticeIds.value = {}
     agentConfigs.value = []
@@ -823,6 +929,8 @@ export const useHarnessStore = defineStore('harness', () => {
     activeSessionId,
     viewingSessionId,
     loading,
+    sessionsLoaded,
+    sessionsLoadedWorkspace,
     error,
     modelInput,
     effortInput,
@@ -844,6 +952,7 @@ export const useHarnessStore = defineStore('harness', () => {
     setViewingSession,
     markSessionRead,
     fetchParts,
+    refreshPartsAfterIdle,
     fetchTodos,
     createSession,
     sendMessage,

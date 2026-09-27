@@ -6,8 +6,15 @@
  * as standalone rows. Subtasks, patches, and answered questions stay as
  * top-level cards. Pending questions stay invisible (they live in the
  * composer sheet) and only appear as cards once answered.
- * After a turn finishes, wrapFinishedWork scoops work blocks into one
- * "Worked for" shell; text, compaction, and Agent-S plan steps stay outside.
+ * After a turn finishes, wrapFinishedWork wraps the flat chronological
+ * timeline into "Worked for" card(s) from the first response block
+ * (initial text/reasoning plus interleaved text/tools) through the last
+ * tool/subagent and its result/patch — tools are never hoisted above
+ * intervening text, and only trailing text after the last tool stays
+ * outside. Compaction dividers move inside to honor chronology unless
+ * they lead the turn before any response. Agent-S plans are the
+ * computer-use timeline and always stay visible outside; each response
+ * slice between plans keeps its own chronological card.
  */
 
 import type { HarnessPart, HarnessPartType } from '@/types/harness'
@@ -177,26 +184,74 @@ function isOuterWorkBlock(block: RenderBlock): boolean {
 }
 
 /**
- * Scoop every work block into one `workedFor` shell at the first work
- * position. Text, compaction, and agent steps stay in chronological
- * order around it so the computer-use timeline stays visible.
+ * Wrap the flat chronological timeline into "Worked for" card(s) from the
+ * first response block through the last work block, preserving strict
+ * chronological order (never hoist tools above intervening text).
+ *
+ * - No work → no card (text-only, agent-only, compaction-only stay flat).
+ * - Each card spans blocks[firstResponse .. lastWork] where firstResponse
+ *   is the first text/work response block and lastWork is the final
+ *   single/group/card (tool, reasoning, error, subtask/patch/question
+ *   card). Inner text/compaction between response blocks stays inside in
+ *   order; a leading compaction divider before any response stays outside.
+ * - Agent-S plans are the computer-use timeline and always stay visible
+ *   outside, so the timeline splits at each plan and every response slice
+ *   keeps its own chronological card. Only trailing blocks after the last
+ *   work (typically the final answer text) stay outside after the card.
  */
 export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
-  const work: RenderBlock[] = []
+  // Agent-S plans are the computer-use timeline: they always stay visible
+  // outside the collapsed card. Split the flat timeline at each plan and
+  // wrap every response slice (first response .. last work) separately so
+  // tools never hoist above intervening blocks, plans never hide inside
+  // the card, and order stays strictly chronological. Compaction dividers
+  // between response blocks move inside to honor chronology; a leading
+  // divider before any response text/work stays outside.
+  if (!blocks.some((block) => block.kind === 'agent')) {
+    return wrapWorkSlice(blocks)
+  }
   const top: MessageRenderBlock[] = []
-  let inserted = false
+  let slice: RenderBlock[] = []
+  function flushSlice(): void {
+    if (slice.length === 0) return
+    const wrapped = wrapWorkSlice(slice)
+    top.push(...wrapped)
+    slice = []
+  }
   for (const block of blocks) {
-    if (!isOuterWorkBlock(block)) {
+    if (block.kind === 'agent') {
+      flushSlice()
       top.push(block)
       continue
     }
-    work.push(block)
-    if (!inserted) {
-      top.push({ kind: 'workedFor', blocks: work })
-      inserted = true
+    slice.push(block)
+  }
+  flushSlice()
+  return top
+}
+
+/** Wrap one agent-free slice from its first response through its last work. */
+function wrapWorkSlice(blocks: RenderBlock[]): MessageRenderBlock[] {
+  let lastWork = -1
+  for (let index = 0; index < blocks.length; index += 1) {
+    if (isOuterWorkBlock(blocks[index]!)) lastWork = index
+  }
+  if (lastWork === -1) return blocks
+  let start = -1
+  for (let index = 0; index <= lastWork; index += 1) {
+    const block = blocks[index]!
+    if (block.kind === 'text' || isOuterWorkBlock(block)) {
+      start = index
+      break
     }
   }
-  return top
+  // Work exists but no text/work response precedes it (only leading
+  // compaction): wrap from the first work block itself.
+  if (start === -1) start = lastWork
+  const inner = blocks.slice(start, lastWork + 1)
+  if (inner.length === 0) return blocks
+  const shell: WorkedForRenderBlock = { kind: 'workedFor', blocks: inner }
+  return [...blocks.slice(0, start), shell, ...blocks.slice(lastWork + 1)]
 }
 
 /** Build timeline blocks, wrapping work after the assistant turn is idle. */

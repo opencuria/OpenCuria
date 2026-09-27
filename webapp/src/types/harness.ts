@@ -39,6 +39,8 @@ export interface HarnessPart {
   input?: Record<string, unknown>
   output: string
   meta?: Record<string, unknown>
+  /** Per-message chronological order (0-based, gap-tolerant). */
+  position?: number
 }
 
 /** One user prompt or assistant answer inside a harness session. */
@@ -58,6 +60,10 @@ export interface HarnessMessage {
   /** ISO timestamp when the user dismissed the stopped/failed notice. */
   notice_dismissed_at?: string | null
   parts: HarnessPart[]
+  /** Per-session chronological order (0-based, gap-tolerant). */
+  position?: number
+  /** Alias for `position` on REST snapshots (backend `message_position`). */
+  message_position?: number
   created_at?: string
   completed_at?: string | null
 }
@@ -239,6 +245,17 @@ export interface HarnessPartDelta {
   /** Safe plan summary riding the live `agent` event (untrusted transport). */
   agent_meta?: Partial<HarnessAgentMeta>
   compaction?: boolean
+  /**
+   * Live tool lifecycle state.
+   *
+   * The backend may send `pending` (queued/provider-placed row) followed by
+   * `running` (actual execution) for the same `part_id`. When absent, the
+   * frontend treats an unsignaled legacy `tool_started` as running.
+   * A repeated event for the same `part_id` advances pending to running.
+   */
+  state?: HarnessPartState | string
+  /** `true` when this `tool_started` is only provider-queued (not running). */
+  queued?: boolean
   /** Live tool attachments on `tool_completed` (same shape as persisted meta). */
   attachments?: Array<{
     type?: string
@@ -251,9 +268,12 @@ export interface HarnessPartDelta {
 export interface HarnessPartUpdatedEvent {
   workspace_id: string
   session_id: string
+  /** Backend assistant shell id — the deterministic per-turn routing key. */
+  message_id?: string
   delta: HarnessPartDelta
   step?: number
   part_id?: string
+  part_position?: number
 }
 
 export interface HarnessPermissionRequiredEvent {
@@ -302,6 +322,10 @@ export interface HarnessSessionStatusEvent {
   workspace_id: string
   session_id: string
   status: HarnessSessionStatus
+  /** Backend assistant shell id for this run (per-turn routing anchor). */
+  message_id?: string
+  /** User message id that opened this run (follow-up correlation). */
+  user_message_id?: string
   model?: string
   reasoning_effort?: string
 }
@@ -316,10 +340,13 @@ export interface HarnessTodoUpdatedEvent {
 export interface HarnessSubtaskStartedEvent {
   workspace_id: string
   session_id: string
+  /** Backend assistant shell id — routes to the right turn. */
+  message_id?: string
   subtask_id: string
   agent: string
   description: string
   part_id?: string
+  part_position?: number
   child_session_id?: string
   model?: string
   reasoning_effort?: string
@@ -328,6 +355,8 @@ export interface HarnessSubtaskStartedEvent {
 export interface HarnessSubtaskFinishedEvent {
   workspace_id: string
   session_id: string
+  /** Backend assistant shell id — routes to the right turn. */
+  message_id?: string
   subtask_id: string
   agent?: string
   status: string

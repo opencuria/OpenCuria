@@ -7,10 +7,16 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureAssistantMessage,
+  ensureBusyAssistant,
   findPart,
+  isLocalId,
   mergeBusyFetchedMessages,
   resetHarnessPartCounter,
+  resolveQueuedToolState,
+  routeAssistantMessage,
   settleOpenStreamParts,
+  sortHarnessMessages,
+  sortHarnessParts,
 } from './harnessReducer'
 
 function makeMessages(): HarnessMessage[] {
@@ -879,5 +885,375 @@ describe('harnessReducer', () => {
     expect(settled[0]!.parts[0]!.output).toBe('planning')
     expect(settled[0]!.parts[1]!.state).toBe('completed')
     expect(settled[0]!.parts[2]!.state).toBe('running')
+  })
+
+  it('routes fresh turns by backend message_id instead of reusing the previous answer', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'first',
+        parts: [],
+        position: 0,
+      },
+      {
+        id: 'msg-assistant-old',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'old answer',
+        parts: [
+          {
+            id: 'part-old',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'old answer',
+          },
+        ],
+        position: 1,
+      },
+      {
+        id: 'msg-user-2',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'follow up',
+        parts: [],
+        position: 2,
+      },
+    ]
+
+    const fresh = applyPartDelta(messages, 'session-1', { text: 'new' }, { messageId: 'msg-assistant-new' })
+
+    expect(fresh.id).toBe('msg-assistant-new')
+    expect(fresh.content).toBe('new')
+    const old = messages.find((m) => m.id === 'msg-assistant-old')!
+    expect(old.content).toBe('old answer')
+    expect(messages.filter((m) => m.role === 'assistant')).toHaveLength(2)
+  })
+
+  it('ignores late stale events for a completed turn (never attaches to latest)', () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'first',
+        parts: [],
+      },
+      {
+        id: 'msg-assistant-old',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'old',
+        parts: [
+          { id: 'part-old', session_id: 'session-1', type: 'text', state: 'completed', title: '', output: 'old' },
+        ],
+        completed_at: '2026-03-29T10:00:00.000Z',
+      },
+      {
+        id: 'msg-user-2',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'second',
+        parts: [],
+      },
+      {
+        id: 'msg-assistant-new',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [],
+      },
+    ]
+
+    applyPartDelta(messages, 'session-1', { text: 'stale' }, { messageId: 'msg-assistant-old' })
+
+    expect(messages.find((m) => m.id === 'msg-assistant-old')!.content).toBe('old')
+    expect(messages.find((m) => m.id === 'msg-assistant-new')!.content).toBe('')
+  })
+
+  it('anchors a busy fresh shell after the optimistic follow-up user', () => {
+    const messages: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'first', parts: [] },
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [],
+        completed_at: '2026-03-29T10:00:00.000Z',
+      },
+      { id: 'local-user-session-1-1', session_id: 'session-1', role: 'user', content: 'follow up', parts: [] },
+    ]
+
+    const shell = ensureBusyAssistant(messages, 'session-1', 'server-assistant-2', 'missing-user-id')
+
+    expect(shell.id).toBe('server-assistant-2')
+    expect(messages.map((m) => m.id)).toEqual([
+      'msg-user-1',
+      'msg-assistant-1',
+      'local-user-session-1-1',
+      'server-assistant-2',
+    ])
+  })
+
+  it('creates queued pending tool then flips the same part_id to running (no duplicate)', () => {
+    const messages = makeMessages()
+
+    const queued = applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'bash', title: '$ ls', call_id: 'call-1', state: 'pending' },
+      { step: 1, partId: 'part-1' },
+    )
+    expect(findPart(queued, { partId: 'part-1' })?.state).toBe('pending')
+
+    const running = applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'bash', title: '$ ls', call_id: 'call-1', state: 'running' },
+      { step: 1, partId: 'part-1' },
+    )
+    const tools = running.parts.filter((p) => p.type === 'tool')
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.state).toBe('running')
+  })
+
+  it('detects queued pending via the queued flag when delta.state is absent', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'Read', call_id: 'call-q', queued: true },
+      { partId: 'part-q' },
+    )
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    expect(findPart(assistant, { partId: 'part-q' })?.state).toBe('pending')
+
+    // The actual start repeats the same part_id: flips to running.
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', title: 'Read', call_id: 'call-q' },
+      { partId: 'part-q' },
+    )
+    expect(findPart(assistant, { partId: 'part-q' })?.state).toBe('running')
+    expect(assistant.parts.filter((p) => p.type === 'tool')).toHaveLength(1)
+  })
+
+  it('resolves queued tool state from delta.state, flags, and legacy singles', () => {
+    expect(resolveQueuedToolState({ tool_started: 'bash', state: 'pending' }, { known: false })).toBe('pending')
+    expect(resolveQueuedToolState({ tool_started: 'bash', state: 'running' }, { known: true })).toBe('running')
+    expect(resolveQueuedToolState({ tool_started: 'bash', queued: true }, { known: false })).toBe('pending')
+    // Legacy single emit (no signal) stays running.
+    expect(resolveQueuedToolState({ tool_started: 'bash' }, { known: false })).toBe('running')
+  })
+
+  it('keeps text/tool/text in interleaved order (no stream merge across tools)', () => {
+    const messages = makeMessages()
+
+    applyPartDelta(messages, 'session-1', { text: 'before ' }, { partId: 'text-1', messageId: 'assistant-1' })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'bash', title: '$ ls', call_id: 'call-1', queued: true },
+      { partId: 'tool-1', messageId: 'assistant-1' },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_completed: 'bash', call_id: 'call-1', output: 'out' },
+      { partId: 'tool-1', messageId: 'assistant-1' },
+    )
+    applyPartDelta(messages, 'session-1', { text: 'after' }, { partId: 'text-2', messageId: 'assistant-1' })
+
+    const assistant = messages.find((m) => m.id === 'assistant-1')!
+    expect(assistant.parts.map((p) => p.type)).toEqual(['text', 'tool', 'text'])
+    expect(assistant.parts.map((p) => p.output)).toEqual(['before ', 'out', 'after'])
+    expect(assistant.content).toBe('before after')
+  })
+
+  it('adopts the server part_id for a local placeholder text stream', () => {
+    const messages: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'hi', parts: [] },
+      {
+        id: 'assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'hel',
+        parts: [
+          { id: 'local-session-1-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'hel' },
+        ],
+      },
+    ]
+
+    applyPartDelta(messages, 'session-1', { text: 'lo' }, { partId: 'server-text-1', messageId: 'assistant-1' })
+
+    const assistant = messages.find((m) => m.id === 'assistant-1')!
+    expect(assistant.parts.filter((p) => p.type === 'text')).toHaveLength(1)
+    expect(assistant.parts[0]!.id).toBe('server-text-1')
+    expect(assistant.parts[0]!.output).toBe('hello')
+  })
+
+  it('routeAssistantMessage returns the running shell and creates server-id shells', () => {
+    const messages = makeMessages()
+    const first = routeAssistantMessage(messages, 'session-1', 'server-1')
+    expect(first.id).toBe('server-1')
+    const same = routeAssistantMessage(messages, 'session-1', 'server-1')
+    expect(same).toBe(first)
+    expect(isLocalId('local-session-1-1')).toBe(true)
+    expect(isLocalId('server-1')).toBe(false)
+  })
+
+  it('sorts messages by position with creation-order fallback', () => {
+    const messages: HarnessMessage[] = [
+      { id: 'b', session_id: 's', role: 'user', content: 'b', parts: [], position: 1, created_at: '2026-03-29T10:00:01.000Z' },
+      { id: 'a', session_id: 's', role: 'user', content: 'a', parts: [], position: 0, created_at: '2026-03-29T10:00:02.000Z' },
+      { id: 'local', session_id: 's', role: 'user', content: 'c', parts: [] },
+    ]
+    expect(sortHarnessMessages(messages).map((m) => m.id)).toEqual(['a', 'b', 'local'])
+  })
+
+  it('sorts parts by position while preserving local observed order', () => {
+    const parts = [
+      { id: 'p2', session_id: 's', type: 'tool' as const, state: 'completed' as const, title: '', output: '', position: 1 },
+      { id: 'p1', session_id: 's', type: 'text' as const, state: 'completed' as const, title: '', output: '', position: 0 },
+      { id: 'local-1', session_id: 's', type: 'text' as const, state: 'running' as const, title: '', output: '' },
+    ]
+    expect(sortHarnessParts(parts).map((p) => p.id)).toEqual(['p1', 'p2', 'local-1'])
+  })
+
+  it('preserves already-received live data when the busy snapshot is stale', () => {
+    const previous: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'hi', parts: [], position: 0 },
+      {
+        id: 'assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello world, more streamed',
+        parts: [
+          { id: 'server-text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello world, more streamed', position: 0 },
+          { id: 'server-tool-1', session_id: 'session-1', type: 'tool', state: 'running', title: 'bash', output: '', call_id: 'call-1', position: 1 },
+        ],
+        position: 1,
+      },
+    ]
+    const incoming: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'hi', parts: [], position: 0 },
+      {
+        id: 'assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'Hello',
+        parts: [
+          { id: 'server-text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello', position: 0 },
+        ],
+        position: 1,
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    const assistant = merged.find((m) => m.id === 'assistant-1')!
+    expect(assistant.content).toBe('Hello world, more streamed')
+    expect(assistant.parts.find((p) => p.id === 'server-text-1')!.output).toBe('Hello world, more streamed')
+    // Live-only tool row the stale snapshot missed is kept.
+    expect(assistant.parts.some((p) => p.id === 'server-tool-1')).toBe(true)
+  })
+
+  it('carries the optimistic follow-up user across a busy fetch until echoed', () => {
+    const previous: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'first', parts: [], position: 0 },
+      {
+        id: 'assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [],
+        position: 1,
+        completed_at: '2026-03-29T10:00:00.000Z',
+      },
+      { id: 'local-user-session-1-9', session_id: 'session-1', role: 'user', content: 'follow up', parts: [] },
+    ]
+    const incoming: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'first', parts: [], position: 0 },
+      {
+        id: 'assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: 'done',
+        parts: [],
+        position: 1,
+        completed_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+
+    const merged = mergeBusyFetchedMessages(previous, incoming)
+    expect(merged.some((m) => m.id === 'local-user-session-1-9')).toBe(true)
+
+    // Server echo arrives: the optimistic row drops (no duplicate).
+    const echoed = mergeBusyFetchedMessages(previous, [
+      ...incoming,
+      { id: 'msg-user-2', session_id: 'session-1', role: 'user', content: 'follow up', parts: [], position: 2 },
+    ])
+    expect(echoed.filter((m) => m.role === 'user' && m.content === 'follow up')).toHaveLength(1)
+    expect(echoed.some((m) => m.id === 'local-user-session-1-9')).toBe(false)
+  })
+
+  it('routes subtask events to the per-turn shell via message_id', () => {
+    const messages: HarnessMessage[] = [
+      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'go', parts: [] },
+      { id: 'assistant-fresh', session_id: 'session-1', role: 'assistant', content: '', parts: [] },
+    ]
+    const target = routeAssistantMessage(messages, 'session-1', 'assistant-fresh')
+    const started = applySubtaskStarted(target, 'session-1', {
+      workspace_id: 'ws',
+      session_id: 'session-1',
+      message_id: 'assistant-fresh',
+      subtask_id: 'sub-1',
+      agent: 'explore',
+      description: 'research',
+      part_id: 'subtask-part-1',
+    })
+    expect(started.id).toBe('subtask-part-1')
+    expect(started.state).toBe('running')
+    expect(target.parts.some((p) => p.id === 'subtask-part-1')).toBe(true)
+  })
+})
+
+describe('server live positions', () => {
+  it('keeps text/tool/text order after a stale REST snapshot is merged', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', { text: 'before' },
+      { messageId: 'assistant-1', partId: 'text-a', partPosition: 1 })
+    applyPartDelta(messages, 'session-1', { tool_started: 'read', call_id: 'call-1', state: 'pending' },
+      { messageId: 'assistant-1', partId: 'tool-a', partPosition: 2 })
+    applyPartDelta(messages, 'session-1', { text: 'between' },
+      { messageId: 'assistant-1', partId: 'text-b', partPosition: 3 })
+    const assistant = messages.find((m) => m.id === 'assistant-1')!
+    expect(assistant.parts.map((p) => [p.id, p.position])).toEqual([
+      ['text-a', 1], ['tool-a', 2], ['text-b', 3],
+    ])
+    const incoming: HarnessMessage[] = [
+      { ...messages[0]!, position: 0 },
+      { ...assistant, content: 'before', position: 1, parts: [
+        { ...assistant.parts[0]!, output: 'before' },
+        { ...assistant.parts[1]!, state: 'pending' },
+      ] },
+    ]
+    const merged = mergeBusyFetchedMessages(messages, incoming)
+    expect(merged[1]?.parts.map((p) => p.id)).toEqual(['text-a', 'tool-a', 'text-b'])
+    expect(merged[1]?.parts[2]?.output).toBe('between')
+  })
+
+  it('keeps a running assistant when a busy snapshot is empty', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', { text: 'live' },
+      { messageId: 'assistant-live', partId: 'live-part', partPosition: 0 })
+    expect(mergeBusyFetchedMessages(messages, []).map((m) => m.id)).toEqual([
+      'msg-user-1', 'assistant-live',
+    ])
   })
 })

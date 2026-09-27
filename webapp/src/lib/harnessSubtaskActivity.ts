@@ -102,7 +102,7 @@ export function latestRunningChildTool(messages: HarnessMessage[]): HarnessPart 
     if (!message) continue
     for (let j = message.parts.length - 1; j >= 0; j -= 1) {
       const part = message.parts[j]
-      if (part?.type === 'tool' && part.state === 'running') {
+      if (part?.type === 'tool' && (part.state === 'running' || part.state === 'pending')) {
         return part
       }
     }
@@ -258,6 +258,6 @@ export function subtaskActivityLabel(
 /** True when a tool or subtask part is still running (blocks Thinking). */
 export function hasRunningToolOrSubtask(parts: HarnessPart[]): boolean {
   return parts.some(
-    (part) => (part.type === 'tool' || part.type === 'subtask') && part.state === 'running',
+    (part) => (part.type === 'tool' || part.type === 'subtask') && (part.state === 'running' || part.state === 'pending'),
   )
 }

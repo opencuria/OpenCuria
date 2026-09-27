@@ -15,6 +15,7 @@ import type {
   RawGitDiffHunk,
   RawGitRepoSnapshot,
   RawGitRepoSummary,
+  RawGitStash,
 } from '@/services/git.api'
 
 export function makeHunk(suffix: string): RawGitDiffHunk {

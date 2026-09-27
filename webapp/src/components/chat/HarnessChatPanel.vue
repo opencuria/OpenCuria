@@ -45,8 +45,34 @@ const answeringQuestion = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
 
 const activeSession = computed(() => harness.activeSession)
+/**
+ * Deterministic per-turn streaming anchor: the running (not completed)
+ * assistant of the busy session. The container matches by message id so
+ * the cursor/Thinking render only on the fresh turn — never on the
+ * previous answer. Falls back to the session id for legacy streams.
+ */
+const streamingMessageId = computed(() => {
+  if (activeSession.value?.status !== 'busy') return null
+  const messages = harness.activeMessages
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (
+      message?.role === 'assistant' &&
+      message.completed_at == null &&
+      message.session_id === activeSession.value.id
+    ) {
+      return message.id
+    }
+  }
+  return null
+})
 const streamingSessionId = computed(() =>
   activeSession.value?.status === 'busy' ? activeSession.value.id : null,
+)
+
+/** Skeleton only for the true initial workspace load (never over chat). */
+const chatLoading = computed(
+  () => harness.loading && harness.activeMessages.length === 0,
 )
 
 const childSessionIds = computed<Record<string, string>>(() =>
@@ -317,6 +343,8 @@ function setupSocketListeners(): void {
         harness.handlePartUpdated(data.session_id, data.delta, {
           step: data.step,
           partId: data.part_id,
+          partPosition: data.part_position,
+          messageId: data.message_id,
         })
         if (data.delta?.patch || data.delta?.compaction) {
           void harness.fetchParts(data.session_id)
@@ -341,11 +369,17 @@ function setupSocketListeners(): void {
           agent: data.agent,
           description: data.description,
           part_id: data.part_id,
+          part_position: data.part_position,
           child_session_id: data.child_session_id,
           model: data.model,
           reasoning_effort: data.reasoning_effort,
+          message_id: data.message_id,
         })
         if (data.child_session_id) {
+          // Same-workspace refresh must not flash the skeleton over the
+          // parent chat: `fetchSessions` only sets `loading` on the true
+          // initial load (store-level guard), and the container hides the
+          // skeleton while messages exist.
           void harness.fetchSessions(props.workspaceId)
           void harness.fetchParts(data.child_session_id)
         }
@@ -362,6 +396,7 @@ function setupSocketListeners(): void {
           status: data.status,
           summary: data.summary,
           child_session_id: data.child_session_id,
+          message_id: data.message_id,
         })
       }
     }),
@@ -373,9 +408,11 @@ function setupSocketListeners(): void {
         harness.handleSessionStatus(data.session_id, data.status, {
           model: data.model,
           reasoning_effort: data.reasoning_effort,
+          message_id: data.message_id,
+          user_message_id: data.user_message_id,
         })
         if (data.status === 'idle') {
-          void harness.fetchParts(data.session_id)
+          void harness.refreshPartsAfterIdle(data.session_id)
           void harness.fetchTodos(data.session_id)
         }
       }
@@ -619,7 +656,8 @@ async function handleForkMessage(messageId: string): Promise<void> {
   >
     <HarnessChatContainer
       :messages="harness.activeMessages"
-      :loading="harness.loading"
+      :loading="chatLoading"
+      :streaming-message-id="streamingMessageId"
       :streaming-session-id="streamingSessionId"
       :child-session-ids="childSessionIds"
       :disabled="messageActionsDisabled"

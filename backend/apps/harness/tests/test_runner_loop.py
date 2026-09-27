@@ -1413,6 +1413,220 @@ async def _provider_calls(
     return calls
 
 
+async def _provider_step_events(
+    step_deltas: list[Delta], *, step: int = 0
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Run one ``_provider_step`` and return (calls, emitted events)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    provider = FakeProvider([step_deltas])
+    runner = HarnessRunner(
+        provider=provider,
+        tools=default_tool_registry(),
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    _, calls, _, _ = await runner._provider_step(
+        model="m", messages=[], schemas=[], step=step
+    )
+    return calls, events
+
+
+def _queued(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return tool_queued events in emission order."""
+    return [event for event in events if event.get("type") == "tool_queued"]
+
+
+async def test_provider_step_tool_queued_before_later_text_delta() -> None:
+    """tool_queued fires at observed position, before later text deltas."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(text="before "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(text="after"),
+        ],
+        step=1,
+    )
+    assert [call.call_id for call in calls] == ["call-1"]
+    kinds = [event["type"] for event in events]
+    assert kinds == ["part_updated", "tool_queued", "part_updated"]
+    queued = _queued(events)[0]
+    assert queued["step"] == 1
+    assert queued["call_id"] == "call-1"
+    assert queued["tool"] == "read"
+    assert queued["arguments"] == '{"path":"a"}'
+    assert queued["title"]
+
+
+async def test_provider_step_text_tool_text_tool_observed_order() -> None:
+    """text/tool/text/tool streams queue tools in observed provider order."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(text="t0 "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-b",
+                        "id": "call-b",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+            Delta(text="t1 "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-a",
+                        "id": "call-a",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    },
+                )
+            ),
+        ],
+        step=2,
+    )
+    assert [(call.call_id, call.name) for call in calls] == [
+        ("call-b", "read"),
+        ("call-a", "bash"),
+    ]
+    queued = _queued(events)
+    assert [event["call_id"] for event in queued] == ["call-b", "call-a"]
+    # Each queued event precedes the next text delta after its position.
+    kinds = [event["type"] for event in events]
+    assert kinds == [
+        "part_updated",
+        "tool_queued",
+        "part_updated",
+        "tool_queued",
+    ]
+
+
+async def test_provider_step_string_keys_keep_observed_order_not_sorted() -> None:
+    """String stream keys never reorder lexicographically (item-10 vs item-2)."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-10",
+                        "id": "call-10",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-2",
+                        "id": "call-2",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+        ],
+        step=3,
+    )
+    assert [call.call_id for call in calls] == ["call-10", "call-2"]
+    assert [event["call_id"] for event in _queued(events)] == ["call-10", "call-2"]
+
+
+async def test_provider_step_numeric_index_order_preserved() -> None:
+    """Numeric provider indexes stream in numeric order (ordered blocks)."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "call-0",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 1,
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    },
+                )
+            ),
+        ],
+        step=4,
+    )
+    assert [call.call_id for call in calls] == ["call-0", "call-1"]
+    assert [event["call_id"] for event in _queued(events)] == ["call-0", "call-1"]
+
+
+async def test_provider_step_provisional_id_rebound_when_real_id_arrives() -> None:
+    """A slot queued without an id is rebound when the real id arrives later."""
+    part_a = '{"path'
+    part_b = '":"a"}'
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {"index": 0, "name": "read", "arguments": part_a},
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {"index": 0, "id": "real-1", "arguments": part_b},
+                )
+            ),
+        ],
+        step=5,
+    )
+    assert len(calls) == 1
+    assert calls[0].call_id == "real-1"
+    assert calls[0].arguments == {"path": "a"}
+    queued = _queued(events)
+    assert len(queued) == 1
+    # First fragment had no id: the queued event carries the unique
+    # provisional id; the service rebinds it on tool_started.
+    assert queued[0]["call_id"] == "call-5-0"
+    assert queued[0]["tool"] == "read"
+
+
+async def test_provider_step_queued_ids_stable_without_index_or_id() -> None:
+    """Fragments lacking index/id keep a stable queued id per tool slot."""
+    args_a = '{"path":"a"}'
+    args_b = '{"command":"ls"}'
+    calls, events = await _provider_step_events(
+        [
+            Delta(tool_calls=({"name": "read", "arguments": args_a},)),
+            Delta(tool_calls=({"name": "bash", "arguments": args_b},)),
+        ],
+        step=6,
+    )
+    assert [(call.name) for call in calls] == ["read", "bash"]
+    queued = _queued(events)
+    assert len(queued) == 2
+    assert queued[0]["call_id"] != queued[1]["call_id"]
+    assert [call.call_id for call in calls] == [
+        event["call_id"] for event in queued
+    ]
+
+
 async def test_provider_step_parallel_tools_without_index_split_by_id() -> None:
     """Two index-less fragments with different ids stay separate."""
     calls = await _provider_calls(

@@ -421,6 +421,20 @@ class ChatGPTAdapter(ProviderAdapter):
 
             if message.role == "assistant":
                 if message.tool_calls:
+                    # Replay assistant text *before* the function_call
+                    # items (provider order: text precedes the tool call
+                    # in the streamed turn). Previously the text was
+                    # dropped whenever tool_calls were present, so the
+                    # model lost the pre-tool narrative on replay.
+                    text = self._message_text(message.content)
+                    if text:
+                        input_items.append(
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": text}],
+                            }
+                        )
                     for call in message.tool_calls:
                         function = call.get("function", call)
                         if not isinstance(function, dict):

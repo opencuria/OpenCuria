@@ -64,7 +64,7 @@ describe('HarnessMessageView', () => {
     setActivePinia(createPinia())
     resetProviderCatalogCache()
   })
-  it('renders text and a single tool in chronological order', async () => {
+  it('wraps initial text plus a single tool in chronological order inside one card', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -82,19 +82,24 @@ describe('HarnessMessageView', () => {
     })
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['text', 'workedFor', 'text'])
+    expect(kinds).toEqual(['workedFor', 'text'])
     expect(
       wrapper.get('[data-block-kind="workedFor"]').element.parentElement?.className,
     ).toContain('[&>[data-block-kind=workedFor]]:-mb-0.5')
-    expect(wrapper.text()).toContain('Hello')
+    // Chronological order is preserved inside: initial text stays before the tool.
+    await expandWorkedFor(wrapper)
+    const inner = wrapper
+      .get('[data-block-kind="workedFor"]')
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(inner).toEqual(['text', 'single'])
+    const innerText = wrapper.get('[data-block-kind="workedFor"]').text()
+    expect(innerText.indexOf('Hello')).toBeLessThan(innerText.indexOf('Read index.ts'))
     expect(wrapper.text()).toContain('Worked for 5m 11s')
     expect(wrapper.text()).toContain('Done')
-    expect(wrapper.text()).not.toContain('Read index.ts')
-    await expandWorkedFor(wrapper)
-    expect(wrapper.text()).toContain('Read index.ts')
   })
 
-  it('groups consecutive work items under Worked inside Worked for', async () => {
+  it('wraps initial text plus consecutive work items under Worked inside one card', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -117,13 +122,16 @@ describe('HarnessMessageView', () => {
     })
 
     const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['text', 'workedFor', 'text'])
+    expect(kinds).toEqual(['workedFor', 'text'])
+    await expandWorkedFor(wrapper)
+    const inner = wrapper
+      .get('[data-block-kind="workedFor"]')
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(inner).toEqual(['text', 'group'])
     expect(wrapper.text()).toContain('Looking around')
     expect(wrapper.text()).toContain('Worked for 5m 11s')
     expect(wrapper.text()).toContain('Found it')
-    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
-    await expandWorkedFor(wrapper)
-    expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="harness-worked-count"]').text()).toBe('2')
   })
 
@@ -820,7 +828,7 @@ describe('HarnessMessageView', () => {
     ).toBe(false)
   })
 
-  it('shows an answered question card inside Worked for', async () => {
+  it('shows an answered question card with its leading text inside one Worked for', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
@@ -838,7 +846,6 @@ describe('HarnessMessageView', () => {
     })
 
     expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'text',
       'workedFor',
     ])
     // The card is hidden until Worked for is expanded, like patch cards.
@@ -848,6 +855,169 @@ describe('HarnessMessageView', () => {
     expect(card.text()).toContain('Which mode?')
     expect(card.get('[data-testid="harness-question-card-answer"]').text()).toBe('Build')
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
+    // Leading text keeps chronological order above the card.
+    const innerText = wrapper.get('[data-block-kind="workedFor"]').text()
+    expect(innerText.indexOf('One question')).toBeLessThan(innerText.indexOf('Which mode?'))
+  })
+
+  it('keeps text->tool->text->tool->text chronological inside one card with trailing text outside', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'First thought' }),
+          makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
+          makePart({ id: 't2', type: 'text', output: 'Middle note' }),
+          makePart({ id: 'tool-2', type: 'tool', tool: 'grep', title: 'Grep foo' }),
+          makePart({ id: 't3', type: 'text', output: 'Final answer' }),
+        ]),
+      },
+    })
+
+    // Streaming stays flat (no card yet); the finished view wraps once.
+    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'workedFor',
+      'text',
+    ])
+    await expandWorkedFor(wrapper)
+    const inner = wrapper
+      .get('[data-block-kind="workedFor"]')
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(inner).toEqual(['text', 'single', 'text', 'single'])
+    const text = wrapper.text()
+    expect(text.indexOf('First thought')).toBeLessThan(text.indexOf('Read a.ts'))
+    expect(text.indexOf('Read a.ts')).toBeLessThan(text.indexOf('Middle note'))
+    expect(text.indexOf('Middle note')).toBeLessThan(text.indexOf('Grep foo'))
+    expect(text.indexOf('Grep foo')).toBeLessThan(text.indexOf('Final answer'))
+  })
+
+  it('keeps subagent and patch adjacency chronological inside one card', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'Kicking off' }),
+          makePart({
+            id: 'sub-1',
+            type: 'subtask',
+            title: 'Explore renderer',
+            meta: { agent: 'explore', subtask_id: 'sub-1', child_session_id: 'child-a' },
+          }),
+          makePart({ id: 'read-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
+          makePart({
+            id: 'patch-1',
+            type: 'patch',
+            call_id: 'c-other',
+            title: 'Patch b.ts',
+          }),
+          makePart({ id: 't2', type: 'text', output: 'Finished' }),
+        ]),
+      },
+    })
+
+    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'workedFor',
+      'text',
+    ])
+    await expandWorkedFor(wrapper)
+    const inner = wrapper
+      .get('[data-block-kind="workedFor"]')
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(inner).toEqual(['text', 'card', 'single', 'card'])
+    const rows = wrapper.findAll('[data-testid="harness-subtask-row"]')
+    expect(rows).toHaveLength(1)
+    await rows[0]!.trigger('click')
+    expect(wrapper.emitted('openSubtask')).toEqual([['child-a']])
+  })
+
+  it('keeps Agent-S plans chronological around tool work after idle', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 'agent-0', type: 'agent', title: 'Agent plan', output: 'plan zero' }),
+          makePart({ id: 't1', type: 'text', output: 'Starting' }),
+          makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
+          makePart({ id: 'agent-1', type: 'agent', title: 'Agent plan', output: 'plan one' }),
+          makePart({ id: 'tool-2', type: 'tool', tool: 'grep', title: 'Grep foo' }),
+          makePart({ id: 't2', type: 'text', output: 'Done' }),
+        ]),
+      },
+    })
+
+    // Agent-S plans are the computer-use timeline: both stay visible
+    // outside while each response slice keeps one chronological card.
+    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'agent',
+      'workedFor',
+      'agent',
+      'workedFor',
+      'text',
+    ])
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(2)
+    await expandWorkedFor(wrapper)
+    const cards = wrapper.findAll('[data-block-kind="workedFor"]')
+    expect(cards).toHaveLength(2)
+    const first = cards[0]!
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(first).toEqual(['text', 'single'])
+    const text = cards[0]!.text()
+    expect(text.indexOf('Starting')).toBeLessThan(text.indexOf('Read a.ts'))
+  })
+
+  it('keeps a leading compaction divider outside while interleaved compaction stays chronological inside', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 'compact-0', type: 'compaction', title: 'Session compacted', output: 'older summary' }),
+          makePart({ id: 't1', type: 'text', output: 'Starting' }),
+          makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
+          makePart({ id: 'compact-1', type: 'compaction', title: 'Session compacted', output: 'mid summary' }),
+          makePart({ id: 'tool-2', type: 'tool', tool: 'grep', title: 'Grep foo' }),
+          makePart({ id: 't2', type: 'text', output: 'Done' }),
+        ]),
+      },
+    })
+
+    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    expect(kinds).toEqual(['compaction', 'workedFor', 'text'])
+    expect(wrapper.findAll('[data-testid="harness-compaction-divider"]')).toHaveLength(1)
+    await expandWorkedFor(wrapper)
+    const inner = wrapper
+      .get('[data-block-kind="workedFor"]')
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+    expect(inner).toContain('compaction')
+  })
+
+  it('keeps the streaming cursor on the trailing text while finished (stable card key)', async () => {
+    const message = makeAssistant([
+      makePart({ id: 't1', type: 'text', output: 'Working' }),
+      makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
+      makePart({ id: 't2', type: 'text', output: 'Finishing' }),
+    ])
+    const streaming = mount(HarnessMessageView, {
+      props: { streaming: true, message },
+    })
+    expect(streaming.find('[data-testid="harness-worked-for"]').exists()).toBe(false)
+    expect(streaming.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'text',
+      'single',
+      'text',
+    ])
+
+    const finished = mount(HarnessMessageView, { props: { message } })
+    expect(finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'workedFor',
+      'text',
+    ])
+    // Same finished message re-rendered (e.g. usage arrival) keeps one card.
+    await finished.setProps({ message: { ...message } })
+    expect(finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
+      'workedFor',
+      'text',
+    ])
+    expect(finished.findAll('[data-testid="harness-worked-for"]')).toHaveLength(1)
   })
 
   it('does not render message errors inline', () => {

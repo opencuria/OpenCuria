@@ -182,6 +182,7 @@ class _PendingToolCall:
     name: str
     arguments: dict[str, Any]
     raw_arguments: str = ""
+    queued_id: str = ""
 
 
 @dataclass
@@ -252,10 +253,15 @@ def _combine_decisions(*decisions: str) -> str:
 def _slot_sort_key(key: Any) -> tuple[int, int, str]:
     """Return a comparison-safe sort key for mixed stream-key types.
 
-    Numeric stream keys (Chat/Bedrock ``index``) sort numerically first;
+    Kept for backwards compatibility (mixed ``int``/``str`` stream keys
+    must stay comparable without raising ``TypeError``). New code
+    preserves *observed* provider positions (insertion order) instead of
+    sorting: numeric ``index`` blocks stream in order in practice, while
     string keys (Responses ``item_id``, synthetic ``call-{step}-{n}`` and
-    ``{index}#{n}`` split keys) sort lexicographically after them, so
-    ``sorted()`` never raises ``TypeError`` on mixed ``int``/``str`` keys.
+    ``{index}#{n}`` split keys) must never be reordered
+    lexicographically when observed order differs. ``_provider_step``
+    therefore iterates fragments in first-seen order; this helper is no
+    longer used for final call ordering.
     """
     if isinstance(key, bool):
         return (0, int(key), "")
@@ -564,6 +570,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": (
                         f"Subagent depth limit reached (depth={depth}, "
@@ -581,6 +588,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": "todowrite is not available to subagents.",
                 }
@@ -628,6 +636,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": f"Permission {reason}: {title}",
                 }
@@ -638,6 +647,7 @@ class HarnessRunner:
                 "type": "tool_started",
                 "step": step,
                 "call_id": call.call_id,
+                "queued_id": call.queued_id,
                 "tool": call.name,
                 "title": title,
                 "arguments": call.raw_arguments,
@@ -655,6 +665,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": error,
                 }
@@ -667,6 +678,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": error,
                 }
@@ -677,6 +689,7 @@ class HarnessRunner:
                 "type": "tool_completed",
                 "step": step,
                 "call_id": call.call_id,
+                "queued_id": call.queued_id,
                 "tool": call.name,
                 "output": result.output,
                 "attachments": list(result.attachments or []),
@@ -688,6 +701,7 @@ class HarnessRunner:
                     "type": "patch",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "title": f"Patch {result.metadata.get('path', call.name)}",
                     "path": result.metadata.get("path", ""),
@@ -702,6 +716,7 @@ class HarnessRunner:
                     "type": "todo_updated",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "todos": await _todos_payload(call_ctx),
                 }
             )
@@ -782,6 +797,7 @@ class HarnessRunner:
                         "type": "tool_error",
                         "step": step,
                         "call_id": call.call_id,
+                        "queued_id": call.queued_id,
                         "tool": call.name,
                         "error": str(item),
                     }
@@ -1292,6 +1308,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": MAX_STEPS_TOOL_ERROR,
                 }
@@ -1471,19 +1488,75 @@ class HarnessRunner:
         Responses ``item_id`` strings stay strings (never cast to int).
         Fragments without a usable index are grouped by their call ``id``
         so arguments of two different call IDs are never concatenated
-        into one string. Slots sort via :func:`_slot_sort_key`, which
-        keeps mixed ``int``/``str`` keys comparable (ints numerically
-        first, strings lexicographically after).
+        into one string.
+
+        Ordered ``tool_queued`` contract: on
+        the *first fragment* for each slot a ``tool_queued``
+        ``{type, step, call_id, tool, title, arguments}`` event is sent
+        immediately at the observed provider position — never delayed to
+        step end — so the timeline creates the pending tool row before
+        any later text delta. A single provider :class:`Delta` may carry
+        text/reasoning/tool together; deltas are processed in stream
+        order and fragments within one delta in wire order, which is the
+        only representable provider order (the :class:`Delta` shape does
+        not encode intra-delta text-vs-tool precedence).
+
+        ``call_id`` stability: the queued id is the real provider id
+        when the first fragment carries one, otherwise a unique
+        provisional ``call-{step}-{n}`` (or ``call-{step}-{index}`` for
+        indexed slots without an id). When the real id arrives in a
+        later fragment for the same slot the slot is rebound to it; the
+        queued provisional id is adopted by the service via its
+        provisional-rebind path, and the final call uses the real id.
+
+        Final call order preserves provider positions: numeric stream
+        keys (explicit ordered blocks) sort numerically; all other keys
+        (Responses ``item_id``, synthetic ``call-{step}-{n}`` and
+        ``{index}#{n}`` split keys) keep first-seen observed order
+        instead of lexicographic string sorting.
         """
         fragments: dict[Any, dict[str, Any]] = {}
         id_to_key: dict[str, Any] = {}
         split_to_key: dict[tuple[str, str], Any] = {}
+        slot_order: dict[Any, int] = {}
+        order_counter = 0
         next_slot = 0
         current_key: Any = None
         text_parts: list[str] = []
         usage = Usage()
         finish_reason = ""
         resolved = self._resolve_model(model)
+
+        def _provisional_call_id(key: Any, slot_id: str) -> str:
+            """Return the stable queued id for a newly opened slot."""
+            if slot_id:
+                return slot_id
+            if isinstance(key, str):
+                return key
+            return f"call-{step}-{key}"
+
+        async def _emit_queued(key: Any) -> None:
+            slot = fragments[key]
+            queued_id = _provisional_call_id(
+                key, str(slot.get("id", "") or "")
+            )
+            slot["queued_id"] = queued_id
+            name = str(slot.get("name", "") or "")
+            raw = str(slot.get("arguments", "") or "")
+            try:
+                title = self._tool_title(name, _parse_arguments(raw))
+            except Exception:  # pragma: no cover - title never breaks loop
+                title = name
+            await self._send(
+                {
+                    "type": "tool_queued",
+                    "step": step,
+                    "call_id": queued_id,
+                    "tool": name,
+                    "title": title,
+                    "arguments": raw,
+                }
+            )
         async for delta in resolved.adapter.chat_stream(
             resolved.model_id,
             messages,
@@ -1518,6 +1591,8 @@ class HarnessRunner:
                 # Bedrock index or Responses ``item_id`` string) used
                 # verbatim — never cast to int. Missing key, ``None`` and
                 # ``""`` all mean "no stream key" (Bedrock emits no index).
+                # ``0``/``False`` are usable keys (never treated as
+                # missing): bools stay verbatim keys like any other index.
                 raw_index = fragment.get("index")
                 has_usable_index = raw_index is not None and (
                     not isinstance(raw_index, str) or raw_index != ""
@@ -1601,9 +1676,11 @@ class HarnessRunner:
                                 key = split_key
                             else:
                                 id_to_key[fragment_id] = key
-                slot = fragments.setdefault(
-                    key, {"id": "", "name": "", "arguments": ""}
-                )
+                if key not in fragments:
+                    fragments[key] = {"id": "", "name": "", "arguments": ""}
+                    slot_order[key] = order_counter
+                    order_counter += 1
+                slot = fragments[key]
                 if fragment_id and not slot.get("id"):
                     slot["id"] = fragment_id
                 if fragment_name and not slot.get("name"):
@@ -1613,9 +1690,34 @@ class HarnessRunner:
                     args = json.dumps(args)
                 if args:
                     slot["arguments"] += str(args)
+                # tool_queued on *first fragment* for each slot: the slot
+                # just opened (or already existed but has never been
+                # queued, e.g. created before its name arrived). Uses the
+                # provisional id when no real id is known yet; the service
+                # rebinds when the real id arrives later. A
+                # nameless slot cannot emit yet (no tool known).
+                if slot.get("name") and not slot.get("queued_id"):
+                    await _emit_queued(key)
                 current_key = key
         calls: list[_PendingToolCall] = []
-        for key in sorted(fragments, key=_slot_sort_key):
+        # Preserve provider positions: numeric stream keys (explicit
+        # ordered blocks) sort numerically; every other key keeps
+        # first-seen observed order (never lexicographic string order,
+        # so "item-10" stays after "item-2" when observed that way).
+        numeric_keys = sorted(
+            (
+                key
+                for key in fragments
+                if isinstance(key, int) and not isinstance(key, bool)
+            ),
+        )
+        numeric_set = set(numeric_keys)
+        observed_keys = [
+            key
+            for key, _ in sorted(slot_order.items(), key=lambda item: item[1])
+            if key not in numeric_set
+        ]
+        for key in [*numeric_keys, *observed_keys]:
             slot = fragments[key]
             name = str(slot.get("name", "") or "")
             if not name:
@@ -1624,17 +1726,17 @@ class HarnessRunner:
             slot_id = str(slot.get("id", "") or "")
             if slot_id:
                 call_id = slot_id
-            elif isinstance(key, str):
-                # Index-less slots already carry a synthetic key.
-                call_id = key
             else:
-                call_id = f"call-{step}-{key}"
+                call_id = str(slot.get("queued_id", "") or "")
+                if not call_id:
+                    call_id = _provisional_call_id(key, "")
             calls.append(
                 _PendingToolCall(
                     call_id=call_id,
                     name=name,
                     arguments=_parse_arguments(raw),
                     raw_arguments=raw,
+                    queued_id=str(slot.get("queued_id", "") or ""),
                 )
             )
         return "".join(text_parts), calls, usage, finish_reason

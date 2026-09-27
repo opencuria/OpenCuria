@@ -5,7 +5,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
-import { markHarnessSessionRead } from '@/services/harness.api'
+import { listHarnessSessions, markHarnessSessionRead } from '@/services/harness.api'
 import {
   armComposerTransition,
   clearComposerTransition,
@@ -832,5 +832,131 @@ describe('HarnessChatPanel', () => {
     await flushPromises()
     expect(uploadSpy).not.toHaveBeenCalled()
     uploadSpy.mockRestore()
+  })
+
+  it('routes the live turn by message id so the fresh empty turn streams (not the previous answer)', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-root')
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'user-1',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'first',
+        parts: [],
+      },
+      {
+        id: 'assistant-old',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: 'previous reply',
+        parts: [],
+        completed_at: '2026-03-29T10:00:01.000Z',
+      },
+      {
+        id: 'user-2',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'follow up',
+        parts: [],
+      },
+      {
+        id: 'assistant-fresh',
+        session_id: 'session-root',
+        role: 'assistant',
+        content: '',
+        parts: [],
+      },
+    ]
+    await wrapper.vm.$nextTick()
+
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('streamingMessageId')).toBe('assistant-fresh')
+  })
+
+  it('does not pass loading to the container while chat exists (no skeleton flash)', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'user-1',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+    ]
+    // A background subagent refresh flips the shared session list fetch;
+    // the store must not raise `loading` for a same-workspace refresh.
+    store.loading = true
+    await wrapper.vm.$nextTick()
+
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('loading')).toBe(false)
+  })
+
+  it('keeps chat visible across a same-workspace subagent session refresh', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    store.messagesBySession['session-root'] = [
+      {
+        id: 'user-1',
+        session_id: 'session-root',
+        role: 'user',
+        content: 'hello',
+        parts: [],
+      },
+    ]
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([
+      makeSession(),
+      makeSession({ id: 'session-child', parent_id: 'session-root', title: 'subtask', agent_name: 'explore' }),
+    ])
+    await store.fetchSessions('ws-1')
+    await wrapper.vm.$nextTick()
+
+    expect(store.loading).toBe(false)
+    expect(store.messagesBySession['session-root']).toHaveLength(1)
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    expect(container.props('loading')).toBe(false)
   })
 })

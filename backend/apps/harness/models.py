@@ -414,12 +414,23 @@ class HarnessMessage(models.Model):
         blank=True,
         help_text="When the user dismissed the stopped/failed notice for this message.",
     )
+    position = models.PositiveIntegerField(
+        default=0,
+        db_index=True,
+        help_text="Per-session chronological order (0-based, gap-tolerant).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "harness_message"
-        ordering = ["created_at"]
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "position"],
+                name="harness_message_session_position_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         """Return a short representation of the message."""
@@ -473,12 +484,23 @@ class HarnessPart(models.Model):
         blank=True,
         help_text="Extra payload (step number, cost, tokens, subtask id).",
     )
+    position = models.PositiveIntegerField(
+        default=0,
+        db_index=True,
+        help_text="Per-message chronological order (0-based, gap-tolerant).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "harness_part"
-        ordering = ["created_at"]
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["message", "position"],
+                name="harness_part_message_position_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         """Return a short representation of the part."""

@@ -380,7 +380,9 @@ class HarnessService:
             raise NotFoundError("HarnessMessage", str(message_id))
         if target.role != "user":
             raise ValueError("Only user messages can be edited")
-        ordered = sorted(stored, key=lambda row: (row.created_at, str(row.id)))
+        ordered = sorted(
+            stored, key=lambda row: (row.position, row.created_at, str(row.id))
+        )
         index = next(pos for pos, row in enumerate(ordered) if row.id == message_id)
         suffix = ordered[index:]
         suffix_ids = [row.id for row in suffix]
@@ -733,7 +735,7 @@ class HarnessService:
                 config_service.provider_connected_for_model(organization_id, grounding)
         if not (session.reasoning_effort or "").strip():
             # Legacy fallback so the assistant snapshot carries the default
-            # (old sessions without effort otherwise ran with the default but snapshotted "").
+            # Old sessions otherwise ran with the default but snapshotted "".
             agent_effort = (
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
             )
@@ -926,7 +928,11 @@ class HarnessService:
             session, HarnessSessionStatus.BUSY
         )
         session.status = HarnessSessionStatus.BUSY
-        history = await self._build_history(session, exclude_message_id=assistant.id)
+        history = await self._build_history(
+            session,
+            exclude_message_id=assistant.id,
+            exclude_user_message_id=user_message.id,
+        )
         skill_bodies: list[str] = []
         if session.skill_ids and user_id is not None:
             skill_bodies = await sync_to_async(resolve_skill_bodies)(
@@ -974,6 +980,8 @@ class HarnessService:
                 session,
                 "busy",
                 model=resolved_model,
+                assistant=assistant,
+                user_message_id=str(user_message.id),
             ),
             str(session.workspace_id),
         )
@@ -1138,6 +1146,7 @@ class HarnessService:
         session: HarnessSession,
         *,
         exclude_message_id: uuid.UUID | None = None,
+        exclude_user_message_id: uuid.UUID | None = None,
     ) -> list[LLMMessage]:
         """Build provider history from persisted messages and parts.
 
@@ -1148,8 +1157,8 @@ class HarnessService:
         import json
 
         stored = await sync_to_async(self.messages.list_for_session)(session.id)
-        if exclude_message_id is not None:
-            stored = [message for message in stored if message.id != exclude_message_id]
+        excluded_ids = {exclude_message_id, exclude_user_message_id}
+        stored = [message for message in stored if message.id not in excluded_ids]
         compaction = await self._find_latest_compaction(stored)
         checkpoint_summary = ""
         compaction_msg_id: uuid.UUID | None = None
@@ -1200,42 +1209,72 @@ class HarnessService:
                     )
                 )
                 continue
-            tool_calls: list[dict[str, Any]] = []
-            for part in tool_parts:
-                tool_input = dict(part.input or {})
-                tool_name = str(tool_input.get("tool", "") or part.title or "tool")
-                raw_args = tool_input.get("arguments", "")
-                if isinstance(raw_args, dict):
-                    raw_args = json.dumps(raw_args)
-                tool_calls.append(
-                    {
-                        "id": part.call_id,
-                        "name": tool_name,
-                        "arguments": str(raw_args or "{}"),
-                    }
-                )
-            history.append(
-                LLMMessage(
-                    role="assistant",
-                    content=assistant_content,
-                    tool_calls=tool_calls,
-                    message_id=str(message.id),
-                )
-            )
-            for part in tool_parts:
-                clipped = truncate_tool_output(part.output or "")
-                attachments = select_persisted_tool_attachments(
-                    _tool_part_attachments(part)
-                )
+            # Rebuild conversational turns from ordered parts, not from the
+            # flattened message.content. A response can contain text, tools,
+            # more text, and more tools; provider replay must keep these
+            # segments in the same order as the persisted timeline.
+            tool_ids = {part.id for part in tool_parts}
+            has_text_parts = any(part.type == "text" and part.output for part in parts)
+            text = ""
+            pending_calls: list[HarnessPart] = []
+            if not has_text_parts and assistant_content:
+                # Legacy messages without text parts only have a flattened
+                # content field; place it before tools as the best effort.
+                text = assistant_content
+
+            def flush_segment() -> None:
+                nonlocal text, pending_calls
+                if not text and not pending_calls:
+                    return
+                calls: list[dict[str, Any]] = []
+                for tool_part in pending_calls:
+                    tool_input = dict(tool_part.input or {})
+                    tool_name = str(
+                        tool_input.get("tool", "") or tool_part.title or "tool"
+                    )
+                    raw_args = tool_input.get("arguments", "")
+                    if isinstance(raw_args, dict):
+                        raw_args = json.dumps(raw_args)
+                    calls.append(
+                        {
+                            "id": tool_part.call_id,
+                            "name": tool_name,
+                            "arguments": str(raw_args or "{}"),
+                        }
+                    )
                 history.append(
                     LLMMessage(
-                        role="tool",
-                        content=build_tool_message_content(
-                            clipped.content, attachments
-                        ),
-                        tool_call_id=part.call_id,
+                        role="assistant",
+                        content=text or None,
+                        tool_calls=calls,
+                        message_id=str(message.id),
                     )
                 )
+                for tool_part in pending_calls:
+                    clipped = truncate_tool_output(tool_part.output or "")
+                    attachments = select_persisted_tool_attachments(
+                        _tool_part_attachments(tool_part)
+                    )
+                    history.append(
+                        LLMMessage(
+                            role="tool",
+                            content=build_tool_message_content(
+                                clipped.content, attachments
+                            ),
+                            tool_call_id=tool_part.call_id,
+                        )
+                    )
+                text = ""
+                pending_calls = []
+
+            for part in parts:
+                if part.type == "text" and part.output:
+                    if pending_calls:
+                        flush_segment()
+                    text += part.output
+                elif part.id in tool_ids:
+                    pending_calls.append(part)
+            flush_segment()
         return history
 
     async def _find_latest_compaction(
@@ -1281,7 +1320,7 @@ class HarnessService:
         *,
         summary: str = "",
     ) -> str | None:
-        """Resolve assistant text for provider history (never the compaction summary)."""
+        """Resolve assistant text for history without the compaction summary."""
         text_output = "".join(
             part.output for part in parts if part.type == "text" and part.output
         )
@@ -1322,7 +1361,7 @@ class HarnessService:
                 role="assistant",
             )
             .exclude(id=exclude_message_id)
-            .order_by("-created_at")
+            .order_by("-position", "-created_at", "-id")
             .first()
         )
         if prev is None:
@@ -1332,7 +1371,7 @@ class HarnessService:
                 message_id=prev.id,
                 type="step-finish",
             )
-            .order_by("-created_at")
+            .order_by("-position", "-created_at", "-id")
             .first()
         )
         if part is not None:
@@ -1587,21 +1626,22 @@ class HarnessService:
                 prompt, session.agent_name or "build", model, session.mode, opts
             )
             # Text deltas were already appended to the assistant message
-            # incrementally (see _persist_part_updated); only the tail
-            # after the last delta still needs persisting.
+            # incrementally (see _persist_part_updated); only genuinely new
+            # tail content still needs persisting. The runner's final
+            # ``output`` is the full assembled answer, so diff it against
+            # what is already stored instead of appending blindly (content
+            # drifts when a rerun/continuation re-emits a prefix). When a
+            # remainder exists it also gets its own text part so message
+            # content and parts never drift apart.
             await sync_to_async(assistant.refresh_from_db)()
             existing = assistant.content or ""
             tail = result.output or ""
-            if tail and not existing.endswith(tail):
-                remainder = tail
-                if existing and tail.startswith(existing):
-                    remainder = tail[len(existing) :]
-                elif existing and existing.startswith(tail):
-                    remainder = ""
-                if remainder:
-                    await sync_to_async(self.messages.append_content)(
-                        assistant, remainder
-                    )
+            remainder = _tail_remainder(existing, tail)
+            if remainder:
+                await sync_to_async(self.messages.append_content)(
+                    assistant, remainder
+                )
+                await self._append_tail_text_part(session, assistant, remainder)
             # Message usage is accumulated per step_finish so abort still
             # keeps completed steps. Session usage is applied once here.
             await sync_to_async(self.sessions.add_usage)(
@@ -1656,6 +1696,7 @@ class HarnessService:
                     session,
                     "idle",
                     model=assistant.model or "",
+                    assistant=assistant,
                 ),
                 str(session.workspace_id),
             )
@@ -1841,6 +1882,27 @@ class HarnessService:
                 part, state, output=part.output or output
             )
 
+    async def _append_tail_text_part(
+        self, session: HarnessSession, assistant: HarnessMessage, remainder: str
+    ) -> None:
+        """Persist the non-streamed tail remainder as its own text part."""
+        run_ctx = self._runs.get(str(session.id), {})
+        part_id = run_ctx.get("text_part_id")
+        part = None
+        if part_id is not None:
+            part = await sync_to_async(
+                self.parts.model.objects.filter(id=part_id).first
+            )()
+        if part is None:
+            part = await sync_to_async(self.parts.create)(
+                message_id=assistant.id,
+                type="text",
+                state="running",
+                meta={"step": None, "tail": True},
+            )
+            run_ctx["text_part_id"] = str(part.id)
+        await sync_to_async(self.parts.append_output)(part, remainder)
+
     async def _on_permission(
         self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any
     ) -> str:
@@ -1950,19 +2012,64 @@ class HarnessService:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
+        """Persist a runner streaming event and forward it to frontend.
+
+        Contract shared by the runner, persisted parts, and frontend:
+
+        - every ``harness.part_updated`` payload carries ``message_id``
+          (the current assistant shell) so live deltas route to the right
+          turn; text/reasoning deltas additionally carry the persisted
+          ``part_id`` of the running stream part.
+        - ``harness.subtask_started/finished`` carry ``message_id`` too.
+        - ``harness.session_status`` busy/idle carries ``message_id`` of the
+          *current* assistant (see ``_session_status_payload``).
+        - provider-position handling: the runner emits
+          ``tool_queued`` ``{type, step, call_id, tool, title, arguments}``
+          in observed order. We create the tool part here (state pending)
+          and emit ``delta.tool_started`` with that ``part_id``; the later
+          ``tool_started`` for the same ``call_id`` flips the same part to
+          running and re-emits ``delta.tool_started`` with the same
+          ``part_id`` (frontend dedupes by ``part_id``). ``tool_queued``
+          ``call_id`` may be provisional: when the real ``tool_started``
+          carries a *different* id for the same step/tool, we rebind by
+          updating the queued part's ``call_id`` instead of creating a
+          second row.
+        """
         etype = str(event.get("type", ""))
         workspace_id = str(session.workspace_id)
         session_id = str(session.id)
+        message_id = str(assistant.id)
         if etype == "part_updated":
-            await self._persist_part_updated(session, assistant, event)
+            part_id = await self._persist_part_updated(session, assistant, event)
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": event.get("delta", {}),
                     "step": event.get("step"),
+                    **({"part_id": part_id} if part_id is not None else {}),
+                },
+                workspace_id,
+            )
+        elif etype == "tool_queued":
+            part = await self._persist_tool_queued(session, assistant, event)
+            await self._emit_frontend(
+                FRONTEND_EVENT_PART,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "delta": {
+                        "tool_started": event.get("tool", ""),
+                        "title": event.get("title", ""),
+                        "call_id": event.get("call_id", ""),
+                        "arguments": event.get("arguments", ""),
+                        "state": "pending",
+                    },
+                    "step": event.get("step"),
+                    "part_id": str(part.id),
                 },
                 workspace_id,
             )
@@ -1981,6 +2088,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {"step_start": event.get("step")},
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -2055,6 +2163,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {
                         "step_finish": event.get("step"),
                         "cost": event.get("cost", 0.0),
@@ -2066,31 +2175,19 @@ class HarnessService:
                 workspace_id,
             )
         elif etype == "tool_started":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="tool",
-                state="running",
-                call_id=str(event.get("call_id", "")),
-                title=str(event.get("title", "")),
-                input={
-                    "tool": event.get("tool", ""),
-                    "arguments": event.get("arguments", ""),
-                },
-                meta={"step": event.get("step")},
-            )
-            self._runs.get(session_id, {}).get("tool_parts", {})[
-                str(event.get("call_id", ""))
-            ] = str(part.id)
+            part = await self._persist_tool_started(session, assistant, event)
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {
                         "tool_started": event.get("tool", ""),
                         "title": event.get("title", ""),
                         "call_id": event.get("call_id", ""),
                         "arguments": event.get("arguments", ""),
+                        "state": "running",
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -2104,6 +2201,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {
                         "tool_completed": event.get("tool", ""),
                         "call_id": event.get("call_id", ""),
@@ -2124,6 +2222,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {
                         "tool_error": event.get("error", ""),
                         "call_id": event.get("call_id", ""),
@@ -2141,6 +2240,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {etype: event.get("attempt")},
                     "step": event.get("step"),
                 },
@@ -2152,6 +2252,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "todos": event.get("todos", []),
                     "step": event.get("step"),
                 },
@@ -2177,6 +2278,7 @@ class HarnessService:
                 # optimization and never trusted (it could carry
                 # ``exec_code`` or other unexpected keys).
                 agent_meta = parse_plan_meta(plan)
+                await self._close_running_stream_parts(session)
                 part = await sync_to_async(self.parts.create)(
                     message_id=assistant.id,
                     type="agent",
@@ -2193,6 +2295,7 @@ class HarnessService:
                     {
                         "workspace_id": workspace_id,
                         "session_id": session_id,
+                        "message_id": message_id,
                         "delta": {"agent": plan, "agent_meta": agent_meta},
                         "step": event.get("step"),
                         "part_id": str(part.id),
@@ -2200,6 +2303,10 @@ class HarnessService:
                     workspace_id,
                 )
         elif etype == "subtask_started":
+            # A non-text part opens: close any running text/reasoning stream
+            # first so nothing merges across the boundary (text/tool/text
+            # stays three rows in observed order).
+            await self._close_running_stream_parts(session)
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
                 type="subtask",
@@ -2221,6 +2328,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "subtask_id": event.get("subtask_id", ""),
                     "child_session_id": event.get("child_session_id", ""),
                     "agent": event.get("agent", ""),
@@ -2238,6 +2346,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "subtask_id": event.get("subtask_id", ""),
                     "child_session_id": event.get("child_session_id", ""),
                     "status": event.get("status", ""),
@@ -2246,6 +2355,7 @@ class HarnessService:
                 workspace_id,
             )
         elif etype == "patch":
+            await self._close_running_stream_parts(session)
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
                 type="patch",
@@ -2266,6 +2376,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {"patch": event.get("path", "")},
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -2273,6 +2384,7 @@ class HarnessService:
                 workspace_id,
             )
         elif etype == "compaction":
+            await self._close_running_stream_parts(session)
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
                 type="compaction",
@@ -2290,6 +2402,7 @@ class HarnessService:
                 {
                     "workspace_id": workspace_id,
                     "session_id": session_id,
+                    "message_id": message_id,
                     "delta": {"compaction": True},
                     "part_id": str(part.id),
                 },
@@ -2301,7 +2414,7 @@ class HarnessService:
         session: HarnessSession,
         assistant: HarnessMessage,
         event: dict[str, Any],
-    ) -> None:
+    ) -> str | None:
         """Append text/reasoning deltas to the running text/reasoning parts.
 
         Reasoning parts stay step-attributed via ``meta["step"]`` (normal
@@ -2309,6 +2422,13 @@ class HarnessService:
         ``None``). ``step_finish`` closes the running text and reasoning
         parts DB-side and resets ``text_part_id`` / ``reasoning_part_id``
         so the next step starts fresh ones (see ``_persist_runner_event``).
+
+        A text/reasoning *kind transition* closes the other running stream
+        first so text and reasoning never merge across boundaries; a new
+        tool/subtask/patch/agent/compaction part also closes both via
+        ``_close_running_stream_parts``. Completion alone never closes.
+        Returns the persisted ``part_id`` when a text/reasoning delta was
+        stored (so live events carry it), else ``None``.
         """
         delta = event.get("delta", {}) or {}
         text = str(delta.get("text", "") or "")
@@ -2316,7 +2436,9 @@ class HarnessService:
         step = event.get("step")
         key = str(session.id)
         run_ctx = self._runs.get(key, {})
+        touched_id: str | None = None
         if text:
+            await self._complete_stream_part(run_ctx, "reasoning_part_id")
             part_id = run_ctx.get("text_part_id")
             if part_id is None:
                 part = await sync_to_async(self.parts.create)(
@@ -2330,7 +2452,9 @@ class HarnessService:
             part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
             await sync_to_async(self.parts.append_output)(part, text)
             await sync_to_async(self.messages.append_content)(assistant, text)
+            touched_id = str(part_id)
         if reasoning:
+            await self._complete_stream_part(run_ctx, "text_part_id")
             part_id = run_ctx.get("reasoning_part_id")
             if part_id is None:
                 part = await sync_to_async(self.parts.create)(
@@ -2343,6 +2467,184 @@ class HarnessService:
                 part_id = str(part.id)
             part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
             await sync_to_async(self.parts.append_output)(part, reasoning)
+            touched_id = str(part_id)
+        return touched_id
+
+    async def _complete_stream_part(
+        self, run_ctx: dict[str, Any], slot: str
+    ) -> None:
+        """Complete+clear one running text/reasoning stream slot (best-effort)."""
+        part_id = run_ctx.pop(slot, None)
+        if part_id is None:
+            return
+        part = await sync_to_async(
+            self.parts.model.objects.filter(id=part_id).first
+        )()
+        if part is not None:
+            await sync_to_async(self.parts.mark_state)(part, "completed")
+
+    async def _close_running_stream_parts(self, session: HarnessSession) -> None:
+        """Close open text/reasoning streams before a non-text part boundary."""
+        run_ctx = self._runs.get(str(session.id), {})
+        await self._complete_stream_part(run_ctx, "text_part_id")
+        await self._complete_stream_part(run_ctx, "reasoning_part_id")
+
+    async def _persist_tool_queued(
+        self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
+    ) -> HarnessPart:
+        """Create the tool part at observed ``tool_queued`` position (pending).
+
+        Called for the runner's ``tool_queued`` event
+        ``{type, step, call_id, tool, title, arguments}``. The row is created
+        in observed order (``position`` allocation) with state ``pending`` so
+        the timeline shows the tool where the provider placed it even before
+        permission gates/actual execution.
+        """
+        await self._close_running_stream_parts(session)
+        part = await sync_to_async(self.parts.create)(
+            message_id=assistant.id,
+            type="tool",
+            state="pending",
+            call_id=str(event.get("call_id", "")),
+            title=str(event.get("title", "")),
+            input={
+                "tool": event.get("tool", ""),
+                "arguments": event.get("arguments", ""),
+            },
+            meta={"step": event.get("step")},
+        )
+        self._runs.get(str(session.id), {}).get("tool_parts", {})[
+            str(event.get("call_id", ""))
+        ] = str(part.id)
+        return part
+
+    async def _persist_tool_started(
+        self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
+    ) -> HarnessPart:
+        """Update-or-create the tool part for ``tool_started`` (running).
+
+        The normal path updates the ``tool_queued`` row for the same
+        ``call_id`` to running and re-emits ``delta.tool_started`` with the
+        *same* ``part_id`` (frontend dedupes). When the queued ``call_id``
+        was provisional, a pending tool part for
+        the same step+tool is rebound by updating its ``call_id`` instead of
+        creating a second row. Without any queued row this falls back to
+        creating the part here (legacy runner path).
+        """
+        await self._close_running_stream_parts(session)
+        call_id = str(event.get("call_id", ""))
+        step = event.get("step")
+        tool = str(event.get("tool", ""))
+        run_ctx = self._runs.get(str(session.id), {})
+        part = await self._lookup_tool_part(run_ctx, assistant, call_id)
+        queued_id = str(event.get("queued_id", "") or "")
+        if part is None and queued_id:
+            part = await self._lookup_tool_part(run_ctx, assistant, queued_id)
+        if part is None and not queued_id:
+            part = await self._rebind_provisional_tool_part(
+                run_ctx, assistant, step=step, tool=tool, call_id=call_id
+            )
+        if part is None:
+            part = await sync_to_async(self.parts.create)(
+                message_id=assistant.id,
+                type="tool",
+                state="running",
+                call_id=call_id,
+                title=str(event.get("title", "")),
+                input={
+                    "tool": event.get("tool", ""),
+                    "arguments": event.get("arguments", ""),
+                },
+                meta={"step": step},
+            )
+            run_ctx.get("tool_parts", {})[call_id] = str(part.id)
+            return part
+        if call_id and part.call_id != call_id:
+            part.call_id = call_id
+            rebased_meta = dict(part.meta or {})
+            rebased_meta["step"] = step
+            part.meta = rebased_meta
+            await sync_to_async(part.save)(
+                update_fields=["call_id", "meta", "updated_at"]
+            )
+            # Rebind the run-context index to the real call id.
+            tool_parts = run_ctx.get("tool_parts", {})
+            for old_key, old_part_id in list(tool_parts.items()):
+                if old_part_id == str(part.id) and old_key != call_id:
+                    del tool_parts[old_key]
+            tool_parts[call_id] = str(part.id)
+        await sync_to_async(self.parts.mark_state)(
+            part,
+            "running",
+            title=str(event.get("title", "") or part.title),
+            meta={"step": step},
+        )
+        run_ctx.get("tool_parts", {})[call_id] = str(part.id)
+        # Refresh title/arguments observed at start (queued row may only
+        # have had provisional values).
+        part.title = str(event.get("title", "") or part.title)
+        part.input = {
+            "tool": event.get("tool", "") or (part.input or {}).get("tool", ""),
+            "arguments": event.get("arguments", "")
+            or (part.input or {}).get("arguments", ""),
+        }
+        await sync_to_async(part.save)(update_fields=["title", "input", "updated_at"])
+        return part
+
+    async def _lookup_tool_part(
+        self, run_ctx: dict[str, Any], assistant: HarnessMessage, call_id: str
+    ) -> HarnessPart | None:
+        """Return the tool part for *call_id* (run ctx first, then DB)."""
+        part = None
+        part_id = (run_ctx.get("tool_parts", {}) or {}).get(call_id)
+        if part_id is not None:
+            part = await sync_to_async(
+                self.parts.model.objects.filter(id=part_id).first
+            )()
+        if part is None and call_id:
+            part = await sync_to_async(
+                self.parts.model.objects.filter(
+                    message_id=assistant.id, call_id=call_id
+                ).first
+            )()
+        return part
+
+    async def _rebind_provisional_tool_part(
+        self,
+        run_ctx: dict[str, Any],
+        assistant: HarnessMessage,
+        *,
+        step: Any,
+        tool: str,
+        call_id: str,
+    ) -> HarnessPart | None:
+        """Rebind a pending queued part when ``tool_queued`` used a temp id.
+
+        Matches the oldest still-pending tool part for the same step+tool so
+        the real ``tool_started`` id adopts that row (same ``part_id``
+        across both live events) instead of appending a duplicate.
+        """
+        if not tool or not call_id:
+            return None
+        candidate = (
+            await sync_to_async(
+                lambda: list(
+                    self.parts.model.objects.filter(
+                        message_id=assistant.id,
+                        type="tool",
+                        state="pending",
+                    ).order_by("position", "created_at", "id")
+                )
+            )()
+        )
+        for row in candidate:
+            meta = dict(row.meta or {})
+            row_tool = str((row.input or {}).get("tool", "") or row.title or "")
+            if meta.get("step") == step and (
+                row_tool == tool or (row.title or "") == tool or not row_tool
+            ):
+                return row
+        return None
 
     async def _finish_tool_part(
         self, assistant: HarnessMessage, event: dict[str, Any], *, state: str
@@ -2354,7 +2656,9 @@ class HarnessService:
         output stays in ``output`` while image/PDF bytes survive restarts
         via ``meta`` and are rehydrated in :meth:`_build_history`.
         ``mark_state`` merges ``meta`` (existing keys like ``step`` from
-        the ``tool_started`` part are preserved).
+        the ``tool_started`` part are preserved). Tool *results* never
+        create a new part: completion only updates the queued/started row;
+        the no-queued fallback creates the row here for legacy runners.
         """
         call_id = str(event.get("call_id", ""))
         output = str(event.get("output", "") or event.get("error", "") or "")
@@ -2374,6 +2678,17 @@ class HarnessService:
                     message_id=assistant.id, call_id=call_id
                 ).first
             )()
+        queued_id = str(event.get("queued_id", "") or "")
+        if part is None and queued_id:
+            part = await self._lookup_tool_part(
+                self._runs.get(str(assistant.session_id), {}), assistant, queued_id
+            )
+            if part is not None and call_id != part.call_id:
+                part.call_id = call_id
+                await sync_to_async(part.save)(update_fields=["call_id", "updated_at"])
+                self._runs.get(str(assistant.session_id), {}).get("tool_parts", {})[
+                    call_id
+                ] = str(part.id)
         if part is None:
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
@@ -2527,15 +2842,40 @@ class HarnessService:
         status: str,
         *,
         model: str = "",
+        assistant: HarnessMessage | None = None,
+        user_message_id: str = "",
     ) -> dict[str, Any]:
-        """Shape a ``harness.session_status`` frontend payload."""
-        return {
+        """Shape a ``harness.session_status`` frontend payload.
+
+        ``message_id`` is always the *current* assistant message id so the
+        frontend never attaches a fresh turn to an older answer. Callers
+        pass the run's assistant shell explicitly; the ``_runs`` context is
+        the fallback (busy path after refresh, idle path before cleanup).
+        """
+        assistant_id = ""
+        if assistant is not None:
+            assistant_id = str(assistant.id)
+        else:
+            assistant_id = str(
+                self._runs.get(str(session.id), {}).get("message_id", "") or ""
+            )
+        if not user_message_id:
+            user_message_id = str(
+                self._runs.get(str(session.id), {}).get("user_message_id", "")
+                or ""
+            )
+        payload: dict[str, Any] = {
             "workspace_id": str(session.workspace_id),
             "session_id": str(session.id),
             "status": status,
             "model": (model or session.model or "").strip(),
             "reasoning_effort": session.reasoning_effort or "",
         }
+        if assistant_id:
+            payload["message_id"] = assistant_id
+        if user_message_id:
+            payload["user_message_id"] = user_message_id
+        return payload
 
     async def _emit_conversations_changed(self, workspace_id: uuid.UUID | str) -> None:
         """Notify workspace subscribers that the conversation feed may have changed."""
@@ -2564,6 +2904,27 @@ class HarnessService:
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
         """Forward an event to subscribed frontend clients (never breaks)."""
+        # Cache each part's immutable position: text/reasoning emit many
+        # token deltas, so querying the database on every socket emit would
+        # add an avoidable round trip to the streaming hot path.
+        part_id = data.get("part_id")
+        if part_id and event in (FRONTEND_EVENT_PART, FRONTEND_EVENT_SUBTASK_STARTED):
+            run_ctx = self._runs.get(str(data.get("session_id", "")), {})
+            positions = run_ctx.setdefault("part_positions", {})
+            position = positions.get(str(part_id))
+            if position is None:
+                try:
+                    position = await sync_to_async(
+                        self.parts.model.objects.filter(id=part_id)
+                        .values_list("position", flat=True)
+                        .first
+                    )()
+                except (ValueError, TypeError):
+                    position = None
+                if position is not None:
+                    positions[str(part_id)] = position
+            if position is not None:
+                data["part_position"] = position
         try:
             if self._emit is not None:
                 await self._emit(event, data)
@@ -3083,6 +3444,32 @@ def _title_from_prompt(prompt: str) -> str:
     first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
     title = first_line.strip()[:80]
     return title or "Harness session"
+
+
+def _tail_remainder(existing: str, tail: str) -> str:
+    """Return the genuinely-new suffix of a runner final ``output``.
+
+    Streaming already appended every text delta to the message, so the
+    final ``output`` is the full assembled answer: appending it blindly
+    duplicates content (content-only drift). Exact suffix/prefix overlaps
+    return ``""``; only a true remainder is returned for persistence.
+    """
+    existing = existing or ""
+    tail = tail or ""
+    if not tail:
+        return ""
+    if not existing:
+        return tail
+    if existing.endswith(tail):
+        return ""
+    if tail.startswith(existing):
+        return tail[len(existing):]
+    if existing.startswith(tail):
+        return ""
+    # A divergent final string is not a suffix of the streamed response.
+    # Appending it would duplicate or scramble the answer; the persisted
+    # deltas remain authoritative instead.
+    return ""
 
 
 def _forked_title(title: str) -> str:

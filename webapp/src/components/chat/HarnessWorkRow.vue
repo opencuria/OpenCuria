@@ -127,7 +127,7 @@ const rowClass = computed(() => {
           {{ reasoningPreview }}
         </span>
         <span v-else class="min-w-0 flex-1" />
-        <LoadingSpinner v-if="part.state === 'running'" :size="10" class="shrink-0" />
+        <LoadingSpinner v-if="part.state === 'running' || part.state === 'pending'" :size="10" class="shrink-0" />
         <ChevronDown
           :size="12"
           class="shrink-0 opacity-70 transition-transform"

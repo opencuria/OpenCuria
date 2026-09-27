@@ -610,9 +610,27 @@ class BedrockAdapter(ProviderAdapter):
                 continue
 
             if message.role == "assistant":
-                blocks: list[dict[str, Any]] = []
-                text_parts: list[str] = []
-                reasoning_texts: list[str] = []
+                # Provider order: assistant text precedes the toolUse
+                # block(s) in the streamed turn, so text comes before
+                # toolUse (previously it was appended after, inverting
+                # the observed order for text-before-tool turns).
+                # Reasoning stays first (Converse thinking order and
+                # the previous non-tool order); toolUse comes last.
+                text_blocks: list[dict[str, Any]] = []
+                tool_blocks: list[dict[str, Any]] = []
+                reasoning_blocks: list[dict[str, Any]] = []
+                text_value = _message_text(message.content)
+                if text_value:
+                    text_blocks.append({"text": text_value})
+                for reasoning_text in _reasoning_texts(message.content):
+                    if reasoning_text:
+                        reasoning_blocks.append(
+                            {
+                                "reasoningContent": {
+                                    "reasoningText": {"text": reasoning_text},
+                                }
+                            }
+                        )
                 if message.tool_calls:
                     for call in message.tool_calls:
                         function = call.get("function", call)
@@ -621,7 +639,7 @@ class BedrockAdapter(ProviderAdapter):
                         tool_use_id = str(call.get("id", "") or "")
                         name = str(function.get("name", call.get("name", "")) or "")
                         arguments = function.get("arguments", call.get("arguments", ""))
-                        blocks.append(
+                        tool_blocks.append(
                             {
                                 "toolUse": {
                                     "toolUseId": tool_use_id,
@@ -632,23 +650,11 @@ class BedrockAdapter(ProviderAdapter):
                                 }
                             }
                         )
-                    text_parts.append(_message_text(message.content))
-                    reasoning_texts.extend(_reasoning_texts(message.content))
-                else:
-                    text_parts.append(_message_text(message.content))
-                    reasoning_texts.extend(_reasoning_texts(message.content))
-                for reasoning_text in reasoning_texts:
-                    if reasoning_text:
-                        blocks.append(
-                            {
-                                "reasoningContent": {
-                                    "reasoningText": {"text": reasoning_text},
-                                }
-                            }
-                        )
-                for text_part in text_parts:
-                    if text_part:
-                        blocks.append({"text": text_part})
+                blocks = [
+                    *reasoning_blocks,
+                    *text_blocks,
+                    *tool_blocks,
+                ]
                 if blocks:
                     _merge_message(converse_messages, "assistant", blocks)
                 continue
@@ -778,6 +784,18 @@ class BedrockAdapter(ProviderAdapter):
                         str(tool_use.get("name", "") or ""),
                         index,
                     )
+                    # Tool placement is the block START, not the stop.
+                    # Text blocks may stream before the input JSON is
+                    # complete; emitting only on stop moves the tool past
+                    # that text in the persisted timeline.
+                    deltas.append(
+                        Delta(tool_calls=({
+                            "index": index,
+                            "id": active_tools[index].tool_use_id,
+                            "name": active_tools[index].name,
+                            "arguments": "",
+                        },))
+                    )
 
         block_delta = event.get("contentBlockDelta")
         if isinstance(block_delta, dict):
@@ -806,7 +824,12 @@ class BedrockAdapter(ProviderAdapter):
             index = int(block_stop.get("contentBlockIndex", 0))
             state = active_tools.pop(index, None)
             if state is not None:
-                deltas.append(state.as_delta())
+                # Only the input suffix remains: id/name were already
+                # emitted at contentBlockStart to anchor the tool card.
+                deltas.append(Delta(tool_calls=({
+                    "index": state.index,
+                    "arguments": "".join(state.input_parts),
+                },)))
 
         return deltas
 

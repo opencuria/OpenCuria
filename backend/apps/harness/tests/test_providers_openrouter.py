@@ -209,6 +209,71 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:
     assert deltas[-1].finish_reason == "tool_calls"
 
 
+async def test_chat_stream_mixed_chunk_order_deterministic() -> None:
+    """text/tool/text/tool chunks stream in wire order (no reordering)."""
+    payload = _sse_payload(
+        [
+            {"choices": [{"delta": {"content": "t0 "}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-a",
+                                    "function": {
+                                        "name": "read",
+                                        "arguments": '{"path":"a"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"delta": {"content": "t1 "}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call-b",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": '{"command":"ls"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    adapter = OpenRouterAdapter(api_key="test-key", client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "model-x",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+    kinds = [
+        "text" if d.text else ("tool" if d.tool_calls else "other") for d in deltas
+    ]
+    assert kinds[:4] == ["text", "tool", "text", "tool"]
+    assert "".join(d.text for d in deltas) == "t0 t1 "
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    assert [c["id"] for c in tool_calls] == ["call-a", "call-b"]
+
+
 async def test_chat_stream_auth_error() -> None:
     """HTTP 401 raises ProviderAuthError."""
     adapter = OpenRouterAdapter(

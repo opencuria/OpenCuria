@@ -1018,8 +1018,11 @@ async def test_history_built_from_db_not_params(harness_workspace) -> None:
     )
     await service._tasks[str(session.id)]
     assert len(seen) == 2
-    # Second run history contains the first persisted user turn.
-    assert "first" in json.dumps(seen[1]["texts"])
+    # History contains the first turn exactly once; the active prompt is
+    # appended by the runner, not replayed from persisted messages as well.
+    assert seen[0]["texts"].count("first") == 1
+    assert seen[1]["texts"].count("first") == 1
+    assert seen[1]["texts"].count("second") == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2437,3 +2440,605 @@ async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None
     assert len(forwarded) == 1
     assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
     assert secret not in str(forwarded[0]["delta"]["agent_meta"])
+
+
+# ---------------------------------------------------------------------------
+# Reliable chat timeline regression tests (positions, live ids, boundaries)
+# ---------------------------------------------------------------------------
+
+
+def _timeline_ctx(session_id: uuid.UUID, assistant_id: uuid.UUID) -> dict[str, Any]:
+    return {
+        "session_id": str(session_id),
+        "message_id": str(assistant_id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+def test_message_positions_sequential_with_tied_timestamps(harness_workspace) -> None:
+    """Messages allocate 0..n positions in creation order (ties stable)."""
+    from django.utils import timezone
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="tied",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    first = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="one"
+    )
+    second = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="two"
+    )
+    third = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="three"
+    )
+    stamp = timezone.now()
+    from apps.harness.models import HarnessMessage as _Msg
+
+    _Msg.objects.filter(id__in=[first.id, second.id, third.id]).update(
+        created_at=stamp
+    )
+    ordered = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.id for m in ordered] == [first.id, second.id, third.id]
+    assert [m.position for m in ordered] == [0, 1, 2]
+    assert [str(v) for v in HarnessMessageRepository.list_ids_for_session(session.id)] == [
+        str(first.id),
+        str(second.id),
+        str(third.id),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_part_positions_sequential_with_tied_timestamps(harness_workspace) -> None:
+    """Parts allocate 0..n positions per message in creation order."""
+    from django.utils import timezone
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="tied-parts",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    p1 = HarnessPartRepository.create(
+        message_id=assistant.id, type="text", state="completed", output="a"
+    )
+    p2 = HarnessPartRepository.create(
+        message_id=assistant.id, type="tool", state="completed", call_id="c1"
+    )
+    p3 = HarnessPartRepository.create(
+        message_id=assistant.id, type="text", state="completed", output="b"
+    )
+    stamp = timezone.now()
+    from apps.harness.models import HarnessPart as _Part
+
+    _Part.objects.filter(id__in=[p1.id, p2.id, p3.id]).update(created_at=stamp)
+    ordered = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.id for p in ordered] == [p1.id, p2.id, p3.id]
+    assert [p.position for p in ordered] == [0, 1, 2]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_text_tool_text_observed_order_and_live_ids(harness_workspace) -> None:
+    """text/tool/text persists in observed order; live events carry ids."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "before "}, "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "title": "Read a.txt",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "title": "Read a.txt",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "output": "contents",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "after"}, "step": 1}
+    )
+
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "tool", "text"]
+    assert [p.position for p in parts] == [0, 1, 2]
+    assert parts[0].output == "before "
+    assert parts[1].state == "completed"
+    assert parts[1].output == "contents"
+    assert parts[2].output == "after"
+
+    part_events = [e for e in events if e.get("event") == FRONTEND_EVENT_PART]
+    assert part_events
+    for payload in part_events:
+        assert payload.get("message_id") == str(assistant.id)
+    text_events = [e for e in part_events if "text" in (e.get("delta") or {})]
+    assert len(text_events) == 2
+    assert text_events[0]["part_id"] == str(parts[0].id)
+    assert text_events[1]["part_id"] == str(parts[2].id)
+    assert text_events[0]["part_id"] != text_events[1]["part_id"]
+    queued = [
+        e for e in part_events if (e.get("delta") or {}).get("tool_started") == "read"
+    ]
+    assert len(queued) == 2  # tool_queued + tool_started, same part_id
+    assert queued[0]["part_id"] == str(parts[1].id)
+    assert queued[1]["part_id"] == str(parts[1].id)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_queued_then_started_same_part_id_pending_then_running(
+    harness_workspace,
+) -> None:
+    """tool_queued creates pending part; tool_started flips same row running."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 2,
+            "call_id": "q-1",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    queued_row = HarnessPartRepository.list_for_message(assistant.id)[0]
+    assert queued_row.state == "pending"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 2,
+            "call_id": "q-1",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    rows = HarnessPartRepository.list_for_message(assistant.id)
+    assert len(rows) == 1
+    assert rows[0].id == queued_row.id
+    assert rows[0].state == "running"
+    started = [
+        e
+        for e in events
+        if e.get("event") == FRONTEND_EVENT_PART
+        and (e.get("delta") or {}).get("tool_started") == "bash"
+    ]
+    assert [e["part_id"] for e in started] == [str(queued_row.id)] * 2
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_result_updates_same_part_no_new_row(harness_workspace) -> None:
+    """tool completion/error updates the queued row; no extra part is added."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "output": "done",
+        },
+    )
+    rows = HarnessPartRepository.list_for_message(assistant.id)
+    assert len(rows) == 1
+    assert rows[0].state == "completed"
+    assert rows[0].output == "done"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_provisional_queued_call_id_rebound_on_started(harness_workspace) -> None:
+    """A provisional queued id is rebound to the real started id (one row)."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "provisional-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    queued_id = HarnessPartRepository.list_for_message(assistant.id)[0].id
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "real-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    rows = HarnessPartRepository.list_for_message(assistant.id)
+    assert len(rows) == 1
+    assert rows[0].id == queued_id
+    assert rows[0].call_id == "real-1"
+    assert rows[0].state == "running"
+    started = [
+        e
+        for e in events
+        if e.get("event") == FRONTEND_EVENT_PART
+        and (e.get("delta") or {}).get("tool_started") == "read"
+    ]
+    assert started[-1]["part_id"] == str(queued_id)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_text_reasoning_kind_transition_closes_other_stream(
+    harness_workspace,
+) -> None:
+    """A text->reasoning (and back) transition closes the other open stream."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "t1"}}
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"reasoning": "r1"}}
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "t2"}}
+    )
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "reasoning", "text"]
+    assert [p.output for p in parts] == ["t1", "r1", "t2"]
+    assert [p.position for p in parts] == [0, 1, 2]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_non_text_part_closes_running_text(harness_workspace) -> None:
+    """tool_queued closes an open text stream so nothing merges across it."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "hello"}}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "c-close",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "after"}}
+    )
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "tool", "text"]
+    assert parts[0].state == "completed"
+    assert parts[0].output == "hello"
+    assert parts[2].output == "after"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_status_busy_and_idle_carry_current_assistant_message_id(
+    harness_workspace,
+) -> None:
+    """Follow-up turns emit busy/idle with the fresh assistant message id."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    org_id = harness_workspace.runner.organization_id
+    first = await service.start_run(
+        session,
+        "first",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+    busy_first = [
+        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+    ]
+    idle_first = [
+        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+    ]
+    assert busy_first and busy_first[-1]["message_id"] == str(first.id)
+    assert idle_first and idle_first[-1]["message_id"] == str(first.id)
+    events.clear()
+    session.refresh_from_db()
+    second = await service.start_run(
+        session,
+        "second",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service._tasks[str(session.id)]
+    assert str(second.id) != str(first.id)
+    busy_second = [
+        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+    ]
+    idle_second = [
+        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+    ]
+    assert busy_second and busy_second[-1]["message_id"] == str(second.id)
+    assert idle_second and idle_second[-1]["message_id"] == str(second.id)
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.position for m in stored] == [0, 1, 2, 3]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_execute_run_tail_remainder_creates_text_part_without_duplicates(
+    harness_workspace,
+) -> None:
+    """A non-streamed tail is appended once to content and to a text part."""
+    import apps.harness.harness_service as svc_mod
+
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="streamed "
+    )
+    await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id, type="text", state="running", output="streamed "
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    await service._append_tail_text_part(session, assistant, "tail words")
+    await sync_to_async(svc_mod.HarnessMessageRepository.append_content)(
+        assistant, "tail words"
+    )
+    assistant.refresh_from_db()
+    assert assistant.content == "streamed tail words"
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert "".join(p.output for p in parts if p.type == "text") == "streamed tail words"
+    assert svc_mod._tail_remainder("abc", "abc") == ""
+    assert svc_mod._tail_remainder("abc", "abcdef") == "def"
+    assert svc_mod._tail_remainder("abcdef", "abc") == ""
+    assert svc_mod._tail_remainder("", "hello") == "hello"
+    assert svc_mod._tail_remainder("already streamed", "different final") == ""
+
+
+@pytest.mark.django_db(transaction=True)
+def test_copy_prefix_preserves_positions_in_order(harness_workspace) -> None:
+    """Fork copies keep chronological order with fresh sequential positions."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="src",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    first_user = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="one"
+    )
+    first_asst = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="two"
+    )
+    HarnessPartRepository.create(
+        message_id=first_asst.id, type="text", state="completed", output="two"
+    )
+    second_user = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="three"
+    )
+    forked = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="dst",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    id_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, second_user.id)
+    assert set(id_map) == {first_user.id, first_asst.id}
+    copied = HarnessMessageRepository.list_for_session(forked.id)
+    assert [m.content for m in copied] == ["one", "two"]
+    assert [m.position for m in copied] == [0, 1]
+    copied_parts = HarnessPartRepository.list_for_message(copied[1].id)
+    assert [p.position for p in copied_parts] == [0]
+    full_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, None)
+    assert set(full_map) == {first_user.id, first_asst.id, second_user.id}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_delete_from_uses_positions(harness_workspace) -> None:
+    """delete_from drops the positional suffix starting at the target."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="del",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    first = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="one"
+    )
+    second = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="two"
+    )
+    third = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="three"
+    )
+    deleted = HarnessMessageRepository.delete_from(session.id, second.id)
+    assert [str(v) for v in deleted] == [str(second.id), str(third.id)]
+    remaining = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.id for m in remaining] == [first.id]
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_keeps_text_between_tool_calls(harness_workspace) -> None:
+    """Follow-up replay must keep text/tool/text/tool/final-text in order."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="inspect files"
+    )
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="before between after"
+    )
+    for kind, output, call_id in [
+        ("text", "before ", ""),
+        ("tool", "first result", "first"),
+        ("text", "between ", ""),
+        ("tool", "second result", "second"),
+        ("text", "after", ""),
+    ]:
+        await sync_to_async(HarnessPartRepository.create)(
+            message_id=assistant.id,
+            type=kind,
+            state="completed",
+            output=output,
+            call_id=call_id,
+            input={"tool": "read", "arguments": "{}"} if call_id else {},
+        )
+    history = await service._build_history(session)
+    assert [(m.role, m.content, m.tool_call_id) for m in history] == [
+        ("user", "inspect files", None),
+        ("assistant", "before ", None),
+        ("tool", "first result", "first"),
+        ("assistant", "between ", None),
+        ("tool", "second result", "second"),
+        ("assistant", "after", None),
+    ]
+    assert [m.tool_calls[0]["id"] for m in history if m.tool_calls] == [
+        "first", "second"
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_parallel_same_tool_provisional_ids_rebind_by_queued_id(
+    harness_workspace,
+) -> None:
+    """Same-name parallel calls never exchange their queued part/arguments."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    for queued_id, path in [("temp-1", "a.txt"), ("temp-2", "b.txt")]:
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_queued", "step": 1, "call_id": queued_id,
+            "tool": "read", "title": "Read", "arguments": json.dumps({"path": path}),
+        })
+    initial = HarnessPartRepository.list_for_message(assistant.id)
+    assert [part.call_id for part in initial] == ["temp-1", "temp-2"]
+    # Dispatch in reverse order to stress the correlation (not newest-match).
+    for queued_id, real_id, path in [
+        ("temp-2", "real-b", "b.txt"), ("temp-1", "real-a", "a.txt")
+    ]:
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_started", "step": 1, "call_id": real_id,
+            "queued_id": queued_id, "tool": "read", "title": "Read",
+            "arguments": json.dumps({"path": path}),
+        })
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_completed", "step": 1, "call_id": real_id,
+            "queued_id": queued_id, "tool": "read", "output": path,
+        })
+    result = HarnessPartRepository.list_for_message(assistant.id)
+    assert [part.id for part in result] == [part.id for part in initial]
+    assert [(part.call_id, part.input["arguments"], part.output) for part in result] == [
+        ("real-a", '{"path": "a.txt"}', "a.txt"),
+        ("real-b", '{"path": "b.txt"}', "b.txt"),
+    ]
+    started = [e for e in events if (e.get("delta") or {}).get("tool_started")]
+    assert [e["delta"]["state"] for e in started] == [
+        "pending", "pending", "running", "running"
+    ]
+    assert [e["part_id"] for e in started] == [
+        str(initial[0].id), str(initial[1].id), str(initial[1].id), str(initial[0].id)
+    ]
