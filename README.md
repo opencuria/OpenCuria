@@ -248,6 +248,10 @@ runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
 with `python -m src` while iterating.
 
+## MCP OAuth integrations
+
+OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect personal or organization accounts from **Settings → Plugins**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production. See [MCP OAuth setup and operations](./docs/mcp-oauth.md) for required environment configuration, workspace attachment, security notes, and provider requirements.
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0.

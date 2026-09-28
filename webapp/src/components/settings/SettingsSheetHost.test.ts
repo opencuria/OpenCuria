@@ -43,8 +43,7 @@ async function mountHost() {
   setActivePinia(createPinia())
   replaceMock.mockClear()
   const events: Array<{ tab?: string }> = []
-  const listener = (e: Event) =>
-    events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
+  const listener = (e: Event) => events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
   window.addEventListener(OPEN_SETTINGS_EVENT, listener)
   const wrapper = mount(SettingsSheetHost, {
     global: {
@@ -113,6 +112,20 @@ describe('SettingsSheetHost', () => {
       expect(ctx.events[1]).toEqual({ tab: 'provider' })
       expect(replaceMock).toHaveBeenCalledTimes(2)
       expect(replaceMock).toHaveBeenLastCalledWith({ path: '/', query: {} })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
+  it('opens Plugins from the OAuth return and preserves its result while stripping settings', async () => {
+    setQuery({ settings: 'plugins', mcp_oauth: 'connected' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events).toEqual([{ tab: 'plugins' }])
+      expect(replaceMock).toHaveBeenCalledWith({
+        path: '/',
+        query: { mcp_oauth: 'connected' },
+      })
     } finally {
       ctx.cleanup()
     }

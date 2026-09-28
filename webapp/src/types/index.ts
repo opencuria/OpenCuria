@@ -304,6 +304,7 @@ export interface CredentialService {
   slug: string
   description: string
   credential_type: string
+  organization_id?: string | null
   env_var_name: string
   target_path: string
   label: string
@@ -462,7 +463,26 @@ export interface SkillUpdateIn {
 
 export type PluginMcpTransport = 'stdio' | 'streamable_http' | 'sse'
 
-export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key'
+export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
+
+export type PluginMcpAuthType = 'none' | 'oauth'
+
+export interface McpOAuthScopeStatus {
+  connected: boolean
+  credential_id?: string | null
+  expires_at?: string | null
+  reconnect_required?: boolean
+}
+
+export interface McpOAuthStatus {
+  personal: McpOAuthScopeStatus
+  organization: McpOAuthScopeStatus
+}
+
+export interface McpOAuthConnectOut {
+  authorization_url: string
+  status: 'pending'
+}
 
 export interface PluginSkill {
   id: string
@@ -492,6 +512,8 @@ export interface PluginMcpServer {
   headers: Record<string, string>
   startup_timeout_seconds: number
   request_timeout_seconds: number
+  auth_type: PluginMcpAuthType
+  oauth_requirement_key: string
 }
 
 export interface PluginMcpServerIn {
@@ -506,6 +528,8 @@ export interface PluginMcpServerIn {
   headers?: Record<string, string>
   startup_timeout_seconds?: number
   request_timeout_seconds?: number
+  auth_type?: PluginMcpAuthType
+  oauth_requirement_key?: string
 }
 
 export interface PluginCredentialServiceIn {
@@ -513,6 +537,8 @@ export interface PluginCredentialServiceIn {
   name?: string
   description?: string
   credential_type?: PluginCredentialServiceType
+  oauth_plugin_slug?: string
+  oauth_requirement_key?: string
   env_var_name?: string
   target_path?: string
   label?: string

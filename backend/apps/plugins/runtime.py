@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import replace
 
 from common.utils import decrypt_value
 
@@ -136,6 +137,8 @@ def build_workspace_plugin_snapshot(
                 env=dict(server.env or {}),
                 url=server.url or "",
                 headers=dict(server.headers or {}),
+                auth_type=server.auth_type,
+                oauth_requirement_key=server.oauth_requirement_key,
                 startup_timeout_seconds=server.startup_timeout_seconds,
                 request_timeout_seconds=server.request_timeout_seconds,
             )
@@ -150,6 +153,7 @@ def build_workspace_plugin_snapshot(
                 service_id=req.credential_service_id,
                 service_slug=req.credential_service.slug,
                 service_name=req.credential_service.name,
+                credential_type=req.credential_service.credential_type,
             )
             for req in PluginCredentialRequirementRepository.list_for_plugin(plugin.id)
         )
@@ -215,7 +219,7 @@ def resolve_plugin_plaintexts(
     req_by_key = {req.key: req for req in plugin.requirements}
     for key, req in req_by_key.items():
         credential = credentials_by_service.get(req.service_id)
-        if credential is None:
+        if credential is None or credential.service.credential_type == "mcp_oauth":
             if req.required:
                 raise PluginCredentialConfigError(
                     f"Plugin '{plugin.slug}' is missing required credential "
@@ -282,6 +286,18 @@ def render_server_config(
     HTTP/SSE -> headers); the unused mapping is still validated so typos
     and missing credentials fail closed at run start.
     """
+    oauth_keys = {
+        req.key for req in plugin.requirements if req.credential_type == "mcp_oauth"
+    }
+    if any(
+        key in oauth_keys
+        for mapping in (server.env or {}, server.headers or {})
+        for value in mapping.values()
+        for key in placeholder_keys(value)
+    ):
+        raise PluginCredentialConfigError(
+            f"Plugin '{plugin.slug}' OAuth requirements cannot be used as placeholders."
+        )
     requirement_keys = {req.key for req in plugin.requirements}
     rendered_env = render_mapping(
         dict(server.env or {}),
@@ -300,6 +316,45 @@ def render_server_config(
     return rendered_env, rendered_headers
 
 
+def resolve_runtime_oauth_credentials(
+    snapshot: WorkspacePluginSnapshot, *, workspace
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Resolve only matching OAuth credential row IDs; no token refresh here."""
+    org_id = _verify_workspace_org(workspace, snapshot.organization_id)
+    attached = _workspace_credentials_by_service(workspace, org_id=org_id)
+    resolved: dict[uuid.UUID, uuid.UUID] = {}
+    for plugin in snapshot.plugins:
+        for server in plugin.mcp_servers:
+            if server.auth_type != "oauth":
+                continue
+            requirement = next(
+                (
+                    item
+                    for item in plugin.requirements
+                    if item.key == server.oauth_requirement_key
+                ),
+                None,
+            )
+            credential = attached.get(requirement.service_id) if requirement else None
+            if (
+                credential is not None
+                and credential.service.credential_type == "mcp_oauth"
+                and credential.oauth_status == "connected"
+                and credential.oauth_server_id == server.id
+                and credential.oauth_server_url == server.url
+            ):
+                try:
+                    from apps.credentials.services import CredentialSvc
+
+                    CredentialSvc()._validate_oauth_bindings(
+                        [credential], user=workspace.created_by, org_id=org_id
+                    )
+                except Exception:
+                    continue
+                resolved[server.id] = credential.id
+    return resolved
+
+
 def resolve_runtime_credentials(
     snapshot: WorkspacePluginSnapshot, *, workspace
 ) -> dict[uuid.UUID, dict[str, str]]:
@@ -314,7 +369,26 @@ def resolve_runtime_credentials(
     credentials_by_service = _workspace_credentials_by_service(workspace, org_id=org_id)
     resolved: dict[uuid.UUID, dict[str, str]] = {}
     for plugin in snapshot.plugins:
-        resolved[plugin.id] = resolve_plugin_plaintexts(plugin, credentials_by_service)
+        # OAuth tokens are scoped and injected by the MCP transport only;
+        # never decrypt them into plugin placeholder maps.
+        oauth_keys = {
+            server.oauth_requirement_key
+            for server in plugin.mcp_servers
+            if server.auth_type == "oauth"
+        }
+        ordinary_requirements = tuple(
+            req
+            for req in plugin.requirements
+            if req.key not in oauth_keys and req.credential_type != "mcp_oauth"
+        )
+        safe_credentials = {
+            sid: cred
+            for sid, cred in credentials_by_service.items()
+            if cred.service.credential_type != "mcp_oauth"
+        }
+        resolved[plugin.id] = resolve_plugin_plaintexts(
+            replace(plugin, requirements=ordinary_requirements), safe_credentials
+        )
     logger.info(
         "plugin runtime credentials resolved for workspace %s (%d plugins)",
         snapshot.workspace_id,

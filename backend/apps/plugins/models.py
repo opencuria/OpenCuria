@@ -160,6 +160,12 @@ class PluginMcpServer(models.Model):
         blank=True,
         help_text="Header mapping; values may use {{credential.KEY}} placeholders.",
     )
+    auth_type = models.CharField(
+        max_length=16,
+        choices=[("none", "None"), ("oauth", "OAuth")],
+        default="none",
+    )
+    oauth_requirement_key = models.SlugField(max_length=255, blank=True, default="")
     startup_timeout_seconds = models.PositiveIntegerField(default=30)
     request_timeout_seconds = models.PositiveIntegerField(default=60)
     created_at = models.DateTimeField(auto_now_add=True)

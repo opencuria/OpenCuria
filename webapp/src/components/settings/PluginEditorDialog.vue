@@ -78,6 +78,7 @@ const serviceTypeOptions: Array<{ value: PluginServiceTypeOption; label: string 
   { value: 'env', label: 'Environment Variable' },
   { value: 'file', label: 'Credential File' },
   { value: 'ssh_key', label: 'SSH Key Pair' },
+  { value: 'mcp_oauth', label: 'MCP OAuth (managed connection)' },
 ]
 
 const validationErrors = computed(() => validatePluginForm(form))
@@ -138,6 +139,8 @@ function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): v
   if (transport === 'stdio') {
     mcp.url = ''
     mcp.headers = []
+    mcp.authType = 'none'
+    mcp.oauthRequirementKey = ''
   } else {
     mcp.command = ''
     mcp.argsText = ''
@@ -348,6 +351,36 @@ async function handleSubmit(): Promise<void> {
                     </SelectContent>
                   </Select>
                 </div>
+                <div v-if="mcp.transport !== 'stdio'" class="space-y-2">
+                  <Label>Authentication</Label>
+                  <Select :model-value="mcp.authType" @update:model-value="(value) => { mcp.authType = String(value) === 'oauth' ? 'oauth' : 'none'; if (mcp.authType === 'none') mcp.oauthRequirementKey = '' }">
+                    <SelectTrigger :data-testid="`plugin-mcp-auth-${index}`">
+                      <SelectValue placeholder="Select authentication" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="oauth">OAuth 2.0 (MCP)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <div v-if="mcp.authType === 'oauth'" class="space-y-2">
+                    <Label>Required OAuth credential</Label>
+                    <Select v-model="mcp.oauthRequirementKey">
+                      <SelectTrigger :data-testid="`plugin-mcp-oauth-requirement-${index}`">
+                        <SelectValue placeholder="Select an MCP OAuth requirement" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="req in form.requirements.filter((entry) => entry.required && entry.credentialType === 'mcp_oauth')"
+                          :key="req.uid"
+                          :value="req.reqKey"
+                        >
+                          {{ req.reqKey || 'Unnamed requirement' }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs text-muted-foreground">Create a required mcp_oauth credential requirement below. Provider tokens are managed by the OAuth flow and never entered here.</p>
+                  </div>
+                </div>
                 <div v-if="mcp.transport === 'stdio'" class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">
                     <Label :for="`mcp-command-${mcp.uid}`">Command</Label>
@@ -476,7 +509,10 @@ async function handleSubmit(): Promise<void> {
                   <Label :for="`req-desc-${req.uid}`">Description</Label>
                   <Input :id="`req-desc-${req.uid}`" v-model="req.description" placeholder="Used for API access" :disabled="submitting" />
                 </div>
-                <div class="space-y-2">
+                <div v-if="req.credentialType === 'mcp_oauth' && req.serviceId" class="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+                  Plugin-owned OAuth service · managed by the plugin OAuth flow.
+                </div>
+                <div v-else class="space-y-2">
                   <Label>Service source</Label>
                   <Select v-model="req.mode">
                     <SelectTrigger :data-testid="`plugin-requirement-mode-${index}`">
@@ -488,7 +524,12 @@ async function handleSubmit(): Promise<void> {
                     </SelectContent>
                   </Select>
                 </div>
-                <div v-if="req.mode === 'existing'" class="space-y-2">
+                <div v-if="req.credentialType === 'mcp_oauth' && req.serviceId" class="space-y-2">
+                  <Label>OAuth service</Label>
+                  <Input :model-value="req.serviceName" readonly />
+                  <p class="text-xs text-muted-foreground">This existing OAuth service is reserved for this plugin.</p>
+                </div>
+                <div v-else-if="req.mode === 'existing'" class="space-y-2">
                   <Label>Credential service</Label>
                   <Select :model-value="req.serviceId" @update:model-value="(v) => syncRequirementService(req.uid, String(v))">
                     <SelectTrigger :data-testid="`plugin-requirement-service-${index}`">
@@ -500,6 +541,11 @@ async function handleSubmit(): Promise<void> {
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+                <div v-else-if="req.credentialType === 'mcp_oauth'" class="space-y-2 sm:col-span-2">
+                  <Label :for="`req-svc-name-${req.uid}`">OAuth service name</Label>
+                  <Input :id="`req-svc-name-${req.uid}`" v-model="req.serviceName" placeholder="Notion OAuth" :disabled="submitting" />
+                  <p class="text-xs text-muted-foreground">Tokens are managed by the provider connection, never entered here.</p>
                 </div>
                 <div v-else class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">

@@ -10,21 +10,24 @@ from __future__ import annotations
 
 import uuid
 
+from django.db import models
 from django.http import HttpRequest
 from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
+from apps.credentials.models import CredentialService
 from apps.organizations.services import OrganizationService
 from apps.runners.schemas import ErrorOut
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+
 from .schemas import (
     CredentialCreateIn,
     CredentialOut,
+    CredentialServiceActivationToggleIn,
     CredentialServiceCreateIn,
     CredentialServiceOut,
     CredentialServiceWithActivationOut,
-    CredentialServiceActivationToggleIn,
     CredentialUpdateIn,
     PublicKeyOut,
 )
@@ -116,9 +119,8 @@ def list_credential_services(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     svc = CredentialServiceSvc()
-    services = svc.list_services(org_id=org_id)
-
-    return [_credential_service_to_out(s) for s in services]
+    services = list(svc.list_services(org_id=org_id))
+    return [_credential_service_to_out(service) for service in services]
 
 
 # ===========================================================================
@@ -139,13 +141,20 @@ def list_credentials(request: HttpRequest):
     Includes personal credentials (owned by the user) and org credentials.
     """
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_READ):
-        return 403, ErrorOut(detail="API key lacks permission: credentials:read", code="permission_denied")
+        return 403, ErrorOut(
+            detail="API key lacks permission: credentials:read",
+            code="permission_denied",
+        )
     org_id = _get_org_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
     svc = CredentialSvc()
     creds = svc.list_credentials(request.user, org_id)
+    # OAuth rows are managed only by OAuth plugin endpoints (which also return
+    # their credential IDs for explicit workspace attachment). Keep them out
+    # of the ordinary credential list and manual edit/create UI.
+    creds = [c for c in creds if c.service.credential_type != "mcp_oauth"]
     return 200, [_credential_to_out(c) for c in creds]
 
 
@@ -161,13 +170,29 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
     Personal credentials can be created by any org member.
     """
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_WRITE):
-        return 403, ErrorOut(detail="API key lacks permission: credentials:write", code="permission_denied")
+        return 403, ErrorOut(
+            detail="API key lacks permission: credentials:write",
+            code="permission_denied",
+        )
     org_id = _get_org_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
     svc = CredentialSvc()
     try:
+        service = CredentialService.objects.filter(id=payload.service_id).first()
+        if (
+            service is None
+            or service.credential_type == "mcp_oauth"
+            or service.plugin_owned
+        ):
+            return 404, ErrorOut(
+                detail="Credential service not found", code="not_found"
+            )
+        if service.organization_id not in {None, org_id}:
+            return 404, ErrorOut(
+                detail="Credential service not found", code="not_found"
+            )
         if payload.organization_credential:
             is_admin = org_service.get_user_role(request.user, org_id) == "admin"
             if not is_admin:
@@ -195,6 +220,8 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="validation_error")
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @credential_router.get(
@@ -227,7 +254,7 @@ def get_public_key(request: HttpRequest, credential_id: uuid.UUID):
 
 @credential_router.patch(
     "/{credential_id}/",
-    response={200: CredentialOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: CredentialOut, 400: ErrorOut, 403: ErrorOut, 404: ErrorOut},
     summary="Update a credential",
 )
 def update_credential(
@@ -241,7 +268,10 @@ def update_credential(
     Org credentials: only org admins may edit.
     """
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_WRITE):
-        return 403, ErrorOut(detail="API key lacks permission: credentials:write", code="permission_denied")
+        return 403, ErrorOut(
+            detail="API key lacks permission: credentials:write",
+            code="permission_denied",
+        )
     org_id = _get_org_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
@@ -262,6 +292,8 @@ def update_credential(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except AuthenticationError as e:
         return 403, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="oauth_flow_required")
 
 
 @credential_router.delete(
@@ -278,7 +310,10 @@ def delete_credential(request: HttpRequest, credential_id: uuid.UUID):
     an effective plugin activation of an attached workspace.
     """
     if not check_api_key_permission(request, APIKeyPermission.CREDENTIALS_WRITE):
-        return 403, ErrorOut(detail="API key lacks permission: credentials:write", code="permission_denied")
+        return 403, ErrorOut(
+            detail="API key lacks permission: credentials:write",
+            code="permission_denied",
+        )
     org_id = _get_org_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
@@ -318,7 +353,9 @@ def list_org_credential_services(request: HttpRequest):
     from .repositories import CredentialServiceRepository
     from .services import OrgCredentialServiceActivationSvc
 
-    if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ):
+    if not check_api_key_permission(
+        request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ
+    ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ)
     org_id = _get_org_id(request)
     org_service = _get_org_service()
@@ -326,14 +363,13 @@ def list_org_credential_services(request: HttpRequest):
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    activated_ids = OrgCredentialServiceActivationSvc().activated_service_ids(
-        org_id
-    )
+    activated_ids = OrgCredentialServiceActivationSvc().activated_service_ids(org_id)
 
-    services = CredentialServiceRepository.list_visible_to_org(org_id)
+    services = CredentialServiceRepository.list_visible_to_org(org_id).exclude(
+        models.Q(credential_type="mcp_oauth") | models.Q(plugin_owned=True)
+    )
     return 200, [
-        _credential_service_to_out(s, is_active=s.id in activated_ids)
-        for s in services
+        _credential_service_to_out(s, is_active=s.id in activated_ids) for s in services
     ]
 
 
@@ -342,11 +378,15 @@ def list_org_credential_services(request: HttpRequest):
     response={201: CredentialServiceWithActivationOut, 400: ErrorOut, 403: ErrorOut},
     summary="Create a credential service for organization settings",
 )
-def create_org_credential_service(request: HttpRequest, payload: CredentialServiceCreateIn):
+def create_org_credential_service(
+    request: HttpRequest, payload: CredentialServiceCreateIn
+):
     """Create a new credential service and activate it for the current organization."""
     from .services import OrgCredentialServiceActivationSvc
 
-    if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE):
+    if not check_api_key_permission(
+        request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE
+    ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
     org_id = _get_org_id(request)
     org_service = _get_org_service()
@@ -402,7 +442,9 @@ def toggle_org_credential_service_activation(
     from .repositories import CredentialServiceRepository
     from .services import OrgCredentialServiceActivationSvc
 
-    if not check_api_key_permission(request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE):
+    if not check_api_key_permission(
+        request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE
+    ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
     org_id = _get_org_id(request)
     org_service = _get_org_service()
@@ -416,7 +458,7 @@ def toggle_org_credential_service_activation(
         )
 
     svc = CredentialServiceRepository.get_visible_by_id(service_id, org_id)
-    if svc is None:
+    if svc is None or svc.credential_type == "mcp_oauth":
         return 404, ErrorOut(detail="Credential service not found", code="not_found")
 
     try:

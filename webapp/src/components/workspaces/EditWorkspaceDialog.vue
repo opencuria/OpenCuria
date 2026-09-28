@@ -60,14 +60,73 @@ const workspacePluginsLoading = computed(
 const workspacePluginsError = computed(
   () => pluginStore.workspacePluginsError[props.workspace.id] ?? null,
 )
+const oauthStatusLoading = computed(() => Object.values(pluginStore.mcpOAuthLoading ?? {}).some(Boolean))
 
 /** Service ids covered by the locally selected credentials. */
+const oauthCredentials = computed<Credential[]>(() => {
+  const result: Credential[] = []
+  for (const plugin of pluginStore.plugins ?? []) {
+    for (const server of (plugin.mcp_servers ?? []).filter((entry) => entry.auth_type === 'oauth')) {
+      const requirement = plugin.credential_requirements.find((entry) => entry.key === server.oauth_requirement_key)
+      if (!requirement) continue
+      const status = pluginStore.getMcpOAuthStatus(plugin.id, server.id)
+      for (const scope of ['personal', 'organization'] as const) {
+        const scopeStatus = status?.[scope]
+        if (!scopeStatus?.credential_id) continue
+        result.push({
+          id: scopeStatus.credential_id,
+          name: `${requirement.service_name} (${scope === 'personal' ? 'Personal' : 'Organization'})`,
+          scope,
+          service_id: requirement.service_id,
+          service_name: requirement.service_name,
+          service_slug: requirement.service_slug,
+          credential_type: 'mcp_oauth',
+          env_var_name: '',
+          target_path: '',
+          has_public_key: false,
+          created_by_id: 0,
+          created_at: '',
+          updated_at: '',
+        })
+      }
+    }
+  }
+  return result
+})
+
+const availableCredentials = computed(() => {
+  const credentialsById = new Map<string, Credential>()
+  for (const credential of credentialStore.credentials) credentialsById.set(credential.id, credential)
+  // OAuth status can expose credentials already present in the API list.
+  // Keep the full API record when both sources contain the same credential id.
+  for (const credential of oauthCredentials.value) {
+    if (!credentialsById.has(credential.id)) credentialsById.set(credential.id, credential)
+  }
+  return [...credentialsById.values()]
+})
+
+/** Service ids covered by locally selected ordinary credentials. */
 const attachedServiceIds = computed(() => {
-  const byId = new Map(credentialStore.credentials.map((c) => [c.id, c]))
+  const byId = new Map(availableCredentials.value.map((c) => [c.id, c]))
   const ids = new Set<string>()
   for (const id of selectedCredentialIds.value) {
     const cred = byId.get(id)
-    if (cred) ids.add(cred.service_id)
+    if (cred && cred.credential_type !== 'mcp_oauth') ids.add(cred.service_id)
+  }
+  return ids
+})
+
+const attachedOauthServiceIds = computed(() => {
+  const byId = new Map(availableCredentials.value.map((credential) => [credential.id, credential]))
+  const ids = new Set<string>()
+  for (const id of selectedCredentialIds.value) {
+    const credential = byId.get(id)
+    if (
+      credential?.credential_type === 'mcp_oauth' &&
+      oauthCredentialConnected(credential.id)
+    ) {
+      ids.add(credential.service_id)
+    }
   }
   return ids
 })
@@ -76,6 +135,7 @@ interface PluginGap {
   key: string
   service_id: string
   service_slug: string
+  oauth?: boolean
 }
 
 /**
@@ -83,26 +143,65 @@ interface PluginGap {
  * credential selection. Prefers the full catalog requirements (so newly
  * detached services are detected); falls back to the server-reported gaps.
  */
+function oauthCredentialConnected(credentialId: string): boolean {
+  for (const plugin of pluginStore.plugins ?? []) {
+    for (const server of (plugin.mcp_servers ?? []).filter((entry) => entry.auth_type === 'oauth')) {
+      const status = pluginStore.getMcpOAuthStatus(plugin.id, server.id)
+      if (status?.personal.credential_id === credentialId) return status.personal.connected
+      if (status?.organization.credential_id === credentialId) return status.organization.connected
+    }
+  }
+  return false
+}
+
+function oauthCredentialAttachedForRequirement(pluginId: string, requirementKey: string): boolean {
+  const plugin = (pluginStore.plugins ?? []).find((entry) => entry.id === pluginId)
+  const server = plugin?.mcp_servers.find((entry) => entry.auth_type === 'oauth' && entry.oauth_requirement_key === requirementKey)
+  if (!server) return false
+  const status = pluginStore.getMcpOAuthStatus(pluginId, server.id)
+  const credentialId = [status?.personal.credential_id, status?.organization.credential_id]
+    .find((id): id is string => Boolean(id && selectedCredentialIds.value.includes(id)))
+  if (!credentialId) return false
+  const scope = status?.personal.credential_id === credentialId ? status.personal : status?.organization
+  return Boolean(scope?.connected)
+}
+
 function missingForPlugin(pluginId: string): PluginGap[] {
-  const catalog = pluginStore.plugins.find((p) => p.id === pluginId)
+  const catalog = (pluginStore.plugins ?? []).find((p) => p.id === pluginId)
   if (catalog) {
     return catalog.credential_requirements
-      .filter((req) => req.required && !attachedServiceIds.value.has(req.service_id))
+      .filter((req) => req.required && (req.credential_type === 'mcp_oauth'
+        ? !oauthCredentialAttachedForRequirement(catalog.id, req.key)
+        : !attachedServiceIds.value.has(req.service_id) && !attachedOauthServiceIds.value.has(req.service_id)))
       .map((req) => ({
         key: req.key,
         service_id: req.service_id,
         service_slug: req.service_slug,
+        oauth: req.credential_type === 'mcp_oauth',
       }))
   }
   const entry = workspacePluginList.value.find((p) => p.id === pluginId)
   if (!entry) return []
-  return (entry.missing_required_credentials ?? []).filter(
-    (gap) => !attachedServiceIds.value.has(gap.service_id),
-  )
+  return (entry.missing_required_credentials ?? [])
+    .filter(
+      (gap) =>
+        !attachedServiceIds.value.has(gap.service_id) &&
+        !attachedOauthServiceIds.value.has(gap.service_id),
+    )
+    .map((gap) => ({
+      ...gap,
+      oauth: availableCredentials.value.some(
+        (credential) =>
+          credential.service_id === gap.service_id && credential.credential_type === 'mcp_oauth',
+      ),
+    }))
 }
 
 function credentialsForService(serviceId: string): Credential[] {
-  return credentialStore.credentials.filter((c) => c.service_id === serviceId)
+  return availableCredentials.value.filter((credential) => {
+    if (credential.service_id !== serviceId) return false
+    return credential.credential_type !== 'mcp_oauth' || oauthCredentialConnected(credential.id)
+  })
 }
 
 const blockingPluginIds = computed(() =>
@@ -202,12 +301,12 @@ watch(
 )
 
 function toggleCredential(id: string): void {
-  const credential = credentialStore.credentials.find((entry) => entry.id === id)
+  const credential = availableCredentials.value.find((entry) => entry.id === id)
   if (!credential) return
   selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
     selectedCredentialIds.value,
     credential,
-    credentialStore.credentials,
+    availableCredentials.value,
   )
 }
 
@@ -270,6 +369,9 @@ async function handleOpen(): Promise<void> {
     // credential (de)selection; best-effort when already loaded.
     pluginStore.plugins.length ? Promise.resolve() : pluginStore.fetchPlugins(),
   ])
+  await Promise.all((pluginStore.plugins ?? []).flatMap((plugin) => (plugin.mcp_servers ?? [])
+    .filter((server) => server.auth_type === 'oauth')
+    .map((server) => pluginStore.fetchMcpOAuthStatus(plugin.id, server.id))))
   syncFormWithWorkspace(props.workspace)
   syncPluginsFromStore()
 }
@@ -402,12 +504,13 @@ async function navigateToCredentials(): Promise<void> {
           </label>
 
           <div
-            v-if="credentialStore.credentials.length"
+            v-if="availableCredentials.length"
             class="flex flex-col gap-1.5 max-h-56 overflow-y-auto"
           >
             <button
-              v-for="cred in credentialStore.credentials"
+              v-for="cred in availableCredentials"
               :key="cred.id"
+              :data-testid="`workspace-credential-${cred.id}`"
               type="button"
               class="flex items-center gap-2 px-3 py-2 rounded-sm border text-left text-sm transition-colors cursor-pointer"
               :disabled="submitting || props.disabled"
@@ -426,7 +529,13 @@ async function navigateToCredentials(): Promise<void> {
               </div>
               <span class="flex-1 truncate">{{ cred.name }}</span>
               <span
-                v-if="cred.credential_type === 'ssh_key'"
+                v-if="cred.credential_type === 'mcp_oauth'"
+                class="text-xs text-muted-foreground"
+              >
+                {{ oauthCredentialConnected(cred.id) ? 'OAuth connected' : 'Reconnect required' }}
+              </span>
+              <span
+                v-else-if="cred.credential_type === 'ssh_key'"
                 class="inline-flex items-center gap-1 text-xs text-muted-foreground"
               >
                 <Key :size="10" />
@@ -442,9 +551,8 @@ async function navigateToCredentials(): Promise<void> {
           </div>
 
           <p v-else class="text-xs text-muted-foreground">
-            No credentials available.
-            <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
-            first.
+            No credentials available. Connect an OAuth account from Settings → Plugins or
+            <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">manage credentials</button>.
           </p>
         </div>
 
@@ -556,8 +664,8 @@ async function navigateToCredentials(): Promise<void> {
                     </Button>
                   </div>
                   <p v-else class="text-xs text-muted-foreground">
-                    No matching credential.
-                    <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">
+                    {{ gap.oauth ? 'No connected account is available. Connect it in Settings → Plugins.' : 'No matching credential.' }}
+                    <button v-if="!gap.oauth" type="button" class="underline cursor-pointer" @click="navigateToCredentials">
                       Manage credentials
                     </button>
                   </p>
@@ -565,6 +673,9 @@ async function navigateToCredentials(): Promise<void> {
               </div>
             </div>
           </div>
+          <p v-if="oauthStatusLoading" class="mt-1.5 text-xs text-muted-foreground" data-testid="workspace-oauth-loading">
+            Checking OAuth connection status…
+          </p>
           <p
             v-if="blockingPluginIds.length"
             class="mt-1.5 text-xs text-destructive"

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
@@ -29,6 +30,11 @@ from common.exceptions import ConflictError
 
 from ...enums import WorkspaceStatus
 from ...exceptions import RunnerOfflineError, WorkspaceStateError
+
+# Forward references remain quoted to keep model imports typing-only.
+# ruff: noqa: UP037
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
+    from ...models import Runner, Task, WorkspaceProcess
 
 logger = logging.getLogger(__name__)
 
@@ -272,10 +278,21 @@ class HeartbeatReconcilerMixin:
                             )
                     continue
 
-                has_credentials = ws.credentials.exists()
-                if (not ws.credentials_present and has_credentials) or (
-                    ws.credentials_present and not has_credentials
-                ):
+                has_credentials = False
+                try:
+                    from apps.credentials.services import CredentialSvc
+
+                    resolved = CredentialSvc().resolve_workspace_credentials(ws)
+                    has_credentials = bool(
+                        resolved.env_vars or resolved.files or resolved.ssh_keys
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to resolve attached credential material for "
+                        "workspace %s",
+                        ws_id_str,
+                    )
+                if ws.credentials_present != has_credentials:
                     credential_sync_ids.append(ws.id)
 
                 # Reconcile background processes with the reported list.
@@ -410,7 +427,8 @@ class HeartbeatReconcilerMixin:
             return
 
         logger.info(
-            "Unknown workspace cleanup completed on runner %s (workspace=%s, cleaned=%s)",
+            "Unknown workspace cleanup completed on runner %s "
+            "(workspace=%s, cleaned=%s)",
             runner.id,
             workspace_id,
             cleaned,

@@ -570,6 +570,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
             credentials=resolved.credentials,
+            resolved_credentials=resolved,
             runner_id=payload.runner_id,
             image_artifact_id=payload.image_artifact_id,
             user=request.user,
@@ -584,6 +585,8 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="invalid_credentials")
     except RuntimeError as e:
         return 409, ErrorOut(detail=str(e), code="runner_call_failed")
 
@@ -934,6 +937,9 @@ async def update_workspace(
                 workspace=ws_for_guard,
                 org_id=org_id,
                 remaining_service_ids=remaining_service_ids,
+                remaining_credential_ids={
+                    cred.id for cred in resolved_credentials.credentials
+                },
             )
             if gaps:
                 raise ConflictError(
@@ -1927,6 +1933,7 @@ async def create_workspace_from_image_artifact_global(
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
             credentials=resolved.credentials,
+            resolved_credentials=resolved,
             user=request.user,
             organization_id=org_id,
         )
@@ -2064,6 +2071,7 @@ async def create_workspace_from_workspace_image_artifact(
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
             credentials=resolved.credentials,
+            resolved_credentials=resolved,
             user=request.user,
             organization_id=org_id,
         )

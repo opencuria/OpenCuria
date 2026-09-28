@@ -133,15 +133,14 @@ class CredentialSyncMixin:
                     self._pending_credential_inject.discard(key)
                     await sync_to_async(self.tasks.fail)(task, error)
                     raise ConflictError(error)
-                if "credentials_present" in response:
-                    credentials_present = bool(response["credentials_present"])
-                else:
-                    secrets = self._resolved_credentials_payload(resolved)
-                    credentials_present = bool(
-                        secrets["env_vars"]
-                        or secrets["files"]
-                        or secrets["ssh_keys"]
-                    )
+                # This flag describes only material that was sent to and
+                # installed by the runner; server-side OAuth IDs are excluded.
+                payload_secrets = self._resolved_credentials_payload(resolved)
+                credentials_present = bool(
+                    payload_secrets["env_vars"]
+                    or payload_secrets["files"]
+                    or payload_secrets["ssh_keys"]
+                )
                 workspace = await sync_to_async(
                     self.workspaces.update_credentials_present
                 )(workspace, credentials_present)

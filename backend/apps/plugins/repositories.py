@@ -174,11 +174,51 @@ class PluginMcpServerRepository:
 
     @staticmethod
     def replace_for_plugin(plugin, servers: list[dict]) -> list[PluginMcpServer]:
-        """Atomically replace the MCP server list of a plugin."""
-        PluginMcpServer.objects.filter(plugin=plugin).delete()
-        instances = [PluginMcpServer(plugin=plugin, **item) for item in servers]
-        if instances:
-            PluginMcpServer.objects.bulk_create(instances)
+        """Replace MCP servers while retaining IDs for unchanged slugs."""
+        existing = {
+            server.slug: server
+            for server in PluginMcpServer.objects.filter(plugin_id=plugin.id)
+        }
+        retained_slugs = {item["slug"] for item in servers}
+        stale_ids = [
+            server.id for slug, server in existing.items() if slug not in retained_slugs
+        ]
+        if stale_ids:
+            PluginMcpServer.objects.filter(id__in=stale_ids).delete()
+
+        mutable_fields = {
+            "name",
+            "transport",
+            "command",
+            "args",
+            "cwd",
+            "env",
+            "url",
+            "headers",
+            "auth_type",
+            "oauth_requirement_key",
+            "startup_timeout_seconds",
+            "request_timeout_seconds",
+        }
+        for item in servers:
+            values = {
+                key: value
+                for key, value in item.items()
+                if key in mutable_fields
+            }
+            server = existing.get(item["slug"])
+            if server is None:
+                PluginMcpServer.objects.create(plugin=plugin, **item)
+                continue
+
+            changed_fields = []
+            for field, value in values.items():
+                if getattr(server, field) != value:
+                    setattr(server, field, value)
+                    changed_fields.append(field)
+            if changed_fields:
+                server.save(update_fields=[*changed_fields, "updated_at"])
+
         return list(PluginMcpServerRepository.list_for_plugin(plugin.id))
 
     @staticmethod

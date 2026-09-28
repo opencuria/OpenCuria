@@ -4,9 +4,7 @@ import CredentialCard from './CredentialCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { KeyRound } from '@lucide/vue'
 
-defineProps<{
-  credentials: Credential[]
-}>()
+const props = defineProps<{ credentials: Credential[] }>()
 
 const emit = defineEmits<{
   edit: [credential: Credential]
@@ -17,11 +15,11 @@ const emit = defineEmits<{
 
 <template>
   <div
-    v-if="credentials.length"
+    v-if="props.credentials.length"
     class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
   >
     <CredentialCard
-      v-for="cred in credentials"
+      v-for="cred in props.credentials"
       :key="cred.id"
       :credential="cred"
       @edit="emit('edit', $event)"

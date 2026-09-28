@@ -895,6 +895,30 @@ async def test_stdio_invalid_utf8_closes_and_logs_no_payload(caplog):
     assert "xff" not in caplog.text.replace("WARNING", "")
 
 
+@pytest.mark.asyncio
+async def test_sse_oauth_factory_rejects_sdk_authorization_override(monkeypatch):
+    connection = _connection(transport="sse", url="https://mcp.example/mcp")
+    connection.oauth_credential_id = uuid.uuid4()
+
+    def build_client(accessor, url, **kwargs):
+        return (object(), None)
+
+    def sse_client(*args, **kwargs):
+        factory = kwargs["httpx_client_factory"]
+        return factory(headers={"Authorization": "Basic attacker"})
+
+    monkeypatch.setattr(conn_module, "build_workspace_http_client", build_client)
+    from mcp.client import sse
+
+    monkeypatch.setattr(sse, "sse_client", sse_client)
+    with pytest.raises(McpServerHealthError, match="Authorization header"):
+        await connection._open_http_transport(
+            __import__("contextlib").AsyncExitStack(),
+            accessor=object(),
+            transport="sse",
+        )
+
+
 # -- normalize_call_result -----------------------------------------------------
 
 

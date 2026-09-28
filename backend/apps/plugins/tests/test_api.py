@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import json
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+from apps.credentials.models import (
+    Credential,
+    CredentialService,
+    McpOAuthClientRegistration,
+    OrgCredentialServiceActivation,
+)
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.plugins.models import (
@@ -210,6 +216,344 @@ def test_create_nested_plugin_with_service_and_requirement(client: Client):
 
 
 @pytest.mark.django_db
+def test_create_oauth_plugin_gets_its_own_reserved_service(client: Client):
+    ctx = _ctx()
+    body = {
+        "name": "Notion Clone",
+        "slug": "notion-clone",
+        "mcp_servers": [
+            {
+                "name": "Notion",
+                "slug": "notion",
+                "transport": "streamable_http",
+                "url": "https://mcp.example/mcp",
+                "auth_type": "oauth",
+                "oauth_requirement_key": "notion_connect",
+            },
+            {
+                "name": "Calendar",
+                "slug": "calendar",
+                "transport": "sse",
+                "url": "https://calendar.example/mcp",
+                "auth_type": "oauth",
+                "oauth_requirement_key": "calendar_connect",
+            },
+        ],
+        "credential_requirements": [
+            {
+                "key": "notion_connect",
+                "required": True,
+                "credential_service": {
+                    "name": "Connect Notion Clone",
+                    "credential_type": "mcp_oauth",
+                },
+            },
+            {
+                "key": "calendar_connect",
+                "required": True,
+                "credential_service": {
+                    "name": "Connect Calendar",
+                    "credential_type": "mcp_oauth",
+                },
+            },
+        ],
+    }
+    response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
+    assert response.status_code == 201, response.content[:500]
+    requirements = {
+        requirement["key"]: requirement
+        for requirement in response.json()["credential_requirements"]
+    }
+    requirement = requirements["notion_connect"]
+    calendar_requirement = requirements["calendar_connect"]
+    service = CredentialService.objects.get(pk=requirement["service_id"])
+    calendar_service = CredentialService.objects.get(
+        pk=calendar_requirement["service_id"]
+    )
+    assert service.slug == "notion-clone-notion_connect-oauth"
+    assert service.organization_id == ctx["org"].id
+    assert service.credential_type == "mcp_oauth"
+    assert service.plugin_owned is True
+    assert service.oauth_plugin_slug == "notion-clone"
+    assert service.oauth_requirement_key == "notion_connect"
+    assert not OrgCredentialServiceActivation.objects.filter(
+        credential_service=service
+    ).exists()
+    assert calendar_service.slug == "notion-clone-calendar_connect-oauth"
+    assert calendar_service.oauth_requirement_key == "calendar_connect"
+    assert calendar_service.id != service.id
+    assert not OrgCredentialServiceActivation.objects.filter(
+        credential_service=calendar_service
+    ).exists()
+
+    second = {**body, "name": "Other", "slug": "other"}
+    second["credential_requirements"] = [
+        {
+            **body["credential_requirements"][0],
+            "credential_service": {
+                "name": "Connect Other",
+                "credential_type": "mcp_oauth",
+            },
+        },
+        {
+            **body["credential_requirements"][1],
+            "credential_service": {
+                "name": "Connect Other Calendar",
+                "credential_type": "mcp_oauth",
+            },
+        },
+    ]
+    other_response = _post(client, "/api/v1/plugins/", ctx["headers"], second)
+    assert other_response.status_code == 201, other_response.content[:500]
+    other_service_ids = {
+        requirement["service_id"]
+        for requirement in other_response.json()["credential_requirements"]
+    }
+    assert service.id not in {uuid.UUID(service_id) for service_id in other_service_ids}
+    assert calendar_service.id not in {
+        uuid.UUID(service_id) for service_id in other_service_ids
+    }
+
+    # Generic credential-service creation must not be able to mint OAuth rows.
+    with pytest.raises(ValueError, match="only be defined by an OAuth plugin"):
+        from apps.credentials.services import CredentialServiceSvc
+
+        CredentialServiceSvc().create_service(
+            name="manual OAuth",
+            slug="manual-oauth",
+            description="",
+            credential_type="mcp_oauth",
+            env_var_name="",
+            target_path="",
+            label="",
+            organization_id=ctx["org"].id,
+        )
+
+
+@pytest.mark.django_db
+def test_plugin_edit_preserves_oauth_server_binding_and_fails_closed_on_url_change(
+    client: Client, monkeypatch, settings
+):
+    ctx = _ctx()
+    body = {
+        "name": "OAuth Rename",
+        "slug": "oauth-rename",
+        "skills": [{"name": "Guide", "slug": "guide", "body": "# Guide"}],
+        "mcp_servers": [
+            {
+                "name": "One",
+                "slug": "one",
+                "transport": "streamable_http",
+                "url": "https://one.example/mcp",
+                "auth_type": "oauth",
+                "oauth_requirement_key": "one_auth",
+            },
+        ],
+        "credential_requirements": [
+            {
+                "key": "one_auth",
+                "credential_service": {
+                    "name": "Connect One",
+                    "credential_type": "mcp_oauth",
+                },
+            },
+        ],
+    }
+    created = _post(client, "/api/v1/plugins/", ctx["headers"], body)
+    assert created.status_code == 201, created.content[:500]
+    from common.utils import encrypt_value
+
+    payload = created.json()
+    plugin_id = payload["id"]
+    requirements = {item["key"]: item for item in payload["credential_requirements"]}
+    requirement = requirements["one_auth"]
+    service = CredentialService.objects.get(pk=requirement["service_id"])
+    server = next(item for item in payload["mcp_servers"] if item["slug"] == "one")
+    server_id = uuid.UUID(server["id"])
+    registration = McpOAuthClientRegistration.objects.create(
+        server_url=server["url"],
+        callback_url="https://web.example/api/v1/mcp-oauth/callback/",
+        issuer="https://auth.example",
+        client_id="client",
+        authorization_endpoint="https://auth.example/authorize",
+        token_endpoint="https://auth.example/token",
+    )
+    token_data = {
+        "access_token": "server-side token",
+        "refresh_token": "refresh-token",
+        "token_type": "Bearer",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "resource": server["url"],
+        "server_url": server["url"],
+        "server_id": str(server_id),
+        "registration_id": str(registration.id),
+    }
+    credential = Credential.objects.create(
+        user=ctx["user"],
+        service=service,
+        name="connected",
+        encrypted_value=encrypt_value(json.dumps(token_data)),
+        created_by=ctx["user"],
+        oauth_server_id=server_id,
+        oauth_server_url=server["url"],
+        oauth_resource=server["url"],
+        oauth_registration=registration,
+        oauth_status="connected",
+    )
+    workspace = _create_workspace(ctx)
+    workspace.credentials.add(credential)
+    from apps.plugins.services import PluginService
+
+    service_layer = PluginService()
+    service_layer.set_org_activation(
+        uuid.UUID(plugin_id), org_id=ctx["org"].id, user=ctx["user"], active=True
+    )
+    ready_plugins = service_layer.list_workspace_plugins(
+        workspace=workspace, org_id=ctx["org"].id
+    )
+    assert ready_plugins[0]["ready"] is True
+
+    round_trip_requirements = [
+        {
+            "key": item["key"],
+            "required": item["required"],
+            "description": item["description"],
+            "credential_service": {
+                "service_id": item["service_id"],
+            },
+        }
+        for item in payload["credential_requirements"]
+    ]
+    round_trip_servers = [
+        {
+            key: item[key]
+            for key in (
+                "name",
+                "slug",
+                "transport",
+                "command",
+                "args",
+                "cwd",
+                "env",
+                "url",
+                "headers",
+                "auth_type",
+                "oauth_requirement_key",
+                "startup_timeout_seconds",
+                "request_timeout_seconds",
+            )
+        }
+        for item in payload["mcp_servers"]
+    ]
+    updated = service_layer.update_org_plugin(
+        uuid.UUID(plugin_id),
+        org_id=ctx["org"].id,
+        user=ctx["user"],
+        name="OAuth Edited",
+        skills=[{"name": "Updated Guide", "slug": "guide", "body": "# Updated"}],
+        mcp_servers=round_trip_servers,
+        credential_requirements=round_trip_requirements,
+    )
+    updated_server = next(
+        item for item in updated["mcp_servers"] if item["slug"] == "one"
+    )
+    assert str(updated_server["id"]) == str(server_id)
+    ready_plugins = service_layer.list_workspace_plugins(
+        workspace=workspace, org_id=ctx["org"].id
+    )
+    assert ready_plugins[0]["ready"] is True
+
+    changed_servers = [dict(item) for item in round_trip_servers]
+    changed_servers[0]["url"] = "https://one-new.example/mcp"
+    response = _patch(
+        client,
+        f"/api/v1/plugins/{plugin_id}/",
+        ctx["headers"],
+        {
+            "name": "OAuth Edited",
+            "skills": [{"name": "Updated Guide", "slug": "guide", "body": "# Updated"}],
+            "mcp_servers": changed_servers,
+            "credential_requirements": round_trip_requirements,
+        },
+    )
+    assert response.status_code == 200, response.content[:500]
+    credential.refresh_from_db()
+    assert credential.oauth_server_id == server_id
+    assert credential.oauth_status == "connected"
+    from common.exceptions import ConflictError
+
+    with pytest.raises(ConflictError, match="MCP OAuth credential"):
+        CredentialSvc().resolve_credentials(
+            [credential.id], org_id=ctx["org"].id, user=ctx["user"]
+        )
+    ready_plugins = service_layer.list_workspace_plugins(
+        workspace=workspace, org_id=ctx["org"].id
+    )
+    assert ready_plugins[0]["ready"] is False
+
+    from apps.credentials import mcp_oauth
+    from apps.plugins.models import PluginMcpServer
+
+    settings.MCP_OAUTH_CALLBACK_URL = "https://web.example/api/v1/mcp-oauth/callback/"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=plugins"
+    reconnect_registration = McpOAuthClientRegistration.objects.create(
+        server_url="https://one-new.example/mcp",
+        callback_url=settings.MCP_OAUTH_CALLBACK_URL,
+        issuer="https://auth.example",
+        client_id="reconnected-client",
+        authorization_endpoint="https://auth.example/authorize",
+        token_endpoint="https://auth.example/token",
+    )
+    monkeypatch.setattr(
+        mcp_oauth,
+        "_discover",
+        lambda url: (
+            {"_challenge_scope": ""},
+            {"issuer": reconnect_registration.issuer},
+            "https://one-new.example",
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_oauth, "_registration", lambda *args: reconnect_registration
+    )
+    monkeypatch.setattr(
+        mcp_oauth,
+        "_validated_https_url",
+        lambda url, **kwargs: (url, ("93.184.216.34",)),
+    )
+    current_server = PluginMcpServer.objects.get(pk=server_id)
+    authorization_url, binding, _ = mcp_oauth.start_flow(
+        user=ctx["user"],
+        organization=ctx["org"],
+        server=current_server,
+        service=service,
+        organization_credential=False,
+    )
+    state = parse_qs(urlparse(authorization_url).query)["state"][0]
+    monkeypatch.setattr(
+        mcp_oauth,
+        "_post_token",
+        lambda *args, **kwargs: {
+            "access_token": "reconnected-token",
+            "refresh_token": "reconnected-refresh",
+            "expires_in": 3600,
+        },
+    )
+    assert mcp_oauth.complete_flow(raw_state=state, binding=binding, code="code")
+    credential.refresh_from_db()
+    assert credential.oauth_server_id == server_id
+    assert credential.oauth_server_url == "https://one-new.example/mcp"
+    assert credential.oauth_status == "connected"
+    assert CredentialSvc().resolve_credentials(
+        [credential.id], org_id=ctx["org"].id, user=ctx["user"]
+    ).oauth_credentials == [credential.id]
+    ready_plugins = service_layer.list_workspace_plugins(
+        workspace=workspace, org_id=ctx["org"].id
+    )
+    assert ready_plugins[0]["ready"] is True
+
+
+@pytest.mark.django_db
 def test_create_plugin_invalid_mcp_is_400_and_atomic(client: Client):
     ctx = _ctx()
     body = _minimal_plugin_body("Broken")
@@ -218,6 +562,30 @@ def test_create_plugin_invalid_mcp_is_400_and_atomic(client: Client):
     response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
     assert response.status_code == 400
     assert Plugin.objects.filter(organization=ctx["org"]).count() == count_before
+
+
+@pytest.mark.django_db
+def test_oauth_server_urls_require_clean_https_urls(client: Client):
+    from apps.plugins.services import normalize_mcp_payload
+
+    base = {
+        "name": "OAuth MCP",
+        "transport": "streamable_http",
+        "auth_type": "oauth",
+        "oauth_requirement_key": "connect",
+        "url": "https://mcp.example/mcp",
+    }
+    assert normalize_mcp_payload(base)["url"] == base["url"]
+    for url in (
+        "http://mcp.example/mcp",
+        "https://user:pass@mcp.example/mcp",
+        "https://mcp.example/mcp?token=secret",
+        "https://mcp.example/mcp#fragment",
+        "https://mcp.example/mcp?",
+        "https://mcp.example/mcp#",
+    ):
+        with pytest.raises(ValueError, match="OAuth MCP url"):
+            normalize_mcp_payload({**base, "url": url})
 
 
 @pytest.mark.django_db
@@ -568,9 +936,7 @@ def test_plugin_owned_marker_survives_service_id_replace(client: Client):
         },
     )
     assert updated.status_code == 200, updated.content[:500]
-    assert updated.json()["credential_requirements"][0][
-        "plugin_owned_service"
-    ] is True
+    assert updated.json()["credential_requirements"][0]["plugin_owned_service"] is True
 
 
 @pytest.mark.django_db
@@ -1009,9 +1375,9 @@ def test_personal_credential_delete_cross_org_fanout(client: Client):
     ws_b = Workspace.objects.create(
         runner=runner_b, name="wb", created_by=ctx_a["user"]
     )
-    assert str(
-        Workspace.objects.get(id=ws_b.id).runner.organization_id
-    ) == str(ctx_b["org"].id)
+    assert str(Workspace.objects.get(id=ws_b.id).runner.organization_id) == str(
+        ctx_b["org"].id
+    )
     _post(
         client,
         f"/api/v1/plugins/{plugin_id}/activation/",

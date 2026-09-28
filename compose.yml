@@ -14,6 +14,8 @@ services:
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
       SQLITE_PATH: /data/db.sqlite3
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=plugins}
       DJANGO_SUPERUSER_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
       DJANGO_SUPERUSER_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
     volumes:
@@ -79,6 +81,8 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
       SQLITE_PATH: /data/db.sqlite3
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=plugins}
       LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
       LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
       LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}

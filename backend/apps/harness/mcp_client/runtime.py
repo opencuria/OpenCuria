@@ -119,6 +119,12 @@ class McpRuntime:
                     prepared.snapshot, workspace=prepared.workspace
                 )
             )
+        if prepared.workspace is not None and not prepared.oauth_credentials:
+            prepared.oauth_credentials.update(
+                plugin_runtime.resolve_runtime_oauth_credentials(
+                    prepared.snapshot, workspace=prepared.workspace
+                )
+            )
         snapshot = prepared.snapshot
         await self._stack.__aenter__()
         try:
@@ -143,6 +149,17 @@ class McpRuntime:
                             error=exc,
                         )
                         continue
+                    oauth_credential_id = prepared.oauth_credentials.get(server.id)
+                    if server.auth_type == "oauth" and not oauth_credential_id:
+                        _record_skip(
+                            self.skipped,
+                            plugin=plugin.slug,
+                            server=server.slug,
+                            error=McpServerHealthError(
+                                "MCP OAuth credential is disconnected"
+                            ),
+                        )
+                        continue
                     connection = McpServerConnection(
                         plugin_id=plugin.id,
                         plugin_slug=plugin.slug,
@@ -160,6 +177,7 @@ class McpRuntime:
                         env=rendered_env,
                         url=server.url or "",
                         headers=rendered_headers,
+                        oauth_credential_id=oauth_credential_id,
                         startup_timeout_seconds=float(
                             server.startup_timeout_seconds or 30
                         ),
@@ -264,8 +282,7 @@ class McpRuntime:
         except Exception:  # pragma: no cover - defensive
             return
         needs_display = any(
-            str((server.env or {}).get("DISPLAY", "")).strip()
-            for server in servers
+            str((server.env or {}).get("DISPLAY", "")).strip() for server in servers
         )
         if not needs_display:
             return

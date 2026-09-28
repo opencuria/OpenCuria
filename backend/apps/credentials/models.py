@@ -89,6 +89,9 @@ class CredentialService(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    plugin_owned = models.BooleanField(default=False, db_index=True)
+    oauth_plugin_slug = models.SlugField(max_length=255, blank=True, default="")
+    oauth_requirement_key = models.SlugField(max_length=255, blank=True, default="")
 
     class Meta:
         db_table = "credentials_service"
@@ -157,6 +160,18 @@ class Credential(models.Model):
     encrypted_value = models.TextField(
         help_text="Fernet-encrypted credential value.",
     )
+    # OAuth credentials are server-side only and bound to one MCP resource.
+    oauth_server_id = models.UUIDField(null=True, blank=True, db_index=True)
+    oauth_server_url = models.CharField(max_length=2048, blank=True, default="")
+    oauth_resource = models.CharField(max_length=2048, blank=True, default="")
+    oauth_status = models.CharField(max_length=32, blank=True, default="disconnected")
+    oauth_registration = models.ForeignKey(
+        "credentials.McpOAuthClientRegistration",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credentials",
+    )
     public_key = models.TextField(
         blank=True,
         default="",
@@ -174,6 +189,22 @@ class Credential(models.Model):
         db_table = "credentials_credential"
         ordering = ["-created_at"]
         constraints = [
+            models.UniqueConstraint(
+                fields=["user", "service", "oauth_server_id"],
+                condition=models.Q(
+                    user__isnull=False,
+                    oauth_server_id__isnull=False,
+                ),
+                name="unique_personal_mcp_oauth_binding",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "service", "oauth_server_id"],
+                condition=models.Q(
+                    organization__isnull=False,
+                    oauth_server_id__isnull=False,
+                ),
+                name="unique_org_mcp_oauth_binding",
+            ),
             models.CheckConstraint(
                 check=(
                     models.Q(user__isnull=False, organization__isnull=True)
@@ -185,6 +216,61 @@ class Credential(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.service.name})"
+
+
+class McpOAuthClientRegistration(models.Model):
+    """Durable dynamic-client registration per MCP server and callback."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    server_url = models.CharField(max_length=2048)
+    callback_url = models.CharField(max_length=2048)
+    issuer = models.CharField(max_length=2048)
+    client_id = models.CharField(max_length=2048)
+    encrypted_client_secret = models.TextField(blank=True, default="")
+    authorization_endpoint = models.CharField(max_length=2048)
+    token_endpoint = models.CharField(max_length=2048)
+    registration_endpoint = models.CharField(max_length=2048, blank=True, default="")
+    token_endpoint_auth_method = models.CharField(max_length=32, default="none")
+    scopes_supported = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "credentials_mcp_oauth_registration"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["server_url", "callback_url", "issuer"],
+                name="unique_mcp_oauth_registration",
+            )
+        ]
+
+
+class McpOAuthAuthorizationState(models.Model):
+    """One-use short-lived OAuth transaction; state and verifier stay private."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    state_hash = models.CharField(max_length=64, unique=True)
+    browser_binding_hash = models.CharField(max_length=64)
+    encrypted_code_verifier = models.TextField()
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    organization = models.ForeignKey("organizations.Organization", on_delete=models.CASCADE)
+    service = models.ForeignKey(CredentialService, on_delete=models.CASCADE)
+    server_id = models.UUIDField()
+    requirement_key = models.CharField(max_length=255, blank=True, default="")
+    server_url = models.CharField(max_length=2048)
+    resource = models.CharField(max_length=2048)
+    issuer = models.CharField(max_length=2048)
+    registration = models.ForeignKey(McpOAuthClientRegistration, on_delete=models.CASCADE)
+    organization_credential = models.BooleanField(default=False)
+    redirect_uri = models.CharField(max_length=2048)
+    scope = models.CharField(max_length=2048, blank=True, default="")
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "credentials_mcp_oauth_state"
+        indexes = [models.Index(fields=["expires_at", "consumed_at"], name="credentials_expires_482706_idx")]
 
 
 class OrgCredentialServiceActivation(models.Model):

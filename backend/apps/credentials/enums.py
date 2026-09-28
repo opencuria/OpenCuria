@@ -13,3 +13,4 @@ class CredentialType(models.TextChoices):
     ENV = "env", "Environment Variable"
     FILE = "file", "Credential File"
     SSH_KEY = "ssh_key", "SSH Key"
+    MCP_OAUTH = "mcp_oauth", "MCP OAuth (server-side only)"
