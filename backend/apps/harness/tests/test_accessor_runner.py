@@ -250,8 +250,9 @@ async def test_read_write_list_stat_roundtrip() -> None:
     assert info.size == 2
     assert info.is_dir is False
 
-    with pytest.raises(ValueError, match="under /workspace"):
-        await accessor.read_file("/etc/passwd")
+    external = await accessor.read_file("/etc/passwd")
+    assert external.content == b"hi"
+    assert transport.emitted[-1][1]["path"] == "/etc/passwd"
 
 
 async def test_desktop_action_returns_screenshot_payload() -> None:
@@ -830,11 +831,11 @@ async def test_read_file_timeout_cancels_and_cleans_state() -> None:
     assert accessor._file_chunks == {}
 
 
-async def test_read_file_rejects_path_outside_workspace() -> None:
-    """Absolute paths outside /workspace raise before any socket emit."""
+async def test_read_file_rejects_invalid_path_before_emit() -> None:
+    """Control characters are rejected before any socket event."""
     transport = FakeTransport()
-    with pytest.raises(ValueError, match="under /workspace"):
-        await _accessor(transport).read_file("/etc/passwd")
+    with pytest.raises(ValueError, match="Invalid path"):
+        await _accessor(transport).read_file("/etc/\x00passwd")
     assert transport.emitted == []
 
 

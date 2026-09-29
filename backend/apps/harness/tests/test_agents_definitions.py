@@ -113,23 +113,8 @@ def test_subagent_question_denied_but_build_allowed() -> None:
     assert build_eval.evaluate("question", "") == "allow"
 
 
-def test_global_read_env_asks() -> None:
-    """Global defaults ask for .env reads (OpenCode parity)."""
-    from apps.harness.permissions.evaluator import (
-        DEFAULT_GLOBAL_RULES,
-        PermissionEvaluator,
-    )
-
-    evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", "/workspace/.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/a.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/.env.example") == "allow"
-    assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
-
-
-def test_global_read_env_survives_build_wildcard() -> None:
-    """Build keeps .env and doom-loop asks; external paths stay allow."""
-    from apps.harness.agents.definitions import get_agent
+def test_global_read_env_is_allowed_for_every_agent() -> None:
+    """All agents can read .env and absolute external paths without approval."""
     from apps.harness.runner import HarnessRunner
     from apps.harness.tests.conftest import FakeAccessor
     from apps.harness.tools import default_tool_registry
@@ -141,27 +126,39 @@ def test_global_read_env_survives_build_wildcard() -> None:
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
     )
-    agent = get_agent("build")
+    for name in ("build", "general", "plan", "explore", "computeruse"):
+        agent = get_agent(name)
+        for path in ("/workspace/.env", "/etc/app.env.local", "/tmp/readme"):
+            assert runner._decide(agent, "read", path, "build") == "allow"
+    for name in ("build", "general"):
+        assert runner._decide(get_agent(name), "write", "/tmp/file", "build") == "allow"
+    assert runner._decide(get_agent("plan"), "write", "/tmp/file", "plan") == "ask"
+    assert runner._decide(get_agent("explore"), "write", "/tmp/file", "build") == "deny"
     assert (
-        runner._decide(agent, "read", "/workspace/.env", "build") == "ask"
-    )
-    assert (
-        runner._decide(agent, "read", "/workspace/a.py", "build") == "allow"
-    )
-    assert (
-        runner._decide(
-            agent,
-            "bash",
-            "cat /etc/passwd",
-            "build",
-            external_directory=True,
-        )
-        == "allow"
-    )
-    assert (
-        runner._decide(agent, "read", "/workspace/a.py", "build", doom_loop=True)
+        runner._decide(get_agent("build"), "read", "/tmp/file", "build", doom_loop=True)
         == "ask"
     )
+
+
+def test_explicit_global_rules_still_apply() -> None:
+    """Custom organization/global rules retain precedence over agent grants."""
+    from apps.harness.permissions.evaluator import PermissionEvaluator
+    from apps.harness.runner import HarnessRunner
+    from apps.harness.tests.conftest import FakeAccessor
+    from apps.harness.tools import default_tool_registry
+
+    from .test_runner_loop import FakeProvider
+
+    runner = HarnessRunner(
+        provider=FakeProvider([]),
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(
+            global_rules={"read": {"*.env": "ask"}, "edit": "deny"}
+        ),
+        accessor=FakeAccessor(),
+    )
+    assert runner._decide(get_agent("build"), "read", "/tmp/.env", "build") == "ask"
+    assert runner._decide(get_agent("general"), "write", "/tmp/x", "build") == "deny"
 
 
 def test_unknown_agent_raises() -> None:

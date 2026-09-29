@@ -213,6 +213,8 @@ def resolve_workspace_image_path(raw_dest: str) -> str | None:
         return None
     try:
         normalized = sanitize_harness_path(dest)
+        if normalized != "/workspace" and not normalized.startswith("/workspace/"):
+            return None
     except ValueError:
         return None
     lower = normalized.lower()

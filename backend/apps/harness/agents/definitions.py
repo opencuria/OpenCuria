@@ -29,12 +29,9 @@ Permission design (OpenCode-like defaults):
 - ``computeruse`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
   (same rationale as ``general``; ``ask_user`` still pauses via its
   own desktop flow, not the ``question`` tool).
-- Global (``permissions.evaluator.DEFAULT_GLOBAL_RULES``): ``read``
-  stays ``allow`` except ``*.env`` / ``*.env.*`` which ``ask``
-  (OpenCode parity); ``*.env.example`` stays ``allow``. Combined with
-  deny > ask > allow precedence so agent ``* allow`` cannot override.
-  ``doom_loop`` defaults to ``ask``. Paths outside ``/workspace``
-  (``external_directory``) fall through to normal tool rules.
+- Global defaults do not gate ``.env`` reads. Explicit permission rules
+  still apply. Harness file tools accept absolute paths in the workspace VM.
+
 """
 
 from __future__ import annotations

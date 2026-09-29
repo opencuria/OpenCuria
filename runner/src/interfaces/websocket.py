@@ -1931,7 +1931,10 @@ class WebSocketInterface(Interface):
             try:
                 workspace_id = uuid.UUID(ws_echo)
                 result = await self._service.files.read_file(
-                    workspace_id, path, max_size=data.get("max_size")
+                    workspace_id,
+                    path,
+                    max_size=data.get("max_size"),
+                    allow_external=True,
                 )
                 await _emit_chunked_result(
                     chunk_event="harness:read_file_chunk",
@@ -1981,6 +1984,7 @@ class WebSocketInterface(Interface):
                     path,
                     normalize_base64(content),
                     mode=int(data.get("mode", 0o644)),
+                    allow_external=True,
                 )
                 await _harness_result(
                     "harness:write_file_result",
@@ -2012,17 +2016,15 @@ class WebSocketInterface(Interface):
                     MAX_CHUNKS_PER_TRANSFER,
                     max_b64_chars_for_raw_bytes,
                 )
-                from ..services.files import FILE_UPLOAD_MAX_SIZE
+                from ..services.files import FILE_UPLOAD_MAX_SIZE, FileManager
 
                 total = _parse_total_chunks(
                     data.get("total_chunks", 0),
                     cap=MAX_CHUNKS_PER_TRANSFER,
                 )
-                _validate_upload_start_fields(
-                    request_id=request_id,
-                    workspace_id=str(workspace_id),
-                    path=path,
-                )
+                if not request_id:
+                    raise ValueError("request_id must not be empty")
+                FileManager._file_path(path, allow_external=True)
                 try:
                     mode = int(data.get("mode", 0o644))
                 except (TypeError, ValueError) as exc:
@@ -2126,6 +2128,7 @@ class WebSocketInterface(Interface):
                     path,
                     content,
                     mode=int(entry.get("mode", 0o644)),
+                    allow_external=True,
                 )
                 await _harness_result(
                     "harness:write_file_result",
@@ -2154,7 +2157,9 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                raw_entries = await self._service.files.list_files(workspace_id, path)
+                raw_entries = await self._service.files.list_files(
+                    workspace_id, path, allow_external=True
+                )
                 entries = [
                     {
                         "name": entry.get("name", ""),
@@ -2191,7 +2196,9 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.files.stat_path(workspace_id, path)
+                result = await self._service.files.stat_path(
+                    workspace_id, path, allow_external=True
+                )
                 await _harness_result(
                     "harness:stat_result",
                     {

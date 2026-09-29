@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import os
+import tarfile
 import unittest
 import uuid
 from unittest.mock import AsyncMock
@@ -28,6 +31,7 @@ class _FakeService:
         self.read_calls: list[tuple[str, str, object]] = []
         self.write_calls: list[tuple[str, str, str, int]] = []
         self.stat_calls: list[tuple[str, str]] = []
+        self.file_access_calls: list[tuple[str, str, bool]] = []
         self.desktop_action_calls: list[tuple[object, str, object]] = []
         self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
@@ -67,28 +71,28 @@ class _FakeService:
         def __init__(self, outer: _FakeService) -> None:
             self._outer = outer
 
-        async def read_file(self, workspace_id, path, max_size=None):
+        async def read_file(self, workspace_id, path, max_size=None, *, allow_external=False):
             return await self._outer._read_file_impl(
-                workspace_id, path, max_size=max_size
+                workspace_id, path, max_size=max_size, allow_external=allow_external
             )
 
         async def write_file_content(
-            self, workspace_id, path, content_b64, mode=0o644
+            self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
         ):
             return await self._outer._write_file_content_impl(
-                workspace_id, path, content_b64, mode=mode
+                workspace_id, path, content_b64, mode=mode, allow_external=allow_external
             )
 
-        async def list_files(self, workspace_id, path):
-            return await self._outer._list_files_impl(workspace_id, path)
+        async def list_files(self, workspace_id, path, *, allow_external=False):
+            return await self._outer._list_files_impl(workspace_id, path, allow_external=allow_external)
 
         async def find_files(self, workspace_id, query="", limit=50):
             return await self._outer._find_files_impl(
                 workspace_id, query=query, limit=limit
             )
 
-        async def stat_path(self, workspace_id, path):
-            return await self._outer._stat_path_impl(workspace_id, path)
+        async def stat_path(self, workspace_id, path, *, allow_external=False):
+            return await self._outer._stat_path_impl(workspace_id, path, allow_external=allow_external)
 
     class _FakeDesktop:
         def __init__(self, outer: _FakeService) -> None:
@@ -149,9 +153,17 @@ class _FakeService:
             yield ("stderr", "oops")
             yield ("exit", "3")
 
-    async def _read_file_impl(self, workspace_id, path, max_size=None):
+    @staticmethod
+    def _is_external_path(path) -> bool:
+        normalized = os.path.normpath(str(path))
+        return normalized != "/workspace" and not normalized.startswith(
+            "/workspace/"
+        )
+
+    async def _read_file_impl(self, workspace_id, path, max_size=None, *, allow_external=False):
         self.read_calls.append((workspace_id, path, max_size))
-        if ".." in str(path):
+        self.file_access_calls.append(("read", path, allow_external))
+        if self._is_external_path(path) and not allow_external:
             raise ValueError("Path must be under /workspace")
         return {
             "content": base64.b64encode(b"hi").decode(),
@@ -161,15 +173,17 @@ class _FakeService:
         }
 
     async def _write_file_content_impl(
-        self, workspace_id, path, content_b64, mode=0o644
+        self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
     ):
         self.write_calls.append((workspace_id, path, content_b64, mode))
-        if ".." in str(path):
+        self.file_access_calls.append(("write", path, allow_external))
+        if self._is_external_path(path) and not allow_external:
             raise ValueError("Path must be under /workspace")
 
-    async def _list_files_impl(self, workspace_id, path):
+    async def _list_files_impl(self, workspace_id, path, *, allow_external=False):
         self.list_calls.append((workspace_id, path))
-        if ".." in str(path):
+        self.file_access_calls.append(("list", path, allow_external))
+        if self._is_external_path(path) and not allow_external:
             raise ValueError("Path must be under /workspace")
         return [
             {
@@ -189,9 +203,10 @@ class _FakeService:
             "truncated": False,
         }
 
-    async def _stat_path_impl(self, workspace_id, path):
+    async def _stat_path_impl(self, workspace_id, path, *, allow_external=False):
         self.stat_calls.append((workspace_id, path))
-        if ".." in str(path):
+        self.file_access_calls.append(("stat", path, allow_external))
+        if self._is_external_path(path) and not allow_external:
             raise ValueError("Path must be under /workspace")
         return {
             "path": "/workspace/a.txt",
@@ -216,16 +231,16 @@ class _FakeService:
         ):
             yield chunk
 
-    async def read_file(self, workspace_id, path, max_size=None):
+    async def read_file(self, workspace_id, path, max_size=None, *, allow_external=False):
         return await self.files.read_file(
-            workspace_id, path, max_size=max_size
+            workspace_id, path, max_size=max_size, allow_external=allow_external
         )
 
     async def write_file_content(
-        self, workspace_id, path, content_b64, mode=0o644
+        self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
     ):
         return await self.files.write_file_content(
-            workspace_id, path, content_b64, mode=mode
+            workspace_id, path, content_b64, mode=mode, allow_external=allow_external
         )
 
     async def list_files(self, workspace_id, path):
@@ -526,16 +541,142 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(emitted["harness:stat_result"]["is_dir"])
 
-    async def test_traversal_reports_error(self) -> None:
+    async def test_harness_file_rpcs_allow_external_paths(self) -> None:
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
-        await interface._sio.handlers["/"]["harness:read_file"](
-            _payload(workspace_id, "r-evil", path="/workspace/../etc/passwd")
+        handlers = interface._sio.handlers["/"]
+        path = "/etc/runner-test.txt"
+
+        await handlers["harness:read_file"](
+            _payload(workspace_id, "r-external", path=path)
         )
+        await handlers["harness:write_file"](
+            _payload(
+                workspace_id,
+                "w-external",
+                path=path,
+                content=base64.b64encode(b"write me").decode(),
+                mode=0o600,
+            )
+        )
+        await handlers["harness:list"](
+            _payload(workspace_id, "l-external", path="/etc")
+        )
+        await handlers["harness:stat"](
+            _payload(workspace_id, "s-external", path=path)
+        )
+
+        emitted = {
+            call.args[0]: call.args[1]
+            for call in interface._sio.emit.await_args_list
+        }
+        self.assertEqual(
+            emitted["harness:read_file_result"]["content"],
+            base64.b64encode(b"hi").decode(),
+        )
+        self.assertTrue(emitted["harness:write_file_result"]["ok"])
+        self.assertEqual(
+            emitted["harness:list_result"]["entries"][0]["name"], "a.txt"
+        )
+        self.assertFalse(emitted["harness:stat_result"]["is_dir"])
+        self.assertEqual(
+            service.file_access_calls,
+            [
+                ("read", path, True),
+                ("write", path, True),
+                ("list", "/etc", True),
+                ("stat", path, True),
+            ],
+        )
+
+    async def test_harness_chunked_write_allows_external_path(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handlers = interface._sio.handlers["/"]
+        path = "/etc/chunked.txt"
+        encoded_content = base64.b64encode(b"first second").decode()
+        chunks = [encoded_content[:8], encoded_content[8:]]
+
+        await handlers["harness:write_file_start"](
+            _payload(
+                workspace_id,
+                "w-chunked-external",
+                path=path,
+                total_chunks=len(chunks),
+                mode=0o640,
+            )
+        )
+        # Send out of order to verify the transfer reassembles by chunk index.
+        for index in reversed(range(len(chunks))):
+            await handlers["harness:write_file_chunk"](
+                _payload(
+                    workspace_id,
+                    "w-chunked-external",
+                    path=path,
+                    index=index,
+                    total_chunks=len(chunks),
+                    content=chunks[index],
+                )
+            )
+        await handlers["harness:write_file_finish"](
+            _payload(
+                workspace_id,
+                "w-chunked-external",
+                path=path,
+                total_chunks=len(chunks),
+            )
+        )
+
         event, payload = interface._sio.emit.await_args.args
-        self.assertEqual(event, "harness:read_file_result")
-        self.assertIn("/workspace", payload["error"])
+        self.assertEqual(event, "harness:write_file_result")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            service.write_calls,
+            [
+                (
+                    workspace_id,
+                    path,
+                    base64.b64encode(b"first second").decode(),
+                    0o640,
+                )
+            ],
+        )
+        self.assertEqual(service.file_access_calls, [("write", path, True)])
+        self.assertEqual(interface._upload_transfers, {})
+
+    async def test_file_explorer_rejects_external_paths_by_default(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        handlers = interface._sio.handlers["/"]
+
+        await handlers["files:list"](
+            _payload(workspace_id, "l-external", path="/etc")
+        )
+        await handlers["files:read"](
+            _payload(workspace_id, "r-external", path="/etc/passwd")
+        )
+
+        emitted = {
+            call.args[0]: call.args[1]
+            for call in interface._sio.emit.await_args_list
+        }
+        self.assertEqual(emitted["files:list_result"]["entries"], [])
+        self.assertIn(
+            "Path must be under /workspace",
+            emitted["files:list_result"]["error"],
+        )
+        self.assertEqual(emitted["files:content_result"]["content"], "")
+        self.assertIn(
+            "Path must be under /workspace",
+            emitted["files:content_result"]["error"],
+        )
+        self.assertEqual(
+            service.file_access_calls,
+            [("list", "/etc", False), ("read", "/etc/passwd", False)],
+        )
 
     async def test_files_find_emits_capped_paths(self) -> None:
         service = _FakeService()
@@ -968,6 +1109,39 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
                 uuid.uuid4(), "/etc/passwd", base64.b64encode(b"x").decode()
             )
 
+    async def test_file_manager_rejects_external_paths_by_default(self) -> None:
+        from src.models import WorkspaceInfo
+        from src.service import WorkspaceService
+
+        class UnusedRuntime:
+            async def exec_command_wait(
+                self, instance_id, command, workdir=None, env=None
+            ):
+                raise AssertionError(
+                    "external paths must be rejected before runtime access"
+                )
+
+        workspace_id = uuid.uuid4()
+        service = WorkspaceService(
+            runtimes={"docker": UnusedRuntime()}, settings=RunnerSettings()
+        )
+        service._cache[workspace_id] = WorkspaceInfo(
+            workspace_id=workspace_id,
+            instance_id="instance-1",
+            status="running",
+            runtime_type="docker",
+        )
+        content = base64.b64encode(b"x").decode()
+
+        for operation in (
+            service.files.read_file(workspace_id, "/etc/passwd"),
+            service.files.write_file_content(workspace_id, "/etc/passwd", content),
+            service.files.list_files(workspace_id, "/etc"),
+            service.files.stat_path(workspace_id, "/etc/passwd"),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                await operation
+
     async def test_stat_path_rejects_traversal(self) -> None:
         from src.service import WorkspaceService
 
@@ -1089,12 +1263,26 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
         class FakeRuntime:
             def __init__(self) -> None:
                 self.calls = 0
+                self.commands: list[list[str]] = []
+                self.archives: list[tuple[str, bytes]] = []
 
             async def exec_command_wait(
                 self, instance_id, command, workdir=None, env=None
             ):
                 self.calls += 1
-                return 0, resolved + "\n"
+                self.commands.append(command)
+                if command[:2] == ["realpath", "-m"]:
+                    return 0, resolved + "\n"
+                if command[0] == "find":
+                    return 0, "f\t3\t/etc/target.txt\n"
+                if command[0] == "sh" and "test -f" in command[2]:
+                    return 0, "3\ntext/plain\nYWJj\n"
+                if command[0] == "sh" and "if [ -e" in command[2]:
+                    return 0, "3\n3\ntext/plain\n"
+                return 0, ""
+
+            async def put_archive(self, instance_id, path, archive):
+                self.archives.append((path, archive))
 
         runtime = FakeRuntime()
         service = WorkspaceService(
@@ -1137,6 +1325,83 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
                 "/workspace/link",
                 base64.b64encode(b"x").decode(),
             )
+
+    async def test_external_and_symlink_paths_allowed_when_requested(self) -> None:
+        """All file operations can use external paths only when opted in."""
+        for requested_path in ("/etc/target.txt", "/workspace/link"):
+            with self.subTest(path=requested_path):
+                service, runtime, workspace_id = self._service(
+                    "/etc/target.txt"
+                )
+                manager = service.files
+                encoded = base64.b64encode(b"written externally").decode()
+
+                read_result = await manager.read_file(
+                    workspace_id, requested_path, allow_external=True
+                )
+                listed = await manager.list_files(
+                    workspace_id, requested_path, allow_external=True
+                )
+                stat = await manager.stat_path(
+                    workspace_id, requested_path, allow_external=True
+                )
+                await manager.write_file_content(
+                    workspace_id,
+                    requested_path,
+                    encoded,
+                    mode=0o600,
+                    allow_external=True,
+                )
+
+                self.assertEqual(
+                    base64.b64decode(read_result["content"]), b"abc"
+                )
+                self.assertEqual(read_result["size"], 3)
+                self.assertEqual(listed[0]["path"], "/etc/target.txt")
+                self.assertEqual(stat["path"], "/etc/target.txt")
+                self.assertEqual(stat["size"], 3)
+                self.assertIn(
+                    [
+                        "find",
+                        "/etc/target.txt",
+                        "-maxdepth",
+                        "1",
+                        "-mindepth",
+                        "1",
+                        "-printf",
+                        r"%y\t%s\t%p\n",
+                    ],
+                    runtime.commands,
+                )
+                self.assertTrue(
+                    any(
+                        command[0] == "sh"
+                        and "test -f /etc/target.txt" in command[2]
+                        for command in runtime.commands
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        command[0] == "sh"
+                        and "if [ -e /etc/target.txt ]" in command[2]
+                        for command in runtime.commands
+                    )
+                )
+                self.assertIn(
+                    ["chmod", "600", "/etc/target.txt"], runtime.commands
+                )
+                self.assertIn(["mkdir", "-p", "/etc"], runtime.commands)
+                self.assertEqual(len(runtime.archives), 1)
+                archive_path, archive_data = runtime.archives[0]
+                self.assertEqual(archive_path, "/etc")
+                with tarfile.open(
+                    fileobj=io.BytesIO(archive_data), mode="r:"
+                ) as archive:
+                    member = archive.getmember("target.txt")
+                    self.assertEqual(
+                        archive.extractfile(member).read(),
+                        b"written externally",
+                    )
 
     async def test_normal_path_passes_realpath_check(self) -> None:
         service, runtime, workspace_id = self._service(

@@ -13,6 +13,7 @@ import io
 import ipaddress
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -1685,12 +1686,13 @@ class QemuRuntime(RuntimeBackend):
     ) -> None:
         """Upload a tar archive to the VM and extract it at the given path."""
         ssh = await self._get_ssh(instance_id)
+        quoted_path = shlex.quote(path)
         # Ensure target directory exists
-        await ssh.run(f"mkdir -p '{path}'", check=True)
+        await ssh.run(f"mkdir -p {quoted_path}", check=True)
         # Upload and extract via stdin pipe
         # encoding=None is required to write raw bytes (binary mode)
         process = await ssh.create_process(
-            f"tar xf - -C '{path}'",
+            f"tar xf - -C {quoted_path}",
             stdin=asyncssh.PIPE,
             encoding=None,
         )

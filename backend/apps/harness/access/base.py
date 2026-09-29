@@ -1,7 +1,7 @@
 """WorkspaceAccessor ABC and shared types for harness workspace access.
 
 All harness tools reach workspace files and processes exclusively through
-this interface. File paths are sandboxed to ``/workspace``; exec working
+this interface. Relative file paths resolve from ``/workspace``; exec working
 directories may be any absolute path in the workspace VM/container.
 Stdout and stderr of executed commands stay strictly separated.
 """
@@ -69,26 +69,21 @@ def validate_harness_env(env: dict[str, str] | None) -> dict[str, str]:
 
 
 def sanitize_harness_path(path: str) -> str:
-    """Validate that *path* stays inside the harness workspace root.
+    """Normalize a harness file path in the workspace VM.
 
     Args:
         path: Absolute or workspace-relative path requested by a tool.
 
     Returns:
-        The normalized absolute path under ``/workspace``.
+        The normalized absolute path (relative paths start at ``/workspace``).
 
     Raises:
-        ValueError: If the path escapes the ``/workspace`` sandbox.
+        ValueError: If the path is empty or contains control characters.
     """
-    if not path or not path.strip():
-        raise ValueError(f"Path must be under /workspace: {path}")
+    if not path or not path.strip() or "\x00" in path or "\n" in path:
+        raise ValueError(f"Invalid path: {path}")
     candidate = path if os.path.isabs(path) else f"/workspace/{path}"
-    normalized = os.path.normpath(candidate)
-    if normalized != HARNESS_WORKSPACE_ROOT and not normalized.startswith(
-        HARNESS_WORKSPACE_ROOT + "/"
-    ):
-        raise ValueError(f"Path must be under /workspace: {path}")
-    return normalized
+    return os.path.normpath(candidate)
 
 
 def sanitize_exec_workdir(path: str) -> str:

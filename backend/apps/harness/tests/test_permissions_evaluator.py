@@ -139,21 +139,14 @@ def test_all_decisions_reachable(decision: str) -> None:
     assert evaluator.evaluate("bash", "ls") == decision
 
 
-def test_default_global_rules_env_parity() -> None:
-    """DEFAULT_GLOBAL_RULES asks for .env, allows example and normal."""
+def test_default_global_rules_do_not_gate_env() -> None:
+    """Built-in rules allow env reads; explicit granular rules still match."""
     from apps.harness.permissions.evaluator import DEFAULT_GLOBAL_RULES
 
     evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", "/workspace/.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/app.env.local") == "ask"
-    assert evaluator.evaluate("read", "/workspace/.env.example") == "allow"
-    assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
-
-
-def test_granular_basename_matching_without_path_prefix() -> None:
-    """Basename-scoped patterns fire on bare filenames too (edge path)."""
-    from apps.harness.permissions.evaluator import DEFAULT_GLOBAL_RULES
-
-    evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", ".env") == "ask"
-    assert evaluator.evaluate("read", "") == "allow"
+    assert evaluator.evaluate("read", "/workspace/.env") == "allow"
+    assert evaluator.evaluate("read", "/etc/app.env.local") == "allow"
+    assert evaluator.evaluate("read", ".env") == "allow"
+    custom = PermissionEvaluator(global_rules={"read": {"*.env": "ask"}})
+    assert custom.evaluate("read", "/workspace/.env") == "ask"
+    assert custom.evaluate("read", ".env") == "ask"

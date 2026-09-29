@@ -110,6 +110,29 @@ class QemuRuntimeBuildBaseImageTests(unittest.TestCase):
             )
 
 
+class QemuRuntimeArchiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_put_archive_quotes_external_directory(self) -> None:
+        """A guest path with quotes cannot inject shell commands."""
+        runtime = object.__new__(QemuRuntime)
+        ssh = MagicMock()
+        ssh.run = AsyncMock()
+        process = MagicMock()
+        process.wait = AsyncMock()
+        ssh.create_process = AsyncMock(return_value=process)
+        runtime._get_ssh = AsyncMock(return_value=ssh)
+        path = "/tmp/with'quote"
+
+        await runtime.put_archive("instance-1", path, b"archive")
+
+        ssh.run.assert_awaited_once_with("mkdir -p '/tmp/with'\"'\"'quote'", check=True)
+        self.assertEqual(
+            ssh.create_process.await_args.args[0],
+            "tar xf - -C '/tmp/with'\"'\"'quote'",
+        )
+        process.stdin.write.assert_called_once_with(b"archive")
+        process.wait.assert_awaited_once()
+
+
 class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_image_runs_init_script_with_sudo(self) -> None:
         runtime = object.__new__(QemuRuntime)

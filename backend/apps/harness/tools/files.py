@@ -241,7 +241,9 @@ class ReadArgs(BaseModel):
     with ``lineno = offset + index``).
     """
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     offset: int = Field(
         default=0,
         ge=0,
@@ -260,14 +262,18 @@ class ReadArgs(BaseModel):
 class WriteArgs(BaseModel):
     """Arguments for the write tool."""
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     content: str = Field(description="Full file content (replaces file).")
 
 
 class EditArgs(BaseModel):
     """Arguments for the edit tool."""
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     old_string: str = Field(description="Exact string to replace.")
     new_string: str = Field(default="", description="Replacement string.")
     replace_all: bool = Field(default=False, description="Replace every occurrence.")
@@ -285,7 +291,7 @@ class ReadTool(Tool):
 
     name = "read"
     description = (
-        "Read a text file from the workspace. Paged via offset/limit "
+        "Read a text file from the workspace VM. Paged via offset/limit "
         "(defaults: offset 0, limit 2000 lines, at most 50 KB per page). "
         "Offset and displayed line numbers are 0-based. "
         "Use offset to continue in large files. Rejects binary files. "

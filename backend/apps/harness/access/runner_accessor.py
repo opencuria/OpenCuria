@@ -755,7 +755,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         path: str,
         max_size: int | None = None,
     ) -> FileContent:
-        """Read a file from the sandboxed workspace.
+        """Read a file from the workspace VM.
 
         The public contract is unchanged: returns complete bytes up to
         *max_size*. The runner sends large payloads as ordered
@@ -968,7 +968,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         content: bytes,
         mode: int = 0o644,
     ) -> None:
-        """Write a file atomically into the sandboxed workspace.
+        """Write a file atomically into the workspace VM.
 
         Small payloads use the legacy single ``harness:write_file`` event;
         payloads above 256 KiB base64 ride as
@@ -1062,7 +1062,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 await self._emit_cancel(request_id)
 
     async def list_dir(self, path: str) -> list[DirEntry]:
-        """List directory entries inside the sandboxed workspace."""
+        """List directory entries in the workspace VM."""
         safe_path = sanitize_harness_path(path)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
@@ -1095,7 +1095,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         return entries
 
     async def stat(self, path: str) -> FileStat:
-        """Stat a path inside the sandboxed workspace."""
+        """Stat a path in the workspace VM."""
         safe_path = sanitize_harness_path(path)
         request_id = uuid.uuid4().hex
         result = await self._await_result(

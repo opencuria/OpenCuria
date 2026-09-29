@@ -227,10 +227,11 @@ async def test_read_offset_out_of_range() -> None:
         await tool.execute({"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor))
 
 
-async def test_read_sandbox_violation_rejected(fake_accessor) -> None:
-    """Paths outside /workspace raise ValueError (sandbox)."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await ReadTool().execute({"path": "/etc/passwd"}, _ctx(fake_accessor))
+async def test_read_external_env_file() -> None:
+    """Read can fetch an external secret file via the accessor."""
+    accessor = FakeAccessor(files={"/etc/app.env": b"KEY=value"})
+    result = await ReadTool().execute({"path": "/etc/app.env"}, _ctx(accessor))
+    assert result.output == "0: KEY=value"
 
 
 async def test_read_runner_error_propagates() -> None:
@@ -272,13 +273,12 @@ async def test_write_happy_path(fake_accessor) -> None:
     assert "Wrote" in result.output
 
 
-async def test_write_sandbox_violation_rejected(fake_accessor) -> None:
-    """Write outside /workspace is rejected before any runner call."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await WriteTool().execute(
-            {"path": "../evil.txt", "content": "x"}, _ctx(fake_accessor)
-        )
-    assert fake_accessor.written == {}
+async def test_write_external_path(fake_accessor) -> None:
+    """Write resolves traversing relative paths and forwards absolute ones."""
+    await WriteTool().execute(
+        {"path": "../evil.txt", "content": "x"}, _ctx(fake_accessor)
+    )
+    assert fake_accessor.written["/evil.txt"] == b"x"
 
 
 async def test_write_refuses_truncated_existing_file() -> None:
@@ -365,13 +365,13 @@ async def test_edit_ambiguous_without_replace_all() -> None:
     assert "3" in result.output
 
 
-async def test_edit_sandbox_violation_rejected(fake_accessor) -> None:
-    """Edit outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await EditTool().execute(
-            {"path": "/etc/x", "old_string": "a", "new_string": "b"},
-            _ctx(fake_accessor),
-        )
+async def test_edit_external_path() -> None:
+    """Edit changes existing files outside /workspace."""
+    accessor = FakeAccessor(files={"/etc/x": b"a"})
+    await EditTool().execute(
+        {"path": "/etc/x", "old_string": "a", "new_string": "b"}, _ctx(accessor)
+    )
+    assert accessor.written["/etc/x"] == b"b"
 
 
 async def test_bash_happy_path() -> None:
@@ -501,10 +501,13 @@ async def test_glob_happy_path(fake_accessor) -> None:
     assert "/workspace/a.txt" in result.output
 
 
-async def test_glob_sandbox_violation_rejected(fake_accessor) -> None:
-    """Glob outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await GlobTool().execute({"pattern": "**", "path": "/etc"}, _ctx(fake_accessor))
+async def test_glob_external_path(fake_accessor) -> None:
+    """Glob searches directories outside /workspace."""
+    result = await GlobTool().execute(
+        {"pattern": "**", "path": "/etc"}, _ctx(fake_accessor)
+    )
+    assert result.metadata["path"] == "/etc"
+    assert "rg --files /etc" in fake_accessor.exec_calls[-1][0]
 
 
 async def test_grep_happy_path() -> None:
@@ -514,6 +517,10 @@ async def test_grep_happy_path() -> None:
     )
     result = await GrepTool().execute({"pattern": "hello"}, _ctx(accessor))
     assert "hello" in result.output
+    external = await GrepTool().execute(
+        {"pattern": "KEY", "path": "/etc"}, _ctx(accessor)
+    )
+    assert external.metadata["path"] == "/etc"
 
 
 async def test_grep_runner_error_propagates() -> None:
@@ -530,10 +537,11 @@ async def test_list_happy_path(fake_accessor) -> None:
     assert result.metadata["count"] == 1
 
 
-async def test_list_sandbox_violation_rejected(fake_accessor) -> None:
-    """List outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await ListTool().execute({"path": "/etc"}, _ctx(fake_accessor))
+async def test_list_external_path() -> None:
+    """List returns entries in directories outside /workspace."""
+    accessor = FakeAccessor(files={"/etc/app.env": b"secret"})
+    result = await ListTool().execute({"path": "/etc"}, _ctx(accessor))
+    assert "file app.env" in result.output
 
 
 async def test_todowrite_happy_path(fake_accessor) -> None:

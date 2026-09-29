@@ -55,7 +55,7 @@ class FakeChunkService:
         def __init__(self, outer) -> None:
             self._outer = outer
 
-        async def read_file(self, workspace_id, path, max_size=None):
+        async def read_file(self, workspace_id, path, max_size=None, *, allow_external=False):
             return await self._outer._read_file_impl(
                 workspace_id, path, max_size=max_size
             )
@@ -72,7 +72,7 @@ class FakeChunkService:
             )
 
         async def write_file_content(
-            self, workspace_id, path, content_b64, mode=0o644
+            self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
         ):
             return await self._outer._write_file_content_impl(
                 workspace_id, path, content_b64, mode=mode

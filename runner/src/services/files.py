@@ -176,22 +176,39 @@ class FileManager:
         # keeps peak channel usage well below 10.
         self._file_read_semaphores: dict[uuid.UUID, asyncio.Semaphore] = {}
 
+    @staticmethod
+    def _file_path(path: str, *, allow_external: bool) -> str:
+        """Normalize a guest path; only harness RPCs may leave /workspace."""
+        if not allow_external:
+            return _sanitize_path(path)
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or "\x00" in path
+            or "\n" in path
+        ):
+            raise ValueError(f"Invalid path: {path}")
+        candidate = path if os.path.isabs(path) else f"/workspace/{path}"
+        return os.path.normpath(candidate)
+
     async def _realpath_under_workspace(
         self,
         runtime: RuntimeBackend,
         instance_id: str,
         path: str,
+        *,
+        allow_external: bool = False,
     ) -> str:
-        """Resolve symlinks for *path* and ensure it stays in /workspace.
+        """Resolve symlinks; keep non-harness paths within /workspace.
 
         Runs ``realpath -m`` inside the workspace, which resolves symlinks
-        and ``..`` segments. Raises ``ValueError`` (fail-closed) when the
-        resolved path escapes ``/workspace``. Falls back to *path* when
-        ``realpath`` is unavailable in the image (coreutils ships it on
+        and ``..`` segments. For non-harness calls, raises ``ValueError``
+        when the resolved path escapes ``/workspace``. Falls back to *path*
+        when ``realpath`` is unavailable in the image (coreutils ships it on
         Ubuntu, so this is only a safety net). Note: check-then-use is
         inherently TOCTOU-prone if the workspace mutates the link between
         the check and the file operation; accepted here as defense-in-depth
-        on top of the ``/workspace`` sandbox.
+        on top of the non-harness ``/workspace`` sandbox.
         """
         exit_code, output = await runtime.exec_command_wait(
             instance_id,
@@ -204,7 +221,9 @@ class FileManager:
         if not resolved or not resolved[0]:
             return path
         real = resolved[0].strip()
-        if real != "/workspace" and not real.startswith("/workspace/"):
+        if not allow_external and real != "/workspace" and not real.startswith(
+            "/workspace/"
+        ):
             raise ValueError(f"Path escapes /workspace: {path}")
         return real
 
@@ -212,19 +231,21 @@ class FileManager:
         self,
         workspace_id: uuid.UUID,
         path: str,
+        *,
+        allow_external: bool = False,
     ) -> list[dict]:
         """List files and directories at *path* inside the workspace.
 
         Returns a list of dicts with ``name``, ``path``, ``type``, ``size``.
         """
-        safe_path = _sanitize_path(path)
+        safe_path = self._file_path(path, allow_external=allow_external)
         assert self._get_cached is not None and self._get_runtime is not None
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
         safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
+            runtime, info.instance_id, safe_path, allow_external=allow_external
         )
 
         exit_code, output = await runtime.exec_command_wait(
@@ -316,6 +337,8 @@ class FileManager:
         workspace_id: uuid.UUID,
         path: str,
         max_size: int | None = None,
+        *,
+        allow_external: bool = False,
     ) -> dict:
         """Read a file from the workspace container.
 
@@ -326,7 +349,7 @@ class FileManager:
         avoid exceeding the SSH server's MaxSessions limit when many images
         are fetched simultaneously.
         """
-        safe_path = _sanitize_path(path)
+        safe_path = self._file_path(path, allow_external=allow_external)
         assert self._get_cached is not None and self._get_runtime is not None
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
@@ -352,7 +375,7 @@ class FileManager:
 
         async with sem:
             safe_path = await self._realpath_under_workspace(
-                runtime, info.instance_id, safe_path
+                runtime, info.instance_id, safe_path, allow_external=allow_external
             )
             # Combine stat + read into a single SSH exec to halve the number
             # of SSH channels opened compared to two sequential commands.
@@ -583,19 +606,21 @@ class FileManager:
         self,
         workspace_id: uuid.UUID,
         path: str,
+        *,
+        allow_external: bool = False,
     ) -> dict:
         """Stat a path inside the workspace container.
 
         Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
         """
-        safe_path = _sanitize_path(path)
+        safe_path = self._file_path(path, allow_external=allow_external)
         assert self._get_cached is not None and self._get_runtime is not None
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
         safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
+            runtime, info.instance_id, safe_path, allow_external=allow_external
         )
 
         qpath = shlex.quote(safe_path)
@@ -637,6 +662,7 @@ class FileManager:
         mode: int = 0o644,
         *,
         upload_max_size: int | None = None,
+        allow_external: bool = False,
     ) -> None:
         """Write file content atomically inside the workspace container.
 
@@ -646,14 +672,14 @@ class FileManager:
             content_b64: Base64-encoded file content.
             mode: File permission bits applied after the write.
         """
-        safe_path = _sanitize_path(path)
+        safe_path = self._file_path(path, allow_external=allow_external)
         assert self._get_cached is not None and self._get_runtime is not None
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
         safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path
+            runtime, info.instance_id, safe_path, allow_external=allow_external
         )
         cap = FILE_UPLOAD_MAX_SIZE if upload_max_size is None else upload_max_size
         # Exact cap on decoded bytes: decode + validate before writing.
@@ -668,6 +694,16 @@ class FileManager:
             raise ValueError(f"Invalid file mode: {mode!r}")
 
         archive = build_single_file_tar(os.path.basename(safe_path), decoded)
+        if allow_external:
+            # Docker put_archive needs the destination directory to exist;
+            # keep ordinary file-explorer writes unchanged.
+            exit_code, output = await runtime.exec_command_wait(
+                info.instance_id,
+                command=["mkdir", "-p", os.path.dirname(safe_path)],
+                workdir="/workspace",
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to create parent directory: {output}")
         await runtime.put_archive(
             info.instance_id,
             os.path.dirname(safe_path) or "/workspace",

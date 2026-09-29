@@ -248,7 +248,7 @@ class GlobTool(Tool):
 
     name = "glob"
     description = (
-        "Find files matching a glob pattern under a workspace path. "
+        "Find files matching a glob pattern under a path in the workspace VM. "
         "Implemented via the workspace accessor (find on the runner)."
     )
     args_schema: type[BaseModel] = GlobArgs
@@ -301,7 +301,7 @@ class GrepTool(Tool):
 
     name = "grep"
     description = (
-        "Search file contents under a workspace path. Uses ripgrep when "
+        "Search file contents under a path in the workspace VM. Uses ripgrep when "
         "available (respects .gitignore by default), else grep -r."
     )
     args_schema: type[BaseModel] = GrepArgs
@@ -361,7 +361,7 @@ class ListTool(Tool):
     """List directory entries via the workspace accessor."""
 
     name = "list"
-    description = "List files and directories under a workspace path."
+    description = "List files and directories under a path in the workspace VM."
     args_schema: type[BaseModel] = ListArgs
     permission_key = "read"
 

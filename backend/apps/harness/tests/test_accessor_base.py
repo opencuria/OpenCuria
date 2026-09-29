@@ -21,20 +21,23 @@ def test_sandbox_accepts_workspace_paths() -> None:
 
 
 @pytest.mark.parametrize(
-    "path",
+    ("path", "expected"),
     [
-        "/etc/passwd",
-        "/workspace/../etc/passwd",
-        "/workspace/../../root",
-        "..",
-        "../secret",
-        "/",
-        "",
+        ("/etc/passwd", "/etc/passwd"),
+        ("/workspace/../etc/passwd", "/etc/passwd"),
+        ("../secret", "/secret"),
+        ("/", "/"),
     ],
 )
-def test_sandbox_rejects_traversal(path: str) -> None:
-    """Traversal outside /workspace raises ValueError."""
-    with pytest.raises(ValueError, match="under /workspace"):
+def test_external_paths_are_normalized(path: str, expected: str) -> None:
+    """Harness paths may leave /workspace in the guest VM."""
+    assert sanitize_harness_path(path) == expected
+
+
+@pytest.mark.parametrize("path", ["", "  ", "/tmp/\x00x", "/tmp/\nx"])
+def test_invalid_file_paths_rejected(path: str) -> None:
+    """Reject empty or control-character paths before sending an RPC."""
+    with pytest.raises(ValueError, match="Invalid path"):
         sanitize_harness_path(path)
 
 

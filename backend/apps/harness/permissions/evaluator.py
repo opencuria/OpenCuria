@@ -19,9 +19,6 @@ Matching rules:
   ``doom_loop`` which defaults to ``ask``. ``external_directory``
   falls through to normal tool rules unless an explicit reserved-key
   rule is set (paths outside ``/workspace`` are allowed by default).
-- Filename-only secret matching: granular ``read`` rules are matched
-  against both the full action path and its basename, so ``*.env``
-  fires for ``/workspace/.env`` (OpenCode parity).
 
 Phase 3 decision (WIRE, not remove): ``HarnessRunner._decide`` and
 ``_filtered_schemas`` forward ``mode`` to :meth:`evaluate`, so
@@ -52,21 +49,8 @@ VALID_DECISIONS = (ALLOW, ASK, DENY)
 #: Reserved permission keys with an ``ask`` default instead of ``allow``.
 ASK_BY_DEFAULT_KEYS = ("doom_loop",)
 
-#: Global baseline rules (OpenCode parity): secret files ask for
-#: approval while everything else reads freely. Order matters
-#: (last-match-wins): the ``*.env.example`` allow must come after the
-#: ``*.env``/``*.env.*`` asks so the shipped example stays readable.
-#: Agent layers with ``{"*": "allow"}`` (build/general) do NOT override
-#: this: the runner combines the base and agent evaluators with
-#: deny > ask > allow precedence, so a base ``ask`` always survives.
-DEFAULT_GLOBAL_RULES: dict[str, Any] = {
-    "read": {
-        "*": "allow",
-        "*.env": "ask",
-        "*.env.*": "ask",
-        "*.env.example": "allow",
-    }
-}
+#: No built-in secret-file ask rule; explicit global rules still apply.
+DEFAULT_GLOBAL_RULES: dict[str, Any] = {}
 
 # Tools whose action string is a workspace path (pattern-matched).
 PATH_SCOPED_KEYS = ("read", "edit", "glob", "grep", "list")
