@@ -10,7 +10,8 @@ import uuid
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Max
+from django.db.models import Case, Exists, F, Max, OuterRef, TextField, Value, When
+from django.db.utils import NotSupportedError
 from django.utils import timezone
 
 from .models import (
@@ -28,6 +29,7 @@ from .models import (
     RecentModel,
     Todo,
 )
+from .timeline import append_part_display, build_part_display
 
 
 class ProviderConfigRepository:
@@ -659,6 +661,52 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
+    def list_timeline_for_session(session_id: uuid.UUID) -> list[HarnessMessage]:
+        """Load timeline metadata and only content lacking text-part backing."""
+        has_text = Exists(
+            HarnessPart.objects.filter(message_id=OuterRef("pk"), type="text")
+        )
+        try:
+            queryset = HarnessMessage.objects.filter(session_id=session_id).annotate(
+                has_text_parts=has_text,
+                timeline_content=Case(
+                    When(
+                        role=HarnessMessageRole.ASSISTANT,
+                        has_text_parts=True,
+                        then=Value(""),
+                    ),
+                    default=F("content"),
+                    output_field=TextField(),
+                ),
+            )
+        except NotSupportedError:
+            # Test repositories such as SQLite may lack correlated subqueries
+            # for the project backend. Keep a one-query safe fallback there.
+            queryset = HarnessMessage.objects.filter(session_id=session_id).annotate(
+                timeline_content=F("content")
+            )
+        return list(
+            queryset.defer("content")
+            .only(
+                "id",
+                "session_id",
+                "role",
+                "model",
+                "reasoning_effort",
+                "cost",
+                "tokens",
+                "finish",
+                "error",
+                "skill_ids",
+                "notice_dismissed_at",
+                "position",
+                "created_at",
+                "completed_at",
+            )
+            .order_by("position", "created_at", "id")
+        )
+
+    @staticmethod
     def get_by_id(message_id: uuid.UUID) -> HarnessMessage | None:
         """Fetch a single message by ID."""
         return HarnessMessage.objects.filter(id=message_id).first()
@@ -917,6 +965,10 @@ class HarnessPartRepository:
             try:
                 with transaction.atomic():
                     position = HarnessPartRepository._next_part_position(message_id)
+                    part_meta = dict(meta or {})
+                    if type == "patch":
+                        part_meta.pop("old_content", None)
+                        part_meta.pop("new_content", None)
                     return HarnessPart.objects.create(
                         message_id=message_id,
                         type=type,
@@ -925,7 +977,15 @@ class HarnessPartRepository:
                         title=title or "",
                         input=dict(input or {}),
                         output=output or "",
-                        meta=dict(meta or {}),
+                        meta=part_meta,
+                        display=build_part_display(
+                            part_type=type,
+                            title=title or "",
+                            call_id=call_id or "",
+                            input_data=input or {},
+                            output=output or "",
+                            meta_data=part_meta,
+                        ),
                         position=position,
                     )
             except IntegrityError:
@@ -935,7 +995,7 @@ class HarnessPartRepository:
 
     @staticmethod
     def list_for_session(session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all parts of a session in timeline order."""
+        """Return all full parts of a session in timeline order (legacy path)."""
         return list(
             HarnessPart.objects.filter(message__session_id=session_id).order_by(
                 "message__position",
@@ -948,6 +1008,63 @@ class HarnessPartRepository:
         )
 
     @staticmethod
+    def list_timeline_for_session(session_id: uuid.UUID) -> list[HarnessPart]:
+        """Fetch timeline rows without loading large tool/patch/agent/reasoning data."""
+        rows = list(
+            HarnessPart.objects.filter(message__session_id=session_id)
+            .annotate(
+                message_position=F("message__position"),
+                timeline_output=Case(
+                    When(type="text", then=F("output")),
+                    default=Value(""),
+                    output_field=TextField(),
+                ),
+            )
+            .only(
+                "id",
+                "message_id",
+                "type",
+                "state",
+                "call_id",
+                "title",
+                "position",
+                "created_at",
+                "display",
+            )
+            .order_by(
+                "message__position",
+                "message__created_at",
+                "message__id",
+                "position",
+                "created_at",
+                "id",
+            )
+        )
+        if not rows:
+            return rows
+
+        # Large tool/patch/agent/reasoning bodies are deferred; text output is
+        # projected conditionally in the same query for ordinary rendering.
+        return rows
+
+    @staticmethod
+    def get_for_session(
+        session_id: uuid.UUID, part_id: uuid.UUID
+    ) -> HarnessPart | None:
+        """Fetch a full part only when it belongs to the requested session."""
+        part = HarnessPart.objects.filter(
+            id=part_id, message__session_id=session_id
+        ).first()
+        if part is not None:
+            part.message_position = (
+                HarnessMessage.objects.filter(id=part.message_id)
+                .values_list("position", flat=True)
+                .first()
+                or 0
+            )
+        return part
+
+    @staticmethod
     def list_for_message(message_id: uuid.UUID) -> list[HarnessPart]:
         """Return all parts of one message in timeline order."""
         return list(
@@ -957,10 +1074,56 @@ class HarnessPartRepository:
         )
 
     @staticmethod
+    def set_input(part: HarnessPart, input_data: dict) -> HarnessPart:
+        """Replace a part input payload and refresh its lightweight display."""
+        part.input = dict(input_data or {})
+        part.display = build_part_display(
+            part_type=part.type,
+            title=part.title,
+            call_id=part.call_id,
+            input_data=part.input,
+            output=part.output,
+            meta_data=part.meta,
+        )
+        part.save(update_fields=["input", "display", "updated_at"])
+        return part
+
+    @staticmethod
+    def append_output_by_id(part_id: uuid.UUID, delta: str) -> None:
+        """Append a stream delta without loading the growing output column."""
+        from django.db.models.functions import Concat
+
+        delta = delta or ""
+        if not delta:
+            return
+        row = (
+            HarnessPart.objects.filter(id=part_id)
+            .values_list("display", "type")
+            .first()
+        )
+        if row is None:
+            return
+        display, part_type = row
+        next_display = append_part_display(
+            display, part_type=part_type, delta=delta
+        )
+        HarnessPart.objects.filter(id=part_id).update(
+            output=Concat(F("output"), Value(delta), output_field=TextField()),
+            display=next_display,
+            updated_at=timezone.now(),
+        )
+
+    @staticmethod
     def append_output(part: HarnessPart, delta: str) -> HarnessPart:
-        """Append a text/reasoning delta to a part's output."""
+        """Append a text/reasoning delta and refresh the lightweight display."""
         part.output = f"{part.output or ''}{delta or ''}"
-        part.save(update_fields=["output", "updated_at"])
+        # Reasoning summaries depend only on the final line. Advance that
+        # bounded projection from the delta instead of scanning the full body
+        # for every token (stream persistence itself remains append-only).
+        part.display = append_part_display(
+            part.display, part_type=part.type, delta=delta or ""
+        )
+        part.save(update_fields=["output", "display", "updated_at"])
         return part
 
     @staticmethod
@@ -984,8 +1147,26 @@ class HarnessPartRepository:
         if meta is not None:
             merged = dict(part.meta or {})
             merged.update(meta)
+            if part.type == "patch":
+                merged.pop("old_content", None)
+                merged.pop("new_content", None)
             part.meta = merged
             fields.append("meta")
+        if part.type == "patch":
+            part.meta = dict(part.meta or {})
+            part.meta.pop("old_content", None)
+            part.meta.pop("new_content", None)
+            if "meta" not in fields:
+                fields.append("meta")
+        part.display = build_part_display(
+            part_type=part.type,
+            title=part.title,
+            call_id=part.call_id,
+            input_data=part.input,
+            output=part.output,
+            meta_data=part.meta,
+        )
+        fields.append("display")
         part.save(update_fields=fields)
         return part
 

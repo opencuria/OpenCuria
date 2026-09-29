@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
+import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
 import { BookText, GitFork, Pencil } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import type { ComposerFileToken } from '@/lib/composerTokens'
-import {
-  buildMessageBlocks,
-  type MessageRenderBlock,
-  type RenderBlock,
-} from '@/lib/harnessBlocks'
+import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { buildAgentStepViews, hasRunningAgentSequence } from '@/lib/harnessAgentSteps'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
@@ -25,6 +22,8 @@ import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
 import HarnessWorkedFor from './HarnessWorkedFor.vue'
+import HarnessPageControls from './HarnessPageControls.vue'
+import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
 
 const props = defineProps<{
   message: HarnessMessage
@@ -42,12 +41,96 @@ const emit = defineEmits<{
 }>()
 
 const workspaceId = inject(harnessWorkspaceIdKey, ref(''))
+const pinMessage = inject(pinHarnessMessageKey, null)
+const messageRoot = ref<HTMLElement | null>(null)
+function onMessageFocusIn(): void {
+  pinMessage?.(props.message.id, true)
+}
+function onMessageFocusOut(event: FocusEvent): void {
+  const next = event.relatedTarget as Node | null
+  if (!messageRoot.value?.contains(next)) pinMessage?.(props.message.id, false)
+}
+onUnmounted(() => pinMessage?.(props.message.id, false))
 const mentionImages = ref<ComposerFileToken[]>([])
 
 const finished = computed(() => props.streaming !== true)
 
-const blocks = computed(() =>
-  buildMessageBlocks(props.message.parts, { finished: finished.value }),
+const blocks = computed(() => buildMessageBlocks(props.message.parts, { finished: finished.value }))
+const blockPage = ref(props.streaming ? lastHarnessPage(blocks.value.length) : 0)
+const followingTail = ref(props.streaming === true)
+const visibleEntries = computed(() => {
+  const start = blockPage.value * HARNESS_PAGE_SIZE
+  const end = (blockPage.value + 1) * HARNESS_PAGE_SIZE
+  const entries = blocks.value
+    .slice(start, end)
+    .map((block, index) => ({ block, index: start + index }))
+  const cursorIndex = streamingCursor.value?.topIndex
+  if (cursorIndex !== undefined && (cursorIndex < start || cursorIndex >= end)) {
+    const cursorBlock = blocks.value[cursorIndex]
+    if (cursorBlock) {
+      // Keep the live answer attached to its cursor without exceeding one page.
+      if (entries.length === HARNESS_PAGE_SIZE) entries.pop()
+      entries.push({ block: cursorBlock, index: cursorIndex })
+      entries.sort((left, right) => left.index - right.index)
+    }
+  }
+  return entries
+})
+const visibleBlockIndexes = computed(() => new Set(visibleEntries.value.map(({ index }) => index)))
+
+function previousBlockPage(): void {
+  blockPage.value = Math.max(0, blockPage.value - 1)
+  followingTail.value = false
+}
+
+function nextBlockPage(): void {
+  blockPage.value = Math.min(lastHarnessPage(blocks.value.length), blockPage.value + 1)
+  followingTail.value = blockPage.value === lastHarnessPage(blocks.value.length)
+}
+function blockIdentity(block: MessageRenderBlock): string {
+  if (block.kind === 'workedFor') {
+    const parts = block.blocks.flatMap((inner) =>
+      inner.kind === 'group' ? inner.parts : [inner.part],
+    )
+    return `workedFor:${parts[0]?.id ?? ''}:${parts[parts.length - 1]?.id ?? ''}`
+  }
+  if (block.kind === 'group') return `work:${block.parts[0]?.id ?? ''}`
+  if (block.kind === 'single' && block.part.type === 'tool') return `work:${block.part.id}`
+  return `${block.kind}:${block.part.id}`
+}
+
+const blockIdentities = computed(() => blocks.value.map(blockIdentity))
+watch(blockIdentities, (next, previous) => {
+  if (shouldResetHarnessPage(previous, next)) {
+    if (!props.streaming) blockPage.value = 0
+    else if (followingTail.value) blockPage.value = lastHarnessPage(next.length)
+    else blockPage.value = Math.min(blockPage.value, lastHarnessPage(next.length))
+  } else {
+    blockPage.value = Math.min(blockPage.value, lastHarnessPage(next.length))
+  }
+})
+watch(
+  () => props.streaming,
+  (streaming) => {
+    followingTail.value = streaming === true
+    if (followingTail.value) blockPage.value = lastHarnessPage(blocks.value.length)
+  },
+)
+watch(
+  () => blocks.value.length,
+  (length, previous) => {
+    if (props.streaming && followingTail.value && length > previous) {
+      blockPage.value = lastHarnessPage(length)
+    }
+  },
+)
+watch(
+  () => props.message.parts.length,
+  (length, previous) => {
+    if (props.streaming && followingTail.value && length > previous) {
+      blockPage.value = lastHarnessPage(blocks.value.length)
+    }
+  },
 )
 
 const elapsedLabel = computed(() => {
@@ -72,7 +155,7 @@ function agentViewFor(partId: string): (typeof agentViews.value)[number] | undef
 
 function isAgentBlockConnected(index: number): boolean {
   const next = blocks.value[index + 1]
-  return next?.kind === 'agent'
+  return visibleBlockIndexes.value.has(index + 1) && next?.kind === 'agent'
 }
 
 const lastBlockIsText = computed(() => {
@@ -152,8 +235,7 @@ function blockKey(block: MessageRenderBlock, index: number): string {
       !first || first.kind === 'group'
         ? ((first as { parts?: { id: string }[] } | undefined)?.parts?.[0]?.id ?? '')
         : first.part.id
-    const lastId =
-      !last || last.kind === 'group' ? '' : (last as { part: { id: string } }).part.id
+    const lastId = !last || last.kind === 'group' ? '' : (last as { part: { id: string } }).part.id
     return `workedFor-${props.message.id}-${firstId}-${lastId || index}`
   }
   if (block.kind === 'compaction') {
@@ -225,7 +307,13 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
 
 <template>
   <!-- User message -->
-  <div v-if="message.role === 'user'" class="group flex items-start gap-3 justify-end">
+  <div
+    v-if="message.role === 'user'"
+    ref="messageRoot"
+    class="group flex items-start gap-3 justify-end"
+    @focusin="onMessageFocusIn"
+    @focusout="onMessageFocusOut"
+  >
     <div class="min-w-0 max-w-3xl">
       <div
         v-if="!editing"
@@ -332,21 +420,34 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   </div>
 
   <!-- Assistant message: chronological blocks in left prose shell -->
-  <div v-else class="group flex items-start gap-3">
+  <div
+    v-else
+    ref="messageRoot"
+    class="group flex items-start gap-3"
+    @focusin="onMessageFocusIn"
+    @focusout="onMessageFocusOut"
+  >
     <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
-      <div
-        v-if="blocks.length"
-        class="flex flex-col gap-2 [&>[data-block-kind=workedFor]]:-mb-0.5"
-      >
-        <template v-for="(block, index) in blocks" :key="blockKey(block, index)">
-          <div
-            v-if="block.kind === 'workedFor'"
-            data-block-kind="workedFor"
-          >
+      <div v-if="blocks.length" class="flex flex-col gap-2 [&>[data-block-kind=workedFor]]:-mb-0.5">
+        <HarnessPageControls
+          :page="blockPage"
+          :total-items="blocks.length"
+          label="Message blocks pages"
+          @previous="previousBlockPage"
+          @next="nextBlockPage"
+        />
+        <template v-for="entry in visibleEntries" :key="blockKey(entry.block, entry.index)">
+          <div v-if="entry.block.kind === 'workedFor'" data-block-kind="workedFor">
             <HarnessWorkedFor :elapsed-label="elapsedLabel">
               <HarnessBlockList
-                :blocks="block.blocks"
-                :show-streaming-cursor="Boolean(streamingCursor && streamingCursor.topIndex === index && streamingCursor.innerIndex !== null)"
+                :blocks="entry.block.blocks"
+                :show-streaming-cursor="
+                  Boolean(
+                    streamingCursor &&
+                    streamingCursor.topIndex === entry.index &&
+                    streamingCursor.innerIndex !== null,
+                  )
+                "
                 :child-session-ids="childSessionIds"
                 :models="models ?? catalog"
                 @open-subtask="emit('openSubtask', $event)"
@@ -354,24 +455,30 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
             </HarnessWorkedFor>
           </div>
           <div
-            v-else-if="block.kind === 'agent'"
+            v-else-if="entry.block.kind === 'agent'"
             data-block-kind="agent"
-            :data-part-id="block.part.id"
-            :class="isAgentBlockConnected(index) ? 'mb-0.5' : ''"
+            :data-part-id="entry.block.part.id"
+            :class="isAgentBlockConnected(entry.index) ? 'mb-0.5' : ''"
           >
             <HarnessAgentStep
-              :step="agentViewFor(block.part.id)?.step ?? null"
-              :part="block.part"
-              :status="agentViewFor(block.part.id)?.status ?? 'completed'"
-              :live="agentViewFor(block.part.id)?.live ?? false"
-              :legacy="agentViewFor(block.part.id)?.legacy ?? true"
-              :connected="isAgentBlockConnected(index)"
+              :step="agentViewFor(entry.block.part.id)?.step ?? null"
+              :part="entry.block.part"
+              :status="agentViewFor(entry.block.part.id)?.status ?? 'completed'"
+              :live="agentViewFor(entry.block.part.id)?.live ?? false"
+              :legacy="agentViewFor(entry.block.part.id)?.legacy ?? true"
+              :connected="isAgentBlockConnected(entry.index)"
             />
           </div>
           <HarnessBlockList
             v-else
-            :blocks="asRenderBlocks(block)"
-            :show-streaming-cursor="Boolean(streamingCursor && streamingCursor.topIndex === index && streamingCursor.innerIndex === null)"
+            :blocks="asRenderBlocks(entry.block)"
+            :show-streaming-cursor="
+              Boolean(
+                streamingCursor &&
+                streamingCursor.topIndex === entry.index &&
+                streamingCursor.innerIndex === null,
+              )
+            "
             :child-session-ids="childSessionIds"
             :models="models ?? catalog"
             @open-subtask="emit('openSubtask', $event)"

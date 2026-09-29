@@ -34,7 +34,10 @@ const QUESTION_TOOLS = new Set(['question', 'ask_user'])
  */
 export function isQuestionToolPart(part: HarnessPart): boolean {
   if (part.type !== 'tool') return false
-  return QUESTION_TOOLS.has(resolveToolName(part).toLowerCase())
+  const projectedTool = part.detail_loaded === false ? part.display?.tool : undefined
+  return QUESTION_TOOLS.has(
+    String(part.input?.['tool'] || resolveToolName(part) || projectedTool || '').toLowerCase(),
+  )
 }
 
 /** True while the question is still open (no answers yet). */
@@ -125,11 +128,7 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
   }
 
   for (const part of parts) {
-    if (
-      SKIP_TYPES.has(part.type) ||
-      isEmptyText(part) ||
-      isPatchedFileTool(part, patchedCalls)
-    ) {
+    if (SKIP_TYPES.has(part.type) || isEmptyText(part) || isPatchedFileTool(part, patchedCalls)) {
       continue
     }
     if (hasSubtask && isTaskToolPart(part)) {

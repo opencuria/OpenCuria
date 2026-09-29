@@ -39,8 +39,47 @@ export interface HarnessPart {
   input?: Record<string, unknown>
   output: string
   meta?: Record<string, unknown>
+  /** Lightweight timeline projection used before detail is requested. */
+  display?: HarnessPartDisplay
+  /** False when heavy fields are intentionally omitted from the timeline. */
+  detail_loaded?: boolean
   /** Per-message chronological order (0-based, gap-tolerant). */
   position?: number
+}
+
+export interface HarnessDiffPreviewLine {
+  type: 'add' | 'del' | 'context'
+  oldNo: number | null
+  newNo: number | null
+  content: string
+}
+
+export interface HarnessQuestionPreviewRow {
+  header?: string
+  question: string
+  answer?: string
+  options?: Array<{ label: string; description?: string }>
+  multiple?: boolean
+}
+
+/** Safe bounded summary fields supplied by the lightweight timeline API. */
+export interface HarnessPartDisplay {
+  tool?: string
+  summary?: string
+  path?: string
+  preview?: HarnessDiffPreviewLine[]
+  additions?: number
+  deletions?: number
+  agent_meta?: Partial<HarnessAgentMeta>
+  question_rows?: HarnessQuestionPreviewRow[]
+  subtask_id?: string
+  child_session_id?: string
+  agent?: string
+  status?: string
+  step?: number
+  auto?: boolean
+  overflow?: boolean
+  [key: string]: unknown
 }
 
 /** One user prompt or assistant answer inside a harness session. */
@@ -240,7 +279,7 @@ export interface HarnessPartDelta {
   arguments?: string
   output?: string
   patch?: string
-  /** Full Agent-S worker plan text (live `agent` event). */
+  /** Agent-S plan text; compact projections include the `display` marker. */
   agent?: string
   /** Safe plan summary riding the live `agent` event (untrusted transport). */
   agent_meta?: Partial<HarnessAgentMeta>
@@ -256,7 +295,9 @@ export interface HarnessPartDelta {
   state?: HarnessPartState | string
   /** `true` when this `tool_started` is only provider-queued (not running). */
   queued?: boolean
-  /** Live tool attachments on `tool_completed` (same shape as persisted meta). */
+  /** Bounded, safe compact display projection for completed/error parts. */
+  display?: HarnessPartDisplay
+  /** Live tool attachments on legacy `tool_completed` deltas. */
   attachments?: Array<{
     type?: string
     mime?: string

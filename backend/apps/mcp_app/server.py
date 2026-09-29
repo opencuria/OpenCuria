@@ -53,6 +53,8 @@ Tools and their required permissions
 - abort_harness_session → harness:run
 - take_desktop_control → harness:run (also requires terminal:access)
 - list_harness_parts → harness:read
+- get_harness_timeline → harness:read
+- get_harness_part → harness:read
 - list_harness_todos → harness:read
 - resolve_harness_permission → harness:permissions
 - resolve_harness_question → harness:permissions
@@ -703,6 +705,27 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="get_harness_timeline",
+        description="Load lightweight message/part timeline, including pending gates.",
+        inputSchema={
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+        },
+    ),
+    Tool(
+        name="get_harness_part",
+        description="Load full detail for one part in a harness session.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "part_id": {"type": "string"},
+            },
+            "required": ["session_id", "part_id"],
+        },
+    ),
+    Tool(
         name="list_harness_todos",
         description="List todos of a harness session.",
         inputSchema={
@@ -1108,6 +1131,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
     "take_desktop_control": APIKeyPermission.HARNESS_RUN,
     "list_harness_parts": APIKeyPermission.HARNESS_READ,
+    "get_harness_timeline": APIKeyPermission.HARNESS_READ,
+    "get_harness_part": APIKeyPermission.HARNESS_READ,
     "list_harness_todos": APIKeyPermission.HARNESS_READ,
     "resolve_harness_permission": APIKeyPermission.HARNESS_PERMISSIONS,
     "patch_harness_session": APIKeyPermission.HARNESS_RUN,
@@ -2915,6 +2940,10 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
     parts = service.list_parts(session.id)
     parts_by_message: dict[str, list] = {}
     for part in parts:
+        safe_meta = dict(part.meta or {})
+        if part.type == "patch":
+            safe_meta.pop("old_content", None)
+            safe_meta.pop("new_content", None)
         parts_by_message.setdefault(str(part.message_id), []).append(
             {
                 "id": str(part.id),
@@ -2925,7 +2954,7 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
                 "title": part.title or "",
                 "output": part.output or "",
                 "input": dict(part.input or {}),
-                "meta": dict(part.meta or {}),
+                "meta": safe_meta,
             }
         )
     return _text(
@@ -2960,6 +2989,18 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
             ),
         }
     )
+
+
+def _call_get_harness_timeline(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.mcp_app.timeline_handlers import get_harness_timeline
+
+    return get_harness_timeline(api_key, org_id, args)
+
+
+def _call_get_harness_part(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.mcp_app.timeline_handlers import get_harness_part
+
+    return get_harness_part(api_key, org_id, args)
 
 
 def _call_list_harness_todos(api_key, org_id, args: dict) -> list[TextContent]:
@@ -4101,6 +4142,8 @@ _TOOL_HANDLERS = {
     "abort_harness_session": _call_abort_harness_session,
     "take_desktop_control": _call_take_desktop_control,
     "list_harness_parts": _call_list_harness_parts,
+    "get_harness_timeline": _call_get_harness_timeline,
+    "get_harness_part": _call_get_harness_part,
     "list_harness_todos": _call_list_harness_todos,
     "resolve_harness_permission": _call_resolve_harness_permission,
     "patch_harness_session": _call_patch_harness_session,

@@ -6,6 +6,7 @@ import pytest
 
 from apps.harness.models import (
     HarnessMessage,
+    HarnessPart,
     HarnessSession,
     Todo,
 )
@@ -59,6 +60,14 @@ def test_session_message_part_crud(harness_workspace) -> None:
     HarnessPartRepository.append_output(part, "lo")
     part.refresh_from_db()
     assert part.output == "hello"
+
+    reasoning = HarnessPartRepository.create(
+        message_id=assistant.id, type="reasoning", state="running"
+    )
+    HarnessPartRepository.append_output(reasoning, "old line\n")
+    HarnessPartRepository.append_output(reasoning, "last line")
+    reasoning.refresh_from_db()
+    assert reasoning.display["summary"] == "last line"
     HarnessPartRepository.mark_state(part, "completed")
     part.refresh_from_db()
     assert part.state == "completed"
@@ -79,10 +88,135 @@ def test_session_message_part_crud(harness_workspace) -> None:
     assert assistant.completed_at is not None
 
     assert len(HarnessMessageRepository.list_for_session(session.id)) == 2
-    assert [p.id for p in HarnessPartRepository.list_for_session(session.id)] == [
-        part.id
-    ]
+    assert {p.id for p in HarnessPartRepository.list_for_session(session.id)} == {
+        part.id,
+        reasoning.id,
+    }
     assert user_message.id is not None
+
+
+@pytest.mark.django_db
+def test_timeline_migration_backfills_and_scrubs_patch_metadata(
+    harness_workspace,
+) -> None:
+    """The additive data migration is bounded/idempotent and removes file copies."""
+    import importlib
+    from types import SimpleNamespace
+
+    from django.apps import apps as django_apps
+    from django.db import connection
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    message = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    legacy_patch = HarnessPart.objects.create(
+        message=message,
+        type="patch",
+        position=0,
+        title="Patch file",
+        output="--- a/f\n+++ b/f\n-old\n+new",
+        meta={"path": "f", "old_content": "old", "new_content": "new"},
+    )
+    oversized_patch_output = "x" * 600_000
+    oversized_patch = HarnessPart.objects.create(
+        message=message,
+        type="patch",
+        position=1,
+        title="Oversized patch",
+        output=oversized_patch_output,
+        meta={"path": "huge.py"},
+    )
+    migration = importlib.import_module(
+        "apps.harness.migrations.0026_backfill_harnesspart_display"
+    )
+    schema_editor = SimpleNamespace(connection=connection)
+    migration.backfill_part_display(django_apps, schema_editor)
+    migration.backfill_part_display(django_apps, schema_editor)
+    legacy_patch.refresh_from_db()
+    assert "old_content" not in legacy_patch.meta
+    assert "new_content" not in legacy_patch.meta
+    assert legacy_patch.display["path"] == "f"
+    assert legacy_patch.display["additions"] == 1
+    assert legacy_patch.display["deletions"] == 1
+    assert legacy_patch.display["preview"] == [
+        {"type": "del", "oldNo": 1, "newNo": None, "content": "old"},
+        {"type": "add", "oldNo": None, "newNo": 1, "content": "new"},
+    ]
+    oversized_patch.refresh_from_db()
+    assert oversized_patch.output == oversized_patch_output
+    assert oversized_patch.display["preview"] == []
+    assert oversized_patch.display["additions"] == 0
+    assert migration.Migration.atomic is False
+    assert "apps.harness.timeline" not in open(migration.__file__).read()
+
+
+@pytest.mark.django_db
+def test_reasoning_stream_append_does_not_read_the_growing_output(harness_workspace):
+    """Reasoning projection refresh reads display only, never full output."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    message = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    part = HarnessPartRepository.create(
+        message_id=message.id, type="reasoning", state="running"
+    )
+    HarnessPart.objects.filter(id=part.id).update(output="x" * 100_000)
+    with CaptureQueriesContext(connection) as captured:
+        HarnessPartRepository.append_output_by_id(part.id, "\nlatest")
+    selects = [
+        query["sql"]
+        for query in captured
+        if query["sql"].lstrip().upper().startswith("SELECT")
+    ]
+    assert len(selects) == 1
+    assert "output" not in selects[0].lower()
+    part.refresh_from_db()
+    assert part.output.endswith("\nlatest")
+    assert part.display["summary"] == "latest"
+
+
+@pytest.mark.django_db
+def test_timeline_query_defers_heavy_part_fields(
+    harness_workspace, django_assert_num_queries
+) -> None:
+    """Timeline list loads display only; detail fields remain deferred and grouped."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    message = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    part = HarnessPartRepository.create(
+        message_id=message.id,
+        type="tool",
+        title="Read file",
+        input={"tool": "read", "arguments": "x" * 10000},
+        output="y" * 10000,
+        meta={"huge": "z" * 10000},
+    )
+    with django_assert_num_queries(1):
+        rows = HarnessPartRepository.list_timeline_for_session(session.id)
+    row = next(item for item in rows if item.id == part.id)
+    assert row.timeline_output == ""
+    assert row.display["tool"] == "read"
+    assert {"input", "output", "meta"} <= row.get_deferred_fields()
+
+    text = HarnessPartRepository.create(
+        message_id=message.id, type="text", output="body from text part"
+    )
+    with django_assert_num_queries(1):
+        text_row = next(
+            item
+            for item in HarnessPartRepository.list_timeline_for_session(session.id)
+            if item.id == text.id
+        )
+    assert text_row.timeline_output == "body from text part"
+    assert text_row.output == "body from text part"
 
 
 @pytest.mark.django_db

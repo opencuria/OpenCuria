@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import { ChevronDown } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
 import { diffFileName, parseFileDiff, type DiffLineType } from '@/lib/fileDiff'
@@ -9,14 +10,42 @@ const props = defineProps<{
 }>()
 
 const open = ref(false)
+const partRef = computed(() => props.part)
+const {
+  loading: detailLoading,
+  error: detailError,
+  load: loadDetail,
+  setExpanded,
+} = useHarnessPartDetail(partRef)
+watch(open, (expanded) => {
+  setExpanded(expanded)
+  if (expanded) void loadDetail()
+})
 
 const path = computed(() =>
-  String(props.part.meta?.['path'] ?? props.part.title ?? 'file'),
+  String(props.part.display?.path ?? props.part.meta?.['path'] ?? props.part.title ?? 'file'),
 )
 const fileName = computed(() => diffFileName(path.value))
+const previewLines = computed(() =>
+  (props.part.display?.preview ?? []).map((line) => ({
+    type: line.type,
+    oldNo: line.oldNo,
+    newNo: line.newNo,
+    content: line.content,
+  })),
+)
 const parsed = computed(() => parseFileDiff(props.part.output || ''))
-const lines = computed(() => (open.value ? parsed.value.expanded : parsed.value.collapsed))
-const canExpand = computed(() => parsed.value.expanded.length > parsed.value.collapsed.length)
+const lines = computed(() => {
+  if (props.part.detail_loaded === false) return previewLines.value
+  return open.value ? parsed.value.expanded : parsed.value.collapsed
+})
+const additions = computed(() => props.part.display?.additions ?? parsed.value.additions)
+const deletions = computed(() => props.part.display?.deletions ?? parsed.value.deletions)
+const canExpand = computed(
+  () =>
+    props.part.detail_loaded === false ||
+    parsed.value.expanded.length > parsed.value.collapsed.length,
+)
 
 const lineNumberWidth = computed(() => {
   let max = 0
@@ -71,25 +100,29 @@ function lineNumber(oldNo: number | null, newNo: number | null): string {
         class="shrink-0 text-muted-foreground opacity-70 transition-transform"
         :class="open ? '' : '-rotate-90'"
       />
-      <span
-        data-testid="harness-patch-name"
-        class="min-w-0 truncate font-medium text-foreground"
-      >
+      <span data-testid="harness-patch-name" class="min-w-0 truncate font-medium text-foreground">
         {{ fileName }}
       </span>
       <span class="ml-auto flex shrink-0 items-center gap-1.5 font-medium tabular-nums">
-        <span
-          v-if="parsed.additions > 0"
-          data-testid="harness-patch-additions"
-          class="text-success"
-        >+{{ parsed.additions }}</span>
-        <span
-          v-if="parsed.deletions > 0"
-          data-testid="harness-patch-deletions"
-          class="text-error"
-        >-{{ parsed.deletions }}</span>
+        <span v-if="additions > 0" data-testid="harness-patch-additions" class="text-success"
+          >+{{ additions }}</span
+        >
+        <span v-if="deletions > 0" data-testid="harness-patch-deletions" class="text-error"
+          >-{{ deletions }}</span
+        >
       </span>
     </button>
+    <div
+      v-if="detailLoading"
+      data-testid="harness-part-detail-loading"
+      class="px-3 py-2 text-xs text-muted-foreground"
+    >
+      Loading full diff…
+    </div>
+    <div v-if="detailError" class="px-3 py-2 text-xs text-destructive">
+      <p>{{ detailError }}</p>
+      <button type="button" class="mt-1 underline" @click="loadDetail">Retry</button>
+    </div>
     <div
       v-if="lines.length"
       data-testid="harness-patch-diff"
@@ -102,23 +135,20 @@ function lineNumber(oldNo: number | null, newNo: number | null): string {
         :class="ROW_CLASSES[line.type]"
         :data-diff-type="line.type"
       >
-        <span
-          class="w-0.5 shrink-0"
-          :class="GUTTER_CLASSES[line.type]"
-        />
+        <span class="w-0.5 shrink-0" :class="GUTTER_CLASSES[line.type]" />
         <span
           class="shrink-0 select-none px-2 text-right text-muted-foreground/50"
           :style="{ width: `${lineNumberWidth + 2}ch` }"
-        >{{ lineNumber(line.oldNo, line.newNo) }}</span>
-        <span
-          class="shrink-0 select-none pr-1"
-          :class="SIGN_CLASSES[line.type]"
-        >{{ lineSign(line.type) }}</span>
+          >{{ lineNumber(line.oldNo, line.newNo) }}</span
+        >
+        <span class="shrink-0 select-none pr-1" :class="SIGN_CLASSES[line.type]">{{
+          lineSign(line.type)
+        }}</span>
         <span class="min-w-0 whitespace-pre pr-3">{{ line.content || ' ' }}</span>
       </div>
     </div>
     <p
-      v-else
+      v-else-if="!detailLoading && !detailError"
       data-testid="harness-patch-empty"
       class="border-t border-border px-3 py-2 font-mono text-xs text-muted-foreground"
     >

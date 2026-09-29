@@ -281,6 +281,22 @@ async def test_write_sandbox_violation_rejected(fake_accessor) -> None:
     assert fake_accessor.written == {}
 
 
+async def test_write_refuses_truncated_existing_file() -> None:
+    """A partial read cannot produce a misleading replacement diff."""
+    from apps.harness.access.base import FileContent
+
+    class TruncatedAccessor(FakeAccessor):
+        async def read_file(self, path: str, max_size=None) -> FileContent:
+            return FileContent(content=b"prefix", size=100, truncated=True)
+
+    accessor = TruncatedAccessor(files={"/workspace/large.txt": b"x" * 100})
+    with pytest.raises(ToolError, match="read was truncated"):
+        await WriteTool().execute(
+            {"path": "large.txt", "content": "replacement"}, _ctx(accessor)
+        )
+    assert accessor.written == {}
+
+
 async def test_write_runner_error_propagates() -> None:
     """Runner write failures surface as ToolError."""
     accessor = FakeAccessor(error=RunnerAccessorError("write failed"))
@@ -300,6 +316,23 @@ async def test_edit_happy_path(fake_accessor) -> None:
     )
     assert fake_accessor.files["/workspace/a.txt"] == b"hello\nthere\n"
     assert "1" in result.output
+
+
+async def test_edit_refuses_truncated_existing_file() -> None:
+    """An edit cannot use an incomplete file prefix as its current state."""
+    from apps.harness.access.base import FileContent
+
+    class TruncatedAccessor(FakeAccessor):
+        async def read_file(self, path: str, max_size=None) -> FileContent:
+            return FileContent(content=b"old", size=100, truncated=True)
+
+    accessor = TruncatedAccessor(files={"/workspace/large.txt": b"x" * 100})
+    with pytest.raises(ToolError, match="read was truncated"):
+        await EditTool().execute(
+            {"path": "large.txt", "old_string": "old", "new_string": "new"},
+            _ctx(accessor),
+        )
+    assert accessor.written == {}
 
 
 async def test_edit_no_match_fails(fake_accessor) -> None:

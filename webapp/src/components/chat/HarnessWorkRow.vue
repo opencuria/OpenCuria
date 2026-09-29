@@ -1,12 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Component } from 'vue'
+import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import { ChevronDown } from '@lucide/vue'
 
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import type { HarnessPart } from '@/types/harness'
 import HarnessMarkdown from './HarnessMarkdown.vue'
@@ -17,11 +14,7 @@ import ToolDetailRead from './tools/ToolDetailRead.vue'
 import ToolDetailSearch from './tools/ToolDetailSearch.vue'
 import ToolDetailTodos from './tools/ToolDetailTodos.vue'
 import ToolDetailWebfetch from './tools/ToolDetailWebfetch.vue'
-import {
-  resolveToolName,
-  toolDisplayIcon,
-  toolDisplayLabel,
-} from '@/lib/toolDisplay'
+import { resolveToolName, toolDisplayIcon, toolDisplayLabel } from '@/lib/toolDisplay'
 
 const COMPUTER_USE_DETAIL_TOOLS = new Set([
   'view_screen',
@@ -57,24 +50,37 @@ const props = withDefaults(
   { grouped: false },
 )
 
-const open = ref(shouldAutoOpen(props.part))
+const open = ref(false)
+
+const partRef = computed(() => props.part)
+const {
+  loading: detailLoading,
+  error: detailError,
+  load: loadDetail,
+  setExpanded,
+} = useHarnessPartDetail(partRef)
 
 watch(
+  open,
+  (expanded) => {
+    setExpanded(expanded)
+    if (expanded) void loadDetail()
+  },
+  { immediate: true },
+)
+watch(
   () => props.part.state,
-  () => {
-    if (shouldAutoOpen(props.part)) open.value = true
+  (state) => {
+    if (open.value && (state === 'completed' || state === 'error')) void loadDetail()
   },
 )
-
-function shouldAutoOpen(part: HarnessPart): boolean {
-  return part.state === 'error' && resolveToolName(part).toLowerCase() !== 'bash'
-}
 
 const label = computed(() => toolDisplayLabel(props.part))
 const icon = computed<Component>(() => toolDisplayIcon(props.part))
 
 const reasoningPreview = computed(() => {
   if (props.part.type !== 'reasoning') return ''
+  if (props.part.display?.summary) return String(props.part.display.summary)
   const lines = (props.part.output || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -91,9 +97,7 @@ const detailComponent = computed<Component>(() => {
 })
 
 const rowClass = computed(() => {
-  const classes = [
-    'flex w-full min-w-0 items-center gap-1.5 py-0.5 text-left text-xs font-normal',
-  ]
+  const classes = ['flex w-full min-w-0 items-center gap-1.5 py-0.5 text-left text-xs font-normal']
   if (props.part.state === 'error') {
     classes.push('text-destructive')
   } else {
@@ -127,7 +131,11 @@ const rowClass = computed(() => {
           {{ reasoningPreview }}
         </span>
         <span v-else class="min-w-0 flex-1" />
-        <LoadingSpinner v-if="part.state === 'running' || part.state === 'pending'" :size="10" class="shrink-0" />
+        <LoadingSpinner
+          v-if="part.state === 'running' || part.state === 'pending'"
+          :size="10"
+          class="shrink-0"
+        />
         <ChevronDown
           :size="12"
           class="shrink-0 opacity-70 transition-transform"
@@ -135,12 +143,21 @@ const rowClass = computed(() => {
         />
       </CollapsibleTrigger>
       <CollapsibleContent class="pb-1 pl-[18px]">
-        <HarnessMarkdown
-          v-if="part.type === 'reasoning'"
-          :text="part.output"
-          compact
-        />
-        <component :is="detailComponent" v-else :part="part" />
+        <div
+          v-if="detailLoading"
+          data-testid="harness-part-detail-loading"
+          class="py-2 text-xs text-muted-foreground"
+        >
+          <LoadingSpinner :size="12" /> Loading details…
+        </div>
+        <div v-else-if="detailError" class="py-2 text-xs text-destructive">
+          <p>{{ detailError }}</p>
+          <button type="button" class="mt-1 underline" @click="loadDetail">Retry</button>
+        </div>
+        <template v-else>
+          <HarnessMarkdown v-if="part.type === 'reasoning'" :text="part.output" compact />
+          <component :is="detailComponent" v-else :part="part" />
+        </template>
       </CollapsibleContent>
     </Collapsible>
   </div>

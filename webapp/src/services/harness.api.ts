@@ -9,6 +9,7 @@
 import type {
   HarnessConversation,
   HarnessForkIn,
+  HarnessPart,
   HarnessMessage,
   HarnessMessageEditIn,
   HarnessMessageIn,
@@ -249,8 +250,14 @@ export function abortHarnessSession(sessionId: string): Promise<HarnessSession> 
   return post<HarnessSession>(`/harness/sessions/${sessionId}/abort`)
 }
 
+/** Load the all-messages, lightweight timeline envelope. */
 export function listHarnessParts(sessionId: string): Promise<HarnessPartsResponse> {
-  return get<HarnessPartsResponse>(`/harness/sessions/${sessionId}/parts`)
+  return get<HarnessPartsResponse>(`/harness/sessions/${sessionId}/timeline`)
+}
+
+/** Load heavyweight fields for one timeline part after its row is expanded. */
+export function getHarnessPart(sessionId: string, partId: string): Promise<HarnessPart> {
+  return get<HarnessPart>(`/harness/sessions/${sessionId}/parts/${partId}`)
 }
 
 export function listHarnessTodos(sessionId: string): Promise<HarnessTodo[]> {

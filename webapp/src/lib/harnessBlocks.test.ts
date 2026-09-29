@@ -12,10 +12,7 @@ import {
   wrapFinishedWork,
 } from './harnessBlocks'
 
-function makePart(
-  type: HarnessPartType,
-  overrides: Partial<HarnessPart> = {},
-): HarnessPart {
+function makePart(type: HarnessPartType, overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: overrides.id ?? `part-${type}`,
     session_id: 'session-1',
@@ -46,9 +43,7 @@ describe('buildRenderBlocks', () => {
   it('renders a single work item at the top level', () => {
     const parts = [makePart('reasoning', { id: 'r1', output: 'thinking' })]
 
-    expect(buildRenderBlocks(parts)).toEqual([
-      { kind: 'single', part: parts[0] },
-    ])
+    expect(buildRenderBlocks(parts)).toEqual([{ kind: 'single', part: parts[0] }])
   })
 
   it('groups two or more consecutive tool calls', () => {
@@ -152,12 +147,7 @@ describe('buildRenderBlocks', () => {
 
     const blocks = buildRenderBlocks(parts)
 
-    expect(blocks.map((block) => block.kind)).toEqual([
-      'single',
-      'card',
-      'single',
-      'card',
-    ])
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'card', 'single', 'card'])
     expect(blocks[1]).toMatchObject({ kind: 'card', part: { id: 'sub-1' } })
     expect(blocks[3]).toMatchObject({ kind: 'card', part: { id: 'patch-1' } })
   })
@@ -357,6 +347,26 @@ describe('buildRenderBlocks', () => {
     expect(blocks[1]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
   })
 
+  it('keeps question recognition when projection metadata is stale or absent', () => {
+    expect(
+      isQuestionToolPart(
+        makePart('tool', {
+          tool: 'question',
+          detail_loaded: true,
+          display: { tool: 'read' },
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      isQuestionToolPart(
+        makePart('tool', {
+          detail_loaded: false,
+          display: { tool: 'question' },
+        }),
+      ),
+    ).toBe(true)
+  })
+
   it('skips a pending question while keeping the surrounding run intact', () => {
     const parts = [
       makePart('tool', { id: 'tool-1', tool: 'read' }),
@@ -420,9 +430,9 @@ describe('question helpers', () => {
     expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'pending' }))).toBe(
       true,
     )
-    expect(
-      isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'completed' })),
-    ).toBe(false)
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'completed' }))).toBe(
+      false,
+    )
     expect(isWorkItem(makePart('tool', { tool: 'question' }))).toBe(false)
   })
 })
@@ -442,12 +452,7 @@ describe('wrapFinishedWork', () => {
     expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
     const shell = wrapped[0]
     if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(shell.blocks.map((block) => block.kind)).toEqual([
-      'text',
-      'group',
-      'single',
-      'card',
-    ])
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'group', 'single', 'card'])
   })
 
   it('keeps interleaved text->tool->text->tool->text in strict chronological order inside one shell', () => {
@@ -464,14 +469,11 @@ describe('wrapFinishedWork', () => {
     const shell = wrapped[0]
     if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
     // Never hoist tools above the intervening text: exact flat order stays.
-    expect(shell.blocks.map((block) => block.kind)).toEqual([
-      'text',
-      'single',
-      'text',
-      'single',
-    ])
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'single', 'text', 'single'])
     expect(
-      shell.blocks.map((block) => (block.kind === 'text' || block.kind === 'single' ? block.part.id : '')),
+      shell.blocks.map((block) =>
+        block.kind === 'text' || block.kind === 'single' ? block.part.id : '',
+      ),
     ).toEqual(['t1', 'tool-1', 't2', 'tool-2'])
   })
 
@@ -599,9 +601,7 @@ describe('wrapFinishedWork', () => {
 
   it('does not wrap a text-only message', () => {
     const parts = [makePart('text', { id: 't1', output: 'Hello' })]
-    expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual([
-      'text',
-    ])
+    expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual(['text'])
   })
 })
 

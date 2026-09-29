@@ -55,7 +55,9 @@ function makeAssistant(parts: HarnessPart[], extras: Partial<HarnessMessage> = {
 }
 
 async function expandWorkedFor(wrapper: VueWrapper): Promise<void> {
-  const trigger = wrapper.find('[data-testid="harness-worked-for"] [data-slot="collapsible-trigger"]')
+  const trigger = wrapper.find(
+    '[data-testid="harness-worked-for"] [data-slot="collapsible-trigger"]',
+  )
   if (trigger.exists()) await trigger.trigger('click')
 }
 
@@ -64,6 +66,114 @@ describe('HarnessMessageView', () => {
     setActivePinia(createPinia())
     resetProviderCatalogCache()
   })
+  it('keeps the newest streaming response block and cursor mounted beyond page one', async () => {
+    const parts: HarnessPart[] = []
+    for (let index = 0; index < 81; index += 1) {
+      parts.push(
+        makePart({
+          id: `response-${index}`,
+          type: 'text',
+          output: `Response ${index}`,
+        }),
+      )
+    }
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeAssistant(parts, { completed_at: null }), streaming: true },
+    })
+
+    expect(wrapper.find('[data-testid="harness-page-status"]').text()).toContain('Page 2 of 2')
+    expect(wrapper.find('[data-part-id="response-80"] .animate-pulse').exists()).toBe(true)
+  })
+
+  it('paginates 1000 Agent-S blocks while preserving page order and bounds mounted cards', async () => {
+    const parts = Array.from({ length: 1000 }, (_, index) =>
+      makePart({
+        id: `agent-${index}`,
+        type: 'agent',
+        title: 'Agent plan',
+        output: `plan ${index}`,
+        meta: { agent_meta: { action: 'click', action_kind: 'click' } },
+      }),
+    )
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeAssistant(parts) },
+      global: {
+        stubs: {
+          HarnessAgentStep: {
+            props: ['part'],
+            template: '<span data-testid="harness-agent-step" :data-part-id="part.id" />',
+          },
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 1 of 13')
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(80)
+    expect(wrapper.find('[data-part-id="agent-79"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="agent-80"]').exists()).toBe(false)
+
+    for (let index = 0; index < 6; index += 1) {
+      await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
+    }
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 7 of 13')
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(80)
+    expect(wrapper.find('[data-part-id="agent-480"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="agent-560"]').exists()).toBe(false)
+
+    while (!wrapper.get('[data-testid="harness-page-next"]').element.hasAttribute('disabled')) {
+      await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
+    }
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 13 of 13')
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(40)
+    expect(wrapper.find('[data-part-id="agent-960"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="agent-999"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="agent-959"]').exists()).toBe(false)
+  })
+
+  it('keeps live trailing text and cursor visible without losing the reader page on deltas', async () => {
+    const agents = Array.from({ length: 1000 }, (_, index) =>
+      makePart({
+        id: `agent-${index}`,
+        type: 'agent',
+        title: 'Agent plan',
+        output: `plan ${index}`,
+        meta: { agent_meta: { action: 'click', action_kind: 'click' } },
+      }),
+    )
+    const initial = [...agents, makePart({ id: 'live-text-1', type: 'text', output: 'Answer' })]
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeAssistant(initial, { completed_at: null }), streaming: true },
+      global: {
+        stubs: {
+          HarnessAgentStep: {
+            props: ['part'],
+            template: '<span data-testid="harness-agent-step" :data-part-id="part.id" />',
+          },
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 13 of 13')
+    expect(wrapper.find('[data-part-id="live-text-1"] .animate-pulse').exists()).toBe(true)
+    await wrapper.get('[data-testid="harness-page-previous"]').trigger('click')
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 12 of 13')
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(79)
+    expect(wrapper.find('[data-part-id="live-text-1"] .animate-pulse').exists()).toBe(true)
+
+    const firstVisibleAgent = wrapper.get('[data-part-id="agent-880"]').element
+    const updated = [
+      ...initial,
+      makePart({ id: 'live-text-2', type: 'text', output: ' still live' }),
+    ]
+    await wrapper.setProps({ message: makeAssistant(updated, { completed_at: null }) })
+
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 12 of 13')
+    expect(wrapper.get('[data-part-id="agent-880"]').element).toBe(firstVisibleAgent)
+    expect(wrapper.find('[data-part-id="live-text-2"] .animate-pulse').exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(79)
+    expect(wrapper.findAll('[data-block-kind]').length).toBeLessThanOrEqual(80)
+  })
+
   it('wraps initial text plus a single tool in chronological order inside one card', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
@@ -81,11 +191,13 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['workedFor', 'text'])
-    expect(
-      wrapper.get('[data-block-kind="workedFor"]').element.parentElement?.className,
-    ).toContain('[&>[data-block-kind=workedFor]]:-mb-0.5')
+    expect(wrapper.get('[data-block-kind="workedFor"]').element.parentElement?.className).toContain(
+      '[&>[data-block-kind=workedFor]]:-mb-0.5',
+    )
     // Chronological order is preserved inside: initial text stays before the tool.
     await expandWorkedFor(wrapper)
     const inner = wrapper
@@ -121,7 +233,9 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['workedFor', 'text'])
     await expandWorkedFor(wrapper)
     const inner = wrapper
@@ -149,7 +263,9 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['workedFor'])
     expect(wrapper.text()).not.toContain('Thought')
     await expandWorkedFor(wrapper)
@@ -244,11 +360,13 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-    ])
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor'])
     await expandWorkedFor(wrapper)
-    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['workedFor', 'single', 'single', 'single'])
     expect(wrapper.text()).toContain('Thought')
     expect(wrapper.find('[data-testid="harness-worked-group"]').exists()).toBe(false)
@@ -845,9 +963,9 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-    ])
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor'])
     // The card is hidden until Worked for is expanded, like patch cards.
     expect(wrapper.find('[data-testid="harness-question-card"]').exists()).toBe(false)
     await expandWorkedFor(wrapper)
@@ -874,10 +992,9 @@ describe('HarnessMessageView', () => {
     })
 
     // Streaming stays flat (no card yet); the finished view wraps once.
-    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-      'text',
-    ])
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor', 'text'])
     await expandWorkedFor(wrapper)
     const inner = wrapper
       .get('[data-block-kind="workedFor"]')
@@ -914,10 +1031,9 @@ describe('HarnessMessageView', () => {
       },
     })
 
-    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-      'text',
-    ])
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor', 'text'])
     await expandWorkedFor(wrapper)
     const inner = wrapper
       .get('[data-block-kind="workedFor"]')
@@ -946,13 +1062,9 @@ describe('HarnessMessageView', () => {
 
     // Agent-S plans are the computer-use timeline: both stay visible
     // outside while each response slice keeps one chronological card.
-    expect(wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'agent',
-      'workedFor',
-      'agent',
-      'workedFor',
-      'text',
-    ])
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['agent', 'workedFor', 'agent', 'workedFor', 'text'])
     expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(2)
     await expandWorkedFor(wrapper)
     const cards = wrapper.findAll('[data-block-kind="workedFor"]')
@@ -969,17 +1081,29 @@ describe('HarnessMessageView', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([
-          makePart({ id: 'compact-0', type: 'compaction', title: 'Session compacted', output: 'older summary' }),
+          makePart({
+            id: 'compact-0',
+            type: 'compaction',
+            title: 'Session compacted',
+            output: 'older summary',
+          }),
           makePart({ id: 't1', type: 'text', output: 'Starting' }),
           makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
-          makePart({ id: 'compact-1', type: 'compaction', title: 'Session compacted', output: 'mid summary' }),
+          makePart({
+            id: 'compact-1',
+            type: 'compaction',
+            title: 'Session compacted',
+            output: 'mid summary',
+          }),
           makePart({ id: 'tool-2', type: 'tool', tool: 'grep', title: 'Grep foo' }),
           makePart({ id: 't2', type: 'text', output: 'Done' }),
         ]),
       },
     })
 
-    const kinds = wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
     expect(kinds).toEqual(['compaction', 'workedFor', 'text'])
     expect(wrapper.findAll('[data-testid="harness-compaction-divider"]')).toHaveLength(1)
     await expandWorkedFor(wrapper)
@@ -1000,23 +1124,19 @@ describe('HarnessMessageView', () => {
       props: { streaming: true, message },
     })
     expect(streaming.find('[data-testid="harness-worked-for"]').exists()).toBe(false)
-    expect(streaming.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'text',
-      'single',
-      'text',
-    ])
+    expect(
+      streaming.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['text', 'single', 'text'])
 
     const finished = mount(HarnessMessageView, { props: { message } })
-    expect(finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-      'text',
-    ])
+    expect(
+      finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor', 'text'])
     // Same finished message re-rendered (e.g. usage arrival) keeps one card.
     await finished.setProps({ message: { ...message } })
-    expect(finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind'))).toEqual([
-      'workedFor',
-      'text',
-    ])
+    expect(
+      finished.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['workedFor', 'text'])
     expect(finished.findAll('[data-testid="harness-worked-for"]')).toHaveLength(1)
   })
 

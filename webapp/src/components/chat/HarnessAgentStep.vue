@@ -8,7 +8,8 @@
   responsive layout come from existing theme tokens only.
 -->
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import { Check, ChevronDown, CircleAlert, MonitorPlay } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -31,6 +32,18 @@ const props = defineProps<{
 }>()
 
 const open = ref(false)
+
+const partRef = computed(() => props.part)
+const {
+  loading: detailLoading,
+  error: detailError,
+  load: loadDetail,
+  setExpanded,
+} = useHarnessPartDetail(partRef)
+watch(open, (expanded) => {
+  setExpanded(expanded)
+  if (expanded) void loadDetail()
+})
 
 const meta = computed(() => readAgentMeta(props.part))
 const primary = computed(() => agentPrimaryAction(props.part).text)
@@ -58,6 +71,7 @@ const hasDetails = computed(
     analysis.value !== '' ||
     verification.value !== '' ||
     nextAction.value !== '' ||
+    String(props.part.display?.summary ?? '').trim() !== '' ||
     rawPlan.value !== '',
 )
 
@@ -164,7 +178,18 @@ const fullPlanTriggerLabel = computed(() =>
           <span>{{ open ? 'Hide details' : 'Show details' }}</span>
         </CollapsibleTrigger>
         <CollapsibleContent :id="detailsId" class="pt-1.5">
-          <div class="space-y-2 border-t border-border/60 pt-2">
+          <div
+            v-if="detailLoading"
+            data-testid="harness-part-detail-loading"
+            class="py-2 text-xs text-muted-foreground"
+          >
+            Loading details…
+          </div>
+          <div v-else-if="detailError" class="py-2 text-xs text-destructive">
+            <p>{{ detailError }}</p>
+            <button type="button" class="mt-1 underline" @click="loadDetail">Retry</button>
+          </div>
+          <div v-else class="space-y-2 border-t border-border/60 pt-2">
             <div v-if="analysis" class="space-y-0.5">
               <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 Analysis

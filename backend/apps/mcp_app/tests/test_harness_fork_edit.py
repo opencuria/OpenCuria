@@ -32,13 +32,15 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.repositories import HarnessMessageRepository
+from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
 from apps.mcp_app.server import (
     _TOOL_HANDLERS,
     _TOOL_PERMISSIONS,
     _TOOLS,
     _call_edit_harness_message,
     _call_fork_harness_session,
+    _call_get_harness_part,
+    _call_get_harness_timeline,
     create_mcp_server,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -139,6 +141,84 @@ def _key(user, permissions: list[APIKeyPermission]) -> SimpleNamespace:
     return _Key(user=user)
 
 
+def test_timeline_detail_mcp_tools_registered_read_permission() -> None:
+    """Timeline and detail parity tools are discoverable to read-only keys."""
+    names = {tool.name for tool in _TOOLS}
+    assert {"get_harness_timeline", "get_harness_part"} <= names
+    assert _TOOL_PERMISSIONS["get_harness_timeline"] == APIKeyPermission.HARNESS_READ
+    assert _TOOL_PERMISSIONS["get_harness_part"] == APIKeyPermission.HARNESS_READ
+    assert _TOOL_HANDLERS["get_harness_timeline"] is _call_get_harness_timeline
+    assert _TOOL_HANDLERS["get_harness_part"] is _call_get_harness_part
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mcp_timeline_and_detail_owned(monkeypatch):
+    """MCP returns lightweight timeline and session-scoped expanded detail."""
+    # Local setup mirrors the module's existing isolated direct-handler tests.
+    org, user, workspace = _setup_owned_workspace()
+    service = _service()
+    session = service.create_session(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="mcp timeline",
+        user_id=user.id,
+    )
+    message = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    part = HarnessPartRepository.create(
+        message_id=message.id,
+        type="tool",
+        state="completed",
+        title="Read file",
+        input={"tool": "read", "arguments": '{"path":"a"}'},
+        output="private output",
+    )
+    plan = "(Screenshot Analysis)\nSafe detail.\n```python\nagent.wait()\n```"
+    agent_part = HarnessPartRepository.create(
+        message_id=message.id,
+        type="agent",
+        state="completed",
+        title="Agent plan",
+        output=plan,
+        meta={"agent_meta": {"analysis": "Safe detail."}},
+    )
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    api_key = _key(user, [APIKeyPermission.HARNESS_READ])
+    timeline = _parse(
+        _call_get_harness_timeline(api_key, org.id, {"session_id": str(session.id)})
+    )
+    tool = next(
+        item for item in timeline["messages"][0]["parts"] if item["id"] == str(part.id)
+    )
+    timeline_agent = next(
+        item
+        for item in timeline["messages"][0]["parts"]
+        if item["id"] == str(agent_part.id)
+    )
+    assert tool["detail_loaded"] is False
+    assert tool["tool"] == "read"
+    assert tool["output"] == ""
+    assert timeline_agent["detail_loaded"] is False
+    assert timeline_agent["output"] == ""
+    assert plan not in str(timeline_agent)
+    assert timeline["messages"][0]["content"] == ""
+    detail = _parse(
+        _call_get_harness_part(
+            api_key, org.id, {"session_id": str(session.id), "part_id": str(part.id)}
+        )
+    )
+    assert detail["detail_loaded"] is True
+    assert detail["output"] == "private output"
+    agent_detail = _parse(
+        _call_get_harness_part(
+            api_key,
+            org.id,
+            {"session_id": str(session.id), "part_id": str(agent_part.id)},
+        )
+    )
+    assert agent_detail["detail_loaded"] is True
+    assert agent_detail["output"] == plan
+
+
 def test_fork_edit_tools_registered_with_run_permission() -> None:
     """Both tools are exposed and require ``harness:run``."""
     names = {tool.name for tool in _TOOLS}
@@ -168,6 +248,7 @@ def test_fork_edit_tools_hidden_without_run_permission() -> None:
         names = {tool.name for tool in listed.root.tools}
         assert "fork_harness_session" not in names
         assert "edit_harness_message" not in names
+        assert {"get_harness_timeline", "get_harness_part"} <= names
 
         run_key = _key(
             user, [APIKeyPermission.HARNESS_READ, APIKeyPermission.HARNESS_RUN]

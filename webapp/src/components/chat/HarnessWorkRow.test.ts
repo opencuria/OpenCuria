@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import type { HarnessPart } from '@/types/harness'
+import { requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 
 vi.mock('@/components/common/LoadingSpinner.vue', () => ({
   default: { template: '<span class="loading-stub" />' },
@@ -29,6 +30,17 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
 }
 
 describe('HarnessWorkRow', () => {
+  it('does not request detail until an unopened grouped row expands', async () => {
+    const request = vi.fn().mockResolvedValue(true)
+    const wrapper = mount(HarnessWorkRow, {
+      props: { grouped: true, part: makePart({ detail_loaded: false, output: '' }) },
+      global: { provide: { [requestHarnessPartDetailKey as symbol]: request } },
+    })
+    expect(request).not.toHaveBeenCalled()
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(request).toHaveBeenCalledWith('session-1', 'part-1')
+  })
+
   it('labels reasoning as Thought and shows a one-line preview', () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
@@ -45,9 +57,7 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.get('[data-testid="harness-work-row-preview"]').text()).toBe(
       'considering the layout',
     )
-    expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe(
-      '1',
-    )
+    expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe('1')
   })
 
   it('previews the last reasoning summary line', () => {
@@ -84,9 +94,7 @@ describe('HarnessWorkRow', () => {
     })
 
     expect(wrapper.find('[data-slot="collapsible-trigger"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe(
-      '1',
-    )
+    expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-expandable')).toBe('1')
     await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
     expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('export const x = 1')
   })
@@ -108,18 +116,25 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.text()).toContain('need to check the store')
   })
 
-  it('opens non-bash error tools by default', () => {
+  it('keeps error tools collapsed until the user explicitly expands them', async () => {
+    const request = vi.fn().mockResolvedValue(true)
     const wrapper = mount(HarnessWorkRow, {
       props: {
         part: makePart({
           state: 'error',
           title: 'Read missing.ts',
-          output: 'file not found',
+          output: 'Tool failed',
+          detail_loaded: false,
+          display: { tool: 'read', summary: 'Read missing.ts' },
         }),
       },
+      global: { provide: { [requestHarnessPartDetailKey as symbol]: request } },
     })
 
-    expect(wrapper.get('[data-testid="tool-detail-read"]').text()).toContain('file not found')
+    expect(wrapper.find('[data-testid="tool-detail-read"]').exists()).toBe(false)
+    expect(request).not.toHaveBeenCalled()
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(request).toHaveBeenCalledWith('session-1', 'part-1')
   })
 
   it('keeps bash rows collapsed even when the command failed', () => {

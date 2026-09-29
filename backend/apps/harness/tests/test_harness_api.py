@@ -343,6 +343,9 @@ def test_parts_todos_abort_flow(harness_setup, fake_harness_service):
     assert "messages" in parts.json()
     assert parts.json()["permissions"] == []
     assert parts.json()["questions"] == []
+    # Legacy compatibility response remains fully populated for ordinary parts.
+    timeline = read_client.get(f"/api/v1/harness/sessions/{session_id}/timeline")
+    assert timeline.status_code == 200
 
     todos = read_client.get(f"/api/v1/harness/sessions/{session_id}/todos")
     assert todos.status_code == 200
@@ -379,11 +382,166 @@ def test_parts_include_tool_input(harness_setup, fake_harness_service):
     assert response.status_code == 200
     messages = response.json()["messages"]
     assistant_out = next(
-        message for message in messages if message["role"] == "assistant" and message["parts"]
+        message
+        for message in messages
+        if message["role"] == "assistant" and message["parts"]
     )
     tool_part = next(part for part in assistant_out["parts"] if part["type"] == "tool")
     assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
     assert tool_part["output"] == "hello"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
+    harness_setup, fake_harness_service
+):
+    """Timeline omits detail fields; explicit expansion loads one owned part."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="timeline",
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="answer"
+    )
+    text_part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="text",
+        state="completed",
+        output="answer",
+    )
+    tool = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-1",
+        title="Read a.txt",
+        input={"tool": "read", "arguments": '{"path":"a.txt"}'},
+        output="large tool output",
+        meta={"step": 2, "attachments": [{"url": "data:image/png;base64,SECRET"}]},
+    )
+    patch = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="patch",
+        state="completed",
+        title="Patch src/a.py",
+        output="--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new",
+        meta={"path": "src/a.py", "old_content": "old copy", "new_content": "new copy"},
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
+    assert timeline.status_code == 200
+    envelope = timeline.json()
+    assert {"session", "messages", "permissions", "questions"} <= envelope.keys()
+    assistant_view = next(
+        item for item in envelope["messages"] if item["id"] == str(assistant.id)
+    )
+    # Timeline clients reconstruct assistant text from ordered text parts;
+    # content remains a compatibility fallback only when a legacy row has no parts.
+    assert assistant_view["content"] == ""
+    assert next(item for item in assistant_view["parts"] if item["id"] == str(text_part.id))["output"] == "answer"
+    legacy_assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="legacy assistant body"
+    )
+    fallback_timeline = client.get(
+        f"/api/v1/harness/sessions/{session.id}/timeline"
+    ).json()
+    legacy_view = next(
+        item for item in fallback_timeline["messages"] if item["id"] == str(legacy_assistant.id)
+    )
+    assert legacy_view["content"] == "legacy assistant body"
+    parts = assistant_view["parts"]
+    tool_view = next(item for item in parts if item["id"] == str(tool.id))
+    assert tool_view["detail_loaded"] is False
+    assert tool_view["tool"] == "read"
+    assert tool_view["input"] == {"tool": "read"}
+    assert tool_view["output"] == ""
+    assert tool_view["meta"] == {}
+    patch_view = next(item for item in parts if item["id"] == str(patch.id))
+    assert len(patch_view["display"]["preview"]) <= 4
+    assert patch_view["display"]["additions"] == 1
+    assert patch_view["display"]["deletions"] == 1
+
+    # Newly persisted questions retain their compact question/answer preview.
+    question_part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        title="Which color?",
+        input={"tool": "question", "arguments": '{"questions":[{"question":"Which color?"}]}'},
+        output='{"answers":["blue"]}',
+    )
+    HarnessPartRepository.mark_state(question_part, "completed")
+    timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline").json()
+    question_view = next(
+        item
+        for message_item in timeline["messages"]
+        for item in message_item["parts"]
+        if item["id"] == str(question_part.id)
+    )
+    assert question_view["display"]["question_rows"] == [
+        {
+            "header": "",
+            "question": "Which color?",
+            "options": [],
+            "multiple": False,
+            "answer": "blue",
+        }
+    ]
+
+    detail = client.get(f"/api/v1/harness/sessions/{session.id}/parts/{tool.id}")
+    assert detail.status_code == 200
+    assert detail.json()["detail_loaded"] is True
+    assert detail.json()["output"] == "large tool output"
+    assert "attachments" in detail.json()["meta"]
+    assert (
+        "old_content"
+        not in client.get(
+            f"/api/v1/harness/sessions/{session.id}/parts/{patch.id}"
+        ).json()["meta"]
+    )
+    legacy_parts = client.get(f"/api/v1/harness/sessions/{session.id}/parts")
+    legacy_patch = next(
+        item
+        for message_item in legacy_parts.json()["messages"]
+        for item in message_item["parts"]
+        if item["id"] == str(patch.id)
+    )
+    assert legacy_patch["output"].startswith("--- a/src/a.py")
+    assert "old_content" not in legacy_patch["meta"]
+    assert "new_content" not in legacy_patch["meta"]
+    other = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="other session",
+    )
+    assert (
+        client.get(f"/api/v1/harness/sessions/{other.id}/parts/{tool.id}").status_code
+        == 404
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_requires_harness_read_permission(harness_setup, fake_harness_service):
+    """Both timeline and part detail retain existing read authorization."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="permission",
+    )
+    no_read = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=[]
+    )
+    assert (
+        no_read.get(f"/api/v1/harness/sessions/{session.id}/timeline").status_code
+        == 403
+    )
+    assert (
+        no_read.get(f"/api/v1/harness/sessions/{session.id}/parts/{uuid.uuid4()}").status_code
+        == 403
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -409,7 +567,7 @@ def test_parts_include_pending_permissions_and_questions(
         organization_id=harness_setup["org"].id,
         session_id=session.id,
         workspace_id=harness_setup["owned"].id,
-        questions=[{"question": "Which color?"}],
+        questions=[{"question": "Which color?", "secret": "x" * 10000}],
         call_id="call-q",
     )
     answered = QuestionRequestRepository.create(
@@ -430,14 +588,95 @@ def test_parts_include_pending_permissions_and_questions(
     assert body["permissions"][0]["pattern"] == "reboot"
     assert body["permissions"][0]["status"] == "pending"
     assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
-    assert body["questions"][0]["questions"] == [{"question": "Which color?"}]
+    assert body["questions"][0]["questions"][0]["question"] == "Which color?"
     assert body["questions"][0]["status"] == "pending"
+    timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
+    pending = timeline.json()["questions"][0]
+    assert pending["questions"] == [
+        {"header": "", "question": "Which color?", "options": [], "multiple": False}
+    ]
+    assert len(str(pending)) < 1000
 
 
 @pytest.mark.django_db(transaction=True)
-def test_parts_include_descendant_pending_gates(
+def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
     harness_setup, fake_harness_service
 ):
+    """Timeline projections omit large fields; authorized detail fetch restores them."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="large timeline details",
+    )
+    message = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    arguments = "PRIVATE-WRITE-CONTENT-" * 1000
+    output = "PRIVATE-TOOL-OUTPUT-" * 1000
+    attachment = "A" * 100_000
+    tool = HarnessPartRepository.create(
+        message_id=message.id,
+        type="tool",
+        state="completed",
+        call_id="large-call",
+        title="Write file",
+        input={"tool": "write", "arguments": arguments},
+        output=output,
+        meta={
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": f"data:image/png;base64,{attachment}",
+                    "filename": "large.png",
+                }
+            ]
+        },
+    )
+    plan = "PRIVATE-AGENT-PLAN-" * 1000
+    agent = HarnessPartRepository.create(
+        message_id=message.id,
+        type="agent",
+        state="completed",
+        title="Agent plan",
+        output=plan,
+        meta={"agent_meta": {"analysis": "safe summary"}},
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+
+    timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
+    assert timeline.status_code == 200, timeline.content[:500]
+    timeline_json = json.dumps(timeline.json())
+    for private in (arguments, output, attachment, plan):
+        assert private not in timeline_json
+    tool_timeline = next(
+        part
+        for item in timeline.json()["messages"]
+        for part in item["parts"]
+        if part["id"] == str(tool.id)
+    )
+    assert tool_timeline["detail_loaded"] is False
+    assert tool_timeline["display"]["tool"] == "write"
+
+    detail = client.get(
+        f"/api/v1/harness/sessions/{session.id}/parts/{tool.id}"
+    )
+    assert detail.status_code == 200, detail.content[:500]
+    detail_json = detail.json()
+    assert detail_json["detail_loaded"] is True
+    assert detail_json["input"]["arguments"] == arguments
+    assert detail_json["output"] == output
+    assert detail_json["meta"]["attachments"][0]["url"].endswith(attachment)
+
+    agent_detail = client.get(
+        f"/api/v1/harness/sessions/{session.id}/parts/{agent.id}"
+    )
+    assert agent_detail.status_code == 200
+    assert agent_detail.json()["output"] == plan
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parts_include_descendant_pending_gates(harness_setup, fake_harness_service):
     """GET parts on a parent includes child gates, not sibling-tree gates."""
     parent = fake_harness_service.create_session(
         workspace_id=harness_setup["owned"].id,
@@ -489,9 +728,7 @@ def test_parts_include_descendant_pending_gates(
     client = _client(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
     )
-    parent_body = client.get(
-        f"/api/v1/harness/sessions/{parent.id}/parts"
-    ).json()
+    parent_body = client.get(f"/api/v1/harness/sessions/{parent.id}/parts").json()
     assert [item["request_id"] for item in parent_body["permissions"]] == [
         str(child_perm.id)
     ]
@@ -506,9 +743,7 @@ def test_parts_include_descendant_pending_gates(
     assert [item["request_id"] for item in child_body["permissions"]] == [
         str(child_perm.id)
     ]
-    other_body = client.get(
-        f"/api/v1/harness/sessions/{other_parent.id}/parts"
-    ).json()
+    other_body = client.get(f"/api/v1/harness/sessions/{other_parent.id}/parts").json()
     assert [item["session_id"] for item in other_body["permissions"]] == [
         str(other_child.id)
     ]
@@ -840,7 +1075,9 @@ def test_notice_dismiss_persists_and_shows_in_parts(
     message = HarnessMessageRepository.create(
         session_id=session.id, role="assistant", content="", model="fake-model"
     )
-    HarnessMessageRepository.complete(message, finish="aborted", error="aborted by user")
+    HarnessMessageRepository.complete(
+        message, finish="aborted", error="aborted by user"
+    )
 
     dismissed = client.post(
         f"/api/v1/harness/sessions/{session_id}/messages/{message.id}/notice-dismiss"

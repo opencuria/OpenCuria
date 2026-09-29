@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
+import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
-import { onEvent, onReconnect, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
+import {
+  onEvent,
+  onReconnect,
+  subscribeToWorkspace,
+  unsubscribeFromWorkspace,
+} from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 import {
@@ -34,6 +40,12 @@ const emit = defineEmits<{
 provide(harnessWorkspaceIdKey, toRef(props, 'workspaceId'))
 
 const harness = useHarnessStore()
+provide(requestHarnessPartDetailKey, (sessionId, partId) =>
+  harness.fetchPartDetail(sessionId, partId),
+)
+provide(pinHarnessPartDetailKey, (sessionId, partId, pinned) =>
+  harness.pinPartDetail(sessionId, partId, pinned),
+)
 const route = useRoute()
 const router = useRouter()
 const fileExplorer = useFileExplorerStore()
@@ -71,9 +83,7 @@ const streamingSessionId = computed(() =>
 )
 
 /** Skeleton only for the true initial workspace load (never over chat). */
-const chatLoading = computed(
-  () => harness.loading && harness.activeMessages.length === 0,
-)
+const chatLoading = computed(() => harness.loading && harness.activeMessages.length === 0)
 
 const childSessionIds = computed<Record<string, string>>(() =>
   buildChildSessionIdMap(harness.sessions, harness.messagesBySession),
@@ -90,9 +100,7 @@ const mentionCandidates = ref<MentionCandidate[]>([])
 const contextOpen = ref(false)
 const contextMetrics = ref<Pick<ContextSheetState, 'used' | 'limit' | 'percent'> | null>(null)
 
-const contextUsed = computed(
-  () => resolveSessionUsedTokens(harness.activeMessages).used,
-)
+const contextUsed = computed(() => resolveSessionUsedTokens(harness.activeMessages).used)
 
 const contextSheet = computed<ContextSheetState | null>(() => {
   if (!contextMetrics.value) return null
@@ -223,9 +231,7 @@ const entering = ref(false)
 function startComposerMorph(): void {
   const from = consumeComposerTransition()
   if (!from) return
-  const card = composerMorphEl.value?.querySelector<HTMLElement>(
-    '[data-testid="composer-card"]',
-  )
+  const card = composerMorphEl.value?.querySelector<HTMLElement>('[data-testid="composer-card"]')
   if (!card) return
   const target = card.getBoundingClientRect()
   const dx = from.left - target.left
@@ -333,9 +339,11 @@ function refreshSessionDetails(sessionId: string): void {
 
 function setupSocketListeners(): void {
   cleanupFns.push(subscribeToWorkspace(props.workspaceId))
-  cleanupFns.push(onReconnect(() => {
-    reconcileActiveSession()
-  }))
+  cleanupFns.push(
+    onReconnect(() => {
+      reconcileActiveSession()
+    }),
+  )
 
   cleanupFns.push(
     onEvent('harness.part_updated', (data) => {
@@ -655,6 +663,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
     @drop="onChatDrop"
   >
     <HarnessChatContainer
+      :key="harness.activeSessionId ?? 'new-session'"
       :messages="harness.activeMessages"
       :loading="chatLoading"
       :streaming-message-id="streamingMessageId"

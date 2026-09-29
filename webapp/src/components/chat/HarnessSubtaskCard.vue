@@ -42,7 +42,7 @@ const childId = computed(() => {
 const catalog = ref<ProviderModel[]>(props.models ?? [])
 
 const agentLabel = computed(() => {
-  const raw = props.part.meta?.['agent']
+  const raw = props.part.meta?.['agent'] ?? props.part.display?.agent
   return formatSubagentType(typeof raw === 'string' ? raw : null)
 })
 
@@ -57,7 +57,7 @@ const childSession = computed(() => {
 })
 
 function metaString(key: string): string {
-  const raw = props.part.meta?.[key]
+  const raw = props.part.meta?.[key] ?? props.part.display?.[key]
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
@@ -86,9 +86,7 @@ onMounted(async () => {
   }
 })
 
-const activity = computed(() =>
-  subtaskActivityLabel(props.part, childMessages.value),
-)
+const activity = computed(() => subtaskActivityLabel(props.part, childMessages.value))
 
 const isRunning = computed(() => props.part.state === 'running')
 
@@ -147,11 +145,7 @@ function handleOpen(): void {
         >
           {{ modelLabel }}
         </span>
-        <ChevronRight
-          v-if="childId"
-          :size="14"
-          class="ml-auto shrink-0 text-muted-foreground"
-        />
+        <ChevronRight v-if="childId" :size="14" class="ml-auto shrink-0 text-muted-foreground" />
       </span>
       <span
         v-if="activity"

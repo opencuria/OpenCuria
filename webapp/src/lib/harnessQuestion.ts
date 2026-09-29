@@ -34,6 +34,14 @@ function asAnswerList(value: unknown): string[] {
 
 /** Pair asked questions with their answers (index-aligned). */
 export function parseQuestionRows(part: HarnessPart): HarnessQuestionRow[] {
+  const displayRows = part.display?.question_rows
+  if (part.detail_loaded === false && Array.isArray(displayRows) && displayRows.length > 0) {
+    return displayRows.flatMap((row) =>
+      typeof row.question === 'string'
+        ? [{ question: row.question, answer: typeof row.answer === 'string' ? row.answer : '' }]
+        : [],
+    )
+  }
   const args = parseToolArguments(part)
   const questions = asQuestionList(part.meta?.['questions'] ?? args.questions)
   let answers = asAnswerList(part.meta?.['answers'])

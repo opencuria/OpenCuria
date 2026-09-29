@@ -59,10 +59,7 @@ export function collectAncestorSessions(
 /**
  * *rootId* plus every descendant session id (parent_id chain), breadth-first.
  */
-export function collectDescendantSessionIds(
-  rootId: string,
-  sessions: HarnessSession[],
-): string[] {
+export function collectDescendantSessionIds(rootId: string, sessions: HarnessSession[]): string[] {
   const ids: string[] = [rootId]
   const seen = new Set<string>([rootId])
   let added = true
@@ -117,7 +114,7 @@ export function collectRunningChildSessionIds(messages: HarnessMessage[]): strin
   for (const message of messages) {
     for (const part of message.parts) {
       if (part.type !== 'subtask' || part.state !== 'running') continue
-      const childId = part.meta?.['child_session_id']
+      const childId = part.meta?.['child_session_id'] ?? part.display?.child_session_id
       if (typeof childId !== 'string' || !childId || seen.has(childId)) continue
       seen.add(childId)
       ids.push(childId)
@@ -139,9 +136,9 @@ export function resolveChildSessionId(
   sessions: HarnessSession[],
   knownIds: Record<string, string> = {},
 ): string | null {
-  const fromMeta = part.meta?.['child_session_id']
+  const fromMeta = part.meta?.['child_session_id'] ?? part.display?.child_session_id
   if (typeof fromMeta === 'string' && fromMeta.trim()) return fromMeta.trim()
-  const subtaskId = String(part.meta?.['subtask_id'] ?? '')
+  const subtaskId = String(part.meta?.['subtask_id'] ?? part.display?.subtask_id ?? '')
   if (subtaskId && knownIds[subtaskId]) return knownIds[subtaskId]!
   if (knownIds[part.id]) return knownIds[part.id]!
   const parentId = part.session_id
@@ -159,12 +156,8 @@ function sessionCreatedAt(session: HarnessSession): number {
   return session.created_at ? new Date(session.created_at).getTime() : 0
 }
 
-function rememberChildId(
-  map: Record<string, string>,
-  part: HarnessPart,
-  childId: string,
-): void {
-  const subtaskId = part.meta?.['subtask_id']
+function rememberChildId(map: Record<string, string>, part: HarnessPart, childId: string): void {
+  const subtaskId = part.meta?.['subtask_id'] ?? part.display?.subtask_id
   if (typeof subtaskId === 'string' && subtaskId) map[subtaskId] = childId
   map[part.id] = childId
 }
@@ -185,7 +178,7 @@ export function buildChildSessionIdMap(
         const parentId = part.session_id || session.id
         if (!partsByParent[parentId]) partsByParent[parentId] = []
         partsByParent[parentId]!.push(part)
-        const fromMeta = part.meta?.['child_session_id']
+        const fromMeta = part.meta?.['child_session_id'] ?? part.display?.child_session_id
         if (typeof fromMeta === 'string' && fromMeta.trim()) {
           rememberChildId(map, part, fromMeta.trim())
           usedChildIds.add(fromMeta.trim())
@@ -258,6 +251,8 @@ export function subtaskActivityLabel(
 /** True when a tool or subtask part is still running (blocks Thinking). */
 export function hasRunningToolOrSubtask(parts: HarnessPart[]): boolean {
   return parts.some(
-    (part) => (part.type === 'tool' || part.type === 'subtask') && (part.state === 'running' || part.state === 'pending'),
+    (part) =>
+      (part.type === 'tool' || part.type === 'subtask') &&
+      (part.state === 'running' || part.state === 'pending'),
   )
 }

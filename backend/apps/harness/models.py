@@ -484,6 +484,11 @@ class HarnessPart(models.Model):
         blank=True,
         help_text="Extra payload (step number, cost, tokens, subtask id).",
     )
+    display = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Bounded timeline display projection; full details stay in input/output/meta.",
+    )
     position = models.PositiveIntegerField(
         default=0,
         db_index=True,

@@ -11,6 +11,7 @@ import { computed, ref } from 'vue'
 
 import type {
   HarnessMessage,
+  HarnessPart,
   HarnessPartDelta,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
@@ -26,6 +27,7 @@ import {
   dismissHarnessNotice,
   editHarnessMessage,
   forkHarnessSession,
+  getHarnessPart,
   listHarnessParts,
   listHarnessSessions,
   listHarnessTodos,
@@ -97,6 +99,13 @@ export const useHarnessStore = defineStore('harness', () => {
   const partFetches = new Map<string, Promise<void>>()
   const todoFetches = new Map<string, Promise<void>>()
   const partGenerations = new Map<string, number>()
+  const detailGenerations = new Map<string, number>()
+  const detailFetches = new Map<string, Promise<boolean>>()
+  const detailCache = new Map<string, HarnessPart>()
+  const pinnedDetailKeys = new Set<string>()
+  const detailErrors = ref<Record<string, string>>({})
+  const DETAIL_CACHE_LIMIT = 100
+  let activeSelectionGeneration = 0
   const todoGenerations = new Map<string, number>()
   let sessionsGeneration = 0
   let activeSessionsWorkspace: string | null = null
@@ -107,12 +116,12 @@ export const useHarnessStore = defineStore('harness', () => {
     () => sessions.value.find((s) => s.id === activeSessionId.value) ?? null,
   )
 
-  const activeMessages = computed<HarnessMessage[]>(
-    () => (activeSessionId.value ? (messagesBySession.value[activeSessionId.value] ?? []) : []),
+  const activeMessages = computed<HarnessMessage[]>(() =>
+    activeSessionId.value ? (messagesBySession.value[activeSessionId.value] ?? []) : [],
   )
 
-  const activeTodos = computed<HarnessTodo[]>(
-    () => (activeSessionId.value ? (todosBySession.value[activeSessionId.value] ?? []) : []),
+  const activeTodos = computed<HarnessTodo[]>(() =>
+    activeSessionId.value ? (todosBySession.value[activeSessionId.value] ?? []) : [],
   )
 
   const activeLineageIds = computed(() => {
@@ -132,18 +141,14 @@ export const useHarnessStore = defineStore('harness', () => {
       .map((request) => enrichGateAgent(request)),
   )
 
-  function enrichGateAgent<T extends { session_id: string; agent_name?: string }>(
-    request: T,
-  ): T {
+  function enrichGateAgent<T extends { session_id: string; agent_name?: string }>(request: T): T {
     if (request.agent_name) return request
     const session = sessions.value.find((item) => item.id === request.session_id)
     if (!session?.agent_name) return request
     return { ...request, agent_name: session.agent_name }
   }
 
-  const rootSessions = computed(() =>
-    sessions.value.filter((session) => !session.parent_id),
-  )
+  const rootSessions = computed(() => sessions.value.filter((session) => !session.parent_id))
 
   const childSessionsByParent = computed(() => {
     const map: Record<string, HarnessSession[]> = {}
@@ -177,6 +182,139 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // --- Actions ---
 
+  function rememberPartDetail(sessionId: string, part: HarnessPart): void {
+    if (
+      !part.detail_loaded ||
+      !['tool', 'reasoning', 'agent', 'patch', 'compaction'].includes(part.type)
+    )
+      return
+    const key = `${sessionId}:${part.id}`
+    detailCache.delete(key)
+    detailCache.set(key, {
+      ...part,
+      input: part.input ? { ...part.input } : {},
+      meta: part.meta ? { ...part.meta } : {},
+    })
+    while (detailCache.size > DETAIL_CACHE_LIMIT) {
+      const oldest = [...detailCache.keys()].find((candidate) => !pinnedDetailKeys.has(candidate))
+      if (oldest === undefined) break
+      const evicted = detailCache.get(oldest)
+      detailCache.delete(oldest)
+      if (!evicted) continue
+      const stored = messagesBySession.value[evicted.session_id]
+        ?.flatMap((message) => message.parts)
+        .find((item) => item.id === evicted.id)
+      if (stored?.detail_loaded && !pinnedDetailKeys.has(`${evicted.session_id}:${evicted.id}`)) {
+        stored.input = stored.type === 'tool' ? { tool: stored.tool ?? '' } : {}
+        if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
+        stored.meta = stored.display?.agent_meta ? { agent_meta: stored.display.agent_meta } : {}
+        stored.detail_loaded = false
+      }
+    }
+  }
+
+  function pinPartDetail(sessionId: string, partId: string, pinned: boolean): void {
+    const key = `${sessionId}:${partId}`
+    if (pinned) {
+      pinnedDetailKeys.add(key)
+      const cached = detailCache.get(key)
+      if (cached) {
+        detailCache.delete(key)
+        detailCache.set(key, cached)
+      }
+    } else pinnedDetailKeys.delete(key)
+  }
+
+  function invalidatePartDetails(sessionId: string, clear = false): void {
+    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
+    if (!clear) return
+    for (const [key, cached] of detailCache) {
+      if (cached.session_id !== sessionId) continue
+      detailCache.delete(key)
+      pinnedDetailKeys.delete(key)
+      const stored = messagesBySession.value[sessionId]
+        ?.flatMap((message) => message.parts)
+        .find((item) => item.id === cached.id)
+      if (stored) {
+        stored.input = stored.type === 'tool' ? { tool: stored.tool ?? '' } : {}
+        // Keep bounded live previews and generic error status text.
+        if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
+        const lightweightMeta: Record<string, unknown> = {}
+        if (typeof stored.meta?.['step'] === 'number') lightweightMeta.step = stored.meta['step']
+        if (stored.display?.agent_meta) lightweightMeta.agent_meta = stored.display.agent_meta
+        stored.meta = lightweightMeta
+        stored.detail_loaded = false
+      }
+    }
+  }
+
+  async function fetchPartDetail(sessionId: string, partId: string): Promise<boolean> {
+    const message = messagesBySession.value[sessionId]?.find((item) =>
+      item.parts.some((part) => part.id === partId),
+    )
+    const part = message?.parts.find((item) => item.id === partId)
+    if (!part || part.detail_loaded) return Boolean(part?.detail_loaded)
+    if (part.state === 'pending' || part.state === 'running') return false
+    const key = `${sessionId}:${partId}`
+    const existing = detailFetches.get(key)
+    if (existing) return existing
+    const sessionGeneration = detailGenerations.get(sessionId) ?? 0
+    const selectionGeneration = activeSelectionGeneration
+    const partGeneration = partGenerations.get(sessionId) ?? 0
+    const flight = (async () => {
+      try {
+        // A finished part can be expanded while its containing conversation
+        // is still busy. Never fetch a pending/running part, but do not gate
+        // historical/completed rows on the session's overall busy status.
+        if (part.state === 'pending' || part.state === 'running') return false
+        const detail = await getHarnessPart(sessionId, partId)
+        const stillExists = sessions.value.some((item) => item.id === sessionId)
+        if (
+          !stillExists ||
+          activeSessionId.value !== sessionId ||
+          selectionGeneration !== activeSelectionGeneration ||
+          sessionGeneration !== (detailGenerations.get(sessionId) ?? 0) ||
+          partGeneration !== (partGenerations.get(sessionId) ?? 0)
+        )
+          return false
+        const currentMessage = messagesBySession.value[sessionId]?.find(
+          (item) => item.id === message!.id,
+        )
+        const currentPart = currentMessage?.parts.find((item) => item.id === partId)
+        if (!currentPart || currentPart.state === 'pending' || currentPart.state === 'running')
+          return false
+        // A run transition racing the request invalidates only unfinished parts;
+        // completed/error rows remain safe to hydrate during an active run.
+        Object.assign(currentPart, detail, {
+          session_id: sessionId,
+          message_id: currentMessage!.id,
+          detail_loaded: true,
+        })
+        rememberPartDetail(sessionId, currentPart)
+        const errors = { ...detailErrors.value }
+        delete errors[key]
+        detailErrors.value = errors
+        return true
+      } catch (e: unknown) {
+        if (
+          sessionGeneration === (detailGenerations.get(sessionId) ?? 0) &&
+          selectionGeneration === activeSelectionGeneration &&
+          partGeneration === (partGenerations.get(sessionId) ?? 0)
+        ) {
+          detailErrors.value = {
+            ...detailErrors.value,
+            [key]: e instanceof Error ? e.message : 'Failed to load part details',
+          }
+        }
+        throw e
+      }
+    })().finally(() => {
+      if (detailFetches.get(key) === flight) detailFetches.delete(key)
+    })
+    detailFetches.set(key, flight)
+    return flight
+  }
+
   async function fetchSessions(workspaceId: string): Promise<void> {
     if (activeSessionsWorkspace !== workspaceId) {
       const isWorkspaceSwitch = activeSessionsWorkspace !== null
@@ -185,7 +323,7 @@ export const useHarnessStore = defineStore('harness', () => {
       sessionFetches.clear()
       if (isWorkspaceSwitch) {
         sessions.value = []
-        activeSessionId.value = null
+        setActiveSession(null)
         // A new workspace needs its own initial load; the chat must not
         // flash the previous workspace's skeleton state.
         sessionsLoaded.value = false
@@ -195,22 +333,26 @@ export const useHarnessStore = defineStore('harness', () => {
     let flight = sessionFetches.get(workspaceId)
     if (!flight) {
       const generation = ++sessionsGeneration
-      flight = listHarnessSessions(workspaceId).then((result) => {
-        if (generation !== sessionsGeneration) return
-        const previous = sessions.value
-        sessions.value = result
-        if (
-          activeSessionId.value &&
-          !result.some((session) => session.id === activeSessionId.value) &&
-          previous.some((session) => session.id === activeSessionId.value)
-        ) activeSessionId.value = null
-      }).catch((e: unknown) => {
-        if (generation === sessionsGeneration) {
-          error.value = e instanceof Error ? e.message : 'Failed to load harness sessions'
-        }
-      }).finally(() => {
-        if (sessionFetches.get(workspaceId) === flight) sessionFetches.delete(workspaceId)
-      })
+      flight = listHarnessSessions(workspaceId)
+        .then((result) => {
+          if (generation !== sessionsGeneration) return
+          const previous = sessions.value
+          sessions.value = result
+          if (
+            activeSessionId.value &&
+            !result.some((session) => session.id === activeSessionId.value) &&
+            previous.some((session) => session.id === activeSessionId.value)
+          )
+            setActiveSession(null)
+        })
+        .catch((e: unknown) => {
+          if (generation === sessionsGeneration) {
+            error.value = e instanceof Error ? e.message : 'Failed to load harness sessions'
+          }
+        })
+        .finally(() => {
+          if (sessionFetches.get(workspaceId) === flight) sessionFetches.delete(workspaceId)
+        })
       sessionFetches.set(workspaceId, flight)
     }
     const generation = sessionsGeneration
@@ -240,6 +382,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   function setActiveSession(sessionId: string | null): void {
+    if (activeSessionId.value !== sessionId) activeSelectionGeneration += 1
     activeSessionId.value = sessionId
   }
 
@@ -266,7 +409,9 @@ export const useHarnessStore = defineStore('harness', () => {
     const session = sessions.value.find((row) => row.id === sessionId)
     const conversationStore = useHarnessConversationStore()
     const conv = conversationStore.conversations.find((row) => row.session_id === sessionId)
-    const needsPersist = Boolean(force || session?.unread || session?.manual_unread || conv?.unread || conv?.manual_unread)
+    const needsPersist = Boolean(
+      force || session?.unread || session?.manual_unread || conv?.unread || conv?.manual_unread,
+    )
     const previousUnread = session?.unread ?? false
     const previousManualUnread = session?.manual_unread ?? false
     if (session) {
@@ -274,7 +419,7 @@ export const useHarnessStore = defineStore('harness', () => {
       session.manual_unread = false
     }
     const flight = (async () => {
-      const persisted = !needsPersist || await conversationStore.markAsRead(sessionId, true)
+      const persisted = !needsPersist || (await conversationStore.markAsRead(sessionId, true))
       if (!persisted && session && sessions.value.includes(session)) {
         session.unread = previousUnread
         session.manual_unread = previousManualUnread
@@ -297,17 +442,59 @@ export const useHarnessStore = defineStore('harness', () => {
         try {
           const response = await listHarnessParts(sessionId)
           if (partGenerations.get(sessionId) !== generation) return
+          const previous = messagesBySession.value[sessionId] ?? []
+          const previousByPart = new Map(
+            previous.flatMap((row) => row.parts.map((part) => [part.id, part] as const)),
+          )
           const incoming = sortHarnessMessages(
-            response.messages.map((message) => ({
-              ...message,
-              session_id: sessionId,
-              parts: (message.parts ?? []).map(hydrateHarnessPart),
-            })),
+            response.messages.map((message) => {
+              const parts = (message.parts ?? []).map((part) => {
+                const prior = previousByPart.get(part.id)
+                const cached = detailCache.get(`${sessionId}:${part.id}`)
+                const source = prior?.detail_loaded ? prior : cached
+                const mergedPart = source
+                  ? {
+                      ...part,
+                      input: source.input,
+                      output: source.output,
+                      meta: source.meta,
+                      detail_loaded: true,
+                    }
+                  : part
+                const hydratedPart = hydrateHarnessPart({
+                  ...mergedPart,
+                  session_id: sessionId,
+                  message_id: message.id,
+                })
+                if (hydratedPart.detail_loaded) rememberPartDetail(sessionId, hydratedPart)
+                return hydratedPart
+              })
+              const content =
+                message.role === 'assistant' && !message.content
+                  ? parts
+                      .filter((part) => part.type === 'text')
+                      .map((part) => part.output)
+                      .join('')
+                  : message.content
+              return { ...message, content, session_id: sessionId, parts }
+            }),
           )
           const session = sessions.value.find((item) => item.id === sessionId)
-          messagesBySession.value[sessionId] = session?.status === 'busy'
-            ? mergeBusyFetchedMessages(messagesBySession.value[sessionId] ?? [], incoming)
-            : settleOpenStreamParts(incoming)
+          messagesBySession.value[sessionId] =
+            session?.status === 'busy'
+              ? mergeBusyFetchedMessages(previous, incoming)
+              : settleOpenStreamParts(incoming)
+          // Timeline parts intentionally omit parent ids. Restore them from
+          // the enclosing REST envelope after reconciliation too, since a
+          // busy merge can carry forward live-only rows from the previous
+          // message snapshot.
+          for (const message of messagesBySession.value[sessionId] ?? []) {
+            message.session_id = sessionId
+            for (const part of message.parts) {
+              part.session_id = sessionId
+              part.message_id = message.id
+            }
+          }
           const nextPermissions = { ...pendingPermissions.value }
           for (const id of Object.keys(nextPermissions)) {
             if (nextPermissions[id]?.session_id === sessionId) delete nextPermissions[id]
@@ -330,7 +517,10 @@ export const useHarnessStore = defineStore('harness', () => {
           }
         } catch (e: unknown) {
           if (partGenerations.get(sessionId) === generation) {
-            useNotificationStore().error('Failed to load messages', e instanceof Error ? e.message : 'Unknown error')
+            useNotificationStore().error(
+              'Failed to load messages',
+              e instanceof Error ? e.message : 'Unknown error',
+            )
           }
         }
       })().finally(() => {
@@ -359,13 +549,16 @@ export const useHarnessStore = defineStore('harness', () => {
     if (!flight) {
       const generation = (todoGenerations.get(sessionId) ?? 0) + 1
       todoGenerations.set(sessionId, generation)
-      flight = listHarnessTodos(sessionId).then((todos) => {
-        if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = todos
-      }).catch(() => {
-        if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = []
-      }).finally(() => {
-        if (todoFetches.get(sessionId) === flight) todoFetches.delete(sessionId)
-      })
+      flight = listHarnessTodos(sessionId)
+        .then((todos) => {
+          if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = todos
+        })
+        .catch(() => {
+          if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = []
+        })
+        .finally(() => {
+          if (todoFetches.get(sessionId) === flight) todoFetches.delete(sessionId)
+        })
       todoFetches.set(sessionId, flight)
     }
     await flight
@@ -390,7 +583,7 @@ export const useHarnessStore = defineStore('harness', () => {
         reasoning_effort: reasoningEffort,
       })
       sessions.value.unshift(session)
-      activeSessionId.value = session.id
+      setActiveSession(session.id)
       messagesBySession.value[session.id] = [
         {
           id: `local-user-${session.id}`,
@@ -455,21 +648,19 @@ export const useHarnessStore = defineStore('harness', () => {
     const notifications = useNotificationStore()
     try {
       await deleteHarnessSession(sessionId)
+      invalidatePartDetails(sessionId, true)
       sessions.value = sessions.value.filter((session) => session.id !== sessionId)
       delete messagesBySession.value[sessionId]
       delete todosBySession.value[sessionId]
       if (activeSessionId.value === sessionId) {
-        activeSessionId.value = null
+        setActiveSession(null)
       }
     } catch (e: unknown) {
       notifications.error('Delete failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
-  async function updateSessionMode(
-    sessionId: string,
-    mode: HarnessSessionMode,
-  ): Promise<void> {
+  async function updateSessionMode(sessionId: string, mode: HarnessSessionMode): Promise<void> {
     const notifications = useNotificationStore()
     try {
       const updated = await setSessionMode(sessionId, mode)
@@ -502,14 +693,13 @@ export const useHarnessStore = defineStore('harness', () => {
     const notifications = useNotificationStore()
     try {
       const prefill =
-        messagesBySession.value[sessionId]?.find((item) => item.id === messageId)
-          ?.content ?? ''
+        messagesBySession.value[sessionId]?.find((item) => item.id === messageId)?.content ?? ''
       const session = await forkHarnessSession(
         sessionId,
         messageId ? { message_id: messageId } : {},
       )
       upsertSession(session)
-      activeSessionId.value = session.id
+      setActiveSession(session.id)
       await fetchParts(session.id)
       void useHarnessConversationStore().fetchConversations()
       return { session, prefill }
@@ -537,6 +727,7 @@ export const useHarnessStore = defineStore('harness', () => {
   ): Promise<void> {
     const notifications = useNotificationStore()
     try {
+      invalidatePartDetails(sessionId, true)
       const session = await editHarnessMessage(sessionId, messageId, {
         prompt,
         mode: options.mode,
@@ -548,10 +739,7 @@ export const useHarnessStore = defineStore('harness', () => {
       await fetchParts(sessionId)
     } catch (e: unknown) {
       if (e instanceof ApiRequestError && e.status === 409) {
-        notifications.error(
-          'Agent is running — stop it before editing this message.',
-          e.message,
-        )
+        notifications.error('Agent is running — stop it before editing this message.', e.message)
         return
       }
       notifications.error('Edit failed', e instanceof Error ? e.message : 'Unknown error')
@@ -614,10 +802,9 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   function handleTodoUpdated(sessionId: string, todos: HarnessTodo[]): void {
-    todosBySession.value[sessionId] = applyTodoUpdate(
-      todosBySession.value[sessionId] ?? [],
-      { todos },
-    )
+    todosBySession.value[sessionId] = applyTodoUpdate(todosBySession.value[sessionId] ?? [], {
+      todos,
+    })
   }
 
   function handleSubtaskStarted(
@@ -710,7 +897,12 @@ export const useHarnessStore = defineStore('harness', () => {
   function handleSessionStatus(
     sessionId: string,
     status: HarnessSession['status'],
-    extras?: { model?: string; reasoning_effort?: string; message_id?: string; user_message_id?: string },
+    extras?: {
+      model?: string
+      reasoning_effort?: string
+      message_id?: string
+      user_message_id?: string
+    },
   ): void {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
@@ -721,6 +913,8 @@ export const useHarnessStore = defineStore('harness', () => {
       }
     }
     if (status === 'busy') {
+      // Already-completed parts are immutable history and remain detail-loadable
+      // while the new turn runs; never invalidate their in-flight hydration.
       // Anchor the fresh turn before the first delta arrives: create the
       // server-id assistant shell after the (possibly optimistic)
       // follow-up user so deltas route to the new turn — never to the
@@ -783,10 +977,7 @@ export const useHarnessStore = defineStore('harness', () => {
       const outcome = await resolveHarnessQuestion(sessionId, requestId, answers, reject)
       handleQuestionResolved(requestId, outcome.status)
     } catch (e: unknown) {
-      notifications.error(
-        'Question failed',
-        e instanceof Error ? e.message : 'Unknown error',
-      )
+      notifications.error('Question failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
@@ -802,10 +993,7 @@ export const useHarnessStore = defineStore('harness', () => {
       const outcome = await resolveHarnessPermission(sessionId, request, response)
       handlePermissionResolved(requestId, outcome.decision)
     } catch (e: unknown) {
-      notifications.error(
-        'Permission failed',
-        e instanceof Error ? e.message : 'Unknown error',
-      )
+      notifications.error('Permission failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
@@ -827,10 +1015,7 @@ export const useHarnessStore = defineStore('harness', () => {
       dismissedNoticeIds.value = next
       if (message) message.notice_dismissed_at = null
       const notifications = useNotificationStore()
-      notifications.error(
-        'Dismiss failed',
-        e instanceof Error ? e.message : 'Unknown error',
-      )
+      notifications.error('Dismiss failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
 
@@ -845,8 +1030,9 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // Agent default {model, effort} for a mode.
   function agentDefault(mode: HarnessSessionMode): { model: string; effort: string } {
-    const found = agentConfigs.value.find((item) => item.agent === mode && item.mode === 'primary')
-      ?? agentConfigs.value.find((item) => item.agent === mode)
+    const found =
+      agentConfigs.value.find((item) => item.agent === mode && item.mode === 'primary') ??
+      agentConfigs.value.find((item) => item.agent === mode)
     return { model: found?.model ?? '', effort: found?.effort ?? '' }
   }
 
@@ -896,6 +1082,15 @@ export const useHarnessStore = defineStore('harness', () => {
 
   function reset(): void {
     sessions.value = []
+    for (const id of partGenerations.keys())
+      partGenerations.set(id, (partGenerations.get(id) ?? 0) + 1)
+    for (const id of detailGenerations.keys())
+      detailGenerations.set(id, (detailGenerations.get(id) ?? 0) + 1)
+    detailFetches.clear()
+    detailCache.clear()
+    pinnedDetailKeys.clear()
+    detailErrors.value = {}
+    activeSelectionGeneration += 1
     sessionsGeneration += 1
     activeSessionsWorkspace = null
     sessionFetches.clear()
@@ -908,7 +1103,7 @@ export const useHarnessStore = defineStore('harness', () => {
     todosBySession.value = {}
     pendingPermissions.value = {}
     pendingQuestions.value = {}
-    activeSessionId.value = null
+    setActiveSession(null)
     viewingSessionId.value = null
     loading.value = false
     sessionsLoaded.value = false
@@ -952,6 +1147,9 @@ export const useHarnessStore = defineStore('harness', () => {
     setViewingSession,
     markSessionRead,
     fetchParts,
+    fetchPartDetail,
+    pinPartDetail,
+    detailErrors,
     refreshPartsAfterIdle,
     fetchTodos,
     createSession,
