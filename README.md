@@ -241,7 +241,16 @@ Optional local workspace image build:
 ./scripts/setup-dev.sh --build-workspace-image
 ```
 
-After that you can run `backend`, `webapp`, and `runner` individually.
+After that you can run `backend`, `webapp`, and `runner` individually. When
+updating a source checkout, apply backend migrations before starting `runserver`:
+
+```bash
+cd backend
+.venv/bin/python manage.py migrate --noinput
+```
+
+The Docker backend entrypoint runs migrations automatically; a raw Django
+`runserver` does not.
 
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
