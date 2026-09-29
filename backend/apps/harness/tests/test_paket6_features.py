@@ -19,13 +19,19 @@ from apps.harness.compaction import (
 )
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import QuestionRequest
-from apps.harness.providers.base import Delta, LLMMessage, ProviderAdapter, ToolSchema, Usage
+from apps.harness.providers.base import (
+    Delta,
+    LLMMessage,
+    ProviderAdapter,
+    ToolSchema,
+    Usage,
+)
 from apps.harness.repositories import QuestionRequestRepository
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import default_tool_registry
-from apps.harness.tools.files import EditTool, WriteTool
 from apps.harness.tools.base import ToolContext
+from apps.harness.tools.files import EditTool, WriteTool
 
 
 class ScriptProvider(ProviderAdapter):
@@ -159,7 +165,9 @@ async def test_question_timeout_is_tool_error() -> None:
     async def emit(event: dict[str, Any]) -> None:
         events.append(event)
 
-    provider = ScriptProvider([_tool_step("question", {"questions": [{"question": "Hi?"}]})])
+    provider = ScriptProvider(
+        [_tool_step("question", {"questions": [{"question": "Hi?"}]})]
+    )
     runner = HarnessRunner(
         provider=provider,
         tools=default_tool_registry(),
@@ -200,8 +208,9 @@ async def test_edit_tool_emits_patch_metadata() -> None:
         ctx,
     )
     assert result.metadata.get("path")
-    assert "foo" in result.metadata.get("old_content", "")
-    assert "baz" in result.metadata.get("new_content", "")
+    assert "unified_diff" in result.metadata
+    assert "old_content" not in result.metadata
+    assert "new_content" not in result.metadata
 
 
 @pytest.mark.asyncio
@@ -228,6 +237,8 @@ async def test_runner_emits_patch_event_after_write() -> None:
     patch_events = [event for event in events if event.get("type") == "patch"]
     assert patch_events
     assert patch_events[0].get("unified_diff")
+    assert "old_content" not in patch_events[0]
+    assert "new_content" not in patch_events[0]
 
 
 def test_is_overflow_helper() -> None:
@@ -383,7 +394,10 @@ async def test_compaction_child_emit_does_not_leak_to_parent() -> None:
         if event.get("type") == "part_updated"
         and str((event.get("delta") or {}).get("text", ""))
     ]
-    assert not any("leaked summary" in str(event.get("delta", {}).get("text", "")) for event in text_deltas)
+    assert not any(
+        "leaked summary" in str(event.get("delta", {}).get("text", ""))
+        for event in text_deltas
+    )
     compaction_events = [event for event in events if event.get("type") == "compaction"]
     assert compaction_events
     assert "leaked summary" in compaction_events[0].get("summary", "")
@@ -401,7 +415,9 @@ async def test_resolve_question_via_service(db) -> None:
     from common.utils import hash_token
 
     user_model = get_user_model()
-    org = Organization.objects.create(name="Q Org", slug=f"q-org-{uuid.uuid4().hex[:8]}")
+    org = Organization.objects.create(
+        name="Q Org", slug=f"q-org-{uuid.uuid4().hex[:8]}"
+    )
     user = user_model.objects.create_user(
         email=f"q-user-{uuid.uuid4().hex[:6]}@example.com",
         password="secret",

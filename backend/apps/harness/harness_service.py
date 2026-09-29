@@ -88,6 +88,25 @@ def _tool_part_attachments(part: HarnessPart) -> list[dict[str, Any]]:
     return [item for item in attachments if isinstance(item, dict)]
 
 
+def _socket_text(value: object, *, limit: int) -> str:
+    """Bound runner-controlled text included in a live socket projection."""
+    return str(value or "")[:limit]
+
+
+def _tool_socket_identity(
+    event: dict[str, Any], part: HarnessPart, *, state: str
+) -> dict[str, str]:
+    """Project a tool event to identifiers and a small display title only."""
+    return {
+        "tool": _socket_text(
+            event.get("tool") or (part.input or {}).get("tool", ""), limit=100
+        ),
+        "title": _socket_text(event.get("title") or part.title, limit=240),
+        "call_id": _socket_text(event.get("call_id") or part.call_id, limit=255),
+        "state": state,
+    }
+
+
 FRONTEND_EVENT_PART = "harness.part_updated"
 FRONTEND_EVENT_PERMISSION = "harness.permission_required"
 FRONTEND_EVENT_QUESTION = "harness.question_required"
@@ -749,14 +768,32 @@ class HarnessService:
         return self.sessions.list_for_workspace(workspace_id)
 
     def list_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all parts of a session."""
+        """Return all full parts of a session (legacy compatibility)."""
         self.get_session(session_id)
         return self.parts.list_for_session(session_id)
+
+    def list_timeline_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
+        """Return lightweight timeline parts without loading large detail fields."""
+        self.get_session(session_id)
+        return self.parts.list_timeline_for_session(session_id)
+
+    def get_part(self, session_id: uuid.UUID, part_id: uuid.UUID) -> HarnessPart:
+        """Return a full part only when it belongs to the supplied session."""
+        self.get_session(session_id)
+        part = self.parts.get_for_session(session_id, part_id)
+        if part is None:
+            raise NotFoundError("HarnessPart", str(part_id))
+        return part
 
     def list_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
         """Return all messages of a session."""
         self.get_session(session_id)
         return self.messages.list_for_session(session_id)
+
+    def list_timeline_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
+        """Return message headers without duplicate assistant text bodies."""
+        self.get_session(session_id)
+        return self.messages.list_timeline_for_session(session_id)
 
     def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
         """Return persisted todos of a session as plain dicts."""
@@ -2029,15 +2066,13 @@ class HarnessService:
           *current* assistant (see ``_session_status_payload``).
         - provider-position handling: the runner emits
           ``tool_queued`` ``{type, step, call_id, tool, title, arguments}``
-          in observed order. We create the tool part here (state pending)
-          and emit ``delta.tool_started`` with that ``part_id``; the later
-          ``tool_started`` for the same ``call_id`` flips the same part to
-          running and re-emits ``delta.tool_started`` with the same
-          ``part_id`` (frontend dedupes by ``part_id``). ``tool_queued``
-          ``call_id`` may be provisional: when the real ``tool_started``
-          carries a *different* id for the same step/tool, we rebind by
-          updating the queued part's ``call_id`` instead of creating a
-          second row.
+          in observed order. We persist all tool details, but live
+          ``delta.tool_started`` contains only bounded tool/title/call_id/state
+          fields plus the ``part_id``. The later ``tool_started`` for the
+          same call flips the same part to running and re-emits that small
+          projection. ``tool_queued`` ``call_id`` may be provisional: when
+          the real ``tool_started`` carries a *different* id for the same
+          step/tool, we rebind the queued part instead of creating a second row.
         """
         etype = str(event.get("type", ""))
         workspace_id = str(session.workspace_id)
@@ -2059,6 +2094,7 @@ class HarnessService:
             )
         elif etype == "tool_queued":
             part = await self._persist_tool_queued(session, assistant, event)
+            identity = _tool_socket_identity(event, part, state="pending")
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
@@ -2066,11 +2102,10 @@ class HarnessService:
                     "session_id": session_id,
                     "message_id": message_id,
                     "delta": {
-                        "tool_started": event.get("tool", ""),
-                        "title": event.get("title", ""),
-                        "call_id": event.get("call_id", ""),
-                        "arguments": event.get("arguments", ""),
-                        "state": "pending",
+                        "tool_started": identity["tool"],
+                        "title": identity["title"],
+                        "call_id": identity["call_id"],
+                        "state": identity["state"],
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -2180,6 +2215,7 @@ class HarnessService:
             )
         elif etype == "tool_started":
             part = await self._persist_tool_started(session, assistant, event)
+            identity = _tool_socket_identity(event, part, state="running")
             await self._emit_frontend(
                 FRONTEND_EVENT_PART,
                 {
@@ -2187,11 +2223,10 @@ class HarnessService:
                     "session_id": session_id,
                     "message_id": message_id,
                     "delta": {
-                        "tool_started": event.get("tool", ""),
-                        "title": event.get("title", ""),
-                        "call_id": event.get("call_id", ""),
-                        "arguments": event.get("arguments", ""),
-                        "state": "running",
+                        "tool_started": identity["tool"],
+                        "title": identity["title"],
+                        "call_id": identity["call_id"],
+                        "state": identity["state"],
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -2207,11 +2242,24 @@ class HarnessService:
                     "session_id": session_id,
                     "message_id": message_id,
                     "delta": {
-                        "tool_completed": event.get("tool", ""),
-                        "call_id": event.get("call_id", ""),
-                        "output": event.get("output", ""),
-                        "attachments": select_persisted_tool_attachments(
-                            _event_tool_attachments(event)
+                        "tool_completed": _socket_text(
+                            event.get("tool")
+                            or ((part.input or {}).get("tool", "") if part else ""),
+                            limit=100,
+                        ),
+                        "title": _socket_text(
+                            event.get("title") or (part.title if part else ""),
+                            limit=240,
+                        ),
+                        "call_id": _socket_text(
+                            event.get("call_id") or (part.call_id if part else ""),
+                            limit=255,
+                        ),
+                        "state": "completed",
+                        **(
+                            {"display": dict(part.display or {})}
+                            if part is not None
+                            else {}
                         ),
                     },
                     "step": event.get("step"),
@@ -2228,8 +2276,14 @@ class HarnessService:
                     "session_id": session_id,
                     "message_id": message_id,
                     "delta": {
-                        "tool_error": event.get("error", ""),
-                        "call_id": event.get("call_id", ""),
+                        "tool_error": "Tool failed",
+                        "call_id": _socket_text(event.get("call_id", ""), limit=255),
+                        "state": "error",
+                        **(
+                            {"display": dict(part.display or {})}
+                            if part is not None
+                            else {}
+                        ),
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id) if part is not None else None,
@@ -2267,10 +2321,9 @@ class HarnessService:
             # plan, never the final assistant answer). Persisted as an
             # ``agent`` card part so the frontend renders it; the child
             # run's assistant message keeps only the final status text.
-            # The full plan stays in ``output`` (backcompat); safe,
-            # non-executable summaries live in ``meta["agent_meta"]`` and
-            # ride the existing live event as ``delta.agent_meta`` (the
-            # ``delta.agent`` contract is unchanged). Raw ``exec_code``
+            # The full plan stays in ``output`` for explicit part-detail
+            # fetches; only bounded safe summaries in ``display.agent_meta``
+            # and ``display.summary`` reach the live socket. Raw ``exec_code``
             # and materialized coordinates are never persisted.
             delta = event.get("delta", {}) or {}
             plan = str(delta.get("plan", "") or "")
@@ -2294,13 +2347,21 @@ class HarnessService:
                         "agent_meta": agent_meta,
                     },
                 )
+                safe_agent_meta = dict(part.display.get("agent_meta", {}))
+                safe_summary = _socket_text(
+                    part.display.get("summary", ""), limit=240
+                )
                 await self._emit_frontend(
                     FRONTEND_EVENT_PART,
                     {
                         "workspace_id": workspace_id,
                         "session_id": session_id,
                         "message_id": message_id,
-                        "delta": {"agent": plan, "agent_meta": agent_meta},
+                        "delta": {
+                            "agent": safe_summary,
+                            "agent_meta": safe_agent_meta,
+                            "display": dict(part.display or {}),
+                        },
                         "step": event.get("step"),
                         "part_id": str(part.id),
                     },
@@ -2371,8 +2432,6 @@ class HarnessService:
                     "path": event.get("path", ""),
                     "step": event.get("step"),
                     "tool": event.get("tool", ""),
-                    "old_content": event.get("old_content", ""),
-                    "new_content": event.get("new_content", ""),
                 },
             )
             await self._emit_frontend(
@@ -2453,8 +2512,7 @@ class HarnessService:
                 )
                 run_ctx["text_part_id"] = str(part.id)
                 part_id = str(part.id)
-            part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
-            await sync_to_async(self.parts.append_output)(part, text)
+            await sync_to_async(self.parts.append_output_by_id)(part_id, text)
             await sync_to_async(self.messages.append_content)(assistant, text)
             touched_id = str(part_id)
         if reasoning:
@@ -2469,8 +2527,7 @@ class HarnessService:
                 )
                 run_ctx["reasoning_part_id"] = str(part.id)
                 part_id = str(part.id)
-            part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
-            await sync_to_async(self.parts.append_output)(part, reasoning)
+            await sync_to_async(self.parts.append_output_by_id)(part_id, reasoning)
             touched_id = str(part_id)
         return touched_id
 
@@ -2587,12 +2644,14 @@ class HarnessService:
         # Refresh title/arguments observed at start (queued row may only
         # have had provisional values).
         part.title = str(event.get("title", "") or part.title)
-        part.input = {
-            "tool": event.get("tool", "") or (part.input or {}).get("tool", ""),
-            "arguments": event.get("arguments", "")
-            or (part.input or {}).get("arguments", ""),
-        }
-        await sync_to_async(part.save)(update_fields=["title", "input", "updated_at"])
+        await sync_to_async(self.parts.set_input)(
+            part,
+            {
+                "tool": event.get("tool", "") or (part.input or {}).get("tool", ""),
+                "arguments": event.get("arguments", "")
+                or (part.input or {}).get("arguments", ""),
+            },
+        )
         return part
 
     async def _lookup_tool_part(
@@ -2656,9 +2715,9 @@ class HarnessService:
         """Transition the matching tool part to completed/error.
 
         ``tool_completed`` events persist sanitized attachments into
-        ``HarnessPart.meta["attachments"]`` (no DB migration): text
-        output stays in ``output`` while image/PDF bytes survive restarts
-        via ``meta`` and are rehydrated in :meth:`_build_history`.
+        ``HarnessPart.meta["attachments"]`` and full output in ``output``;
+        image/PDF bytes survive restarts and are rehydrated in
+        :meth:`_build_history`. These full details never enter socket deltas.
         ``mark_state`` merges ``meta`` (existing keys like ``step`` from
         the ``tool_started`` part are preserved). Tool *results* never
         create a new part: completion only updates the queued/started row;

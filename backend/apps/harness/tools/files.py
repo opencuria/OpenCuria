@@ -216,11 +216,20 @@ def _patch_metadata(
     unified = "\n".join(diff_lines)
     if not unified and old_text != new_text:
         unified = f"--- a/{path}\n+++ b/{path}\n(content changed)"
+    diff_lines = unified.splitlines()
     return {
         "path": path,
-        "old_content": old_text,
-        "new_content": new_text,
         "unified_diff": unified,
+        "additions": sum(
+            1
+            for line in diff_lines
+            if line.startswith("+") and not line.startswith("+++")
+        ),
+        "deletions": sum(
+            1
+            for line in diff_lines
+            if line.startswith("-") and not line.startswith("---")
+        ),
     }
 
 
@@ -443,6 +452,12 @@ class WriteTool(Tool):
             old_text = ""
             try:
                 stored = await ctx.accessor.read_file(safe_path)
+                if stored.truncated:
+                    raise ToolError(
+                        f"Refusing to overwrite {args.path}: existing file "
+                        "read was truncated",
+                        tool=self.name,
+                    )
                 if not _is_binary(stored.content):
                     old_text = stored.content.decode("utf-8", errors="replace")
             except RunnerAccessorError:
@@ -489,6 +504,11 @@ class EditTool(Tool):
                 stored = await ctx.accessor.read_file(safe_path)
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
+            if stored.truncated:
+                raise ToolError(
+                    f"Refusing to edit {args.path}: existing file read was truncated",
+                    tool=self.name,
+                )
             if _is_binary(stored.content):
                 raise ToolError(
                     f"Refusing to edit binary file: {args.path}",

@@ -34,9 +34,7 @@ describe('HarnessPatchCard', () => {
     const wrapper = mount(HarnessPatchCard, {
       props: { part: makePart('--- a/a.txt\n+++ b/a.txt\n-old\n+new\n+also') },
     })
-    expect(wrapper.get('[data-testid="harness-patch-name"]').text()).toBe(
-      'CommandPalette.vue',
-    )
+    expect(wrapper.get('[data-testid="harness-patch-name"]').text()).toBe('CommandPalette.vue')
     expect(wrapper.get('[data-testid="harness-patch-additions"]').text()).toBe('+2')
     expect(wrapper.get('[data-testid="harness-patch-deletions"]').text()).toBe('-1')
   })
@@ -49,6 +47,27 @@ describe('HarnessPatchCard', () => {
     expect(rows).toHaveLength(4)
     expect(wrapper.text()).toContain('<Dialog :open')
     expect(wrapper.text()).not.toContain('more')
+  })
+
+  it('renders the timeline preview eagerly without including the complete patch', () => {
+    const wrapper = mount(HarnessPatchCard, {
+      props: {
+        part: {
+          ...makePart(''),
+          output: '',
+          detail_loaded: false,
+          display: {
+            path: '/workspace/CommandPalette.vue',
+            additions: 8,
+            deletions: 2,
+            preview: [{ type: 'add', oldNo: null, newNo: 4, content: 'preview only' }],
+          },
+        },
+      },
+    })
+    expect(wrapper.text()).toContain('preview only')
+    expect(wrapper.get('[data-testid="harness-patch-additions"]').text()).toBe('+8')
+    expect(wrapper.find('[data-diff-type]').exists()).toBe(true)
   })
 
   it('expands to the remaining diff lines', async () => {

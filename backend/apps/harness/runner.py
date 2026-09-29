@@ -706,8 +706,6 @@ class HarnessRunner:
                     "title": f"Patch {result.metadata.get('path', call.name)}",
                     "path": result.metadata.get("path", ""),
                     "unified_diff": result.metadata.get("unified_diff", ""),
-                    "old_content": result.metadata.get("old_content", ""),
-                    "new_content": result.metadata.get("new_content", ""),
                 }
             )
         if tool_key == "todowrite":

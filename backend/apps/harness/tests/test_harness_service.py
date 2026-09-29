@@ -1200,6 +1200,7 @@ async def test_tool_completed_event_persists_attachments_in_meta(
     ]
     # tool_started meta (step) survives the completed merge (no replace).
     assert parts[0].meta.get("step") == 1
+    assert parts[0].display["tool"] == "read"
     completed_deltas = [
         item.get("delta", {})
         for item in events
@@ -1207,14 +1208,176 @@ async def test_tool_completed_event_persists_attachments_in_meta(
         and "tool_completed" in (item.get("delta") or {})
     ]
     assert completed_deltas
-    assert completed_deltas[0]["attachments"] == [
+    assert completed_deltas[0]["tool_completed"] == "read"
+    assert completed_deltas[0]["display"]["tool"] == "read"
+    assert "output" not in completed_deltas[0]
+    assert "attachments" not in completed_deltas[0]
+    assert big not in str(events)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_large_tool_payloads_and_agent_plan_are_not_emitted(
+    harness_workspace,
+) -> None:
+    """Live deltas stay small while the persisted part retains full detail."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+
+    secret = "WRITE-CONTENT-SHOULD-STAY-SERVER-SIDE"
+    arguments = json.dumps({"path": "/workspace/large.py", "content": secret * 4000})
+    attachment_data = "A" * 160_000
+    await service._on_runner_event(
+        session,
+        assistant,
         {
-            "type": "file",
-            "mime": "image/png",
-            "url": f"data:image/png;base64,{big}",
-            "filename": "cat.png",
-        }
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "title": "Write /workspace/large.py",
+            "arguments": arguments,
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "title": "Write /workspace/large.py",
+            "arguments": arguments,
+        },
+    )
+    output = "TOOL-OUTPUT-SECRET-" * 12_000
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "output": output,
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": f"data:image/png;base64,{attachment_data}",
+                    "filename": "large.png",
+                }
+            ],
+        },
+    )
+
+    plan = (
+        "(Previous action verification)\nVerified.\n"
+        "(Screenshot Analysis)\nAGENT-PLAN-SECRET-" + "P" * 10_000 + "\n"
+        "(Next Action)\nContinue safely.\n"
+        "(Grounded Action)\n```python\nagent.wait()\n```"
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 2}
+    )
+
+    stored = HarnessPartRepository.list_for_message(assistant.id)
+    tool_part = next(part for part in stored if part.type == "tool")
+    agent_part = next(part for part in stored if part.type == "agent")
+    assert tool_part.input["arguments"] == arguments
+    assert tool_part.output == output
+    assert tool_part.meta["attachments"][0]["url"].endswith(attachment_data)
+    assert agent_part.output == plan
+
+    socket_json = json.dumps(events)
+    assert len(socket_json) < 20_000
+    for private in (secret, attachment_data, output, plan):
+        assert private not in socket_json
+    tool_deltas = [
+        item["delta"]
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and any(
+            key in item.get("delta", {})
+            for key in ("tool_started", "tool_completed")
+        )
     ]
+    assert [delta["state"] for delta in tool_deltas] == [
+        "pending",
+        "running",
+        "completed",
+    ]
+    assert all("arguments" not in delta for delta in tool_deltas)
+    assert all(
+        "output" not in delta and "attachments" not in delta for delta in tool_deltas
+    )
+    agent_delta = next(
+        item["delta"]
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "agent" in item.get("delta", {})
+    )
+    assert agent_delta["agent"] == agent_part.display["summary"]
+    assert agent_delta["display"] == agent_part.display
+    assert len(agent_delta["agent"]) <= 240
+    assert agent_delta["agent"] != plan
+    assert "agent.wait()" not in socket_json
+    assert "exec_code" not in socket_json
+    assert len(json.dumps(agent_delta)) < 4000
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_error_socket_payload_is_bounded_and_sanitized(
+    harness_workspace,
+) -> None:
+    """An error does not forward potentially untrusted tool output verbatim."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    error = "ERROR-SECRET-" + "x" * 20_000
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "failed-call",
+            "tool": "bash",
+            "title": "Run command",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_error",
+            "step": 1,
+            "call_id": "failed-call",
+            "tool": "bash",
+            "error": error,
+        },
+    )
+    failure = next(
+        item["delta"]
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_error" in item.get("delta", {})
+    )
+    assert failure["tool_error"] == "Tool failed"
+    assert failure["state"] == "error"
+    assert len(json.dumps(failure)) < 1000
+    assert error not in json.dumps(events)
+    part = HarnessPartRepository.list_for_message(assistant.id)[0]
+    assert part.output == error
+    assert part.state == "error"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2328,9 +2491,34 @@ async def test_agent_event_persists_meta_and_forwards_agent_meta(
         and "agent" in (item.get("delta") or {})
     ]
     assert len(forwarded) == 1
-    assert forwarded[0]["delta"]["agent"] == plan
-    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
-    assert forwarded[0]["step"] == 3
+    expected_agent_meta = {
+        "verification": "It worked.",
+        "analysis": "Desktop shown.",
+        "next_action": "Click save.",
+        "action": 'click "The save button in the dialog"',
+        "action_kind": "click",
+    }
+    agent_part = agent_parts[0]
+    assert forwarded[0] == {
+        "event": FRONTEND_EVENT_PART,
+        "workspace_id": str(session.workspace_id),
+        "session_id": str(session.id),
+        "message_id": str(assistant.id),
+        "delta": {
+            "agent": "Desktop shown.",
+            "agent_meta": expected_agent_meta,
+            "display": {
+                "summary": "Desktop shown.",
+                "agent_meta": expected_agent_meta,
+                "step": 3,
+            },
+        },
+        "step": 3,
+        "part_id": str(agent_part.id),
+        "part_position": agent_part.position,
+    }
+    assert forwarded[0]["delta"]["display"] == agent_part.display
+    assert plan not in str(forwarded[0])
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2395,6 +2583,8 @@ async def test_agent_event_ignores_injected_agent_meta(harness_workspace) -> Non
     ]
     assert len(forwarded) == 1
     assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
+    assert forwarded[0]["delta"]["agent"] == "Desktop shown."
+    assert plan not in str(forwarded[0])
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2439,7 +2629,8 @@ async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None
     ]
     assert len(forwarded) == 1
     assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
-    assert secret not in str(forwarded[0]["delta"]["agent_meta"])
+    assert forwarded[0]["delta"]["agent"] == "A password field is focused."
+    assert secret not in str(forwarded[0])
 
 
 # ---------------------------------------------------------------------------

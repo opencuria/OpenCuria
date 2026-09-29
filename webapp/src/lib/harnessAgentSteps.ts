@@ -38,7 +38,7 @@ function textOf(value: unknown): string {
 
 /** Defensive read of `part.meta.agent_meta` (nested object, strings only). */
 export function readAgentMeta(part: HarnessPart): HarnessAgentMeta {
-  const raw = part.meta?.['agent_meta']
+  const raw = part.meta?.['agent_meta'] ?? part.display?.agent_meta
   const empty: HarnessAgentMeta = {
     verification: '',
     analysis: '',
@@ -59,7 +59,7 @@ export function readAgentMeta(part: HarnessPart): HarnessAgentMeta {
 
 /** Step number from `meta.step` (finite numbers only). */
 export function agentStepNumber(part: HarnessPart): number | null {
-  const step = part.meta?.['step']
+  const step = part.meta?.['step'] ?? part.display?.step
   if (typeof step === 'number' && Number.isFinite(step)) return step
   return null
 }
@@ -74,7 +74,7 @@ export function hasStructuredAgentMeta(part: HarnessPart): boolean {
 function isStepErrorTool(part: HarnessPart, step: number | null): boolean {
   if (part.type !== 'tool' || part.state !== 'error') return false
   if (step === null) return false
-  const toolStep = part.meta?.['step']
+  const toolStep = part.meta?.['step'] ?? part.display?.step
   return typeof toolStep === 'number' && toolStep === step
 }
 
@@ -99,10 +99,14 @@ export function agentStepStatus(
   if (step !== null) {
     if (parts.some((candidate) => isStepErrorTool(candidate, step))) return 'error'
     const hasFinish = parts.some(
-      (candidate) => candidate.type === 'step-finish' && candidate.meta?.['step'] === step,
+      (candidate) =>
+        candidate.type === 'step-finish' &&
+        (candidate.meta?.['step'] ?? candidate.display?.step) === step,
     )
     const hasStart = parts.some(
-      (candidate) => candidate.type === 'step-start' && candidate.meta?.['step'] === step,
+      (candidate) =>
+        candidate.type === 'step-start' &&
+        (candidate.meta?.['step'] ?? candidate.display?.step) === step,
     )
     const agentSteps = parts
       .filter((candidate) => candidate.type === 'agent')
@@ -160,6 +164,8 @@ export function agentPrimaryAction(part: HarnessPart): { text: string; legacy: b
     }
     return { text: trimmed, legacy: false }
   }
+  const displaySummary = textOf(part.display?.summary)
+  if (displaySummary) return { text: displaySummary, legacy: false }
   if (meta.next_action) {
     const firstLine = meta.next_action
       .split('\n')
@@ -247,7 +253,7 @@ export function buildAgentStepViews(
 export function hasRunningAgentSequence(parts: HarnessPart[]): boolean {
   const steps = new Set<number>()
   for (const part of parts) {
-    const step = part.meta?.['step']
+    const step = part.meta?.['step'] ?? part.display?.step
     if (typeof step !== 'number' || !Number.isFinite(step)) continue
     if (part.type === 'step-start' || part.type === 'agent' || part.type === 'reasoning') {
       steps.add(step)
@@ -255,16 +261,19 @@ export function hasRunningAgentSequence(parts: HarnessPart[]): boolean {
   }
   for (const step of steps) {
     const finished = parts.some(
-      (part) => part.type === 'step-finish' && part.meta?.['step'] === step,
+      (part) => part.type === 'step-finish' && (part.meta?.['step'] ?? part.display?.step) === step,
     )
     if (finished) continue
     const started = parts.some(
       (part) =>
-        (part.type === 'step-start' || part.type === 'agent') && part.meta?.['step'] === step,
+        (part.type === 'step-start' || part.type === 'agent') &&
+        (part.meta?.['step'] ?? part.display?.step) === step,
     )
     const liveReasoning = parts.some(
       (part) =>
-        part.type === 'reasoning' && part.state === 'running' && part.meta?.['step'] === step,
+        part.type === 'reasoning' &&
+        part.state === 'running' &&
+        (part.meta?.['step'] ?? part.display?.step) === step,
     )
     if (started || liveReasoning) return true
   }

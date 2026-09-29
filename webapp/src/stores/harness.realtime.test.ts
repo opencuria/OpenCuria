@@ -6,6 +6,7 @@ import {
   listHarnessParts,
   listHarnessSessions,
   sendHarnessMessage,
+  getHarnessPart,
 } from '@/services/harness.api'
 import type { HarnessMessage, HarnessSession } from '@/types/harness'
 
@@ -15,6 +16,7 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     listHarnessParts: vi.fn().mockResolvedValue({ session: {}, messages: [] }),
+    getHarnessPart: vi.fn(),
     listHarnessTodos: vi.fn().mockResolvedValue([]),
     listHarnessSessions: vi.fn().mockResolvedValue([]),
     sendHarnessMessage: vi.fn(),
@@ -29,6 +31,7 @@ vi.mock('@/stores/notifications', () => ({
 const partsMock = vi.mocked(listHarnessParts)
 const sessionsMock = vi.mocked(listHarnessSessions)
 const sendMock = vi.mocked(sendHarnessMessage)
+const partDetailMock = vi.mocked(getHarnessPart)
 
 function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
   return {
@@ -65,6 +68,183 @@ describe('harness store realtime reliability', () => {
     sessionsMock.mockResolvedValue([])
   })
 
+  it('reconstructs assistant content from timeline text parts and lazily loads one detail', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    partsMock.mockResolvedValueOnce({
+      session: makeSession(),
+      messages: [
+        {
+          ...makeMessage({ id: 'assistant-1', role: 'assistant', content: '', position: 1 }),
+          parts: [
+            {
+              id: 'text-1',
+              session_id: 'session-1',
+              type: 'text',
+              state: 'completed',
+              title: '',
+              output: 'Answer',
+              detail_loaded: true,
+            },
+            {
+              id: 'tool-1',
+              session_id: 'session-1',
+              type: 'tool',
+              state: 'completed',
+              title: 'Read file',
+              tool: 'read',
+              output: '',
+              display: { tool: 'read' },
+              detail_loaded: false,
+            },
+            {
+              id: 'patch-1',
+              session_id: 'session-1',
+              type: 'patch',
+              state: 'completed',
+              title: '/a.ts',
+              output: '',
+              display: {
+                path: '/a.ts',
+                preview: [{ type: 'add', oldNo: null, newNo: 1, content: 'new' }],
+                additions: 1,
+                deletions: 0,
+              },
+              detail_loaded: false,
+            },
+          ],
+        },
+      ],
+    })
+    store.setActiveSession('session-1')
+    await store.fetchParts('session-1')
+    expect(store.messagesBySession['session-1']?.[0]?.content).toBe('Answer')
+    const tool = store.messagesBySession['session-1']?.[0]?.parts.find(
+      (part) => part.id === 'tool-1',
+    )!
+    partDetailMock.mockResolvedValueOnce({
+      id: 'tool-1',
+      session_id: 'session-1',
+      type: 'tool',
+      state: 'completed',
+      title: 'Read file',
+      tool: 'read',
+      input: { tool: 'read', arguments: '{}' },
+      output: 'full output',
+      meta: {},
+      detail_loaded: true,
+    })
+    const first = store.fetchPartDetail('session-1', 'tool-1')
+    const second = store.fetchPartDetail('session-1', 'tool-1')
+    await Promise.all([first, second])
+    expect(partDetailMock).toHaveBeenCalledTimes(1)
+    expect(tool.output).toBe('full output')
+    expect(
+      store.messagesBySession['session-1']?.[0]?.parts.find((part) => part.id === 'patch-1')
+        ?.output,
+    ).toBe('')
+  })
+
+  it('allows detail fetch for completed parts in a busy session, but not running parts', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-1')
+    store.messagesBySession['session-1'] = [
+      makeMessage({
+        role: 'assistant',
+        parts: [
+          {
+            id: 'done',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'completed',
+            title: 'Read',
+            output: '',
+            detail_loaded: false,
+          },
+          {
+            id: 'running',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'running',
+            title: 'Read',
+            output: '',
+            detail_loaded: false,
+          },
+        ],
+      }),
+    ]
+    partDetailMock.mockResolvedValueOnce({ id: 'done', output: 'full result' } as Awaited<
+      ReturnType<typeof getHarnessPart>
+    >)
+    expect(await store.fetchPartDetail('session-1', 'running')).toBe(false)
+    expect(await store.fetchPartDetail('session-1', 'done')).toBe(true)
+    expect(partDetailMock).toHaveBeenCalledTimes(1)
+    expect(store.messagesBySession['session-1']?.[0]?.parts[0]?.output).toBe('full result')
+  })
+
+  it('does not discard opened historical details on a follow-up busy status', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    store.messagesBySession['session-1'] = [
+      makeMessage({
+        role: 'assistant',
+        parts: [
+          {
+            id: 'opened',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'completed',
+            title: 'Read',
+            output: 'full',
+            input: { arguments: '{}' },
+            detail_loaded: true,
+          },
+        ],
+      }),
+    ]
+    store.handleSessionStatus('session-1', 'busy', { message_id: 'fresh' })
+    expect(store.messagesBySession['session-1']?.[0]?.parts[0]).toMatchObject({
+      output: 'full',
+      detail_loaded: true,
+      input: { arguments: '{}' },
+    })
+  })
+
+  it('does not write lazy detail after switching active sessions', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ id: 'session-1' }), makeSession({ id: 'session-2' })]
+    store.setActiveSession('session-1')
+    store.messagesBySession['session-1'] = [
+      makeMessage({
+        role: 'assistant',
+        parts: [
+          {
+            id: 'p1',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'completed',
+            title: 'tool',
+            output: '',
+            detail_loaded: false,
+          },
+        ],
+      }),
+    ]
+    let finish!: (part: Awaited<ReturnType<typeof getHarnessPart>>) => void
+    partDetailMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+    )
+    const request = store.fetchPartDetail('session-1', 'p1')
+    store.setActiveSession('session-2')
+    finish({ id: 'p1', output: 'stale details' } as Awaited<ReturnType<typeof getHarnessPart>>)
+    await request
+    expect(store.messagesBySession['session-1']?.[0]?.parts[0]?.output).toBe('')
+  })
+
   it('routes a fresh turn by message_id instead of the previous answer', () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ status: 'busy' })]
@@ -75,7 +255,14 @@ describe('harness store realtime reliability', () => {
         role: 'assistant',
         content: 'old answer',
         parts: [
-          { id: 'part-old', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'old answer' },
+          {
+            id: 'part-old',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'old answer',
+          },
         ],
         position: 1,
       }),
@@ -84,12 +271,12 @@ describe('harness store realtime reliability', () => {
 
     store.handlePartUpdated('session-1', { text: 'new' }, { messageId: 'assistant-new' })
 
-    expect(store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content).toBe(
-      'old answer',
-    )
-    expect(store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-new')?.content).toBe(
-      'new',
-    )
+    expect(
+      store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content,
+    ).toBe('old answer')
+    expect(
+      store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-new')?.content,
+    ).toBe('new')
   })
 
   it('drops late stale events for a completed turn (latest turn untouched)', () => {
@@ -110,8 +297,12 @@ describe('harness store realtime reliability', () => {
 
     store.handlePartUpdated('session-1', { text: 'stale' }, { messageId: 'assistant-old' })
 
-    expect(store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content).toBe('old')
-    expect(store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-new')?.content).toBe('')
+    expect(
+      store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content,
+    ).toBe('old')
+    expect(
+      store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-new')?.content,
+    ).toBe('')
   })
 
   it('anchors the busy shell after the optimistic follow-up user', () => {
@@ -119,7 +310,12 @@ describe('harness store realtime reliability', () => {
     store.sessions = [makeSession({ status: 'idle' })]
     store.messagesBySession['session-1'] = [
       makeMessage({ id: 'user-1', content: 'first' }),
-      makeMessage({ id: 'assistant-1', role: 'assistant', content: 'done', completed_at: '2026-03-29T10:00:00.000Z' }),
+      makeMessage({
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'done',
+        completed_at: '2026-03-29T10:00:00.000Z',
+      }),
       makeMessage({ id: 'local-user-session-1-7', content: 'follow up' }),
     ]
 
@@ -162,7 +358,11 @@ describe('harness store realtime reliability', () => {
     store.sessions = [makeSession({ status: 'busy' })]
     store.messagesBySession['session-1'] = [makeMessage({ id: 'user-1' })]
 
-    store.handlePartUpdated('session-1', { text: 'before ' }, { partId: 'text-1', messageId: 'assistant-1' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'before ' },
+      { partId: 'text-1', messageId: 'assistant-1' },
+    )
     store.handlePartUpdated(
       'session-1',
       { tool_started: 'read', title: 'Read', call_id: 'c1', queued: true },
@@ -173,7 +373,11 @@ describe('harness store realtime reliability', () => {
       { tool_completed: 'read', call_id: 'c1', output: 'body' },
       { partId: 'tool-1', messageId: 'assistant-1' },
     )
-    store.handlePartUpdated('session-1', { text: 'after' }, { partId: 'text-2', messageId: 'assistant-1' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'after' },
+      { partId: 'text-2', messageId: 'assistant-1' },
+    )
 
     const assistant = store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-1')
     expect(assistant?.parts.map((p) => p.type)).toEqual(['text', 'tool', 'text'])
@@ -217,7 +421,14 @@ describe('harness store realtime reliability', () => {
         role: 'assistant',
         content: 'Hello world streamed',
         parts: [
-          { id: 'text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello world streamed' },
+          {
+            id: 'text-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello world streamed',
+          },
         ],
         position: 1,
       }),
@@ -231,7 +442,14 @@ describe('harness store realtime reliability', () => {
           role: 'assistant',
           content: 'Hello',
           parts: [
-            { id: 'text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello' },
+            {
+              id: 'text-1',
+              session_id: 'session-1',
+              type: 'text',
+              state: 'running',
+              title: '',
+              output: 'Hello',
+            },
           ],
           position: 1,
         }),
@@ -247,7 +465,9 @@ describe('harness store realtime reliability', () => {
   it('hydrates the server user and assistant ids on follow-up (even for repeated prompts)', async () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ status: 'idle' })]
-    store.messagesBySession['session-1'] = [makeMessage({ id: 'user-1', content: 'repeat', position: 0 })]
+    store.messagesBySession['session-1'] = [
+      makeMessage({ id: 'user-1', content: 'repeat', position: 0 }),
+    ]
     sendMock.mockResolvedValueOnce(makeSession({ status: 'busy' }))
     partsMock.mockResolvedValueOnce({
       session: makeSession({ status: 'busy' }),
@@ -262,7 +482,10 @@ describe('harness store realtime reliability', () => {
     await store.sendMessage('session-1', 'repeat')
 
     expect(store.messagesBySession['session-1']?.map((m) => m.id)).toEqual([
-      'user-1', 'assistant-1', 'user-2', 'assistant-2',
+      'user-1',
+      'assistant-1',
+      'user-2',
+      'assistant-2',
     ])
   })
 
@@ -309,12 +532,19 @@ describe('idle snapshot reconciliation', () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ status: 'busy' })]
     let finishBusy: (value: Awaited<ReturnType<typeof listHarnessParts>>) => void = () => {}
-    partsMock.mockImplementationOnce(() => new Promise((resolve) => { finishBusy = resolve }))
+    partsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishBusy = resolve
+        }),
+    )
     const busy = store.fetchParts('session-1')
     store.handleSessionStatus('session-1', 'idle', { message_id: 'answer-id' })
     partsMock.mockResolvedValueOnce({
       session: makeSession({ status: 'idle' }),
-      messages: [makeMessage({ id: 'answer-id', role: 'assistant', content: 'final', position: 1 })],
+      messages: [
+        makeMessage({ id: 'answer-id', role: 'assistant', content: 'final', position: 1 }),
+      ],
     })
     const settled = store.refreshPartsAfterIdle('session-1')
     expect(partsMock).toHaveBeenCalledTimes(1)

@@ -6,10 +6,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
 import { listHarnessSessions, markHarnessSessionRead } from '@/services/harness.api'
-import {
-  armComposerTransition,
-  clearComposerTransition,
-} from '@/lib/composerTransition'
+import { armComposerTransition, clearComposerTransition } from '@/lib/composerTransition'
 import type { HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/socket', () => ({
@@ -55,8 +52,7 @@ vi.mock('@/stores/skills', () => ({
 
 const HarnessChatInputStub = {
   name: 'HarnessChatInput',
-  template:
-    '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
+  template: '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
   props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag'],
   emits: ['prefill'],
   methods: {
@@ -516,6 +512,36 @@ describe('HarnessChatPanel', () => {
     expect(router.currentRoute.value.query.session).toBe('session-child')
   })
 
+  it('remounts the transcript component when selecting a different history', async () => {
+    const TranscriptProbe = {
+      name: 'HarnessChatContainer',
+      props: ['messages'],
+      template: '<div data-testid="transcript-probe" />',
+    }
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: {
+        plugins: [router],
+        stubs: { ...stubs, HarnessChatContainer: TranscriptProbe },
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession(),
+      makeSession({ id: 'session-child', parent_id: 'session-root' }),
+    ]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+    const firstInstance = wrapper.findComponent(TranscriptProbe).vm.$.uid
+
+    store.setActiveSession('session-child')
+    await wrapper.vm.$nextTick()
+    const secondInstance = wrapper.findComponent(TranscriptProbe).vm.$.uid
+    expect(secondInstance).not.toBe(firstInstance)
+  })
+
   it('opens a subtask immediately even if that session is not listed yet', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
@@ -745,10 +771,12 @@ describe('HarnessChatPanel', () => {
     await flushPromises()
 
     const input = wrapper.findComponent(HarnessChatInputStub)
-    const uploadSpy = vi.spyOn(
-      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
-      'uploadChatFiles',
-    ).mockResolvedValue(undefined)
+    const uploadSpy = vi
+      .spyOn(
+        input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+        'uploadChatFiles',
+      )
+      .mockResolvedValue(undefined)
     const zone = wrapper.find('[data-testid="harness-chat-dropzone"]')
     expect(zone.exists()).toBe(true)
     zone.element.dispatchEvent(makeDropEvent([new File(['hi'], 'drop.txt')]))
@@ -775,10 +803,12 @@ describe('HarnessChatPanel', () => {
     await flushPromises()
 
     const input = wrapper.findComponent(HarnessChatInputStub)
-    const uploadSpy = vi.spyOn(
-      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
-      'uploadChatFiles',
-    ).mockResolvedValue(undefined)
+    const uploadSpy = vi
+      .spyOn(
+        input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+        'uploadChatFiles',
+      )
+      .mockResolvedValue(undefined)
     const zone = wrapper.find('[data-testid="harness-chat-dropzone"]')
     // The composer card calls preventDefault + stopPropagation on drops it
     // handles; such an event bubbling up must not upload a second time.
@@ -824,10 +854,12 @@ describe('HarnessChatPanel', () => {
 
     await wrapper.setProps({ canPrompt: false })
     const input = wrapper.findComponent(HarnessChatInputStub)
-    const uploadSpy = vi.spyOn(
-      input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
-      'uploadChatFiles',
-    ).mockResolvedValue(undefined)
+    const uploadSpy = vi
+      .spyOn(
+        input.vm as unknown as { uploadChatFiles: (files: File[] | FileList) => Promise<void> },
+        'uploadChatFiles',
+      )
+      .mockResolvedValue(undefined)
     zone.element.dispatchEvent(makeDropEvent([new File(['hi'], 'drop.txt')]))
     await flushPromises()
     expect(uploadSpy).not.toHaveBeenCalled()
@@ -949,7 +981,12 @@ describe('HarnessChatPanel', () => {
     ]
     vi.mocked(listHarnessSessions).mockResolvedValueOnce([
       makeSession(),
-      makeSession({ id: 'session-child', parent_id: 'session-root', title: 'subtask', agent_name: 'explore' }),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'subtask',
+        agent_name: 'explore',
+      }),
     ])
     await store.fetchSessions('ws-1')
     await wrapper.vm.$nextTick()

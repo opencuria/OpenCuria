@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 import { mount } from '@vue/test-utils'
 
 import HarnessQuestionCard from './HarnessQuestionCard.vue'
@@ -86,6 +87,43 @@ describe('HarnessQuestionCard', () => {
 
     expect(wrapper.get('[data-testid="harness-question-card-status"]').text()).toBe('Skipped')
     expect(wrapper.text()).toContain('Which mode?')
+  })
+
+  it('renders bounded live question rows and generic error status without opening detail', () => {
+    const request = vi.fn().mockResolvedValue(true)
+    const wrapper = mount(HarnessQuestionCard, {
+      props: {
+        part: makePart({
+          state: 'error',
+          output: 'Tool failed',
+          detail_loaded: false,
+          display: { tool: 'question', question_rows: [{ question: 'Continue?', answer: '' }] },
+          input: { tool: 'question' },
+        }),
+      },
+      global: { provide: { [requestHarnessPartDetailKey as symbol]: request } },
+    })
+    expect(wrapper.text()).toContain('Continue?')
+    expect(wrapper.get('[data-testid="harness-question-card-status"]').text()).toBe('Failed')
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('uses the full fetched question detail after the compact preview hydrates', () => {
+    const wrapper = mount(HarnessQuestionCard, {
+      props: {
+        part: makePart({
+          detail_loaded: true,
+          display: { tool: 'question', question_rows: [{ question: 'Short?', answer: 'yes' }] },
+          input: {
+            arguments: JSON.stringify({ questions: [{ question: 'The complete question?' }] }),
+          },
+          output: '{"answers":["A detailed answer"]}',
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('The complete question?')
+    expect(wrapper.text()).toContain('A detailed answer')
+    expect(wrapper.text()).not.toContain('Short?')
   })
 
   it('marks a timed-out question as timed out', () => {

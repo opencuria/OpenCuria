@@ -197,11 +197,7 @@ function findToolPart(message: HarnessMessage, callId?: string): HarnessPart | u
   return message.parts.find((p) => p.type === 'tool' && p.call_id === callId)
 }
 
-function ensureTextPart(
-  message: HarnessMessage,
-  sessionId: string,
-  partId?: string,
-): HarnessPart {
+function ensureTextPart(message: HarnessMessage, sessionId: string, partId?: string): HarnessPart {
   if (partId) {
     const byId = message.parts.find((p) => p.id === partId)
     if (byId && byId.type === 'text') return byId
@@ -237,9 +233,7 @@ function ensureReasoningPart(
       return byId
     }
   }
-  const part = message.parts.find(
-    (p) => p.type === 'reasoning' && p.state === 'running',
-  )
+  const part = message.parts.find((p) => p.type === 'reasoning' && p.state === 'running')
   if (part) {
     if (opts.partId && isLocalId(part.id)) part.id = opts.partId
     if (opts.step !== undefined) part.meta = { ...part.meta, step: opts.step }
@@ -284,7 +278,7 @@ const STEP_IDENTITY_TYPES: ReadonlySet<HarnessPartType> = new Set([
 
 /** Step number carried by a part (`meta.step` or `delta.step_*` markers). */
 function partStepNumber(part: HarnessPart): number | undefined {
-  const metaStep = toStepNumber(part.meta?.['step'])
+  const metaStep = toStepNumber(part.meta?.['step'] ?? part.display?.step)
   if (metaStep !== undefined) return metaStep
   if (part.type === 'step-start' || part.type === 'step-finish') {
     const titleStep = /step\s+(\d+)/i.exec(part.title ?? '')
@@ -300,7 +294,7 @@ function sanitizeAgentMeta(value: unknown): Record<string, string> {
   const source = value as Record<string, unknown>
   for (const key of ['verification', 'analysis', 'next_action', 'action', 'action_kind']) {
     const entry = source[key]
-    if (typeof entry === 'string' && entry) out[key] = entry
+    if (typeof entry === 'string' && entry) out[key] = entry.slice(0, 240)
   }
   return out
 }
@@ -414,13 +408,17 @@ export function applyPartDelta(
       existing.tool = delta.tool_started || existing.tool
       existing.title = delta.title ?? existing.title ?? delta.tool_started
       existing.call_id = delta.call_id ?? existing.call_id
+      // Live socket start/queued payloads intentionally omit arguments.
+      // Preserve legacy arguments when a legacy event supplied them, but
+      // leave server-backed modern parts explicitly detail-incomplete.
       existing.input = {
-        ...(existing.input ?? {}),
+        ...existing.input,
         tool: delta.tool_started,
         ...(delta.arguments !== undefined ? { arguments: delta.arguments } : {}),
       }
       if (opts.step !== undefined) existing.meta = { ...existing.meta, step: opts.step }
       existing.state = resolveQueuedRepeatState(delta, existing.state)
+      existing.detail_loaded = false
     } else {
       // No known row for this tool: distinguish the initial queued
       // pre-emit (explicit pending/queued signal) from a legacy/actual
@@ -437,10 +435,11 @@ export function applyPartDelta(
         title: delta.title ?? delta.tool_started,
         input: {
           tool: delta.tool_started,
-          arguments: delta.arguments ?? '',
+          ...(delta.arguments !== undefined ? { arguments: delta.arguments } : {}),
         },
         output: '',
         meta: opts.step !== undefined ? { step: opts.step } : {},
+        detail_loaded: false,
       }
       message.parts.push(part)
     }
@@ -456,9 +455,19 @@ export function applyPartDelta(
     if (part) {
       if (opts.partId && isLocalId(part.id)) part.id = opts.partId
       part.state = 'completed'
-      if (delta.output) part.output = delta.output
+      part.tool = delta.tool_completed || part.tool
+      part.title = delta.title ?? part.title
+      part.call_id = delta.call_id ?? part.call_id
+      if (delta.output !== undefined) part.output = delta.output
+      if (delta.display) part.display = delta.display
       if (liveAttachments.length > 0) {
         part.meta = { ...part.meta, attachments: liveAttachments }
+      }
+      if (delta.display) {
+        part.detail_loaded = delta.output !== undefined || delta.attachments !== undefined
+      } else if (delta.output !== undefined || liveAttachments.length > 0) {
+        // Preserve compatibility with legacy deltas carrying full fields.
+        part.detail_loaded = true
       }
     } else {
       message.parts.push({
@@ -468,13 +477,19 @@ export function applyPartDelta(
         type: 'tool',
         state: 'completed',
         call_id: delta.call_id,
-        tool: delta.tool_completed,
-        title: delta.title ?? delta.tool_completed,
+        tool: delta.tool_completed || delta.display?.tool,
+        title: delta.title ?? delta.display?.summary ?? delta.tool_completed,
+        input: delta.display?.tool ? { tool: delta.display.tool } : {},
         output: delta.output ?? '',
+        ...(delta.display ? { display: delta.display } : {}),
         meta: {
           ...(opts.step !== undefined ? { step: opts.step } : {}),
           ...(liveAttachments.length > 0 ? { attachments: liveAttachments } : {}),
         },
+        detail_loaded:
+          delta.display && delta.output === undefined && delta.attachments === undefined
+            ? false
+            : true,
       })
     }
   }
@@ -488,7 +503,14 @@ export function applyPartDelta(
     if (part) {
       if (opts.partId && isLocalId(part.id)) part.id = opts.partId
       part.state = 'error'
+      part.call_id = delta.call_id ?? part.call_id
+      part.tool = delta.display?.tool ?? part.tool
+      part.title = delta.title ?? part.title
       part.output = delta.tool_error
+      if (delta.display) {
+        part.display = delta.display
+        part.detail_loaded = false
+      }
     } else {
       message.parts.push({
         id: opts.partId ?? nextLocalPartId(sessionId),
@@ -497,9 +519,13 @@ export function applyPartDelta(
         type: 'tool',
         state: 'error',
         call_id: delta.call_id,
-        title: delta.title ?? 'Tool failed',
+        tool: delta.display?.tool,
+        title: delta.title ?? delta.display?.summary ?? 'Tool failed',
+        input: delta.display?.tool ? { tool: delta.display.tool } : {},
         output: delta.tool_error,
+        ...(delta.display ? { display: delta.display } : {}),
         meta: opts.step !== undefined ? { step: opts.step } : {},
+        detail_loaded: delta.display ? false : undefined,
       })
     }
   }
@@ -553,12 +579,29 @@ export function applyPartDelta(
     // no per-event refetch is scheduled here.
     const step = toStepNumber(opts.step)
     const agentMeta = sanitizeAgentMeta(delta.agent_meta)
+    // The explicit `display` field is the protocol marker for a compact
+    // Agent-S projection. Never infer projection status from text equality:
+    // legacy full plan payloads can legitimately equal a parsed summary.
+    const safeSummary = String(
+      delta.display?.summary ?? agentMeta.analysis ?? agentMeta.next_action ?? 'Agent plan',
+    ).slice(0, 240)
+    const compactAgent = delta.display !== undefined
+    const display = compactAgent
+      ? {
+          ...delta.display,
+          summary: safeSummary,
+          ...(step !== undefined ? { step } : {}),
+          agent_meta: agentMeta,
+        }
+      : undefined
     const existing = opts.partId ? findPart(message, { partId: opts.partId }) : undefined
     if (existing) {
       existing.type = 'agent'
       existing.state = 'completed'
       existing.title = 'Agent plan'
       existing.output = delta.agent
+      existing.display = display
+      existing.detail_loaded = compactAgent ? false : true
       existing.meta = {
         ...existing.meta,
         ...(step !== undefined ? { step } : {}),
@@ -573,6 +616,8 @@ export function applyPartDelta(
         state: 'completed',
         title: 'Agent plan',
         output: delta.agent,
+        ...(display ? { display } : {}),
+        detail_loaded: compactAgent ? false : true,
         meta: {
           ...(step !== undefined ? { step } : {}),
           ...(Object.keys(agentMeta).length > 0 ? { agent_meta: agentMeta } : {}),
@@ -771,10 +816,6 @@ export function sortHarnessParts<T extends HarnessPart>(parts: T[]): T[] {
 
 // --- Busy reconciliation -----------------------------------------------------
 
-function findAssistantById(messages: HarnessMessage[], id: string): HarnessMessage | undefined {
-  return messages.find((m) => m.id === id && m.role === 'assistant')
-}
-
 /**
  * Merge one live assistant turn into its server snapshot row.
  *
@@ -798,11 +839,23 @@ function mergeAssistantParts(live: HarnessMessage, server: HarnessMessage): void
         serverPart.output = liveSame.output
       }
       serverPart.state = furthestPartState(serverPart.state, liveSame.state)
-      if (
-        serverPart.meta?.['agent_meta'] == null &&
-        liveSame.meta?.['agent_meta'] != null
-      ) {
+      if (liveSame.display && !serverPart.display) serverPart.display = liveSame.display
+      if (liveSame.detail_loaded === false && !serverPart.detail_loaded) {
+        serverPart.detail_loaded = false
+        if (liveSame.input?.['tool'] && !serverPart.input?.['tool']) {
+          serverPart.input = { ...serverPart.input, tool: liveSame.input['tool'] }
+        }
+      }
+      if (serverPart.meta?.['agent_meta'] == null && liveSame.meta?.['agent_meta'] != null) {
         serverPart.meta = { ...serverPart.meta, agent_meta: liveSame.meta['agent_meta'] }
+      }
+      // A lightweight timeline refresh must not discard details fetched while
+      // the same session was idle (or attachments received over the socket).
+      if (liveSame.detail_loaded && !serverPart.detail_loaded) {
+        serverPart.input = liveSame.input
+        serverPart.output = liveSame.output
+        serverPart.meta = { ...serverPart.meta, ...liveSame.meta }
+        serverPart.detail_loaded = true
       }
       // Keep server position/id; merge any live-only meta keys.
       for (const [key, value] of Object.entries(liveSame.meta ?? {})) {
@@ -820,10 +873,17 @@ function mergeAssistantParts(live: HarnessMessage, server: HarnessMessage): void
         serverPart.output = placeholder.output
       }
       serverPart.state = furthestPartState(serverPart.state, placeholder.state)
-      if (
-        serverPart.meta?.['agent_meta'] == null &&
-        placeholder.meta?.['agent_meta'] != null
-      ) {
+      if (placeholder.display && !serverPart.display) serverPart.display = placeholder.display
+      if (placeholder.detail_loaded === false && !serverPart.detail_loaded) {
+        serverPart.detail_loaded = false
+      }
+      if (placeholder.detail_loaded && !serverPart.detail_loaded) {
+        serverPart.input = placeholder.input
+        serverPart.output = placeholder.output
+        serverPart.meta = { ...serverPart.meta, ...placeholder.meta }
+        serverPart.detail_loaded = true
+      }
+      if (serverPart.meta?.['agent_meta'] == null && placeholder.meta?.['agent_meta'] != null) {
         serverPart.meta = { ...serverPart.meta, agent_meta: placeholder.meta['agent_meta'] }
       }
       return serverPart
@@ -837,7 +897,9 @@ function mergeAssistantParts(live: HarnessMessage, server: HarnessMessage): void
       continue
     }
     // Already folded as a placeholder into a server row.
-    if (merged.some((serverPart) => findPlaceholderForServerPart([livePart], serverPart) === livePart)) {
+    if (
+      merged.some((serverPart) => findPlaceholderForServerPart([livePart], serverPart) === livePart)
+    ) {
       coveredLiveIds.add(livePart.id)
       continue
     }
@@ -946,10 +1008,7 @@ function foldLiveTextIntoServerSlot(merged: HarnessPart[], live: HarnessPart): b
  * (exact matches dedupe). Same-step but genuinely different (non-prefix)
  * content is kept as its own row (returns false).
  */
-function foldLiveReasoningIntoServerSlot(
-  merged: HarnessPart[],
-  live: HarnessPart,
-): boolean {
+function foldLiveReasoningIntoServerSlot(merged: HarnessPart[], live: HarnessPart): boolean {
   const step = partStepNumber(live)
   const liveOutput = live.output ?? ''
   const slot = merged.find((part) => {
@@ -1049,11 +1108,14 @@ export function mergeBusyFetchedMessages(
       // any identical prompt would erase a valid repeated follow-up.
       const lastKnownUserPosition = Math.max(
         -1,
-        ...previous.filter((m) => m.role === 'user' && !isLocalId(m.id))
+        ...previous
+          .filter((m) => m.role === 'user' && !isLocalId(m.id))
           .map((m) => messagePosition(m) ?? -1),
       )
       const echoed = incoming.some(
-        (m) => m.role === 'user' && !isLocalId(m.id) &&
+        (m) =>
+          m.role === 'user' &&
+          !isLocalId(m.id) &&
           m.content === live.content &&
           (messagePosition(m) ?? -1) > lastKnownUserPosition,
       )

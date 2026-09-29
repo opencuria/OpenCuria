@@ -39,6 +39,8 @@ from apps.harness.providers.openrouter import DEFAULT_BASE_URL
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
+from .timeline import project_question_definitions, timeline_part_payload
+
 harness_router = Router(tags=["harness"])
 
 
@@ -1325,7 +1327,9 @@ def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
     response={204: None, 403: dict, 404: dict},
     summary="Dismiss the stopped/failed notice of a harness message",
 )
-def dismiss_harness_notice(request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID):
+def dismiss_harness_notice(
+    request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID
+):
     """Persist that the user dismissed one stopped/failed notice."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
@@ -1403,13 +1407,10 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         return 404, {"detail": exc.message, "code": exc.code}
 
 
-@harness_router.get(
-    "/harness/sessions/{session_id}/parts",
-    response={200: dict, 403: dict, 404: dict},
-    summary="List messages and parts of a harness session",
-)
-def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
-    """Return messages with their streamed parts and pending user gates."""
+def _harness_conversation_payload(
+    request: HttpRequest, session_id: uuid.UUID, *, timeline: bool
+):
+    """Build legacy or lightweight conversation envelope after ownership checks."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     org_id = _get_org_id(request)
@@ -1418,16 +1419,36 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
         service = _resolve_harness_service()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
-        messages = service.list_messages(session.id)
-        parts = service.list_parts(session.id)
+        messages = (
+            service.list_timeline_messages(session.id)
+            if timeline
+            else service.list_messages(session.id)
+        )
+        parts = (
+            service.list_timeline_parts(session.id)
+            if timeline
+            else service.list_parts(session.id)
+        )
         message_positions = {
             str(message.id): int(getattr(message, "position", 0) or 0)
             for message in messages
         }
         parts_by_message: dict[str, list] = {}
         for part in parts:
-            parts_by_message.setdefault(str(part.message_id), []).append(
-                HarnessPartOut(
+            if timeline:
+                part.message_position = message_positions.get(str(part.message_id), 0)
+                payload = timeline_part_payload(
+                    part,
+                    text_output=getattr(part, "timeline_output", "")
+                    if part.type == "text"
+                    else None,
+                )
+            else:
+                safe_meta = dict(part.meta or {})
+                if part.type == "patch":
+                    safe_meta.pop("old_content", None)
+                    safe_meta.pop("new_content", None)
+                payload = HarnessPartOut(
                     id=part.id,
                     message_id=part.message_id,
                     type=part.type,
@@ -1436,13 +1457,24 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                     title=part.title or "",
                     output=part.output or "",
                     input=dict(part.input or {}),
-                    meta=dict(part.meta or {}),
+                    meta=safe_meta,
                     position=int(getattr(part, "position", 0) or 0),
-                    message_position=message_positions.get(
-                        str(part.message_id), 0
+                    message_position=message_positions.get(str(part.message_id), 0),
+                ).model_dump(mode="json")
+            parts_by_message.setdefault(str(part.message_id), []).append(payload)
+        pending_questions = service.list_pending_questions(
+            session.id, include_descendants=True
+        )
+        if timeline:
+            pending_questions = [
+                {
+                    **question,
+                    "questions": project_question_definitions(
+                        question.get("questions")
                     ),
-                )
-            )
+                }
+                for question in pending_questions
+            ]
         return 200, {
             "session": _session_to_out_with_unread(service, session).model_dump(
                 mode="json"
@@ -1452,7 +1484,14 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                     **HarnessMessageOut(
                         id=message.id,
                         role=message.role,
-                        content=message.content or "",
+                        # Timeline text comes from ordered text parts; only
+                        # legacy assistant rows with no text parts need the
+                        # message-level fallback. This prevents sending both.
+                        content=(
+                            (getattr(message, "timeline_content", "") or "")
+                            if timeline
+                            else (message.content or "")
+                        ),
                         model=message.model or "",
                         reasoning_effort=message.reasoning_effort or "",
                         cost=float(message.cost or 0.0),
@@ -1471,19 +1510,77 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
                         created_at=message.created_at,
                         completed_at=message.completed_at,
                     ).model_dump(mode="json"),
-                    "parts": [
-                        part.model_dump(mode="json")
-                        for part in parts_by_message.get(str(message.id), [])
-                    ],
+                    "parts": parts_by_message.get(str(message.id), []),
                 }
                 for message in messages
             ],
             "permissions": service.list_pending_permissions(
                 session.id, include_descendants=True
             ),
-            "questions": service.list_pending_questions(
-                session.id, include_descendants=True
-            ),
+            "questions": pending_questions,
+        }
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.get(
+    "/harness/sessions/{session_id}/parts",
+    response={200: dict, 403: dict, 404: dict},
+    summary="List messages and full parts of a harness session (legacy)",
+)
+def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
+    """Return the full legacy message/part envelope, excluding patch file copies."""
+    return _harness_conversation_payload(request, session_id, timeline=False)
+
+
+@harness_router.get(
+    "/harness/sessions/{session_id}/timeline",
+    response={200: dict, 403: dict, 404: dict},
+    summary="Load all session messages with lightweight part projections",
+)
+def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
+    """Return the session envelope without heavyweight detail fields."""
+    return _harness_conversation_payload(request, session_id, timeline=True)
+
+
+@harness_router.get(
+    "/harness/sessions/{session_id}/parts/{part_id}",
+    response={200: dict, 403: dict, 404: dict},
+    summary="Load one full harness part by ID",
+)
+def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.UUID):
+    """Return full detail for one part in an owned session."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    org_id = _get_org_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = service.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        part = service.get_part(session.id, part_id)
+        safe_meta = dict(part.meta or {})
+        if part.type == "patch":
+            safe_meta.pop("old_content", None)
+            safe_meta.pop("new_content", None)
+        display = dict(part.display or {})
+        display.pop("_reasoning_line", None)
+        return 200, {
+            **HarnessPartOut(
+                id=part.id,
+                message_id=part.message_id,
+                type=part.type,
+                state=part.state,
+                call_id=part.call_id or "",
+                title=part.title or "",
+                output=part.output or "",
+                input=dict(part.input or {}),
+                meta=safe_meta,
+                position=int(getattr(part, "position", 0) or 0),
+                message_position=int(getattr(part, "message_position", 0) or 0),
+            ).model_dump(mode="json"),
+            "display": display,
+            "detail_loaded": True,
         }
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

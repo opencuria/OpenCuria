@@ -50,6 +50,74 @@ describe('harnessReducer', () => {
     expect(textParts[0]!.state).toBe('running')
   })
 
+  it('keeps compact live tool projections unloaded while preserving legacy full deltas', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_started: 'read',
+        title: 'Read file',
+        call_id: 'call-live',
+      },
+      { partId: 'tool-live' },
+    )
+    let assistant = ensureAssistantMessage(messages, 'session-1')
+    let tool = findPart(assistant, { partId: 'tool-live' })!
+    expect(tool.detail_loaded).toBe(false)
+    expect(tool.input).toEqual({ tool: 'read' })
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_completed: 'read',
+        call_id: 'call-live',
+        state: 'completed',
+        display: { tool: 'read', summary: 'Read file' },
+      },
+      { partId: 'tool-live' },
+    )
+    expect(tool.state).toBe('completed')
+    expect(tool.display?.summary).toBe('Read file')
+    expect(tool.detail_loaded).toBe(false)
+    expect(tool.output).toBe('')
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_started: 'bash',
+        call_id: 'call-legacy',
+        arguments: '{"command":"ls"}',
+      },
+      { partId: 'tool-legacy' },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        tool_completed: 'bash',
+        call_id: 'call-legacy',
+        output: 'file.txt',
+        attachments: [
+          {
+            type: 'file',
+            mime: 'text/plain',
+            url: 'data:text/plain;base64,QQ==',
+            filename: 'file.txt',
+          },
+        ],
+      },
+      { partId: 'tool-legacy' },
+    )
+    assistant = ensureAssistantMessage(messages, 'session-1')
+    const legacy = findPart(assistant, { partId: 'tool-legacy' })!
+    expect(legacy.detail_loaded).toBe(true)
+    expect(legacy.output).toBe('file.txt')
+    expect(legacy.meta?.['attachments']).toHaveLength(1)
+  })
+
   it('transitions tool parts from running to completed and error', () => {
     const messages = makeMessages()
 
@@ -134,7 +202,12 @@ describe('harnessReducer', () => {
         call_id: 'call-img',
         output: 'Image read successfully',
         attachments: [
-          { type: 'file', mime: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=', filename: 'cat.png' },
+          {
+            type: 'file',
+            mime: 'image/png',
+            url: 'data:image/png;base64,iVBORw0KGgo=',
+            filename: 'cat.png',
+          },
           { type: 'file', mime: '', url: 'https://example.com/a.png' },
         ],
       },
@@ -148,7 +221,12 @@ describe('harnessReducer', () => {
     expect(tool?.meta).toMatchObject({
       step: 3,
       attachments: [
-        { type: 'file', mime: 'image/png', url: 'data:image/png;base64,iVBORw0KGgo=', filename: 'cat.png' },
+        {
+          type: 'file',
+          mime: 'image/png',
+          url: 'data:image/png;base64,iVBORw0KGgo=',
+          filename: 'cat.png',
+        },
       ],
     })
   })
@@ -164,7 +242,12 @@ describe('harnessReducer', () => {
         call_id: 'call-late',
         output: 'PDF read successfully',
         attachments: [
-          { type: 'file', mime: 'application/pdf', url: 'data:application/pdf;base64,JVBERi0=', filename: 'doc.pdf' },
+          {
+            type: 'file',
+            mime: 'application/pdf',
+            url: 'data:application/pdf;base64,JVBERi0=',
+            filename: 'doc.pdf',
+          },
         ],
       },
       { step: 4, partId: 'part-late' },
@@ -176,7 +259,12 @@ describe('harnessReducer', () => {
     expect(tool?.meta).toMatchObject({
       step: 4,
       attachments: [
-        { type: 'file', mime: 'application/pdf', url: 'data:application/pdf;base64,JVBERi0=', filename: 'doc.pdf' },
+        {
+          type: 'file',
+          mime: 'application/pdf',
+          url: 'data:application/pdf;base64,JVBERi0=',
+          filename: 'doc.pdf',
+        },
       ],
     })
   })
@@ -232,14 +320,99 @@ describe('harnessReducer', () => {
     })
   })
 
-  it('creates a completed agent plan part on live delta.agent without touching content', () => {
+  it('stores compact live agent summary as display, not a raw full plan', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: 'Form ready',
+        agent_meta: { action: 'Click Save', action_kind: 'click', analysis: 'Form ready' },
+        display: { summary: 'Form ready', step: 2 },
+      },
+      { step: 2, partId: 'agent-live' },
+    )
+    const part = ensureAssistantMessage(messages, 'session-1').parts[0]!
+    expect(part.type).toBe('agent')
+    expect(part.output).toBe('Form ready')
+    expect(part.display).toMatchObject({
+      summary: 'Form ready',
+      agent_meta: { analysis: 'Form ready' },
+    })
+    expect(part.detail_loaded).toBe(false)
+  })
+
+  it('uses the explicit display marker for compact agent projections', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: 'Agent plan',
+        agent_meta: { analysis: 'Form ready' },
+        display: { summary: 'Form ready' },
+      },
+      { step: 1, partId: 'agent-projection' },
+    )
+    const part = ensureAssistantMessage(messages, 'session-1').parts[0]!
+    expect(part.output).toBe('Agent plan')
+    expect(part.display?.summary).toBe('Form ready')
+    expect(part.detail_loaded).toBe(false)
+  })
+
+  it('preserves legacy plan detail when a summary event updates an existing part', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: 'Full plan text',
+        agent_meta: { analysis: 'Old analysis', next_action: 'Old action' },
+      },
+      { step: 1, partId: 'agent-existing' },
+    )
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+    const part = findPart(assistant, { partId: 'agent-existing' })!
+    part.detail_loaded = false
+    applyPartDelta(
+      messages,
+      'session-1',
+      {
+        agent: 'Safe summary',
+        agent_meta: { analysis: 'Safe summary', next_action: 'New action' },
+        display: { summary: 'Safe summary' },
+      },
+      { step: 1, partId: 'agent-existing' },
+    )
+    expect(part.output).toBe('Safe summary')
+    expect(part.display?.summary).toBe('Safe summary')
+    expect(part.detail_loaded).toBe(false)
+  })
+
+  it('does not mistake a legacy plan equal to its parsed summary for a projection', () => {
+    const messages = makeMessages()
+    const plan = 'Form ready'
+    applyPartDelta(
+      messages,
+      'session-1',
+      { agent: plan, agent_meta: { analysis: plan, next_action: 'Click Save' } },
+      { step: 1, partId: 'agent-legacy-short' },
+    )
+    const part = ensureAssistantMessage(messages, 'session-1').parts[0]!
+    expect(part.output).toBe(plan)
+    expect(part.detail_loaded).toBe(true)
+    expect(part.display).toBeUndefined()
+  })
+
+  it('preserves a legacy full agent plan delta when structured fields accompany it', () => {
     const messages = makeMessages()
 
     applyPartDelta(
       messages,
       'session-1',
       {
-        agent: '(Previous action verification)\nok\n(Screenshot Analysis)\nlogin form\n(Next Action)\nclick submit\n(Grounded Action)\n```python\nagent.click("Submit")\n```',
+        agent:
+          '(Previous action verification)\nok\n(Screenshot Analysis)\nlogin form\n(Next Action)\nclick submit\n(Grounded Action)\n```python\nagent.click("Submit")\n```',
         agent_meta: {
           verification: 'ok',
           analysis: 'login form',
@@ -258,6 +431,7 @@ describe('harnessReducer', () => {
     expect(agent?.state).toBe('completed')
     expect(agent?.title).toBe('Agent plan')
     expect(agent?.output).toContain('click submit')
+    expect(agent?.detail_loaded).toBe(true)
     expect(agent?.meta).toMatchObject({
       step: 3,
       agent_meta: {
@@ -924,7 +1098,12 @@ describe('harnessReducer', () => {
       },
     ]
 
-    const fresh = applyPartDelta(messages, 'session-1', { text: 'new' }, { messageId: 'msg-assistant-new' })
+    const fresh = applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'new' },
+      { messageId: 'msg-assistant-new' },
+    )
 
     expect(fresh.id).toBe('msg-assistant-new')
     expect(fresh.content).toBe('new')
@@ -948,7 +1127,14 @@ describe('harnessReducer', () => {
         role: 'assistant',
         content: 'old',
         parts: [
-          { id: 'part-old', session_id: 'session-1', type: 'text', state: 'completed', title: '', output: 'old' },
+          {
+            id: 'part-old',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'completed',
+            title: '',
+            output: 'old',
+          },
         ],
         completed_at: '2026-03-29T10:00:00.000Z',
       },
@@ -985,10 +1171,21 @@ describe('harnessReducer', () => {
         parts: [],
         completed_at: '2026-03-29T10:00:00.000Z',
       },
-      { id: 'local-user-session-1-1', session_id: 'session-1', role: 'user', content: 'follow up', parts: [] },
+      {
+        id: 'local-user-session-1-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'follow up',
+        parts: [],
+      },
     ]
 
-    const shell = ensureBusyAssistant(messages, 'session-1', 'server-assistant-2', 'missing-user-id')
+    const shell = ensureBusyAssistant(
+      messages,
+      'session-1',
+      'server-assistant-2',
+      'missing-user-id',
+    )
 
     expect(shell.id).toBe('server-assistant-2')
     expect(messages.map((m) => m.id)).toEqual([
@@ -1045,9 +1242,15 @@ describe('harnessReducer', () => {
   })
 
   it('resolves queued tool state from delta.state, flags, and legacy singles', () => {
-    expect(resolveQueuedToolState({ tool_started: 'bash', state: 'pending' }, { known: false })).toBe('pending')
-    expect(resolveQueuedToolState({ tool_started: 'bash', state: 'running' }, { known: true })).toBe('running')
-    expect(resolveQueuedToolState({ tool_started: 'bash', queued: true }, { known: false })).toBe('pending')
+    expect(
+      resolveQueuedToolState({ tool_started: 'bash', state: 'pending' }, { known: false }),
+    ).toBe('pending')
+    expect(
+      resolveQueuedToolState({ tool_started: 'bash', state: 'running' }, { known: true }),
+    ).toBe('running')
+    expect(resolveQueuedToolState({ tool_started: 'bash', queued: true }, { known: false })).toBe(
+      'pending',
+    )
     // Legacy single emit (no signal) stays running.
     expect(resolveQueuedToolState({ tool_started: 'bash' }, { known: false })).toBe('running')
   })
@@ -1055,7 +1258,12 @@ describe('harnessReducer', () => {
   it('keeps text/tool/text in interleaved order (no stream merge across tools)', () => {
     const messages = makeMessages()
 
-    applyPartDelta(messages, 'session-1', { text: 'before ' }, { partId: 'text-1', messageId: 'assistant-1' })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'before ' },
+      { partId: 'text-1', messageId: 'assistant-1' },
+    )
     applyPartDelta(
       messages,
       'session-1',
@@ -1068,7 +1276,12 @@ describe('harnessReducer', () => {
       { tool_completed: 'bash', call_id: 'call-1', output: 'out' },
       { partId: 'tool-1', messageId: 'assistant-1' },
     )
-    applyPartDelta(messages, 'session-1', { text: 'after' }, { partId: 'text-2', messageId: 'assistant-1' })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'after' },
+      { partId: 'text-2', messageId: 'assistant-1' },
+    )
 
     const assistant = messages.find((m) => m.id === 'assistant-1')!
     expect(assistant.parts.map((p) => p.type)).toEqual(['text', 'tool', 'text'])
@@ -1085,12 +1298,24 @@ describe('harnessReducer', () => {
         role: 'assistant',
         content: 'hel',
         parts: [
-          { id: 'local-session-1-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'hel' },
+          {
+            id: 'local-session-1-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'hel',
+          },
         ],
       },
     ]
 
-    applyPartDelta(messages, 'session-1', { text: 'lo' }, { partId: 'server-text-1', messageId: 'assistant-1' })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'lo' },
+      { partId: 'server-text-1', messageId: 'assistant-1' },
+    )
 
     const assistant = messages.find((m) => m.id === 'assistant-1')!
     expect(assistant.parts.filter((p) => p.type === 'text')).toHaveLength(1)
@@ -1110,8 +1335,24 @@ describe('harnessReducer', () => {
 
   it('sorts messages by position with creation-order fallback', () => {
     const messages: HarnessMessage[] = [
-      { id: 'b', session_id: 's', role: 'user', content: 'b', parts: [], position: 1, created_at: '2026-03-29T10:00:01.000Z' },
-      { id: 'a', session_id: 's', role: 'user', content: 'a', parts: [], position: 0, created_at: '2026-03-29T10:00:02.000Z' },
+      {
+        id: 'b',
+        session_id: 's',
+        role: 'user',
+        content: 'b',
+        parts: [],
+        position: 1,
+        created_at: '2026-03-29T10:00:01.000Z',
+      },
+      {
+        id: 'a',
+        session_id: 's',
+        role: 'user',
+        content: 'a',
+        parts: [],
+        position: 0,
+        created_at: '2026-03-29T10:00:02.000Z',
+      },
       { id: 'local', session_id: 's', role: 'user', content: 'c', parts: [] },
     ]
     expect(sortHarnessMessages(messages).map((m) => m.id)).toEqual(['a', 'b', 'local'])
@@ -1119,37 +1360,99 @@ describe('harnessReducer', () => {
 
   it('sorts parts by position while preserving local observed order', () => {
     const parts = [
-      { id: 'p2', session_id: 's', type: 'tool' as const, state: 'completed' as const, title: '', output: '', position: 1 },
-      { id: 'p1', session_id: 's', type: 'text' as const, state: 'completed' as const, title: '', output: '', position: 0 },
-      { id: 'local-1', session_id: 's', type: 'text' as const, state: 'running' as const, title: '', output: '' },
+      {
+        id: 'p2',
+        session_id: 's',
+        type: 'tool' as const,
+        state: 'completed' as const,
+        title: '',
+        output: '',
+        position: 1,
+      },
+      {
+        id: 'p1',
+        session_id: 's',
+        type: 'text' as const,
+        state: 'completed' as const,
+        title: '',
+        output: '',
+        position: 0,
+      },
+      {
+        id: 'local-1',
+        session_id: 's',
+        type: 'text' as const,
+        state: 'running' as const,
+        title: '',
+        output: '',
+      },
     ]
     expect(sortHarnessParts(parts).map((p) => p.id)).toEqual(['p1', 'p2', 'local-1'])
   })
 
   it('preserves already-received live data when the busy snapshot is stale', () => {
     const previous: HarnessMessage[] = [
-      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'hi', parts: [], position: 0 },
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'hi',
+        parts: [],
+        position: 0,
+      },
       {
         id: 'assistant-1',
         session_id: 'session-1',
         role: 'assistant',
         content: 'Hello world, more streamed',
         parts: [
-          { id: 'server-text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello world, more streamed', position: 0 },
-          { id: 'server-tool-1', session_id: 'session-1', type: 'tool', state: 'running', title: 'bash', output: '', call_id: 'call-1', position: 1 },
+          {
+            id: 'server-text-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello world, more streamed',
+            position: 0,
+          },
+          {
+            id: 'server-tool-1',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'running',
+            title: 'bash',
+            output: '',
+            call_id: 'call-1',
+            position: 1,
+          },
         ],
         position: 1,
       },
     ]
     const incoming: HarnessMessage[] = [
-      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'hi', parts: [], position: 0 },
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'hi',
+        parts: [],
+        position: 0,
+      },
       {
         id: 'assistant-1',
         session_id: 'session-1',
         role: 'assistant',
         content: 'Hello',
         parts: [
-          { id: 'server-text-1', session_id: 'session-1', type: 'text', state: 'running', title: '', output: 'Hello', position: 0 },
+          {
+            id: 'server-text-1',
+            session_id: 'session-1',
+            type: 'text',
+            state: 'running',
+            title: '',
+            output: 'Hello',
+            position: 0,
+          },
         ],
         position: 1,
       },
@@ -1158,14 +1461,23 @@ describe('harnessReducer', () => {
     const merged = mergeBusyFetchedMessages(previous, incoming)
     const assistant = merged.find((m) => m.id === 'assistant-1')!
     expect(assistant.content).toBe('Hello world, more streamed')
-    expect(assistant.parts.find((p) => p.id === 'server-text-1')!.output).toBe('Hello world, more streamed')
+    expect(assistant.parts.find((p) => p.id === 'server-text-1')!.output).toBe(
+      'Hello world, more streamed',
+    )
     // Live-only tool row the stale snapshot missed is kept.
     expect(assistant.parts.some((p) => p.id === 'server-tool-1')).toBe(true)
   })
 
   it('carries the optimistic follow-up user across a busy fetch until echoed', () => {
     const previous: HarnessMessage[] = [
-      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'first', parts: [], position: 0 },
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'first',
+        parts: [],
+        position: 0,
+      },
       {
         id: 'assistant-1',
         session_id: 'session-1',
@@ -1175,10 +1487,23 @@ describe('harnessReducer', () => {
         position: 1,
         completed_at: '2026-03-29T10:00:00.000Z',
       },
-      { id: 'local-user-session-1-9', session_id: 'session-1', role: 'user', content: 'follow up', parts: [] },
+      {
+        id: 'local-user-session-1-9',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'follow up',
+        parts: [],
+      },
     ]
     const incoming: HarnessMessage[] = [
-      { id: 'msg-user-1', session_id: 'session-1', role: 'user', content: 'first', parts: [], position: 0 },
+      {
+        id: 'msg-user-1',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'first',
+        parts: [],
+        position: 0,
+      },
       {
         id: 'assistant-1',
         session_id: 'session-1',
@@ -1196,7 +1521,14 @@ describe('harnessReducer', () => {
     // Server echo arrives: the optimistic row drops (no duplicate).
     const echoed = mergeBusyFetchedMessages(previous, [
       ...incoming,
-      { id: 'msg-user-2', session_id: 'session-1', role: 'user', content: 'follow up', parts: [], position: 2 },
+      {
+        id: 'msg-user-2',
+        session_id: 'session-1',
+        role: 'user',
+        content: 'follow up',
+        parts: [],
+        position: 2,
+      },
     ])
     expect(echoed.filter((m) => m.role === 'user' && m.content === 'follow up')).toHaveLength(1)
     expect(echoed.some((m) => m.id === 'local-user-session-1-9')).toBe(false)
@@ -1226,22 +1558,41 @@ describe('harnessReducer', () => {
 describe('server live positions', () => {
   it('keeps text/tool/text order after a stale REST snapshot is merged', () => {
     const messages = makeMessages()
-    applyPartDelta(messages, 'session-1', { text: 'before' },
-      { messageId: 'assistant-1', partId: 'text-a', partPosition: 1 })
-    applyPartDelta(messages, 'session-1', { tool_started: 'read', call_id: 'call-1', state: 'pending' },
-      { messageId: 'assistant-1', partId: 'tool-a', partPosition: 2 })
-    applyPartDelta(messages, 'session-1', { text: 'between' },
-      { messageId: 'assistant-1', partId: 'text-b', partPosition: 3 })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'before' },
+      { messageId: 'assistant-1', partId: 'text-a', partPosition: 1 },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'read', call_id: 'call-1', state: 'pending' },
+      { messageId: 'assistant-1', partId: 'tool-a', partPosition: 2 },
+    )
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'between' },
+      { messageId: 'assistant-1', partId: 'text-b', partPosition: 3 },
+    )
     const assistant = messages.find((m) => m.id === 'assistant-1')!
     expect(assistant.parts.map((p) => [p.id, p.position])).toEqual([
-      ['text-a', 1], ['tool-a', 2], ['text-b', 3],
+      ['text-a', 1],
+      ['tool-a', 2],
+      ['text-b', 3],
     ])
     const incoming: HarnessMessage[] = [
       { ...messages[0]!, position: 0 },
-      { ...assistant, content: 'before', position: 1, parts: [
-        { ...assistant.parts[0]!, output: 'before' },
-        { ...assistant.parts[1]!, state: 'pending' },
-      ] },
+      {
+        ...assistant,
+        content: 'before',
+        position: 1,
+        parts: [
+          { ...assistant.parts[0]!, output: 'before' },
+          { ...assistant.parts[1]!, state: 'pending' },
+        ],
+      },
     ]
     const merged = mergeBusyFetchedMessages(messages, incoming)
     expect(merged[1]?.parts.map((p) => p.id)).toEqual(['text-a', 'tool-a', 'text-b'])
@@ -1250,10 +1601,15 @@ describe('server live positions', () => {
 
   it('keeps a running assistant when a busy snapshot is empty', () => {
     const messages = makeMessages()
-    applyPartDelta(messages, 'session-1', { text: 'live' },
-      { messageId: 'assistant-live', partId: 'live-part', partPosition: 0 })
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'live' },
+      { messageId: 'assistant-live', partId: 'live-part', partPosition: 0 },
+    )
     expect(mergeBusyFetchedMessages(messages, []).map((m) => m.id)).toEqual([
-      'msg-user-1', 'assistant-live',
+      'msg-user-1',
+      'assistant-live',
     ])
   })
 })
