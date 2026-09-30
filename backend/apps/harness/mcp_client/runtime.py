@@ -6,9 +6,14 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 import structlog
+from asgiref.sync import sync_to_async
 
 from apps.plugins import runtime as plugin_runtime
-from apps.plugins.runtime_snapshot import PreparedPluginRuntime, prepared_is_empty
+from apps.plugins.runtime_snapshot import (
+    PreparedPluginRuntime,
+    WorkspacePluginSnapshot,
+    prepared_is_empty,
+)
 
 from ..tools.base import ToolRegistry
 from .connection import (
@@ -42,6 +47,27 @@ def _record_skip(
     )
 
 
+def _resolve_pending_credentials(prepared: PreparedPluginRuntime) -> None:
+    """Resolve plaintext and OAuth maps. Sync ORM; call via sync_to_async.
+
+    Only for a runtime ``setup`` constructed itself. A prepared runtime
+    from the harness is already resolved. An empty OAuth map is a valid
+    result and must not be resolved again.
+    """
+    if prepared.workspace is None:
+        return
+    prepared.plaintexts.update(
+        plugin_runtime.resolve_runtime_credentials(
+            prepared.snapshot, workspace=prepared.workspace
+        )
+    )
+    prepared.oauth_credentials.update(
+        plugin_runtime.resolve_runtime_oauth_credentials(
+            prepared.snapshot, workspace=prepared.workspace
+        )
+    )
+
+
 class McpRuntime:
     """Owns one harness run's MCP connections (no cross-workspace pool)."""
 
@@ -69,7 +95,7 @@ class McpRuntime:
         organization_id,
         accessor: Any,
         core_tool_names: list[str] | None = None,
-        snapshot: PreparedPluginRuntime | None = None,
+        snapshot: PreparedPluginRuntime | WorkspacePluginSnapshot | None = None,
         **kwargs: Any,
     ):
         """Open connections and discover tools for the effective snapshot.
@@ -77,30 +103,36 @@ class McpRuntime:
         *snapshot* is a :class:`PreparedPluginRuntime` built exactly once
         by the caller (the normal run path, possibly empty) or a bare
         :class:`WorkspacePluginSnapshot` (legacy/test path: credentials
-        resolve exactly once here). Extra *kwargs* are ignored for
-        forward compatibility with stub runtimes. Individual server
-        failures are logged as health warnings and skipped — including
-        servers whose tools collide with already-kept names (first
-        server wins deterministically, the colliding server is closed
-        and skipped; the run itself never fails for a collision).
+        resolve exactly once here, off the event loop). An empty OAuth
+        map on a prepared runtime means resolution already ran and
+        nothing matched — it is not resolved again. Extra *kwargs* are
+        ignored for forward compatibility with stub runtimes. Individual
+        server failures are logged as health warnings and skipped —
+        including servers whose tools collide with already-kept names
+        (first server wins deterministically, the colliding server is
+        closed and skipped; the run itself never fails for a collision).
         """
-        prepared: PreparedPluginRuntime | None = snapshot
-        if prepared is not None and not isinstance(prepared, PreparedPluginRuntime):
+        already_prepared = isinstance(snapshot, PreparedPluginRuntime)
+        if isinstance(snapshot, PreparedPluginRuntime):
+            prepared: PreparedPluginRuntime | None = snapshot
+        elif isinstance(snapshot, WorkspacePluginSnapshot):
             # Bare snapshot (tests/legacy): wrap it; credentials resolve
-            # exactly once below.
+            # exactly once below, off the event loop.
             prepared = PreparedPluginRuntime(
-                snapshot=prepared,
+                snapshot=snapshot,
                 workspace=workspace,
-                plaintexts={},  # type: ignore[arg-type]
+                plaintexts={},
             )
+        else:
+            prepared = None
         if prepared is None:
             if workspace is None:
                 # No prepared snapshot and no workspace: nothing to do.
                 self._snapshot = None
                 return None
-            snapshot_built = plugin_runtime.build_workspace_plugin_snapshot(
-                workspace=workspace, org_id=organization_id
-            )
+            snapshot_built = await sync_to_async(
+                plugin_runtime.build_workspace_plugin_snapshot
+            )(workspace=workspace, org_id=organization_id)
             prepared = PreparedPluginRuntime(
                 snapshot=snapshot_built, workspace=workspace, plaintexts={}
             )
@@ -113,18 +145,8 @@ class McpRuntime:
         # it once per run (idempotent, best effort: a missing/foreign
         # accessor simply keeps the old headless-safe behaviour).
         await self._ensure_headed_desktop(accessor, prepared)
-        if not prepared.plaintexts:
-            prepared.plaintexts.update(
-                plugin_runtime.resolve_runtime_credentials(
-                    prepared.snapshot, workspace=prepared.workspace
-                )
-            )
-        if prepared.workspace is not None and not prepared.oauth_credentials:
-            prepared.oauth_credentials.update(
-                plugin_runtime.resolve_runtime_oauth_credentials(
-                    prepared.snapshot, workspace=prepared.workspace
-                )
-            )
+        if not already_prepared:
+            await sync_to_async(_resolve_pending_credentials)(prepared)
         snapshot = prepared.snapshot
         await self._stack.__aenter__()
         try:

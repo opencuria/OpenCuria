@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import uuid
 
 import anyio
@@ -1472,3 +1473,128 @@ async def test_runtime_setup_skipped_carries_real_error_detail():
     assert "initialize failed" in note
     assert "cancel scope" not in note
     await runtime.aclose()
+
+
+def _stdio_snapshot(organization_id: uuid.UUID) -> tuple[uuid.UUID, object]:
+    """One stdio server, no credential requirements."""
+    from apps.plugins.runtime_snapshot import (
+        EffectivePluginSnapshot,
+        PluginMcpServerSnapshot,
+        WorkspacePluginSnapshot,
+    )
+
+    plugin_id = uuid.uuid4()
+    snapshot = WorkspacePluginSnapshot(
+        workspace_id=uuid.uuid4(),
+        organization_id=organization_id,
+        plugins=(
+            EffectivePluginSnapshot(
+                id=plugin_id,
+                name="Plug",
+                slug="plug",
+                description="",
+                organization_id=organization_id,
+                is_global=False,
+                mcp_servers=(
+                    PluginMcpServerSnapshot(
+                        id=uuid.uuid4(),
+                        name="Srv",
+                        slug="srv",
+                        transport="stdio",
+                        command="fake",
+                    ),
+                ),
+            ),
+        ),
+    )
+    return plugin_id, snapshot
+
+
+async def _open_without_transport(
+    self: McpServerConnection, accessor: object
+) -> list[object]:
+    self.tools = []
+    return []
+
+
+def _forbid_credential_resolve(*_args: object, **_kwargs: object) -> None:
+    """Prepared runtimes are already resolved; setup must not call this."""
+    raise AssertionError("setup resolved credentials again")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_prepared_empty_oauth_map_is_not_resolved_again(
+    harness_workspace, monkeypatch
+):
+    """A resolved empty OAuth map must not hit the ORM from async setup.
+
+    Harness prepare can return ``{}`` when no OAuth credential matches.
+    Pytest sets ``DJANGO_ALLOW_ASYNC_UNSAFE``, which hides the
+    SynchronousOnlyOperation Daphne raises on that second query.
+    """
+    from django.core.exceptions import SynchronousOnlyOperation
+
+    from apps.plugins.runtime_snapshot import PreparedPluginRuntime
+
+    org_id = harness_workspace.runner.organization_id
+    plugin_id, snapshot = _stdio_snapshot(org_id)
+    prepared = PreparedPluginRuntime(
+        snapshot=snapshot,
+        workspace=harness_workspace,
+        plaintexts={plugin_id: {}},
+        oauth_credentials={},
+    )
+    monkeypatch.setattr(McpServerConnection, "open", _open_without_transport)
+    monkeypatch.setattr(
+        "apps.harness.mcp_client.runtime.plugin_runtime.resolve_runtime_credentials",
+        _forbid_credential_resolve,
+    )
+    monkeypatch.setattr(
+        "apps.harness.mcp_client.runtime.plugin_runtime.resolve_runtime_oauth_credentials",
+        _forbid_credential_resolve,
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    runtime = McpRuntime()
+    try:
+        await runtime.setup(
+            workspace=None,
+            organization_id=org_id,
+            accessor=object(),
+            snapshot=prepared,
+        )
+        assert prepared.oauth_credentials == {}
+        assert runtime.connections
+    except SynchronousOnlyOperation:
+        pytest.fail("setup re-resolved credentials from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+        await runtime.aclose()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_bare_snapshot_resolves_credentials_off_the_event_loop(
+    harness_workspace, monkeypatch
+):
+    """Legacy setup still resolves credentials, but not on the event loop."""
+    from django.core.exceptions import SynchronousOnlyOperation
+
+    org_id = harness_workspace.runner.organization_id
+    _plugin_id, snapshot = _stdio_snapshot(org_id)
+    monkeypatch.setattr(McpServerConnection, "open", _open_without_transport)
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    runtime = McpRuntime()
+    try:
+        await runtime.setup(
+            workspace=harness_workspace,
+            organization_id=org_id,
+            accessor=object(),
+            snapshot=snapshot,
+        )
+        assert runtime._prepared is not None
+        assert runtime._prepared.oauth_credentials == {}
+        assert runtime.connections
+    except SynchronousOnlyOperation:
+        pytest.fail("bare-snapshot credential resolve ran on the event loop")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+        await runtime.aclose()

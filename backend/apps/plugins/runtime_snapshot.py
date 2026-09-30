@@ -111,6 +111,10 @@ class PreparedPluginRuntime:
     {requirement key: secret}``) is ``repr=False`` so secrets never
     surface in logs, tracebacks, or persisted events; ``workspace`` is
     the already-loaded row (runner relation included).
+
+    ``oauth_credentials`` may be empty. That means resolution already
+    ran and no connected OAuth credential matched. Emptiness is not a
+    signal to resolve again.
     """
 
     snapshot: WorkspacePluginSnapshot = field(
