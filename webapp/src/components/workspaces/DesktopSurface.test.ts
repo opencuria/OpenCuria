@@ -31,8 +31,10 @@ const stopDesktop = vi.mocked(workspacesApi.stopDesktop)
 
 const uiStubs = {
   Button: {
-    template: '<button v-bind="$attrs" :title="title"><slot /></button>',
+    template:
+      '<button v-bind="$attrs" :title="title" @click="$emit(\'click\', $event)"><slot /></button>',
     props: ['title'],
+    emits: ['click'],
   },
   LoadingSpinner: { template: '<div />' },
 }
@@ -41,13 +43,48 @@ let sidebarHost: HTMLElement
 let modalHost: HTMLElement
 const wrappers: VueWrapper[] = []
 
+function setHostRect(
+  host: HTMLElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): void {
+  vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
 function mountSurface() {
   const wrapper = mount(DesktopSurface, {
+    attachTo: document.body,
     props: { workspaceId: 'ws-1' },
     global: { stubs: uiStubs },
   })
   wrappers.push(wrapper)
   return wrapper
+}
+
+function connectionMessage(
+  source: MessageEventSource | null,
+  value: string,
+  origin = window.location.origin,
+) {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      data: { action: 'connection_state', value },
+      source,
+      origin,
+    }),
+  )
 }
 
 describe('DesktopSurface', () => {
@@ -67,6 +104,8 @@ describe('DesktopSurface', () => {
     sidebarHost = document.createElement('div')
     modalHost = document.createElement('div')
     document.body.append(sidebarHost, modalHost)
+    setHostRect(sidebarHost, 10, 20, 320, 240)
+    setHostRect(modalHost, 50, 60, 800, 450)
     sidebarDesktopHost.value = sidebarHost
     modalDesktopHost.value = modalHost
 
@@ -89,45 +128,45 @@ describe('DesktopSurface', () => {
       configurable: true,
       get: () => 'visible',
     })
+    vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
-  it('teleports the iframe into the sidebar host by default', async () => {
+  it('keeps one fixed iframe node while overlaying the active host rectangle', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
 
     mountSurface()
     await nextTick()
 
-    const iframe = sidebarHost.querySelector('iframe')
+    const surface = document.querySelector('[data-testid="desktop-surface"]') as HTMLElement
+    const iframe = surface.querySelector('iframe')
     expect(iframe).toBeTruthy()
+    expect(surface.parentElement).not.toBe(sidebarHost)
     expect(iframe?.getAttribute('src')).toContain('/ws/desktop/ws-1/')
     expect(iframe?.getAttribute('src')).toContain('token=tok')
-    expect(modalHost.querySelector('iframe')).toBeNull()
-  })
-
-  it('moves the same iframe element into the modal host without remounting', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-
-    mountSurface()
-    await nextTick()
-    const before = sidebarHost.querySelector('iframe')
-    expect(before).toBeTruthy()
+    expect(surface.style.position).toBe('fixed')
+    expect(surface.style.left).toBe('10px')
+    expect(surface.style.top).toBe('20px')
+    expect(surface.style.width).toBe('320px')
+    expect(surface.style.height).toBe('240px')
 
     store.open()
     await nextTick()
-
-    const after = modalHost.querySelector('iframe')
-    expect(after).toBeTruthy()
-    expect(after).toBe(before)
-    expect(sidebarHost.querySelector('iframe')).toBeNull()
+    expect(document.querySelector('[data-testid="desktop-surface"] iframe')).toBe(iframe)
+    expect(surface.parentElement).not.toBe(modalHost)
+    expect(surface.style.left).toBe('50px')
+    expect(surface.style.top).toBe('60px')
+    expect(surface.style.width).toBe('800px')
+    expect(surface.style.height).toBe('450px')
 
     store.close()
     await nextTick()
-    expect(sidebarHost.querySelector('iframe')).toBe(before)
+    expect(document.querySelector('[data-testid="desktop-surface"] iframe')).toBe(iframe)
+    expect(surface.style.left).toBe('10px')
   })
 
-  it('keeps the iframe alive offscreen when no visible host exists', async () => {
+  it('keeps the iframe mounted but hides it when no visible host exists', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     sidebarDesktopHost.value = null
@@ -135,8 +174,10 @@ describe('DesktopSurface', () => {
     const wrapper = mountSurface()
     await nextTick()
 
-    const iframe = wrapper.find('iframe')
-    expect(iframe.exists()).toBe(true)
+    expect(wrapper.find('iframe').exists()).toBe(true)
+    expect(
+      (document.querySelector('[data-testid="desktop-surface"]') as HTMLElement).style.visibility,
+    ).toBe('hidden')
   })
 
   it('auto-starts the session when the modal opens', async () => {
@@ -152,7 +193,7 @@ describe('DesktopSurface', () => {
     expect(startDesktop).toHaveBeenCalledWith('ws-1')
   })
 
-  it('shows the computer-use overlay over the surface', async () => {
+  it('shows the computer-use overlay over the fixed surface', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     store.setComputerUseActive(true)
@@ -160,25 +201,118 @@ describe('DesktopSurface', () => {
     mountSurface()
     await nextTick()
 
-    expect(sidebarHost.textContent).toContain('Computer-use is controlling this desktop')
+    expect(document.body.textContent).toContain('Computer-use is controlling this desktop')
   })
 
-  it('hides the iframe behind a placeholder until it has loaded', async () => {
+  it('requires KasmVNC connection status after iframe load', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
 
     mountSurface()
     await nextTick()
 
-    const iframe = sidebarHost.querySelector('iframe')!
+    const iframe = document.querySelector('iframe')!
     expect(iframe.classList.contains('opacity-0')).toBe(true)
-    expect(sidebarHost.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
-
     iframe.dispatchEvent(new Event('load'))
     await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
 
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
     expect(iframe.classList.contains('opacity-0')).toBe(false)
-    expect(sidebarHost.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+  })
+
+  it('ignores messages from the wrong origin or a different frame', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected', 'https://attacker.example')
+    connectionMessage(window, 'connected')
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(true)
+
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+  })
+
+  it('ignores a delayed status from an older iframe generation', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const oldFrame = document.querySelector('iframe')!
+
+    store.bumpViewer()
+    await nextTick()
+    const currentFrame = document.querySelector('iframe')!
+    expect(currentFrame).not.toBe(oldFrame)
+    connectionMessage(oldFrame.contentWindow, 'connected')
+    await nextTick()
+    expect(currentFrame.classList.contains('opacity-0')).toBe(true)
+  })
+
+  it('renders visible Retry on disconnect and retries by bumping the viewer', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+
+    connectionMessage(iframe.contentWindow, 'disconnected')
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-retry"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('Reconnecting')
+
+    document.querySelector<HTMLButtonElement>('[data-testid="desktop-surface-retry"]')!.click()
+    await nextTick()
+    expect(store.viewerGeneration).toBe(1)
+  })
+
+  it('does not remount a healthy iframe when the tab becomes visible', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+
+    expect(store.viewerGeneration).toBe(0)
+    expect(document.querySelector('iframe')).toBe(iframe)
+  })
+
+  it('pauses recovery while hidden and does not reload on hidden transitions', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(store.viewerGeneration).toBe(0)
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+    expect(store.viewerGeneration).toBe(0)
   })
 
   it('stops the session on unmount', async () => {
@@ -193,65 +327,32 @@ describe('DesktopSurface', () => {
     expect(stopDesktop).toHaveBeenCalledWith('ws-1')
   })
 
+  it('shows connecting content until Kasm reports connected', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connecting')
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
   it('remounts the iframe when viewer generation bumps', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
 
     mountSurface()
     await nextTick()
-    const iframe = sidebarHost.querySelector('iframe')!
-    iframe.dispatchEvent(new Event('load'))
-    await nextTick()
-    expect(iframe.classList.contains('opacity-0')).toBe(false)
-
+    const iframe = document.querySelector('iframe')!
     store.bumpViewer()
     await nextTick()
 
-    const nextIframe = sidebarHost.querySelector('iframe')
+    const nextIframe = document.querySelector('iframe')
     expect(nextIframe).toBeTruthy()
     expect(nextIframe).not.toBe(iframe)
     expect(nextIframe?.classList.contains('opacity-0')).toBe(true)
-    expect(sidebarHost.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
-  })
-
-  it('bumps viewer generation when the tab becomes visible', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    mountSurface()
-    await nextTick()
-
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'visible',
-    })
-    document.dispatchEvent(new Event('visibilitychange'))
-    await nextTick()
-
-    expect(store.viewerGeneration).toBe(1)
-  })
-
-  it('does not remount while the tab is hidden or disconnected', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const wrapper = mountSurface()
-    await nextTick()
-
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'hidden',
-    })
-    document.dispatchEvent(new Event('visibilitychange'))
-    await nextTick()
-    expect(store.viewerGeneration).toBe(0)
-
-    store.setDisconnected()
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'visible',
-    })
-    document.dispatchEvent(new Event('visibilitychange'))
-    await nextTick()
-    expect(store.viewerGeneration).toBe(0)
-    wrapper.unmount()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
   })
 })

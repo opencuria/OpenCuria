@@ -50,8 +50,7 @@ _KASM_IDLE_GUARD_SCRIPT = (
     b"if(typeof handler!=='function'){return n.apply(this,arguments);}"
     b"var wrapped=function(){try{return handler.apply(this,arguments);}"
     b"catch(err){var msg=String((err&&err.message)||err);"
-    b"if(!window.UI||!window.UI.rfb){return;}"
-    b"if(msg.indexOf('lastActiveAt')!==-1||msg.indexOf('UI.rfb')!==-1){return;}"
+    b"if(msg.indexOf('lastActiveAt')!==-1){return;}"
     b"throw err;}};"
     b"var args=Array.prototype.slice.call(arguments);args[0]=wrapped;"
     b"return n.apply(this,args);};"
@@ -97,6 +96,21 @@ def inject_kasm_idle_guard(html: bytes) -> bytes:
     close_idx = lower.find(b"</head>")
     if close_idx != -1:
         return html[:close_idx] + _KASM_IDLE_GUARD_SCRIPT + html[close_idx:]
+
+    # vnc.html may omit an explicit head. Keep any standards-mode doctype
+    # first, and place the script inside the root element when available.
+    html_idx = lower.find(b"<html")
+    if html_idx != -1:
+        gt = html.find(b">", html_idx)
+        if gt != -1:
+            insert_at = gt + 1
+            return html[:insert_at] + _KASM_IDLE_GUARD_SCRIPT + html[insert_at:]
+    doctype_idx = lower.find(b"<!doctype")
+    if doctype_idx != -1:
+        gt = html.find(b">", doctype_idx)
+        if gt != -1:
+            insert_at = gt + 1
+            return html[:insert_at] + _KASM_IDLE_GUARD_SCRIPT + html[insert_at:]
     return _KASM_IDLE_GUARD_SCRIPT + html
 
 
@@ -165,6 +179,7 @@ def _verify_cookie(value: str) -> tuple[str, str] | None:
 def _user_can_access_workspace(user_id: str, workspace_id: str) -> bool:
     """Return whether the authenticated user may access the workspace desktop."""
     from apps.organizations.models import Membership, MembershipRole
+
     from .repositories import WorkspaceRepository
 
     try:
@@ -252,12 +267,17 @@ async def desktop_proxy_app(scope, receive, send):
 
     proxy_target = await _get_desktop_proxy_target(workspace_id)
     if proxy_target is None:
-        logger.warning("Desktop proxy: no active session for workspace %s", workspace_id)
+        logger.warning(
+            "Desktop proxy: no active session for workspace %s", workspace_id
+        )
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 4004})
         else:
             await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({"type": "http.response.body", "body": b"No active desktop session"})
+            await send({
+                "type": "http.response.body",
+                "body": b"No active desktop session",
+            })
         return
 
     cookie_header = None
@@ -374,8 +394,8 @@ async def _proxy_http(
         logger.error("Desktop HTTP proxy via runner timed out")
         await send({"type": "http.response.start", "status": 504, "headers": []})
         await send({"type": "http.response.body", "body": b"Gateway Timeout"})
-    except Exception as exc:
-        logger.error("Desktop HTTP proxy via runner failed: %s", exc)
+    except Exception:
+        logger.error("Desktop HTTP proxy via runner failed")
         await send({"type": "http.response.start", "status": 502, "headers": []})
         await send({"type": "http.response.body", "body": b"Bad Gateway"})
 
@@ -432,7 +452,9 @@ async def _proxy_websocket(
         except Exception:
             pass
     except Exception:
-        logger.exception("Desktop WebSocket proxy unexpected error")
+        # Do not include upstream exception text or tracebacks: they can contain
+        # request details from the proxied desktop session.
+        logger.error("Desktop WebSocket proxy unexpected error")
         try:
             await send({"type": "websocket.close", "code": 1011})
         except Exception:
@@ -441,10 +463,41 @@ async def _proxy_websocket(
         _unregister_ws_tunnel(tunnel_id)
 
 
+def _sanitize_websocket_close_code(value) -> int:
+    """Return a close code that is valid to send in an ASGI WebSocket frame."""
+    try:
+        code = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return 1011
+    if code < 1000 or code >= 5000 or code in {1004, 1005, 1006, 1015}:
+        return 1011
+    return code
+
+
 async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
     """Bidirectional proxy between client ASGI WebSocket and the runner tunnel."""
 
     from .sio_server import get_sio_server
+
+    runner_close_task: asyncio.Task | None = None
+
+    async def emit_runner_tunnel_close():
+        try:
+            await get_sio_server().emit(
+                "desktop:proxy_ws_close",
+                {"tunnel_id": tunnel_id},
+                to=runner_sid,
+            )
+        except Exception:
+            # Avoid logging exception details, which may include session data.
+            logger.error("Desktop WebSocket runner tunnel close failed")
+
+    async def close_runner_tunnel():
+        nonlocal runner_close_task
+        if runner_close_task is None:
+            runner_close_task = asyncio.create_task(emit_runner_tunnel_close())
+        # Shield the close emit from cancellation of either forwarding task.
+        await asyncio.shield(runner_close_task)
 
     async def client_to_upstream():
         """Forward messages from the browser to KasmVNC."""
@@ -459,7 +512,9 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
                             "desktop:proxy_ws_send",
                             {
                                 "tunnel_id": tunnel_id,
-                                "data": base64.b64encode(message["bytes"]).decode("ascii"),
+                                "data": base64.b64encode(message["bytes"]).decode(
+                                    "ascii"
+                                ),
                                 "encoding": "base64",
                             },
                             to=runner_sid,
@@ -474,14 +529,10 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
                             to=runner_sid,
                         )
                 elif msg_type == "websocket.disconnect":
-                    await get_sio_server().emit(
-                        "desktop:proxy_ws_close",
-                        {"tunnel_id": tunnel_id},
-                        to=runner_sid,
-                    )
+                    await close_runner_tunnel()
                     return
         except Exception:
-            pass
+            logger.error("Desktop WebSocket client-to-runner proxy failed")
 
     async def upstream_to_client():
         """Forward messages from KasmVNC to the browser."""
@@ -499,35 +550,44 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
                         "text": msg["data"],
                     })
                 elif msg["type"] == "close":
-                    code = int(msg.get("code", 1000))
-                    if code < 1000:
-                        code = 1000
-                    if code >= 5000:
-                        code = 1011
+                    try:
+                        await close_runner_tunnel()
+                    except Exception:
+                        logger.error("Desktop WebSocket runner tunnel close failed")
+                    code = _sanitize_websocket_close_code(msg.get("code", 1000))
                     await send({"type": "websocket.close", "code": code})
                     break
         except Exception:
-            pass
+            logger.error("Desktop WebSocket runner-to-client proxy failed")
 
-    # Run both directions concurrently
+    # Run both directions concurrently and always await/cancel the other side.
     tasks = [
         asyncio.create_task(client_to_upstream()),
         asyncio.create_task(upstream_to_client()),
     ]
 
+    async def cleanup():
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # A forwarding task may have failed before initiating the close.
+        await close_runner_tunnel()
+
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-        # Await cancelled tasks to suppress warnings
-        for t in pending:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        cleanup_task = asyncio.create_task(cleanup())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # Preserve cleanup if this proxy task is cancelled during teardown.
             try:
-                await t
+                await asyncio.shield(cleanup_task)
             except asyncio.CancelledError:
+                # A second cancellation must not cancel the close emit either.
                 pass
-    except Exception:
-        for t in tasks:
-            t.cancel()
+            raise
 
 
 def _get_cookie_from_scope(scope: dict, name: str) -> str | None:
@@ -544,6 +604,7 @@ def _get_cookie_from_scope(scope: dict, name: str) -> str | None:
 async def _validate_token(token: str):
     """Validate a JWT token and return the user, or None."""
     from asgiref.sync import sync_to_async
+
     from apps.accounts.auth_backends import get_auth_backend
 
     try:
