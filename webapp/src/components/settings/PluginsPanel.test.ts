@@ -8,7 +8,8 @@ import type { Plugin } from '@/types'
 const routerPush = vi.fn()
 
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: routerPush }),
+  useRouter: () => ({ push: routerPush, replace: vi.fn(async () => {}) }),
+  useRoute: () => ({ path: '/', query: {} }),
 }))
 
 vi.mock('vue-sonner', () => ({
@@ -88,6 +89,8 @@ function makePlugin(overrides: Partial<Plugin> = {}): Plugin {
         headers: {},
         startup_timeout_seconds: 30,
         request_timeout_seconds: 60,
+        auth_type: 'none',
+        oauth_requirement_key: '',
       },
     ],
     credential_requirements: [],
@@ -199,6 +202,41 @@ describe('PluginsPanel', () => {
     await flushPromises()
     const toggle = wrapper.find(`[data-testid="plugin-toggle-${plugin.id}"]`)
     expect(toggle.attributes('disabled')).toBeUndefined()
+  })
+
+  it('does not present workspace-managed OAuth as missing organization credentials', async () => {
+    const plugin = makePlugin({
+      credential_requirements: [
+        {
+          id: 'req-oauth',
+          key: 'oauth',
+          description: '',
+          required: true,
+          service_id: 'svc-oauth',
+          service_name: 'OAuth account',
+          service_slug: 'oauth',
+          credential_type: 'mcp_oauth',
+          plugin_owned_service: true,
+        },
+      ],
+      credential_readiness: {
+        required_service_ids: ['svc-oauth'],
+        missing_required_service_ids: ['svc-oauth'],
+        ready: false,
+      },
+    })
+    pluginStoreMock.plugins = [plugin]
+    pluginStoreMock.globalPlugins = [plugin]
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).text()).toContain(
+      'OAuth managed per workspace',
+    )
+    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).classes()).not.toContain(
+      'bg-destructive',
+    )
+    expect(wrapper.text()).not.toContain('Manage organization credentials')
+    expect(wrapper.text()).toContain('manage their connections in this plugin’s OAuth settings.')
   })
 
   it('labels org credential readiness explicitly', async () => {

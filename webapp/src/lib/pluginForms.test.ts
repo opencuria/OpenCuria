@@ -38,6 +38,8 @@ function makePlugin(): Plugin {
         headers: {},
         startup_timeout_seconds: 30,
         request_timeout_seconds: 60,
+        auth_type: 'none',
+        oauth_requirement_key: '',
       },
     ],
     credential_requirements: [
@@ -95,6 +97,69 @@ describe('pluginForms', () => {
     expect(update.mcp_servers?.[0]?.command).toBe('npx')
   })
 
+  it('round-trips OAuth MCP auth and validates its unique required service binding', () => {
+    const form = emptyPluginForm()
+    form.name = 'Notion'
+    form.requirements.push({
+      uid: 'req-oauth',
+      reqKey: 'notion_oauth',
+      description: 'Authorize Notion',
+      required: true,
+      mode: 'new',
+      serviceId: '',
+      serviceName: 'Notion OAuth',
+      credentialType: 'mcp_oauth',
+      envVarName: '',
+      targetPath: '',
+      label: '',
+    })
+    form.mcps.push({
+      uid: 'mcp-oauth',
+      name: 'Notion',
+      transport: 'streamable_http',
+      command: '',
+      argsText: '',
+      cwd: '/workspace',
+      env: [],
+      headers: [],
+      url: 'https://mcp.example.com/mcp',
+      startupTimeout: 30,
+      requestTimeout: 60,
+      authType: 'oauth',
+      oauthRequirementKey: 'notion_oauth',
+    })
+    expect(validatePluginForm(form)).toEqual([])
+    expect(formToCreateIn(form).mcp_servers?.[0]).toMatchObject({
+      auth_type: 'oauth',
+      oauth_requirement_key: 'notion_oauth',
+    })
+    expect(formToCreateIn(form).credential_requirements?.[0]?.credential_service).toMatchObject({
+      credential_type: 'mcp_oauth',
+    })
+
+    const existing = makePlugin()
+    existing.mcp_servers = [{
+      id: 'server-oauth', name: 'Notion', slug: 'notion', transport: 'streamable_http',
+      command: '', args: [], cwd: '/workspace', env: {}, url: 'https://mcp.example.com/mcp',
+      headers: {}, startup_timeout_seconds: 30, request_timeout_seconds: 60,
+      auth_type: 'oauth', oauth_requirement_key: 'notion_oauth',
+    }]
+    existing.credential_requirements = [{
+      id: 'req-oauth', key: 'notion_oauth', description: '', required: true,
+      service_id: 'oauth-service', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
+      credential_type: 'mcp_oauth', plugin_owned_service: true,
+    }]
+    const update = formToUpdateIn(pluginToForm(existing))
+    expect(update.mcp_servers?.[0]).toMatchObject({ auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' })
+    expect(update.credential_requirements?.[0]?.credential_service).toEqual({ service_id: 'oauth-service' })
+
+    form.mcps[0]!.oauthRequirementKey = 'other'
+    expect(validatePluginForm(form).some((error) => error.includes('required MCP OAuth credential service'))).toBe(true)
+    form.mcps[0]!.oauthRequirementKey = 'notion_oauth'
+    form.mcps.push({ ...form.mcps[0]!, uid: 'mcp-duplicate', name: 'Duplicate' })
+    expect(validatePluginForm(form).some((error) => error.includes('used by exactly one'))).toBe(true)
+  })
+
   it('serializes new-service requirements with normalized fields', () => {
     const form = emptyPluginForm()
     form.name = 'Demo'
@@ -133,6 +198,8 @@ describe('pluginForms', () => {
       url: 'https://x.example',
       startupTimeout: 0,
       requestTimeout: 700,
+      authType: 'none',
+      oauthRequirementKey: '',
     })
     form.requirements.push({
       uid: 'r1',
@@ -183,6 +250,8 @@ describe('pluginForms', () => {
       url: 'https://stale.example/mcp',
       startupTimeout: 30,
       requestTimeout: 60,
+      authType: 'none',
+      oauthRequirementKey: '',
     })
     const stdio = formToCreateIn(form).mcp_servers?.[0]
     expect(stdio?.url).toBe('')
@@ -235,6 +304,8 @@ describe('pluginForms', () => {
       url: '',
       startupTimeout: 30,
       requestTimeout: 60,
+      authType: 'none',
+      oauthRequirementKey: '',
     })
     const errors = validatePluginForm(form)
     expect(errors.some((e) => e.includes('duplicate key'))).toBe(true)
@@ -250,7 +321,7 @@ describe('pluginForms', () => {
       uid: 'm1', name: 'Runner', transport: 'streamable_http', command: '', argsText: '',
       cwd: '/workspace', env: [], headers: [],
       url: 'https://user:pass@mcp.example.com/mcp#frag',
-      startupTimeout: 30, requestTimeout: 60,
+      startupTimeout: 30, requestTimeout: 60, authType: 'none', oauthRequirementKey: '',
     })
     expect(validatePluginForm(urlForm).some((e) => e.includes('userinfo or a fragment'))).toBe(true)
   })

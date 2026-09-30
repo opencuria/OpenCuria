@@ -14,6 +14,7 @@ import type {
   PluginCreateIn,
   PluginCredentialRequirementIn,
   PluginCredentialServiceType,
+  PluginMcpAuthType,
   PluginMcpServerIn,
   PluginMcpTransport,
   PluginSkillIn,
@@ -53,6 +54,8 @@ export interface PluginMcpForm {
   url: string
   startupTimeout: number
   requestTimeout: number
+  authType: PluginMcpAuthType
+  oauthRequirementKey: string
 }
 
 export interface PluginRequirementForm {
@@ -119,6 +122,8 @@ export function emptyMcpForm(): PluginMcpForm {
     url: '',
     startupTimeout: 30,
     requestTimeout: 60,
+    authType: 'none',
+    oauthRequirementKey: '',
   }
 }
 
@@ -156,7 +161,7 @@ function toTransport(value: string): PluginMcpTransportOption {
 }
 
 function toServiceType(value: string): PluginServiceTypeOption {
-  if (value === 'file' || value === 'ssh_key') return value
+  if (value === 'file' || value === 'ssh_key' || value === 'mcp_oauth') return value
   return 'env'
 }
 
@@ -195,6 +200,8 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
       url: m.url ?? '',
       startupTimeout: m.startup_timeout_seconds ?? 30,
       requestTimeout: m.request_timeout_seconds ?? 60,
+      authType: m.auth_type ?? 'none',
+      oauthRequirementKey: m.oauth_requirement_key ?? '',
     })),
     requirements: (plugin.credential_requirements ?? []).map((r) => ({
       uid: newUid('req'),
@@ -209,6 +216,7 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
       targetPath: '',
       label: '',
     })),
+
   }
 }
 
@@ -252,6 +260,8 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
     cwd: mcp.cwd.trim() || '/workspace',
     startup_timeout_seconds: Number.isFinite(startup) ? Math.trunc(startup) : 30,
     request_timeout_seconds: Number.isFinite(request) ? Math.trunc(request) : 60,
+    auth_type: mcp.authType,
+    oauth_requirement_key: mcp.authType === 'oauth' ? mcp.oauthRequirementKey.trim() : '',
   }
   if (mcp.transport === 'stdio') {
     // Backend forbids URL for stdio; headers are validated but never
@@ -367,6 +377,9 @@ export function validatePluginForm(form: PluginFormModel): string[] {
   })
 
   const requirementKeys = new Set(form.requirements.map((r) => r.reqKey.trim()).filter(Boolean))
+  const oauthRequirementKeys = form.requirements
+    .filter((req) => req.credentialType === 'mcp_oauth')
+    .map((req) => req.reqKey.trim())
 
   form.mcps.forEach((mcp, i) => {
     const label = mcp.name.trim() ? `MCP server "${mcp.name.trim()}"` : `MCP server #${i + 1}`
@@ -399,6 +412,19 @@ export function validatePluginForm(form: PluginFormModel): string[] {
         errors.push(`${label}: command/args must be empty for http/sse transports.`)
       }
     }
+    if (mcp.authType === 'oauth') {
+      if (mcp.transport === 'stdio') errors.push(`${label}: OAuth is only supported for HTTP transports.`)
+      const requirement = form.requirements.find((req) => req.reqKey.trim() === mcp.oauthRequirementKey.trim())
+      if (!mcp.oauthRequirementKey.trim()) errors.push(`${label}: select a required MCP OAuth credential requirement.`)
+      else if (!requirement || !requirement.required || !oauthRequirementKeys.includes(mcp.oauthRequirementKey.trim())) {
+        errors.push(`${label}: OAuth must reference a required MCP OAuth credential service.`)
+      }
+      if (mcp.headers.some((row) => row.key.trim().toLowerCase() === 'authorization')) {
+        errors.push(`${label}: OAuth manages the Authorization header.`)
+      }
+    } else if (mcp.oauthRequirementKey.trim()) {
+      errors.push(`${label}: OAuth requirement key must be empty when authentication is disabled.`)
+    }
     const activeRows = mcp.transport === 'stdio' ? mcp.env : mcp.headers
     const mappingErrors = validateMappingRows(activeRows, label, mcp.transport === 'stdio' ? 'env' : 'headers', requirementKeys)
     errors.push(...mappingErrors)
@@ -419,6 +445,7 @@ export function validatePluginForm(form: PluginFormModel): string[] {
 
   const seenKeys = new Set<string>()
   const seenServices = new Set<string>()
+  const seenNewOauthNames = new Set<string>()
   form.requirements.forEach((req, i) => {
     const key = req.reqKey.trim()
     const label = key ? `Requirement "${key}"` : `Requirement #${i + 1}`
@@ -434,6 +461,9 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     if (req.description.trim().length > 2000) {
       errors.push(`${label}: description is too long (max 2000 characters).`)
     }
+    if (req.credentialType === 'mcp_oauth' && !req.required) {
+      errors.push(`${label}: MCP OAuth credential requirements must be required.`)
+    }
     if (req.mode === 'existing') {
       if (!req.serviceId) {
         errors.push(`${label}: select an existing credential service.`)
@@ -446,6 +476,14 @@ export function validatePluginForm(form: PluginFormModel): string[] {
       if (!req.serviceName.trim()) errors.push(`${label}: new service name is required.`)
       else if (!isDerivableSlug(req.serviceName)) {
         errors.push(`${label}: new service name must contain letters or digits so an identifier can be derived.`)
+      }
+      if (req.credentialType === 'mcp_oauth') {
+        const slug = slugify(req.serviceName)
+        if (seenNewOauthNames.has(slug)) errors.push(`${label}: duplicate MCP OAuth service.`)
+        seenNewOauthNames.add(slug)
+        if (form.mcps.filter((mcp) => mcp.authType === 'oauth' && mcp.oauthRequirementKey.trim() === key).length !== 1) {
+          errors.push(`${label}: MCP OAuth service must be used by exactly one OAuth MCP server.`)
+        }
       }
       if (req.credentialType === 'env' && !ENV_VAR_RE.test(req.envVarName.trim().toUpperCase())) {
         errors.push(`${label}: environment variable name must look like OPENAI_API_KEY.`)

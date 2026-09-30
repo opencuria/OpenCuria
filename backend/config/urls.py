@@ -15,10 +15,15 @@ from apps.credentials.api import (
     credential_service_router,
     org_credential_service_router,
 )
+from apps.credentials.oauth_api import (
+    callback as mcp_oauth_callback,
+)
+from apps.credentials.oauth_api import (
+    router as mcp_oauth_router,
+)
 from apps.harness.api import harness_router
 from apps.organizations.api import org_router
 from apps.plugins.api import plugin_router, workspace_plugin_router
-from apps.skills.api import skill_router
 from apps.runners.api import (
     git_router,
     image_artifact_router,
@@ -27,6 +32,7 @@ from apps.runners.api import (
     workspace_image_artifact_router,
     workspace_router,
 )
+from apps.skills.api import skill_router
 
 api = NinjaAPI(
     title="opencuria API",
@@ -39,6 +45,7 @@ api = NinjaAPI(
 # ---------------------------------------------------------------------------
 # Health check (unauthenticated)
 # ---------------------------------------------------------------------------
+
 
 @api.get("/health/", auth=None, tags=["health"])
 def health_check(request):
@@ -55,6 +62,7 @@ api.add_router("/workspaces/", git_router)
 api.add_router("/image-artifacts/", image_artifact_router)
 api.add_router("/credential-services/", credential_service_router)
 api.add_router("/credentials/", credential_router)
+api.add_router("/mcp-oauth/", mcp_oauth_router)
 api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
@@ -63,6 +71,7 @@ api.add_router("/plugins/", plugin_router)
 api.add_router("/workspaces/", workspace_plugin_router)
 
 urlpatterns = [
+    path("api/v1/mcp-oauth/callback/", mcp_oauth_callback, name="mcp_oauth_callback"),
     path("admin/", admin.site.urls),
     path("api/v1/", api.urls),
 ]

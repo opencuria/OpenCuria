@@ -44,7 +44,7 @@ onMounted(async () => {
 })
 
 const serviceOptions = computed(() =>
-  credentialStore.services.map((s: CredentialService) => ({
+  credentialStore.services.filter((s: CredentialService) => s.credential_type !== 'mcp_oauth').map((s: CredentialService) => ({
     value: s.id,
     label: s.name,
   })),

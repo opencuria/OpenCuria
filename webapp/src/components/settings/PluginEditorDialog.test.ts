@@ -184,6 +184,34 @@ describe('PluginEditorDialog', () => {
     expect(wrapper.find('[data-testid="plugin-editor-error"]').exists()).toBe(true)
   })
 
+  it('configures HTTP OAuth auth and round-trips its managed requirement', async () => {
+    pluginStoreMock.createPlugin.mockResolvedValue({ id: 'new' })
+    const wrapper = mountEditor(null)
+    await flushPromises()
+    await wrapper.find('[data-testid="plugin-name"]').setValue('Notion')
+    await wrapper.find('[data-testid="plugin-add-mcp"]').trigger('click')
+    const mcp = wrapper.find('[data-testid="plugin-mcp-0"]')
+    await mcp.find('input').setValue('Notion')
+    const { emptyPluginForm, emptyMcpForm, formToCreateIn, validatePluginForm } = await import('@/lib/pluginForms')
+    const form = emptyPluginForm()
+    form.name = 'Notion'
+    form.requirements.push({
+      uid: 'r', reqKey: 'notion_oauth', description: '', required: true, mode: 'new',
+      serviceId: '', serviceName: 'Notion OAuth', credentialType: 'mcp_oauth',
+      envVarName: '', targetPath: '', label: '',
+    })
+    const server = emptyMcpForm()
+    server.name = 'Notion'
+    server.transport = 'streamable_http'
+    server.url = 'https://mcp.notion.com/mcp'
+    server.authType = 'oauth'
+    server.oauthRequirementKey = 'notion_oauth'
+    form.mcps.push(server)
+    expect(validatePluginForm(form)).toEqual([])
+    expect(formToCreateIn(form).mcp_servers?.[0]).toMatchObject({ auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' })
+    expect(formToCreateIn(form).credential_requirements?.[0]?.credential_service.credential_type).toBe('mcp_oauth')
+  })
+
   it('exposes transport switching that clears stale fields (unit-level)', async () => {
     const { emptyMcpForm, formToCreateIn } = await import('@/lib/pluginForms')
     const mcp = emptyMcpForm()

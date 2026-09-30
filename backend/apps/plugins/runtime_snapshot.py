@@ -47,6 +47,8 @@ class PluginMcpServerSnapshot:
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    auth_type: str = "none"
+    oauth_requirement_key: str = ""
     startup_timeout_seconds: int = 30
     request_timeout_seconds: int = 60
 
@@ -62,6 +64,7 @@ class PluginRequirementSnapshot:
     service_id: uuid.UUID
     service_slug: str
     service_name: str
+    credential_type: str = "env"
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,9 @@ class PreparedPluginRuntime:
     )
     workspace: Any = None
     plaintexts: dict[uuid.UUID, dict[str, str]] = field(
+        default_factory=dict, repr=False
+    )
+    oauth_credentials: dict[uuid.UUID, uuid.UUID] = field(
         default_factory=dict, repr=False
     )
 

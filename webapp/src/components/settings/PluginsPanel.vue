@@ -6,7 +6,7 @@
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Pencil, Plus, Puzzle, Trash2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +16,8 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
 import PluginEditorDialog from './PluginEditorDialog.vue'
+import PluginOAuthConnections from './PluginOAuthConnections.vue'
+import { useNotificationStore } from '@/stores/notifications'
 import {
   Dialog,
   DialogContent,
@@ -26,11 +28,15 @@ import {
 } from '@/components/ui/dialog'
 import { useAuthStore } from '@/stores/auth'
 import { usePluginStore } from '@/stores/plugins'
+import { useCredentialStore } from '@/stores/credentials'
 import type { Plugin } from '@/types'
 
 const authStore = useAuthStore()
 const pluginStore = usePluginStore()
+const credentialStore = useCredentialStore()
 const router = useRouter()
+const route = useRoute()
+const notifications = useNotificationStore()
 
 const isAdmin = computed(() => authStore.isAdmin)
 const activeOrgId = computed(() => authStore.activeOrganizationId)
@@ -40,6 +46,61 @@ const editingPlugin = ref<Plugin | null>(null)
 const deletingPlugin = ref<Plugin | null>(null)
 const deleting = ref(false)
 
+function missingOAuthServiceIds(plugin: Plugin): Set<string> {
+  const missing = new Set(plugin.credential_readiness?.missing_required_service_ids ?? [])
+  return new Set(
+    plugin.credential_requirements
+      .filter((requirement) => requirement.credential_type === 'mcp_oauth' && missing.has(requirement.service_id))
+      .map((requirement) => requirement.service_id),
+  )
+}
+
+function hasMissingOrganizationCredentials(plugin: Plugin): boolean {
+  const readiness = plugin.credential_readiness
+  if (!readiness || readiness.ready) return false
+  const oauthServiceIds = new Set(
+    plugin.credential_requirements
+      .filter((requirement) => requirement.credential_type === 'mcp_oauth')
+      .map((requirement) => requirement.service_id),
+  )
+  return readiness.missing_required_service_ids.some((serviceId) => !oauthServiceIds.has(serviceId))
+}
+
+function readinessOkay(plugin: Plugin): boolean {
+  return Boolean(
+    plugin.credential_readiness?.ready ||
+      (missingOAuthServiceIds(plugin).size > 0 && !hasMissingOrganizationCredentials(plugin)),
+  )
+}
+
+function readinessLabel(plugin: Plugin): string {
+  const readiness = plugin.credential_readiness
+  if (!readiness) return 'Unknown'
+  if (readiness.ready) return 'Org credentials ready'
+  if (missingOAuthServiceIds(plugin).size && !hasMissingOrganizationCredentials(plugin)) {
+    return 'OAuth managed per workspace'
+  }
+  return 'Org credentials missing'
+}
+
+function readinessHint(plugin: Plugin): string {
+  if (plugin.credential_readiness?.ready) {
+    return 'Organization credentials are configured for this plugin.'
+  }
+  if (missingOAuthServiceIds(plugin).size) {
+    const organizationMissing = hasMissingOrganizationCredentials(plugin)
+    return organizationMissing
+      ? 'OAuth accounts are managed separately and attached to workspaces; other organization credentials are also missing.'
+      : 'OAuth accounts are managed separately and attached to each workspace; manage their connections in this plugin’s OAuth settings.'
+  }
+  return 'Organization credentials missing for this plugin.'
+}
+
+function activationDisabled(plugin: Plugin): boolean {
+  if (plugin.org_enabled) return false
+  return !plugin.enabled || !plugin.published
+}
+
 watch(
   activeOrgId,
   () => {
@@ -48,31 +109,68 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => route.query.mcp_oauth,
+  (result) => {
+    if (result !== 'connected' && result !== 'error') return
+    if (result === 'connected') {
+      notifications.success(
+        'OAuth connected',
+        'Your MCP account is connected. Attach its credential to each workspace that needs it.',
+      )
+    } else {
+      notifications.error(
+        'OAuth connection failed',
+        'The provider connection was not completed. You can try again from this plugin.',
+      )
+    }
+    void pluginStore.reload().then(async () => {
+      await credentialStore.fetchCredentials()
+      await Promise.all(
+        (pluginStore.plugins ?? []).flatMap((plugin) =>
+          (plugin.mcp_servers ?? [])
+            .filter((server) => server.auth_type === 'oauth')
+            .map((server) => pluginStore.fetchMcpOAuthStatus(plugin.id, server.id)),
+        ),
+      )
+    })
+    const query = { ...route.query }
+    delete query.mcp_oauth
+    void router.replace({ path: route.path, query }).catch(() => undefined)
+  },
+  { immediate: true },
+)
+
+watch(
+  () =>
+    (pluginStore.plugins ?? [])
+      .map(
+        (plugin) =>
+          `${plugin.id}:${(plugin.mcp_servers ?? [])
+            .filter((server) => server.auth_type === 'oauth')
+            .map((server) => server.id)
+            .join(',')}`,
+      )
+      .join('|'),
+  () => {
+    for (const plugin of pluginStore.plugins ?? []) {
+      for (const server of (plugin.mcp_servers ?? []).filter(
+        (entry) => entry.auth_type === 'oauth',
+      )) {
+        const key = `${plugin.id}:${server.id}`
+        if (
+          !pluginStore.getMcpOAuthStatus(plugin.id, server.id) &&
+          !pluginStore.mcpOAuthLoading[key]
+        ) {
+          void pluginStore.fetchMcpOAuthStatus(plugin.id, server.id)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+
 defineExpose({ activationDisabled, readinessLabel, readinessHint })
-
-function readinessLabel(plugin: Plugin): string {
-  const readiness = plugin.credential_readiness
-  if (!readiness) return 'Unknown'
-  if (readiness.ready) return 'Org credentials ready'
-  return 'Org credentials missing'
-}
-
-function readinessHint(plugin: Plugin): string {
-  if (plugin.credential_readiness?.ready) {
-    return 'Organization credentials are configured for this plugin.'
-  }
-  return 'Organization credentials missing for this plugin.'
-}
-
-/**
- * Backend only blocks *enabling* an ineffective (disabled/unpublished)
- * plugin; disabling an org-active entry always succeeds. Keep the
- * switch usable for org-enabled rows so admins can always turn them off.
- */
-function activationDisabled(plugin: Plugin): boolean {
-  if (plugin.org_enabled) return false
-  return !plugin.enabled || !plugin.published
-}
 
 function openCreate(): void {
   editingPlugin.value = null
@@ -144,7 +242,9 @@ async function manageCredentials(): Promise<void> {
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
             OpenCuria ({{ pluginStore.globalPlugins.length }})
           </h3>
-          <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+          >
             <SettingsRow v-for="plugin in pluginStore.globalPlugins" :key="plugin.id">
               <template #icon>
                 <Puzzle :size="16" />
@@ -153,11 +253,13 @@ async function manageCredentials(): Promise<void> {
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="text-sm font-medium text-foreground">{{ plugin.name }}</span>
                   <Badge variant="secondary">Global</Badge>
-                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline">Unpublished</Badge>
+                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline"
+                    >Unpublished</Badge
+                  >
                   <Badge v-else-if="plugin.org_enabled" variant="default">Active</Badge>
                   <Badge v-else variant="outline">Inactive</Badge>
                   <Badge
-                    :variant="plugin.credential_readiness?.ready ? 'secondary' : 'destructive'"
+                    :variant="readinessOkay(plugin) ? 'secondary' : 'destructive'"
                     :data-testid="`plugin-readiness-${plugin.id}`"
                   >
                     {{ readinessLabel(plugin) }}
@@ -168,14 +270,25 @@ async function manageCredentials(): Promise<void> {
                 </p>
                 <p class="text-xs text-muted-foreground">
                   {{ plugin.skills.length }} skill{{ plugin.skills.length === 1 ? '' : 's' }} ·
-                  {{ plugin.mcp_servers.length }} MCP server{{ plugin.mcp_servers.length === 1 ? '' : 's' }}
+                  {{ plugin.mcp_servers.length }} MCP server{{
+                    plugin.mcp_servers.length === 1 ? '' : 's'
+                  }}
                 </p>
+                <PluginOAuthConnections
+                  v-for="server in plugin.mcp_servers.filter(
+                    (entry) => entry.auth_type === 'oauth',
+                  )"
+                  :key="server.id"
+                  :plugin="plugin"
+                  :server="server"
+                />
                 <p
                   v-if="!plugin.credential_readiness?.ready"
                   class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
                 >
                   <span>{{ readinessHint(plugin) }}</span>
                   <button
+                    v-if="hasMissingOrganizationCredentials(plugin)"
                     type="button"
                     class="underline"
                     :data-testid="`plugin-manage-credentials-${plugin.id}`"
@@ -189,8 +302,12 @@ async function manageCredentials(): Promise<void> {
                 <div class="flex items-center gap-2">
                   <Switch
                     :model-value="plugin.org_enabled"
-                    :disabled="activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)"
-                    :aria-label="plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`"
+                    :disabled="
+                      activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)
+                    "
+                    :aria-label="
+                      plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`
+                    "
                     :data-testid="`plugin-toggle-${plugin.id}`"
                     @update:model-value="(v) => handleToggle(plugin, Boolean(v))"
                   />
@@ -210,7 +327,10 @@ async function manageCredentials(): Promise<void> {
           >
             No organization plugins yet.
           </div>
-          <div v-else class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            v-else
+            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+          >
             <SettingsRow v-for="plugin in pluginStore.orgPlugins" :key="plugin.id">
               <template #icon>
                 <Puzzle :size="16" />
@@ -219,11 +339,13 @@ async function manageCredentials(): Promise<void> {
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="text-sm font-medium text-foreground">{{ plugin.name }}</span>
                   <Badge variant="secondary">Organization</Badge>
-                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline">Unpublished</Badge>
+                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline"
+                    >Unpublished</Badge
+                  >
                   <Badge v-else-if="plugin.org_enabled" variant="default">Active</Badge>
                   <Badge v-else variant="outline">Inactive</Badge>
                   <Badge
-                    :variant="plugin.credential_readiness?.ready ? 'secondary' : 'destructive'"
+                    :variant="readinessOkay(plugin) ? 'secondary' : 'destructive'"
                     :data-testid="`plugin-readiness-${plugin.id}`"
                   >
                     {{ readinessLabel(plugin) }}
@@ -234,14 +356,25 @@ async function manageCredentials(): Promise<void> {
                 </p>
                 <p class="text-xs text-muted-foreground">
                   {{ plugin.skills.length }} skill{{ plugin.skills.length === 1 ? '' : 's' }} ·
-                  {{ plugin.mcp_servers.length }} MCP server{{ plugin.mcp_servers.length === 1 ? '' : 's' }}
+                  {{ plugin.mcp_servers.length }} MCP server{{
+                    plugin.mcp_servers.length === 1 ? '' : 's'
+                  }}
                 </p>
+                <PluginOAuthConnections
+                  v-for="server in plugin.mcp_servers.filter(
+                    (entry) => entry.auth_type === 'oauth',
+                  )"
+                  :key="server.id"
+                  :plugin="plugin"
+                  :server="server"
+                />
                 <p
                   v-if="!plugin.credential_readiness?.ready"
                   class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
                 >
                   <span>{{ readinessHint(plugin) }}</span>
                   <button
+                    v-if="hasMissingOrganizationCredentials(plugin)"
                     type="button"
                     class="underline"
                     :data-testid="`plugin-manage-credentials-${plugin.id}`"
@@ -255,8 +388,12 @@ async function manageCredentials(): Promise<void> {
                 <div class="flex items-center gap-1">
                   <Switch
                     :model-value="plugin.org_enabled"
-                    :disabled="activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)"
-                    :aria-label="plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`"
+                    :disabled="
+                      activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)
+                    "
+                    :aria-label="
+                      plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`
+                    "
                     :data-testid="`plugin-toggle-${plugin.id}`"
                     @update:model-value="(v) => handleToggle(plugin, Boolean(v))"
                   />

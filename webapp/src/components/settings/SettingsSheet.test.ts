@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 import SettingsSheet from './SettingsSheet.vue'
 import { OPEN_SETTINGS_EVENT } from './settingsTabs'
@@ -156,9 +157,14 @@ const listProviderConnectionsMock = vi.mocked(harnessApi.listProviderConnections
 
 function mountSheet() {
   setActivePinia(createPinia())
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: { template: '<div />' } }],
+  })
   const wrapper = mount(SettingsSheet, {
     attachTo: document.body,
     global: {
+      plugins: [router],
       stubs: {
         Dialog: { template: '<div><slot /></div>' },
         DialogContent: { template: '<div><slot /></div>' },

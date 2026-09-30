@@ -1869,10 +1869,14 @@ class HarnessService:
         resolved = plugin_runtime.resolve_runtime_credentials(
             snapshot, workspace=workspace
         )
+        oauth_credentials = plugin_runtime.resolve_runtime_oauth_credentials(
+            snapshot, workspace=workspace
+        )
         return PreparedPluginRuntime(
             snapshot=snapshot,
             workspace=workspace,
             plaintexts=dict(resolved or {}),
+            oauth_credentials=oauth_credentials,
         )
 
     async def _settle_open_stream_parts(self, assistant: HarnessMessage) -> None:

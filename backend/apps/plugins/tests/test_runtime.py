@@ -8,20 +8,25 @@ values are logged or returned through the API-shaped payloads.
 
 from __future__ import annotations
 
+import json
 import uuid
 import uuid as _uuid  # noqa: F401  (service ids arrive as strings)
 
 import pytest
 from django.contrib.auth import get_user_model
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import (
+    Credential,
+    CredentialService,
+    McpOAuthClientRegistration,
+)
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.plugins import runtime as plugin_runtime
 from apps.plugins.models import Plugin
 from apps.plugins.services import PluginService
 from apps.runners.models import Runner, Workspace
-from common.utils import hash_token
+from common.utils import encrypt_value, hash_token
 
 
 @pytest.fixture
@@ -39,9 +44,7 @@ def org_ctx(db):
         api_token_hash=hash_token(uuid.uuid4().hex),
         organization=org,
     )
-    workspace = Workspace.objects.create(
-        runner=runner, name="rt-ws", created_by=user
-    )
+    workspace = Workspace.objects.create(runner=runner, name="rt-ws", created_by=user)
     return {"user": user, "org": org, "workspace": workspace}
 
 
@@ -121,6 +124,86 @@ def test_snapshot_only_effective_plugins(org_ctx):
     assert len(snapshot.plugins[0].skills) == 1
     assert len(snapshot.plugins[0].mcp_servers) == 1
     assert snapshot.plugin_skills and "guide" in snapshot.plugin_skills[0].lower()
+
+
+@pytest.mark.parametrize("owner_scope", ["personal", "org"])
+@pytest.mark.django_db
+def test_global_notion_oauth_credential_enables_workspace_plugin(org_ctx, owner_scope):
+    """Seeded global Notion bindings work for personal and org tokens."""
+    from apps.plugins.runtime import (
+        build_workspace_plugin_snapshot,
+        resolve_runtime_oauth_credentials,
+    )
+
+    plugin = Plugin.objects.get(slug="notion", organization__isnull=True)
+    requirement = plugin.credential_requirements.select_related(
+        "credential_service"
+    ).get(key="notion_oauth")
+    service = requirement.credential_service
+    server = plugin.mcp_servers.get(slug="notion")
+    assert service.organization_id is None
+
+    registration = McpOAuthClientRegistration.objects.create(
+        server_url=server.url,
+        callback_url=f"https://example.test/oauth/callback/{uuid.uuid4()}",
+        issuer="https://mcp.notion.com",
+        client_id="notion-client",
+        authorization_endpoint="https://mcp.notion.com/authorize",
+        token_endpoint="https://mcp.notion.com/token",
+    )
+    token_payload = {
+        "access_token": "notion-access-token",
+        "refresh_token": "notion-refresh-token",
+        "server_id": str(server.id),
+        "server_url": server.url,
+        "resource": server.url,
+        "registration_id": str(registration.id),
+    }
+    credential = Credential.objects.create(
+        user=org_ctx["user"] if owner_scope == "personal" else None,
+        organization=org_ctx["org"] if owner_scope == "org" else None,
+        service=service,
+        name="Notion OAuth",
+        encrypted_value=encrypt_value(json.dumps(token_payload)),
+        created_by=org_ctx["user"],
+        oauth_server_id=server.id,
+        oauth_server_url=server.url,
+        oauth_resource=server.url,
+        oauth_status="connected",
+        oauth_registration=registration,
+    )
+    org_ctx["workspace"].credentials.add(credential)
+
+    plugin_service = PluginService()
+    plugin_service.set_org_activation(
+        plugin.id,
+        org_id=org_ctx["org"].id,
+        user=org_ctx["user"],
+        active=True,
+    )
+    org_readiness = plugin_service.get_visible(plugin.id, org_id=org_ctx["org"].id)[
+        "credential_readiness"
+    ]
+    # Org summaries deliberately ignore personal credentials, while a valid
+    # org-owned credential on the global Notion service satisfies the summary.
+    assert org_readiness["ready"] is (owner_scope == "org")
+
+    workspace_plugins = plugin_service.set_workspace_plugins(
+        workspace=org_ctx["workspace"],
+        org_id=org_ctx["org"].id,
+        user=org_ctx["user"],
+        plugin_ids=[plugin.id],
+    )
+    notion_state = next(item for item in workspace_plugins if item["id"] == plugin.id)
+    assert notion_state["ready"] is True
+    assert notion_state["missing_required_credentials"] == []
+
+    snapshot = build_workspace_plugin_snapshot(
+        workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
+    )
+    assert resolve_runtime_oauth_credentials(
+        snapshot, workspace=org_ctx["workspace"]
+    ) == {server.id: credential.id}
 
 
 @pytest.mark.django_db

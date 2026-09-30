@@ -223,6 +223,7 @@ class WorkspaceLifecycleMixin:
         files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
+        resolved_credentials: ResolvedCredentials | None = None,
         runner_id: uuid.UUID | None = None,
         image_artifact_id: uuid.UUID | None = None,
         user=None,
@@ -288,6 +289,28 @@ class WorkspaceLifecycleMixin:
             DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height,
         )
 
+        resolved_credential_records = resolved_credentials
+        if credentials is not None:
+            if user is None or organization_id is None:
+                raise ConflictError(
+                    "User and organization are required to resolve "
+                    "workspace credentials"
+                )
+            if resolved_credential_records is None:
+                from apps.credentials.services import CredentialSvc
+
+                resolved_credential_records = await sync_to_async(
+                    CredentialSvc().resolve_credentials
+                )(
+                    [credential.id for credential in credentials],
+                    org_id=organization_id,
+                    user=user,
+                )
+        if credentials is not None:
+            env_vars = resolved_credential_records.env_vars
+            files = resolved_credential_records.files
+            ssh_keys = resolved_credential_records.ssh_keys
+
         # Create records
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, repos, workspace_id)
@@ -306,6 +329,10 @@ class WorkspaceLifecycleMixin:
         )
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
+            await sync_to_async(self.workspaces.update_credentials_present)(
+                workspace,
+                bool(env_vars or files or ssh_keys),
+            )
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
@@ -393,15 +420,30 @@ class WorkspaceLifecycleMixin:
             else credentials
         )
         if credential_records is not None:
-            current_ids = {
-                credential.id for credential in workspace.credentials.all()
-            }
+            current_ids = {credential.id for credential in workspace.credentials.all()}
             new_ids = {credential.id for credential in credential_records}
             ids_changed = current_ids != new_ids
-            desired_present = bool(new_ids)
+            resolved_payload = resolved_credentials
+            if resolved_payload is None and credential_records is not None:
+                from apps.credentials.services import CredentialSvc
+
+                resolved_payload = await sync_to_async(
+                    CredentialSvc().resolve_credentials
+                )(
+                    [credential.id for credential in credential_records],
+                    org_id=workspace.runner.organization_id,
+                    user=workspace.created_by,
+                )
+            desired_present = bool(
+                resolved_payload
+                and (
+                    resolved_payload.env_vars
+                    or resolved_payload.files
+                    or resolved_payload.ssh_keys
+                )
+            )
             needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
-                ids_changed
-                or bool(workspace.credentials_present) != desired_present
+                ids_changed or bool(workspace.credentials_present) != desired_present
             )
             if needs_disk_sync:
                 runner = workspace.runner
@@ -415,11 +457,7 @@ class WorkspaceLifecycleMixin:
                 )
 
             if needs_disk_sync:
-                resolved = resolved_credentials
-                if resolved is None:
-                    # Phase-4 port: prefer the injected credential_resolver.
-                    resolve_call = self._credential_resolve_call(workspace)
-                    resolved = await sync_to_async(resolve_call)(workspace)
+                resolved = resolved_payload
                 await self._dispatch_credential_inject(
                     workspace,
                     resolved=resolved,
@@ -1010,6 +1048,7 @@ class WorkspaceLifecycleMixin:
         files: list | None = None,
         ssh_keys: list[str] | None = None,
         credentials: list | None = None,
+        resolved_credentials: ResolvedCredentials | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
     ) -> tuple["Workspace", "Task"]:
@@ -1084,9 +1123,16 @@ class WorkspaceLifecycleMixin:
         resolved_ssh_keys = ssh_keys or []
 
         if credentials is not None:
-            await sync_to_async(credential_svc.assert_unique_workspace_credentials)(
-                credentials
-            )
+            resolved = resolved_credentials
+            if resolved is None:
+                resolved = await sync_to_async(credential_svc.resolve_credentials)(
+                    [credential.id for credential in credentials],
+                    org_id=organization_id,
+                    user=user,
+                )
+            resolved_env_vars = resolved.env_vars
+            resolved_files = resolved.files
+            resolved_ssh_keys = resolved.ssh_keys
 
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
@@ -1109,6 +1155,10 @@ class WorkspaceLifecycleMixin:
 
         if credentials is not None:
             await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
+            await sync_to_async(self.workspaces.update_credentials_present)(
+                workspace,
+                bool(resolved_env_vars or resolved_files or resolved_ssh_keys),
+            )
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(

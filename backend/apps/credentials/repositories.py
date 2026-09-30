@@ -246,6 +246,16 @@ class CredentialRepository:
         )
 
     @staticmethod
+    def credential_ids_for_services(service_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        if not service_ids:
+            return set()
+        return set(
+            Credential.objects.filter(service_id__in=service_ids).values_list(
+                "id", flat=True
+            )
+        )
+
+    @staticmethod
     def org_service_ids_with_credentials(
         org_id: uuid.UUID, service_ids: list[uuid.UUID]
     ) -> set[uuid.UUID]:

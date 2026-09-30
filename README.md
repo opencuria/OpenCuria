@@ -241,12 +241,25 @@ Optional local workspace image build:
 ./scripts/setup-dev.sh --build-workspace-image
 ```
 
-After that you can run `backend`, `webapp`, and `runner` individually.
+After that you can run `backend`, `webapp`, and `runner` individually. When
+updating a source checkout, apply backend migrations before starting `runserver`:
+
+```bash
+cd backend
+.venv/bin/python manage.py migrate --noinput
+```
+
+The Docker backend entrypoint runs migrations automatically; a raw Django
+`runserver` does not.
 
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
 with `python -m src` while iterating.
+
+## MCP OAuth integrations
+
+OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect personal or organization accounts from **Settings → Plugins**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production. See [MCP OAuth setup and operations](./docs/mcp-oauth.md) for required environment configuration, workspace attachment, security notes, and provider requirements.
 
 ## License
 

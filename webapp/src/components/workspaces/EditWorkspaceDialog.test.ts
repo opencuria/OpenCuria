@@ -14,6 +14,8 @@ const fetchWorkspacePlugins = vi.fn()
 const setWorkspacePlugins = vi.fn()
 const resyncWorkspacePlugins = vi.fn()
 const fetchPlugins = vi.fn()
+const fetchMcpOAuthStatus = vi.fn()
+const mcpOAuthStatuses: Record<string, { personal: { connected: boolean; credential_id: string | null; reconnect_required: boolean }; organization: { connected: boolean; credential_id: string | null; reconnect_required: boolean } }> = {}
 
 const credentialStore = {
   credentials: [
@@ -50,6 +52,8 @@ const credentialStore = {
   ],
   fetchCredentials,
 }
+
+const regularCredentials = [...credentialStore.credentials]
 
 const runnerStore = {
   runners: [
@@ -108,8 +112,13 @@ function makeWorkspacePlugin(overrides: Partial<WorkspacePlugin> = {}): Workspac
 const pluginStore = {
   plugins: [] as Array<{
     id: string
-    credential_requirements: Array<{ required: boolean; service_id: string }>
+    credential_requirements: Array<{ required: boolean; service_id: string; key?: string; credential_type?: string; service_name?: string; service_slug?: string }>
+    mcp_servers?: Array<{ auth_type?: string; oauth_requirement_key?: string; id: string }>
   }>,
+  mcpOAuthLoading: {} as Record<string, boolean>,
+  mcpOAuthStatuses,
+  fetchMcpOAuthStatus,
+  getMcpOAuthStatus: (pluginId: string, serverId: string) => mcpOAuthStatuses[`${pluginId}:${serverId}`],
   workspacePlugins: {} as Record<string, WorkspacePlugin[]>,
   workspacePluginsLoading: {} as Record<string, boolean>,
   workspacePluginsError: {} as Record<string, string | null>,
@@ -250,6 +259,9 @@ describe('EditWorkspaceDialog', () => {
     fetchWorkspaceDetail.mockReset()
     fetchWorkspaceDetail.mockResolvedValue(undefined)
     pluginStore.plugins = []
+    credentialStore.credentials = [...regularCredentials]
+    pluginStore.mcpOAuthLoading = {}
+    Object.keys(mcpOAuthStatuses).forEach((key) => delete mcpOAuthStatuses[key])
     pluginStore.workspacePlugins = {}
     pluginStore.workspacePluginsLoading = {}
     pluginStore.workspacePluginsError = {}
@@ -359,6 +371,134 @@ describe('EditWorkspaceDialog', () => {
     expect(setWorkspacePlugins).toHaveBeenCalledWith('workspace-1', ['plugin-1'])
   })
 
+  it('offers a connected OAuth credential for explicit workspace attachment', async () => {
+    credentialStore.credentials = []
+    pluginStore.plugins = [{
+      id: 'plugin-1',
+      credential_requirements: [{
+        required: true, service_id: 'oauth-service', key: 'notion_oauth',
+        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
+      }],
+      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
+    }]
+    mcpOAuthStatuses['plugin-1:server-1'] = {
+      personal: { connected: true, credential_id: 'oauth-credential', reconnect_required: false },
+      organization: { connected: false, credential_id: null, reconnect_required: false },
+    }
+    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin({ missing_required_credentials: [
+      { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
+    ] })] }
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+
+    const attach = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-oauth-credential"]')
+    expect(attach.exists()).toBe(true)
+    await attach.trigger('click')
+    await nextTick()
+    expect(vmOf(wrapper).selectedCredentialIds).toContain('oauth-credential')
+    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(false)
+  })
+
+  it('deduplicates an OAuth credential returned by both the API and OAuth status', async () => {
+    const oauthApiCredential = {
+      id: 'oauth-credential',
+      name: 'OAuth from credentials API',
+      scope: 'personal' as const,
+      service_id: 'oauth-service',
+      service_name: 'Notion OAuth',
+      service_slug: 'notion-oauth',
+      credential_type: 'mcp_oauth',
+      env_var_name: '',
+      target_path: '',
+      has_public_key: false,
+      created_by_id: 1,
+      created_at: '2026-04-01T10:00:00.000Z',
+      updated_at: '2026-04-01T10:00:00.000Z',
+    }
+    credentialStore.credentials = [oauthApiCredential]
+    pluginStore.plugins = [{
+      id: 'plugin-1',
+      credential_requirements: [{
+        required: true, service_id: 'oauth-service', key: 'notion_oauth',
+        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
+      }],
+      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
+    }]
+    mcpOAuthStatuses['plugin-1:server-1'] = {
+      personal: { connected: true, credential_id: 'oauth-credential', reconnect_required: false },
+      organization: { connected: false, credential_id: null, reconnect_required: false },
+    }
+    pluginStore.workspacePlugins = { 'workspace-1': [] }
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
+    await vmOf(wrapper).handleOpen()
+
+    expect(wrapper.findAll('[data-testid="workspace-credential-oauth-credential"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="workspace-credential-oauth-credential"]').text()).toContain(
+      'OAuth from credentials API',
+    )
+  })
+
+  it('does not treat an attached-but-disconnected OAuth credential as ready', async () => {
+    credentialStore.credentials = []
+    pluginStore.plugins = [{
+      id: 'plugin-1',
+      credential_requirements: [{
+        required: true, service_id: 'oauth-service', key: 'notion_oauth',
+        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
+      }],
+      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
+    }]
+    mcpOAuthStatuses['plugin-1:server-1'] = {
+      personal: { connected: false, credential_id: 'oauth-credential', reconnect_required: true },
+      organization: { connected: false, credential_id: null, reconnect_required: false },
+    }
+    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin({ missing_required_credentials: [
+      { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
+    ] })] }
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: ['oauth-credential'] }))
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-oauth-credential"]').exists()).toBe(false)
+  })
+
+  it('keeps disconnected OAuth gaps visible when only the workspace plugin list is available', async () => {
+    credentialStore.credentials = [{
+      id: 'oauth-credential',
+      name: 'Notion OAuth',
+      scope: 'personal',
+      service_id: 'oauth-service',
+      service_name: 'Notion OAuth',
+      service_slug: 'notion-oauth',
+      credential_type: 'mcp_oauth',
+      env_var_name: '',
+      target_path: '',
+      has_public_key: false,
+      created_by_id: 1,
+      created_at: '2026-04-01T10:00:00.000Z',
+      updated_at: '2026-04-01T10:00:00.000Z',
+    }]
+    pluginStore.plugins = []
+    pluginStore.workspacePlugins = {
+      'workspace-1': [makeWorkspacePlugin({
+        missing_required_credentials: [
+          { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
+        ],
+      })],
+    }
+    const wrapper = mountDialog(makeWorkspace({ credential_ids: ['oauth-credential'] }))
+    await vmOf(wrapper).handleOpen()
+    vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="workspace-plugin-missing-plugin-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('No connected account is available')
+  })
+
   it('saves deactivation → credential patch → final activation in order', async () => {
     const calls: string[] = []
     setWorkspacePlugins.mockImplementation(async (_id: string, ids: string[]) => {
@@ -428,6 +568,15 @@ describe('EditWorkspaceDialog', () => {
     await vmOf(wrapper).handleOpen()
     await nextTick()
     vmOf(wrapper).togglePlugin('plugin-1')
+    await nextTick()
+    credentialStore.credentials = [
+      {
+        id: 'cred-1', name: 'GitHub Token', scope: 'personal', service_id: 'service-github',
+        service_name: 'GitHub', service_slug: 'github', credential_type: 'env', env_var_name: 'GITHUB_TOKEN',
+        target_path: '', has_public_key: false, created_by_id: 1,
+        created_at: '2026-04-01T10:00:00.000Z', updated_at: '2026-04-01T10:00:00.000Z',
+      },
+    ]
     await nextTick()
 
     // Gap offers Attach for the missing credential…

@@ -45,6 +45,8 @@ class PluginMcpServerIn(Schema):
     headers: dict[str, str] = {}
     startup_timeout_seconds: int = 30
     request_timeout_seconds: int = 60
+    auth_type: str = "none"
+    oauth_requirement_key: str = ""
 
 
 class PluginMcpServerOut(Schema):
@@ -62,6 +64,8 @@ class PluginMcpServerOut(Schema):
     headers: dict[str, str]
     startup_timeout_seconds: int
     request_timeout_seconds: int
+    auth_type: str = "none"
+    oauth_requirement_key: str = ""
 
 
 class PluginCredentialServiceIn(Schema):

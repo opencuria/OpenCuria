@@ -4,6 +4,7 @@ Tests for RunnerService business logic.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -3341,6 +3342,133 @@ class TestPersistentWorkspaceCredentials:
         assert payload["files"][0]["content"] == '{"access_token":"abc"}'
         assert payload["ssh_keys"]
         sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_oauth_only_attachment_injects_empty_payload_and_false_presence(
+        self, service, sio_mock, workspace, user
+    ):
+        from apps.credentials.enums import CredentialType
+
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
+        from apps.credentials.models import Credential, McpOAuthClientRegistration
+        from apps.plugins.models import (
+            Plugin,
+            PluginCredentialRequirement,
+            PluginMcpServer,
+        )
+        from common.utils import encrypt_value
+
+        plugin = Plugin.objects.create(
+            name="OAuth only",
+            slug="oauth-only",
+            organization=workspace.runner.organization,
+        )
+        server = PluginMcpServer.objects.create(
+            plugin=plugin,
+            name="OAuth server",
+            slug="oauth-server",
+            transport="streamable_http",
+            url="https://mcp.example/mcp",
+            auth_type="oauth",
+            oauth_requirement_key="server_auth",
+        )
+        oauth_service = CredentialService.objects.create(
+            name="OAuth server",
+            slug="oauth-only-server_auth-oauth",
+            credential_type=CredentialType.MCP_OAUTH,
+            organization=workspace.runner.organization,
+            plugin_owned=True,
+            oauth_plugin_slug="oauth-only",
+            oauth_requirement_key="server_auth",
+        )
+        PluginCredentialRequirement.objects.create(
+            plugin=plugin,
+            key="server_auth",
+            credential_service=oauth_service,
+            required=True,
+        )
+        registration = McpOAuthClientRegistration.objects.create(
+            server_url=server.url,
+            callback_url="https://backend.example/api/v1/mcp-oauth/callback/",
+            issuer="https://auth.example/tenant",
+            client_id="client",
+            authorization_endpoint="https://auth.example/authorize",
+            token_endpoint="https://auth.example/token",
+        )
+        token_data = {
+            "access_token": "secret-access-token",
+            "refresh_token": "secret-refresh-token",
+            "resource": "https://mcp.example/mcp",
+            "server_url": server.url,
+            "server_id": str(server.id),
+            "registration_id": str(registration.id),
+        }
+        oauth_credential = Credential.objects.create(
+            user=user,
+            service=oauth_service,
+            name="Connected",
+            encrypted_value=encrypt_value(json.dumps(token_data)),
+            created_by=user,
+            oauth_server_id=server.id,
+            oauth_server_url=server.url,
+            oauth_resource=token_data["resource"],
+            oauth_registration=registration,
+            oauth_status="connected",
+        )
+        workspace.credentials.add(oauth_credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+        resolved = CredentialSvc().resolve_workspace_credentials(workspace)
+        assert resolved.oauth_credentials == [oauth_credential.id]
+        assert resolved.env_vars == {}
+        assert resolved.files == []
+        assert resolved.ssh_keys == []
+
+        updated = await service.update_workspace(
+            workspace.id,
+            resolved_credentials=resolved,
+        )
+
+        assert updated.credentials_present is False
+        assert list(updated.credentials.values_list("id", flat=True)) == [
+            oauth_credential.id
+        ]
+        event, payload = sio_mock.call.await_args.args[:2]
+        assert event == "task:inject_credentials"
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        assert "oauth_credentials" not in payload
+
+        env_service = CredentialService.objects.create(
+            name="Ordinary token",
+            slug=f"ordinary-{uuid.uuid4().hex[:6]}",
+            credential_type="env",
+            env_var_name="ORDINARY_TOKEN",
+            organization=workspace.runner.organization,
+        )
+        env_credential = CredentialSvc().create_org_credential(
+            organization_id=workspace.runner.organization_id,
+            service_id=env_service.id,
+            name="Ordinary token",
+            value="ordinary-secret",
+            user=user,
+        )
+        workspace.credentials.add(env_credential)
+        combined = CredentialSvc().resolve_workspace_credentials(workspace)
+        assert set(combined.oauth_credentials) == {oauth_credential.id}
+        updated = await service.update_workspace(
+            workspace.id,
+            resolved_credentials=combined,
+        )
+        assert updated.credentials_present is True
+        _, payload = sio_mock.call.await_args.args[:2]
+        assert payload["env_vars"] == {"ORDINARY_TOKEN": "ordinary-secret"}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        assert "oauth_credentials" not in payload
 
     @pytest.mark.asyncio
     async def test_running_remove_dispatches_empty_inject(

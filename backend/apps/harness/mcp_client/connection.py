@@ -437,6 +437,7 @@ class McpServerConnection:
     url: str = ""
     env: dict[str, str] = field(default_factory=dict, repr=False)
     headers: dict[str, str] = field(default_factory=dict, repr=False)
+    oauth_credential_id: Any = field(default=None, repr=False)
     startup_timeout_seconds: float = 30.0
     request_timeout_seconds: float = 60.0
     tools: list[DiscoveredMcpTool] = field(default_factory=list)
@@ -578,16 +579,27 @@ class McpServerConnection:
         """
         _, _, _, _ = parse_mcp_http_url(self.url)
         timeout = httpx.Timeout(30.0, read=float(self.request_timeout_seconds or 60.0))
+        headers = dict(self.headers or {})
+        auth = None
+        if self.oauth_credential_id is not None:
+            if any(key.lower() == "authorization" for key in headers):
+                raise McpServerHealthError(
+                    "OAuth Authorization header cannot be overridden"
+                )
+            from apps.credentials.mcp_oauth import McpOAuthHTTPAuth
+
+            auth = McpOAuthHTTPAuth(self.oauth_credential_id, self.server_id, self.url)
         if transport == "streamable_http":
             from mcp.client.streamable_http import streamable_http_client
 
             client, _ = build_workspace_http_client(
                 accessor,
                 self.url,
-                headers=dict(self.headers or {}),
+                headers=headers,
                 timeout=timeout,
-                follow_redirects=True,
+                follow_redirects=False,
             )
+            client.auth = auth
             await stack.enter_async_context(client)
             ctx = streamable_http_client(self.url, http_client=client)
             read, write, _session_id_cb = await stack.enter_async_context(ctx)
@@ -605,21 +617,32 @@ class McpServerConnection:
                 merged = dict(self.headers or {})
                 if headers:
                     merged.update(headers)
+                if self.oauth_credential_id is not None and any(
+                    key.lower() == "authorization" for key in merged
+                ):
+                    raise McpServerHealthError(
+                        "OAuth Authorization header cannot be overridden"
+                    )
                 client, _ = build_workspace_http_client(
                     accessor,
                     self.url,
                     headers=merged,
                     timeout=timeout or httpx.Timeout(30.0, read=300.0),
-                    follow_redirects=True,
+                    follow_redirects=False,
                 )
                 if auth is not None:
                     client.auth = auth
+                elif self.oauth_credential_id is not None:
+                    client.auth = McpOAuthHTTPAuth(
+                        self.oauth_credential_id, self.server_id, self.url
+                    )
                 return client
 
             ctx = sse_client(
                 self.url,
-                headers=dict(self.headers or {}),
+                headers=headers,
                 httpx_client_factory=_factory,  # type: ignore[arg-type]
+                auth=auth,
             )
             read, write = await stack.enter_async_context(ctx)
         self._read, self._write = read, write
@@ -639,6 +662,12 @@ class McpServerConnection:
         except McpServerHealthError:
             raise
         except Exception as exc:
+            from apps.credentials.mcp_oauth import McpOAuthUnauthorizedError
+
+            if isinstance(exc, McpOAuthUnauthorizedError):
+                raise McpServerHealthError(
+                    "MCP OAuth authorization failed; reconnect required"
+                ) from None
             raise McpServerHealthError(
                 f"MCP server {self.desc} initialize failed"
             ) from exc
@@ -713,6 +742,13 @@ class McpServerConnection:
             except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
                 raise
             except Exception as exc:
+                from apps.credentials.mcp_oauth import McpOAuthUnauthorizedError
+
+                if isinstance(exc, McpOAuthUnauthorizedError):
+                    raise ToolError(
+                        "MCP OAuth authorization was rejected; reconnect required",
+                        tool=original_name,
+                    ) from None
                 raise ToolError(
                     f"MCP tool '{original_name}' failed", tool=original_name
                 ) from exc

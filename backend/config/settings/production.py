@@ -8,9 +8,21 @@ from __future__ import annotations
 
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *  # noqa: F401, F403
 
 DEBUG = False
+
+MCP_OAUTH_CALLBACK_URL = os.getenv("MCP_OAUTH_CALLBACK_URL", "").strip()
+MCP_OAUTH_FRONTEND_RETURN_URL = os.getenv(
+    "MCP_OAUTH_FRONTEND_RETURN_URL", ""
+).strip()
+if not MCP_OAUTH_CALLBACK_URL or not MCP_OAUTH_FRONTEND_RETURN_URL:
+    raise ImproperlyConfigured(
+        "MCP_OAUTH_CALLBACK_URL and MCP_OAUTH_FRONTEND_RETURN_URL must be set "
+        "in production"
+    )
 
 ALLOWED_HOSTS = [
     h.strip()
