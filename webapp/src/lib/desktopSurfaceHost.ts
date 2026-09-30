@@ -2,9 +2,9 @@
  * Host element registry for the persistent desktop surface.
  *
  * SidePanelDesktop and the WorkspaceDesktop modal register their host
- * containers here via callback refs. DesktopSurface teleports the single
- * KasmVNC iframe into the active host, so opening/closing the modal moves
- * the existing iframe instead of reloading it.
+ * containers here via callback refs. DesktopSurface keeps its iframe at one
+ * stable fixed position and aligns that placement with the active host; it
+ * never moves the iframe browsing context between these containers.
  */
 import { shallowRef } from 'vue'
 

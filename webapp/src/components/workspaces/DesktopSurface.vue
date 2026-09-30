@@ -1,31 +1,34 @@
 <script setup lang="ts">
 /**
- * DesktopSurface — the single persistent KasmVNC iframe for a workspace.
- *
- * The iframe is created once per session and moved between the side-panel
- * host and the desktop modal host via <Teleport>, so opening or closing
- * the modal never reloads the VNC connection. This component owns the
- * session lifecycle (socket listeners, auto-start when the modal opens,
- * stop on unmount), the scale-to-fit rendering, the computer-use overlay
- * and the clipboard shortcuts. Until the KasmVNC page has loaded, the
- * iframe is hidden behind a themed placeholder so the KasmVNC loading
- * screen is never visible.
+ * DesktopSurface owns the one persistent KasmVNC iframe for a workspace.
+ * The iframe stays at this component's fixed root placement; only that
+ * placement is aligned with the active sidebar/modal viewport. Keeping the
+ * browsing context stationary avoids WebKit/Chrome resetting VNC on moves.
+ * This component also owns session lifecycle, viewer recovery, scaling,
+ * computer-use overlay and clipboard shortcuts.
  */
-import { ref, computed, onMounted, onBeforeUnmount, watch, toRef } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, toRef, nextTick } from 'vue'
 import type { CSSProperties } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useDesktopSession } from '@/composables/useDesktopSession'
 import { getConfig } from '@/services/config'
-import { desktopIframeSrc as buildDesktopIframeSrc, workspaceDesktopSize } from '@/lib/desktopGeometry'
+import {
+  desktopIframeSrc as buildDesktopIframeSrc,
+  workspaceDesktopSize,
+} from '@/lib/desktopGeometry'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
+import {
+  createDesktopReconnectBackoff,
+  createPausableTimer,
+  isTrustedDesktopMessage,
+  parseDesktopConnectionStatus,
+} from '@/lib/desktopSurfaceRecovery'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { MousePointerClick } from '@lucide/vue'
 
-const props = defineProps<{
-  workspaceId: string
-}>()
+const props = defineProps<{ workspaceId: string }>()
 
 const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
@@ -41,30 +44,32 @@ const {
   cleanupSocketListeners,
 } = useDesktopSession(toRef(props, 'workspaceId'))
 
-const hiddenHostRef = ref<HTMLElement | null>(null)
 const surfaceRef = ref<HTMLElement | null>(null)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
 const viewportWidth = ref(0)
 const viewportHeight = ref(0)
 const iframeLoaded = ref(false)
-let resizeObserver: ResizeObserver | null = null
-let iframeKeydownCleanup: (() => void) | null = null
-let isDispatchingSyntheticPasteShortcut = false
-
-// Move the iframe into the modal host while the modal is open, otherwise
-// into the side-panel host. The offscreen fallback keeps the session alive
-// when no visible host exists (e.g. side panel never opened).
-const teleportTarget = computed<HTMLElement | null>(() => {
-  if (desktopStore.isOpen) {
-    return modalDesktopHost.value ?? hiddenHostRef.value
-  }
-  return sidebarDesktopHost.value ?? hiddenHostRef.value
+const viewerStatus = ref<'connecting' | 'connected' | 'disconnected'>('connecting')
+const recoveryError = ref(false)
+const surfaceStyle = ref<CSSProperties>({
+  position: 'fixed',
+  left: '-10000px',
+  top: '0',
+  width: '1px',
+  height: '1px',
+  zIndex: 60,
+  visibility: 'hidden',
+  pointerEvents: 'none',
 })
+let hostResizeObserver: ResizeObserver | null = null
+let iframeKeydownCleanup: (() => void) | null = null
+let iframeErrorCleanup: (() => void) | null = null
+let isDispatchingSyntheticPasteShortcut = false
 
 const desktopSize = computed(() => {
   const workspace =
-    workspaceStore.workspaces.find((entry) => entry.id === props.workspaceId)
-    ?? (workspaceStore.activeWorkspace?.id === props.workspaceId
+    workspaceStore.workspaces.find((entry) => entry.id === props.workspaceId) ??
+    (workspaceStore.activeWorkspace?.id === props.workspaceId
       ? workspaceStore.activeWorkspace
       : null)
   return workspaceDesktopSize(workspace)
@@ -95,8 +100,7 @@ const desktopIframeSrc = computed(() => {
   if (!desktopStore.proxyUrl) return ''
   const token = localStorage.getItem('kern_access_token') || ''
   const config = getConfig()
-  const base = config.wsBaseUrl || ''
-  return buildDesktopIframeSrc(base, desktopStore.proxyUrl, token)
+  return buildDesktopIframeSrc(config.wsBaseUrl || '', desktopStore.proxyUrl, token)
 })
 
 // --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
@@ -158,44 +162,39 @@ function dispatchPasteShortcutToVm(event: KeyboardEvent): void {
 }
 
 async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
-  if (isDispatchingSyntheticPasteShortcut) return
-  if (!shouldHandleClipboardShortcut(event)) return
+  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
   const shortcut = parseClipboardShortcut(event)
   if (!shortcut) return
 
   if (shortcut === 'copy') {
-    window.setTimeout(() => {
-      void copyFromVmClipboard()
-    }, 120)
+    window.setTimeout(() => void copyFromVmClipboard(), 120)
     return
   }
 
   suppressClipboardEvent(event)
-  const synced = await pasteToVmClipboard()
-  if (!synced) return
-  dispatchPasteShortcutToVm(event)
+  if (await pasteToVmClipboard()) dispatchPasteShortcutToVm(event)
 }
 
 function handleDesktopIframeKeyup(event: KeyboardEvent): void {
-  if (isDispatchingSyntheticPasteShortcut) return
-  if (!shouldHandleClipboardShortcut(event)) return
-  if (parseClipboardShortcut(event) !== 'paste') return
-  suppressClipboardEvent(event)
+  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
+  if (parseClipboardShortcut(event) === 'paste') suppressClipboardEvent(event)
 }
 
-function bindDesktopIframeKeydownListener(): void {
+function clearIframeListeners(): void {
   iframeKeydownCleanup?.()
   iframeKeydownCleanup = null
+  iframeErrorCleanup?.()
+  iframeErrorCleanup = null
+}
 
-  const doc = desktopIframeRef.value?.contentDocument
-  const win = desktopIframeRef.value?.contentWindow
-  if (!doc || !win) return
-  const keydownListener = (event: KeyboardEvent) => {
-    void handleDesktopIframeKeydown(event)
-  }
-  const keyupListener = (event: KeyboardEvent) => {
-    handleDesktopIframeKeyup(event)
-  }
+function bindDesktopIframeListeners(): void {
+  clearIframeListeners()
+  const iframe = desktopIframeRef.value
+  const doc = iframe?.contentDocument
+  const win = iframe?.contentWindow
+  if (!iframe || !doc || !win) return
+  const keydownListener = (event: KeyboardEvent) => void handleDesktopIframeKeydown(event)
+  const keyupListener = (event: KeyboardEvent) => handleDesktopIframeKeyup(event)
   win.addEventListener('keydown', keydownListener, true)
   win.addEventListener('keyup', keyupListener, true)
   doc.addEventListener('keydown', keydownListener, true)
@@ -206,180 +205,331 @@ function bindDesktopIframeKeydownListener(): void {
     doc.removeEventListener('keydown', keydownListener, true)
     doc.removeEventListener('keyup', keyupListener, true)
   }
-}
 
-// Global handler only while the modal is open: with the embedded sidebar
-// view, focus outside the iframe means the user is working elsewhere.
-function onGlobalKeydown(event: KeyboardEvent): void {
-  if (!desktopStore.isOpen) return
-  if (!shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-
-  if (shortcut === 'copy') {
-    event.preventDefault()
-    void copyFromVmClipboard()
-  } else if (shortcut === 'paste') {
-    event.preventDefault()
-    void pasteToVmClipboard()
+  const onFrameError = (event: ErrorEvent) => {
+    // Never log the raw message or URL: either may contain the desktop token.
+    // Script basename and coordinates identify parser failures without secrets.
+    let script = '[unknown]'
+    try {
+      const pathname = new URL(event.filename).pathname
+      const match = pathname.match(/\/(?:dist|vendor|core|app)\/([\w.~-]+\.js)$/)
+      if (match) script = match[0].slice(1)
+    } catch {
+      // Inline and blob scripts have no safe vendor pathname.
+    }
+    console.error('Desktop viewer script error', {
+      kind: event.error instanceof SyntaxError ? 'SyntaxError' : 'JavaScriptError',
+      script,
+      line: Number.isFinite(event.lineno) ? event.lineno : 0,
+      column: Number.isFinite(event.colno) ? event.colno : 0,
+    })
   }
+  win.addEventListener('error', onFrameError)
+  iframeErrorCleanup = () => win.removeEventListener('error', onFrameError)
 }
 
-// --- Scaling / load state ---
+// --- Fixed placement over the active viewport, without moving the iframe ---
 
-function observeSurface(): void {
-  resizeObserver?.disconnect()
-  resizeObserver = null
-  if (!surfaceRef.value) return
-  const el = surfaceRef.value
-  const refreshBounds = () => {
-    const rect = el.getBoundingClientRect()
-    viewportWidth.value = rect.width
-    viewportHeight.value = rect.height
+function activeHost(): HTMLElement | null {
+  return desktopStore.isOpen ? modalDesktopHost.value : sidebarDesktopHost.value
+}
+
+function refreshHostBounds(): void {
+  hostResizeObserver?.disconnect()
+  hostResizeObserver = null
+  const host = activeHost()
+  if (!host || !surfaceRef.value) {
+    viewportWidth.value = 0
+    viewportHeight.value = 0
+    surfaceStyle.value = {
+      ...surfaceStyle.value,
+      left: '-10000px',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+    }
+    return
   }
-  refreshBounds()
-  resizeObserver = new ResizeObserver(refreshBounds)
-  resizeObserver.observe(el)
+
+  const update = () => {
+    if (activeHost() !== host || !surfaceRef.value) return
+    const rect = host.getBoundingClientRect()
+    const style = window.getComputedStyle(host)
+    const intersectsViewport =
+      rect.right > 0 &&
+      rect.bottom > 0 &&
+      rect.left < window.innerWidth &&
+      rect.top < window.innerHeight
+    const visible =
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      intersectsViewport
+    viewportWidth.value = visible ? rect.width : 0
+    viewportHeight.value = visible ? rect.height : 0
+    surfaceStyle.value = {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      zIndex: 60,
+      visibility: visible ? 'visible' : 'hidden',
+      pointerEvents: visible ? 'auto' : 'none',
+    }
+  }
+
+  update()
+  hostResizeObserver = new ResizeObserver(update)
+  hostResizeObserver.observe(host)
 }
 
-function handleIframeLoad(): void {
+function onViewportChange(): void {
+  refreshHostBounds()
+}
+
+// --- KasmVNC status, recovery and page visibility ---
+
+const connectionTimeout = createPausableTimer(() => {
+  if (viewerStatus.value === 'connected') return
+  markViewerDisconnected()
+})
+
+function startConnectionTimeout(): void {
+  if (!connectionTimeout.pending) connectionTimeout.start(15_000)
+  if (document.visibilityState !== 'visible') connectionTimeout.pause()
+}
+
+const reconnectBackoff = createDesktopReconnectBackoff(
+  () => {
+    if (document.visibilityState !== 'visible') return
+    viewerStatus.value = 'connecting'
+    recoveryError.value = false
+    iframeLoaded.value = false
+    desktopStore.bumpViewer()
+  },
+  () => {
+    recoveryError.value = true
+  },
+)
+
+function markViewerConnected(): void {
+  viewerStatus.value = 'connected'
   iframeLoaded.value = true
-  bindDesktopIframeKeydownListener()
+  recoveryError.value = false
+  connectionTimeout.cancel()
+  reconnectBackoff.reset()
+  bindDesktopIframeListeners()
+}
+
+function markViewerDisconnected(): void {
+  if (!desktopStore.isConnected) return
+  connectionTimeout.cancel()
+  viewerStatus.value = 'disconnected'
+  iframeLoaded.value = false
+  reconnectBackoff.schedule()
+  if (document.visibilityState !== 'visible') reconnectBackoff.pause()
+}
+
+function readIframeConnection(): boolean {
+  try {
+    return Boolean(
+      desktopIframeRef.value?.contentDocument?.documentElement.classList.contains(
+        'noVNC_connected',
+      ),
+    )
+  } catch {
+    return false
+  }
+}
+
+function handleIframeLoad(event: Event): void {
+  if (event.currentTarget !== desktopIframeRef.value) return
+  bindDesktopIframeListeners()
+  if (readIframeConnection()) {
+    markViewerConnected()
+    return
+  }
+  // A document load is not proof of a live KasmVNC websocket.
+  viewerStatus.value = 'connecting'
+  startConnectionTimeout()
+}
+
+function handleWindowMessage(event: MessageEvent): void {
+  const iframe = desktopIframeRef.value
+  if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
+  const status = parseDesktopConnectionStatus(event.data)
+  if (!status) return
+  if (status === 'connected') markViewerConnected()
+  else if (status === 'disconnected') markViewerDisconnected()
+  else if (viewerStatus.value !== 'connected') {
+    viewerStatus.value = 'connecting'
+    startConnectionTimeout()
+  }
 }
 
 function onVisibilityChange(): void {
-  // Safari drops the iframe WebSocket when the tab is backgrounded.
-  // Remount the client against the still-running Xvnc session.
-  if (document.visibilityState !== 'visible') return
-  if (!desktopStore.isConnected) return
-  desktopStore.bumpViewer()
+  if (document.visibilityState !== 'visible') {
+    connectionTimeout.pause()
+    reconnectBackoff.pause()
+    return
+  }
+
+  if (readIframeConnection()) {
+    // A healthy frame survives backgrounding; do not reload it.
+    markViewerConnected()
+    return
+  }
+  connectionTimeout.resume()
+  reconnectBackoff.resume()
+  if (viewerStatus.value === 'connected') markViewerDisconnected()
+}
+
+function retryViewer(): void {
+  connectionTimeout.cancel()
+  recoveryError.value = false
+  viewerStatus.value = 'connecting'
+  iframeLoaded.value = false
+  reconnectBackoff.retryNow()
+  startConnectionTimeout()
+}
+
+function onGlobalKeydown(event: KeyboardEvent): void {
+  if (!desktopStore.isOpen || !shouldHandleClipboardShortcut(event)) return
+  const shortcut = parseClipboardShortcut(event)
+  if (!shortcut) return
+  event.preventDefault()
+  if (shortcut === 'copy') void copyFromVmClipboard()
+  else void pasteToVmClipboard()
 }
 
 onMounted(() => {
-  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId) {
+  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId)
     desktopStore.reset()
-  }
-
   setupSocketListeners()
-
-  if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting) {
+  if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting)
     void startDesktop()
-  }
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('message', handleWindowMessage)
+  window.addEventListener('resize', onViewportChange)
+  window.addEventListener('scroll', onViewportChange, true)
   document.addEventListener('visibilitychange', onVisibilityChange)
+  refreshHostBounds()
 })
 
 onBeforeUnmount(() => {
   void stopDesktopIfActive(props.workspaceId)
   cleanupSocketListeners()
-  resizeObserver?.disconnect()
-  resizeObserver = null
-  iframeKeydownCleanup?.()
-  iframeKeydownCleanup = null
+  hostResizeObserver?.disconnect()
+  hostResizeObserver = null
+  clearIframeListeners()
+  connectionTimeout.cancel()
+  reconnectBackoff.reset()
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('message', handleWindowMessage)
+  window.removeEventListener('resize', onViewportChange)
+  window.removeEventListener('scroll', onViewportChange, true)
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 watch(
   () => desktopStore.isOpen,
   (open) => {
-    if (open && !desktopStore.isConnected && !desktopStore.isConnecting) {
-      void startDesktop()
-    }
+    refreshHostBounds()
+    if (open && !desktopStore.isConnected && !desktopStore.isConnecting) void startDesktop()
   },
 )
 
-watch(
-  () => props.workspaceId,
-  async (workspaceId, previousWorkspaceId) => {
-    if (workspaceId !== previousWorkspaceId) {
-      if (previousWorkspaceId) await stopDesktopIfActive(previousWorkspaceId)
-      error.value = null
-      desktopStore.reset()
-    }
-  },
-)
+watch([sidebarDesktopHost, modalDesktopHost], refreshHostBounds)
 
 watch(
   () => [desktopStore.proxyUrl, desktopStore.viewerGeneration] as const,
-  () => {
+  async () => {
     iframeLoaded.value = false
+    viewerStatus.value = 'connecting'
+    connectionTimeout.cancel()
+    clearIframeListeners()
+    await nextTick()
+    if (desktopIframeRef.value) startConnectionTimeout()
   },
 )
 
-watch(surfaceRef, () => {
-  observeSurface()
-})
-
+watch(surfaceRef, refreshHostBounds)
 watch(desktopIframeRef, () => {
-  bindDesktopIframeKeydownListener()
+  clearIframeListeners()
+  if (desktopIframeRef.value) startConnectionTimeout()
 })
 </script>
 
 <template>
-  <!-- Offscreen fallback host: keeps the iframe alive when no visible host exists -->
   <div
-    ref="hiddenHostRef"
-    class="fixed top-0 -left-[10000px] h-24 w-32 overflow-hidden"
-    aria-hidden="true"
-  ></div>
-
-  <Teleport v-if="teleportTarget" :to="teleportTarget">
+    v-if="desktopStore.isConnected && desktopStore.proxyUrl"
+    ref="surfaceRef"
+    class="fixed overflow-hidden"
+    :style="surfaceStyle"
+    data-testid="desktop-surface"
+  >
     <div
-      v-if="desktopStore.isConnected && desktopStore.proxyUrl"
-      ref="surfaceRef"
-      class="absolute inset-0"
-      data-testid="desktop-surface"
+      class="absolute inset-0 flex h-full w-full items-center justify-center overflow-hidden"
+      :class="{ 'p-2': !desktopStore.isOpen }"
     >
       <div
-        class="flex h-full w-full items-center justify-center overflow-hidden"
-        :class="{ 'p-2': !desktopStore.isOpen }"
+        class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
+        :style="scaledFrameStyle"
       >
-        <div
-          class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
-          :style="scaledFrameStyle"
-        >
-          <iframe
-            :key="`${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`"
-            ref="desktopIframeRef"
-            :src="desktopIframeSrc"
-            title="Desktop"
-            class="block border-0 transition-opacity duration-200"
-            :class="{ 'opacity-0': !iframeLoaded }"
-            :style="scaledIframeStyle"
-            sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-            allow="clipboard-read; clipboard-write"
-            data-testid="desktop-surface-iframe"
-            @load="handleIframeLoad"
-          />
-        </div>
-      </div>
-
-      <!-- Themed placeholder until the KasmVNC page has loaded -->
-      <div
-        v-if="!iframeLoaded"
-        class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card"
-        data-testid="desktop-surface-loading"
-      >
-        <LoadingSpinner :size="24" />
-        <span class="text-sm text-muted-foreground">Connecting to desktop…</span>
-      </div>
-
-      <div
-        v-if="desktopStore.computerUseActive"
-        class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
-        tabindex="0"
-        @keydown.prevent
-      >
-        <MousePointerClick :size="28" class="text-white" />
-        <p class="max-w-md text-sm text-white">
-          Computer-use is controlling this desktop. Watching is read-only.
-          Taking control aborts the computer-use agent.
-        </p>
-        <Button size="sm" :disabled="takeControlBusy" @click="takeControl">
-          Take control
-        </Button>
+        <iframe
+          :key="`${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`"
+          ref="desktopIframeRef"
+          :src="desktopIframeSrc"
+          title="Desktop"
+          class="block border-0 transition-opacity duration-200"
+          :class="{ 'opacity-0': !iframeLoaded }"
+          :style="scaledIframeStyle"
+          sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+          allow="clipboard-read; clipboard-write"
+          data-testid="desktop-surface-iframe"
+          @load="handleIframeLoad"
+        />
       </div>
     </div>
-  </Teleport>
+
+    <div
+      v-if="!iframeLoaded"
+      class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-card"
+      data-testid="desktop-surface-loading"
+    >
+      <LoadingSpinner v-if="viewerStatus === 'connecting' && !recoveryError" :size="24" />
+      <span
+        v-if="viewerStatus === 'connecting' && !recoveryError"
+        class="text-sm text-muted-foreground"
+      >
+        Connecting to desktop…
+      </span>
+      <span v-else class="text-center text-sm text-destructive">
+        {{ recoveryError ? 'Desktop connection failed.' : 'Desktop disconnected. Reconnecting…' }}
+      </span>
+      <Button
+        v-if="viewerStatus === 'disconnected' || recoveryError"
+        size="sm"
+        data-testid="desktop-surface-retry"
+        @click="retryViewer"
+      >
+        Retry
+      </Button>
+    </div>
+
+    <div
+      v-if="desktopStore.computerUseActive"
+      class="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
+      tabindex="0"
+      @keydown.prevent
+    >
+      <MousePointerClick :size="28" class="text-white" />
+      <p class="max-w-md text-sm text-white">
+        Computer-use is controlling this desktop. Watching is read-only. Taking control aborts the
+        computer-use agent.
+      </p>
+      <Button size="sm" :disabled="takeControlBusy" @click="takeControl"> Take control </Button>
+    </div>
+  </div>
 </template>

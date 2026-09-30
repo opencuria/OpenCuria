@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ref } from 'vue'
+import { effectScope, ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useDesktopSession } from './useDesktopSession'
@@ -396,5 +396,155 @@ describe('useDesktopSession lifecycle', () => {
     expect(store.isConnecting).toBe(true)
     expect(startDesktopApi).toHaveBeenCalledWith('ws-1')
     expect(store.viewerGeneration).toBe(0)
+  })
+
+  it('does not start the captured old workspace after switching while status is pending', async () => {
+    const workspaceId = ref('ws-1')
+    const store = useDesktopStore()
+    let resolveOldStatus!: (status: Awaited<ReturnType<typeof getDesktopStatus>>) => void
+    getDesktopStatus.mockImplementation((id) => {
+      if (id === 'ws-1') {
+        return new Promise((resolve) => {
+          resolveOldStatus = resolve
+        })
+      }
+      return Promise.resolve({
+        active: false,
+        proxy_url: null,
+        viewer_held: false,
+        computer_use_active: false,
+      })
+    })
+    startDesktopApi.mockResolvedValue({ task_id: 'task-start' })
+    const oldSession = useDesktopSession(workspaceId)
+    const oldStart = oldSession.startDesktop()
+    const oldRelease = oldSession.stopDesktopIfActive('ws-1')
+
+    workspaceId.value = 'ws-2'
+    store.reset()
+    const newSession = useDesktopSession(workspaceId)
+    const newStart = newSession.startDesktop()
+    await newStart
+    resolveOldStatus({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+    })
+    await oldStart
+    await oldRelease
+
+    expect(getDesktopStatus.mock.calls.map(([id]) => id)).toEqual(['ws-1', 'ws-2'])
+    expect(startDesktopApi).toHaveBeenCalledTimes(1)
+    expect(startDesktopApi).toHaveBeenCalledWith('ws-2')
+    expect(store.workspaceId).toBe('ws-2')
+    expect(store.isConnecting).toBe(true)
+    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
+  })
+
+  it('coordinates pending starts across composable instances on scope disposal', async () => {
+    const workspaceId = ref('ws-1')
+    let resolveStatus!: (status: Awaited<ReturnType<typeof getDesktopStatus>>) => void
+    getDesktopStatus.mockImplementation(
+      () => new Promise((resolve) => { resolveStatus = resolve }),
+    )
+    const sidePanelScope = effectScope()
+    const surfaceScope = effectScope()
+    const sidePanel = sidePanelScope.run(() => useDesktopSession(workspaceId))!
+    const surface = surfaceScope.run(() => useDesktopSession(workspaceId))!
+
+    const start = sidePanel.startDesktop()
+    const release = surface.stopDesktopIfActive('ws-1')
+
+    expect(getDesktopStatus).toHaveBeenCalledTimes(1)
+    expect(startDesktopApi).not.toHaveBeenCalled()
+    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
+
+    sidePanelScope.stop()
+    resolveStatus({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+    })
+    await Promise.all([start, release])
+
+    expect(startDesktopApi).not.toHaveBeenCalled()
+    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
+    surfaceScope.stop()
+  })
+
+  it('waits for an in-flight start POST before issuing the globally deduplicated stop', async () => {
+    const store = useDesktopStore()
+    const workspaceId = ref('ws-1')
+    getDesktopStatus.mockResolvedValue({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+    })
+    let resolveStart!: (value: { task_id: string }) => void
+    startDesktopApi.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveStart = resolve }),
+    )
+    const firstScope = effectScope()
+    const secondScope = effectScope()
+    const starter = firstScope.run(() => useDesktopSession(workspaceId))!
+    const releaser = secondScope.run(() => useDesktopSession(workspaceId))!
+
+    const start = starter.startDesktop()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(startDesktopApi).toHaveBeenCalledWith('ws-1')
+
+    const release = releaser.stopDesktopIfActive('ws-1')
+    expect(stopDesktopApi).not.toHaveBeenCalled()
+    resolveStart({ task_id: 'task-start' })
+    await Promise.all([start, release])
+    await Promise.resolve()
+
+    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
+    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
+    firstScope.stop()
+    secondScope.stop()
+  })
+
+  it('releases a remembered old lease after the shared store has been reset', async () => {
+    const workspaceId = ref('ws-1')
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const session = useDesktopSession(workspaceId)
+
+    // WorkspaceToolsSplit may reset the shared store before child teardown.
+    store.reset()
+    workspaceId.value = 'ws-2'
+    store.setConnected('ws-2', '/ws/desktop/ws-2/')
+    await session.stopDesktopIfActive('ws-1')
+
+    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
+    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
+    expect(store.workspaceId).toBe('ws-2')
+    expect(store.proxyUrl).toBe('/ws/desktop/ws-2/')
+  })
+
+  it('sends only one stop for concurrent old-workspace teardowns', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const session = useDesktopSession(ref('ws-1'))
+    let resolveStop!: (value: { task_id: string }) => void
+    stopDesktopApi.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveStop = resolve
+      }),
+    )
+
+    const firstStop = session.stopDesktopIfActive('ws-1')
+    const secondStop = session.stopDesktopIfActive('ws-1')
+    await Promise.resolve()
+    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
+    resolveStop({ task_id: 'task-stop' })
+    await Promise.all([firstStop, secondStop])
+
+    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
   })
 })

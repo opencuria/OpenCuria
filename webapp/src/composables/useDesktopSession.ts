@@ -7,7 +7,7 @@
  * panel and the desktop modal only use the actions.
  */
 
-import { ref, type Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, ref, watch, type Ref } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
@@ -29,6 +29,19 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+interface PendingDesktopStart {
+  promise: Promise<void>
+  phase: 'status' | 'post'
+  cancelled: boolean
+  owners: Set<object>
+}
+
+// Component trees can mount more than one desktop surface for the same
+// workspace. These requests coordinate their shared runner lease.
+const pendingDesktopStarts = new Map<string, PendingDesktopStart>()
+const desktopStopRequests = new Map<string, Promise<void>>()
+const knownDesktopLeases = new Set<string>()
+
 export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSessionOptions) {
   const desktopStore = useDesktopStore()
   const notifications = useNotificationStore()
@@ -42,45 +55,220 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   // No AbortController needed: the bounded poll only checks this token
   // after each awaited boundary.
   let runGeneration = 0
+  let startGeneration = 0
+  const owner = {}
+  // Remember sessions even if a parent resets Pinia before teardown runs.
+  const knownLeaseWorkspaceIds = new Set<string>()
+  if (
+    desktopStore.workspaceId === workspaceId.value &&
+    (desktopStore.isConnected || desktopStore.isConnecting)
+  ) {
+    knownLeaseWorkspaceIds.add(workspaceId.value)
+    knownDesktopLeases.add(workspaceId.value)
+  }
 
-  async function startDesktop(): Promise<void> {
-    if (desktopStore.workspaceId && desktopStore.workspaceId !== workspaceId.value) {
-      desktopStore.reset()
-    }
-    if (desktopStore.isConnecting || desktopStore.isConnected) return
-    error.value = null
-    desktopStore.setConnecting(workspaceId.value)
-
-    try {
-      const status = await workspacesApi.getDesktopStatus(workspaceId.value)
-      desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
-      await workspacesApi.startDesktop(workspaceId.value)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
-        try {
-          const status = await workspacesApi.getDesktopStatus(workspaceId.value)
-          desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
-          if (status.active && status.proxy_url) {
-            desktopStore.setConnected(workspaceId.value, status.proxy_url)
-            return
-          }
-        } catch {
-          // fall through
+  function cancelOwnedStart(targetWorkspaceId?: string): void {
+    for (const [id, pending] of pendingDesktopStarts) {
+      if (targetWorkspaceId !== undefined && id !== targetWorkspaceId) continue
+      if (!pending.owners.has(owner)) continue
+      pending.owners.delete(owner)
+      if (pending.owners.size === 0) {
+        pending.cancelled = true
+        if (pending.phase === 'status' && pendingDesktopStarts.get(id) === pending) {
+          pendingDesktopStarts.delete(id)
         }
       }
-      error.value = msg
-      desktopStore.setDisconnected()
     }
+  }
+
+  function releaseOrphanedPosts(): void {
+    for (const [id, pending] of pendingDesktopStarts) {
+      if (pending.owners.size > 0 || pending.phase !== 'post') continue
+      pending.cancelled = true
+      knownDesktopLeases.delete(id)
+      knownLeaseWorkspaceIds.delete(id)
+      if (desktopStore.workspaceId === id) {
+        desktopStore.setDisconnected()
+        desktopStore.setComputerUseActive(false)
+      }
+      void requestStopDesktop(id).catch(() => undefined)
+    }
+  }
+
+  function disposeScope(): void {
+    runGeneration += 1
+    startGeneration += 1
+    cancelOwnedStart()
+    releaseOrphanedPosts()
+    cleanupFns.forEach((fn) => fn())
+    cleanupFns.length = 0
+  }
+
+  if (getCurrentScope()) onScopeDispose(disposeScope)
+
+  // Invalidate a start even if the workspace changes away and back before
+  // its pending API request settles. A POST already sent cannot be cancelled;
+  // the global stop coordinator will wait for it and release the lease.
+  watch(workspaceId, (_current, previous) => {
+    startGeneration += 1
+    cancelOwnedStart(previous)
+    releaseOrphanedPosts()
+  }, { flush: 'sync' })
+
+  function startDesktop(): Promise<void> {
+    const currentWorkspace = workspaceId.value
+    const cancelledStart = pendingDesktopStarts.get(currentWorkspace)
+    if (cancelledStart?.cancelled) {
+      return cancelledStart.promise.then(() => {
+        if (workspaceId.value !== currentWorkspace) return
+        return startDesktop()
+      })
+    }
+
+    const stopInProgress = desktopStopRequests.get(currentWorkspace)
+    if (stopInProgress) {
+      return stopInProgress.then(() => {
+        if (workspaceId.value !== currentWorkspace) return
+        return startDesktop()
+      })
+    }
+
+    const existingStart = pendingDesktopStarts.get(currentWorkspace)
+    if (existingStart && !existingStart.cancelled) {
+      existingStart.owners.add(owner)
+      return existingStart.promise
+    }
+
+    if (desktopStore.workspaceId && desktopStore.workspaceId !== currentWorkspace) {
+      desktopStore.reset()
+    }
+    if (desktopStore.isConnecting || desktopStore.isConnected) return Promise.resolve()
+
+    startGeneration += 1
+    const pending: PendingDesktopStart = {
+      // Replaced below immediately after registering the request globally.
+      promise: Promise.resolve(),
+      phase: 'status',
+      cancelled: false,
+      owners: new Set([owner]),
+    }
+    const isCurrentStart = (): boolean =>
+      !pending.cancelled &&
+      pendingDesktopStarts.get(currentWorkspace) === pending &&
+      currentWorkspace === workspaceId.value &&
+      desktopStore.workspaceId === currentWorkspace
+
+    error.value = null
+    knownDesktopLeases.add(currentWorkspace)
+    knownLeaseWorkspaceIds.add(currentWorkspace)
+    desktopStore.setConnecting(currentWorkspace)
+
+    // Register synchronously before the first await, so a second surface's
+    // teardown can cancel a delayed status request or wait for an in-flight POST.
+    pendingDesktopStarts.set(currentWorkspace, pending)
+    const request = (async () => {
+      try {
+        const status = await workspacesApi.getDesktopStatus(currentWorkspace)
+        if (!isCurrentStart()) return
+        desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
+        // Set phase before invoking the POST: a concurrent teardown must wait
+        // for this request before sending its stop.
+        pending.phase = 'post'
+        await workspacesApi.startDesktop(currentWorkspace)
+        if (pending.cancelled) {
+          knownDesktopLeases.delete(currentWorkspace)
+          knownLeaseWorkspaceIds.delete(currentWorkspace)
+        }
+      } catch (err: unknown) {
+        if (!isCurrentStart()) return
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('409') || msg.toLowerCase().includes('conflict')) {
+          try {
+            const status = await workspacesApi.getDesktopStatus(currentWorkspace)
+            if (!isCurrentStart()) return
+            desktopStore.setComputerUseActive(Boolean(status.computer_use_active))
+            if (status.active && status.proxy_url) {
+              desktopStore.setConnected(currentWorkspace, status.proxy_url)
+              return
+            }
+          } catch {
+            // fall through
+          }
+        }
+        if (!isCurrentStart()) return
+        error.value = msg
+        desktopStore.setDisconnected()
+        knownDesktopLeases.delete(currentWorkspace)
+        knownLeaseWorkspaceIds.delete(currentWorkspace)
+      } finally {
+        if (pendingDesktopStarts.get(currentWorkspace) === pending) {
+          pendingDesktopStarts.delete(currentWorkspace)
+        }
+      }
+    })()
+    pending.promise = request
+    return request
+  }
+
+  function requestStopDesktop(targetWorkspaceId: string): Promise<void> {
+    const existing = desktopStopRequests.get(targetWorkspaceId)
+    if (existing) return existing
+
+    const pending = pendingDesktopStarts.get(targetWorkspaceId)
+    // A status GET has not acquired a lease yet; cancel it and release now.
+    // If POST was already sent, wait for it before releasing so it cannot
+    // recreate a lease after the stop request.
+    if (pending?.phase === 'status') {
+      pending.cancelled = true
+      if (pendingDesktopStarts.get(targetWorkspaceId) === pending) {
+        pendingDesktopStarts.delete(targetWorkspaceId)
+      }
+    }
+
+    let resolveRequest!: () => void
+    let rejectRequest!: (reason?: unknown) => void
+    const request = new Promise<void>((resolve, reject) => {
+      resolveRequest = resolve
+      rejectRequest = reject
+    })
+    // Teardown callers intentionally ignore failures; attach a handler here
+    // while returning the original rejecting promise to explicit stop callers.
+    void request.catch(() => undefined)
+    desktopStopRequests.set(targetWorkspaceId, request)
+    const issueStop = () => {
+      try {
+        void workspacesApi.stopDesktop(targetWorkspaceId).then(
+          () => resolveRequest(),
+          (error: unknown) => rejectRequest(error),
+        )
+      } catch (error: unknown) {
+        rejectRequest(error)
+      }
+    }
+    if (pending?.phase === 'post') {
+      void pending.promise.then(issueStop, issueStop)
+    } else {
+      issueStop()
+    }
+    const clearRequest = () => {
+      if (desktopStopRequests.get(targetWorkspaceId) === request) {
+        desktopStopRequests.delete(targetWorkspaceId)
+      }
+    }
+    void request.then(clearRequest, clearRequest)
+    return request
   }
 
   async function stopDesktop(): Promise<boolean> {
     const currentWorkspace = workspaceId.value
     const generation = runGeneration
+    const ownsStoreAtStart = desktopStore.workspaceId === currentWorkspace
     const isStale = (): boolean =>
-      generation !== runGeneration || currentWorkspace !== workspaceId.value
+      generation !== runGeneration ||
+      currentWorkspace !== workspaceId.value ||
+      (ownsStoreAtStart && desktopStore.workspaceId !== currentWorkspace)
     try {
-      await workspacesApi.stopDesktop(currentWorkspace)
+      await requestStopDesktop(currentWorkspace)
       if (isStale()) return true
       // The runner decides asynchronously whether computer-use still holds
       // the process, so the status right after the POST is usually stale
@@ -167,23 +355,55 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
         if (isStale()) return true
       }
     } catch {
-      error.value = 'Failed to stop desktop session'
+      if (!isStale()) error.value = 'Failed to stop desktop session'
       return false
     }
   }
 
-  async function stopDesktopIfActive(targetWorkspaceId: string): Promise<void> {
-    if (desktopStore.workspaceId !== targetWorkspaceId) return
-    if (!desktopStore.isConnected && !desktopStore.isConnecting) return
-    // Local disconnect first: teardown must never leave a stale mounted
-    // iframe behind when the stop POST hangs or the socket event is lost.
-    desktopStore.setDisconnected()
-    desktopStore.setComputerUseActive(false)
-    try {
-      await workspacesApi.stopDesktop(targetWorkspaceId)
-    } catch {
-      // Ignore stop errors during teardown.
+  function stopDesktopIfActive(targetWorkspaceId: string): Promise<void> {
+    const ownsStore = desktopStore.workspaceId === targetWorkspaceId
+    const hasStoreSession = ownsStore && (desktopStore.isConnected || desktopStore.isConnecting)
+    const pendingStart = pendingDesktopStarts.get(targetWorkspaceId)
+    const existingStop = desktopStopRequests.get(targetWorkspaceId)
+    if (existingStop) {
+      if (workspaceId.value === targetWorkspaceId) startGeneration += 1
+      cancelOwnedStart(targetWorkspaceId)
+      if (ownsStore) {
+        desktopStore.setDisconnected()
+        desktopStore.setComputerUseActive(false)
+      }
+      return existingStop.catch(() => undefined)
     }
+    if (
+      !hasStoreSession &&
+      !knownLeaseWorkspaceIds.has(targetWorkspaceId) &&
+      !knownDesktopLeases.has(targetWorkspaceId) &&
+      !pendingStart
+    ) return Promise.resolve()
+
+    // A teardown also invalidates pending starts for this workspace. The
+    // captured id ensures an old async completion can never become a start
+    // for the next workspace.
+    if (workspaceId.value === targetWorkspaceId) startGeneration += 1
+    cancelOwnedStart(targetWorkspaceId)
+    knownLeaseWorkspaceIds.delete(targetWorkspaceId)
+    knownDesktopLeases.delete(targetWorkspaceId)
+
+    // Local disconnect first, but only mutate the store if it still belongs
+    // to the lease being released. Parent resets may already have initialized
+    // the shared store for another workspace.
+    if (ownsStore) {
+      desktopStore.setDisconnected()
+      desktopStore.setComputerUseActive(false)
+    }
+
+    // Start the release without holding the component's workspace watcher
+    // open. The caller can reset its store immediately after local teardown,
+    // before a new workspace can start; the runner request remains deduped
+    // and settles independently.
+    return requestStopDesktop(targetWorkspaceId).catch(() => {
+      // Ignore stop errors during teardown.
+    })
   }
 
   function handleReconnect(): void {
@@ -249,9 +469,18 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   }
 
   function setupSocketListeners(): void {
+    const isCurrentEvent = (data: { workspace_id?: string }): boolean =>
+      data.workspace_id === workspaceId.value &&
+      (desktopStore.workspaceId === null || desktopStore.workspaceId === data.workspace_id)
+
+    const ownsCurrentWorkspace = (): boolean =>
+      desktopStore.workspaceId === null || desktopStore.workspaceId === workspaceId.value
+
     cleanupFns.push(
       onEvent('desktop:started', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (!isCurrentEvent(data)) return
+        knownDesktopLeases.add(data.workspace_id)
+        knownLeaseWorkspaceIds.add(data.workspace_id)
         // Same proxy URL: keep the existing iframe instead of remounting
         // the KasmVNC client (avoids UI.rfb churn on duplicate events).
         if (
@@ -265,12 +494,16 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
         desktopStore.setComputerUseActive(Boolean(data.computer_use_active))
       }),
       onEvent('desktop:stopped', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (!isCurrentEvent(data)) return
+        knownDesktopLeases.delete(data.workspace_id)
+        knownLeaseWorkspaceIds.delete(data.workspace_id)
         desktopStore.setDisconnected()
         desktopStore.setComputerUseActive(false)
       }),
       onEvent('desktop:viewer_released', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (!isCurrentEvent(data)) return
+        knownDesktopLeases.add(data.workspace_id)
+        knownLeaseWorkspaceIds.add(data.workspace_id)
         // The viewer lease is gone but computer-use still holds the Xvnc
         // process: keep the iframe mounted read-only instead of tearing
         // down the KasmVNC client mid-session.
@@ -284,19 +517,23 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
         }
         desktopStore.setDisconnected()
         desktopStore.setComputerUseActive(Boolean(data.computer_use_active))
+        if (!data.computer_use_active) {
+          knownDesktopLeases.delete(data.workspace_id)
+          knownLeaseWorkspaceIds.delete(data.workspace_id)
+        }
       }),
       onEvent('harness.subtask_started', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (data.workspace_id !== workspaceId.value || !ownsCurrentWorkspace()) return
         if ((data.agent || '').toLowerCase() !== 'computeruse') return
         desktopStore.markComputerUseStarted(data.child_session_id || data.subtask_id)
       }),
       onEvent('harness.subtask_finished', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (data.workspace_id !== workspaceId.value || !ownsCurrentWorkspace()) return
         if ((data.agent || '').toLowerCase() !== 'computeruse') return
         desktopStore.markComputerUseFinished(data.child_session_id || data.subtask_id)
       }),
       onEvent('workspace:error', (data) => {
-        if (data.workspace_id !== workspaceId.value) return
+        if (data.workspace_id !== workspaceId.value || !ownsCurrentWorkspace()) return
         if (desktopStore.isConnecting) {
           error.value = data.error
           desktopStore.setDisconnected()
@@ -310,10 +547,9 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     // boundary observes the bumped generation and returns without
     // touching the store (covers parallel stopDesktop calls and
     // unmounted composables; workspace switches are covered by the
-    // workspace identity check as well).
-    runGeneration += 1
-    cleanupFns.forEach((fn) => fn())
-    cleanupFns.length = 0
+    // workspace identity check as well). This explicit method is also used
+    // by existing lifecycle hooks; scope disposal covers all other callers.
+    disposeScope()
   }
 
   return {

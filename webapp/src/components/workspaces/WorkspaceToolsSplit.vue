@@ -56,8 +56,11 @@ const showSidePanel = computed(
   () => props.canPrompt && hasWorkspace.value && sidePanelStore.hasOpened,
 )
 
-function resetToolStores(): void {
-  desktopStore.reset()
+function resetToolStores(options: { resetDesktop?: boolean } = {}): void {
+  // On workspace switches DesktopSurface owns releasing its old runner lease.
+  // Resetting this shared store first would erase the old workspace identity,
+  // preventing the surface from issuing that release.
+  if (options.resetDesktop !== false) desktopStore.reset()
   terminalStore.reset()
   fileExplorerStore.reset()
   gitStore.reset()
@@ -74,7 +77,7 @@ watch(
   () => props.workspaceId,
   (newId, oldId) => {
     if (!oldId || newId === oldId) return
-    resetToolStores()
+    resetToolStores({ resetDesktop: false })
     if (newId && newId !== mediaWorkspaceId) {
       workspaceImageStore.reset()
       mediaWorkspaceId = newId
@@ -120,6 +123,7 @@ onUnmounted(() => {
 
     <DesktopSurface
       v-if="canPrompt && hasWorkspace"
+      :key="workspaceId"
       :workspace-id="workspaceId"
     />
     <WorkspaceDesktop

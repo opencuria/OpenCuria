@@ -14,8 +14,11 @@ from django.contrib.auth import get_user_model
 from apps.accounts.auth_backends import get_auth_backend
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.desktop_proxy import (
+    _WS_TUNNELS,
+    _proxy_websocket,
     _register_ws_tunnel,
     _unregister_ws_tunnel,
+    _ws_proxy_loop,
     apply_vnc_client_patches,
     build_vnc_redirect_url,
     desktop_proxy_app,
@@ -266,6 +269,155 @@ async def test_runner_frames_from_wrong_runner_are_ignored():
         _unregister_ws_tunnel(tunnel_id)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_code", "expected_code"),
+    [
+        (1001, 1001),
+        (1006, 1011),
+        (1005, 1011),
+        (1015, 1011),
+        (999, 1011),
+        (5000, 1011),
+    ],
+)
+async def test_upstream_close_closes_runner_tunnel_and_sanitizes_code(
+    monkeypatch,
+    upstream_code,
+    expected_code,
+):
+    sio = AsyncMock()
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    tunnel_id = uuid.uuid4().hex
+    queue = asyncio.Queue()
+    await queue.put({"type": "close", "code": upstream_code})
+    sent = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    await _ws_proxy_loop(
+        receive,
+        send,
+        tunnel_id=tunnel_id,
+        runner_sid="runner-sid",
+        queue=queue,
+    )
+
+    sio.emit.assert_awaited_once_with(
+        "desktop:proxy_ws_close",
+        {"tunnel_id": tunnel_id},
+        to="runner-sid",
+    )
+    assert sent == [{"type": "websocket.close", "code": expected_code}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_side", ["send", "receive"])
+async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_code(
+    monkeypatch,
+    failure_side,
+    caplog,
+):
+    sio = AsyncMock()
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    tunnel_id = uuid.uuid4().hex
+    queue = asyncio.Queue()
+    if failure_side == "send":
+        await queue.put({"type": "binary", "data": b"desktop-frame"})
+
+    async def receive():
+        if failure_side == "receive":
+            raise RuntimeError("https://desktop.example/?token=secret-token")
+        await asyncio.Event().wait()
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+        if failure_side == "send":
+            raise RuntimeError("https://desktop.example/?token=secret-token")
+
+    await _ws_proxy_loop(
+        receive,
+        send,
+        tunnel_id=tunnel_id,
+        runner_sid="runner-sid",
+        queue=queue,
+    )
+
+    sio.emit.assert_awaited_once_with(
+        "desktop:proxy_ws_close",
+        {"tunnel_id": tunnel_id},
+        to="runner-sid",
+    )
+    assert not any(
+        event.get("code") in {1005, 1006, 1015}
+        for event in sent
+    )
+    assert "secret-token" not in caplog.text
+    assert "desktop.example" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_closes_runner_tunnel(monkeypatch):
+    sio = AsyncMock()
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    tunnel_id = uuid.uuid4().hex
+
+    async def receive():
+        return {"type": "websocket.disconnect", "code": 1001}
+
+    async def send(message):
+        pass
+
+    await _ws_proxy_loop(
+        receive,
+        send,
+        tunnel_id=tunnel_id,
+        runner_sid="runner-sid",
+        queue=asyncio.Queue(),
+    )
+
+    sio.emit.assert_awaited_once_with(
+        "desktop:proxy_ws_close",
+        {"tunnel_id": tunnel_id},
+        to="runner-sid",
+    )
+
+
+@pytest.mark.asyncio
+async def test_proxy_websocket_unregisters_tunnel_after_loop(monkeypatch):
+    sio = AsyncMock()
+    sio.call = AsyncMock(return_value={})
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._ws_proxy_loop",
+        AsyncMock(return_value=None),
+    )
+    sent = []
+    registered_before = set(_WS_TUNNELS)
+
+    async def send(message):
+        sent.append(message)
+
+    await _proxy_websocket(
+        {"subprotocols": []},
+        AsyncMock(),
+        send,
+        workspace_id=str(uuid.uuid4()),
+        runner_sid="runner-sid",
+        runner_id="runner-id",
+        query_string="",
+    )
+
+    assert sent == [{"type": "websocket.accept"}]
+    assert set(_WS_TUNNELS) == registered_before
+
+
 def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
     workspace_id = "297de18f-3cc8-4e14-b64a-35c80856d51b"
     location = build_vnc_redirect_url(workspace_id, "tok+/=x")
@@ -292,11 +444,24 @@ def test_inject_kasm_idle_guard_inserts_into_head_and_is_idempotent():
     assert inject_kasm_idle_guard(patched) == patched
 
 
-def test_inject_kasm_idle_guard_prefixes_html_without_head():
-    patched = inject_kasm_idle_guard(b"<html><body>vnc</body></html>")
+def test_kasm_idle_guard_handles_only_last_active_exception():
+    patched = inject_kasm_idle_guard(b"<html><head></head></html>")
 
-    assert patched.startswith(b"<script data-opencuria-kasm-idle-guard>")
-    assert patched.endswith(b"<html><body>vnc</body></html>")
+    assert b"msg.indexOf('lastActiveAt')!==-1" in patched
+    assert b"window.UI" not in patched
+    assert b"throw err" in patched
+
+
+def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():
+    original = b"<!doctype html><html lang=\"en\"><body>vnc</body></html>"
+
+    patched = inject_kasm_idle_guard(original)
+
+    assert patched.startswith(b"<!doctype html><html lang=\"en\">")
+    assert patched.index(b"<!doctype html>") < patched.index(
+        b"data-opencuria-kasm-idle-guard"
+    )
+    assert patched.index(b"data-opencuria-kasm-idle-guard") < patched.index(b"<body>")
 
 
 def test_apply_vnc_client_patches_rewrites_vnc_html_content_length():
