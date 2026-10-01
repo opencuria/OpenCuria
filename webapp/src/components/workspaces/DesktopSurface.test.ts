@@ -7,14 +7,13 @@ import DesktopSurface from './DesktopSurface.vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import * as workspacesApi from '@/services/workspaces.api'
+import { NATIVE_CLIPBOARD_ACTION, NATIVE_CLIPBOARD_VERSION } from '@/lib/desktopSurfaceRecovery'
 
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
-  writeDesktopClipboard: vi.fn(),
-  readDesktopClipboard: vi.fn(),
 }))
 
 vi.mock('@/services/config', () => ({
@@ -99,6 +98,9 @@ describe('DesktopSurface', () => {
       unobserve(): void {}
     }
     vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
 
     document.body.innerHTML = ''
     sidebarHost = document.createElement('div')
@@ -191,6 +193,27 @@ describe('DesktopSurface', () => {
 
     expect(getDesktopStatus).toHaveBeenCalledWith('ws-1')
     expect(startDesktop).toHaveBeenCalledWith('ws-1')
+  })
+
+  it('does not intercept Ctrl/Cmd copy or paste shortcuts in the parent window', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    store.open()
+    mountSurface()
+    await nextTick()
+
+    for (const key of ['c', 'v']) {
+      for (const modifier of ['ctrlKey', 'metaKey'] as const) {
+        const event = new KeyboardEvent('keydown', {
+          key,
+          [modifier]: true,
+          bubbles: true,
+          cancelable: true,
+        })
+        window.dispatchEvent(event)
+        expect(event.defaultPrevented).toBe(false)
+      }
+    }
   })
 
   it('shows the computer-use overlay over the fixed surface', async () => {
@@ -337,6 +360,128 @@ describe('DesktopSurface', () => {
     connectionMessage(document.querySelector('iframe')!.contentWindow, 'connecting')
     await nextTick()
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
+  it('keeps clipboard disabled until a ready message and matching connection handshake', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    const posts: Array<{ data: Record<string, unknown>; origin: string }> = []
+    vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation((data, origin) => {
+      posts.push({ data: data as Record<string, unknown>, origin: String(origin) })
+    })
+    const latestContext = () => {
+      const contexts = posts.map((entry) => entry.data).filter((entry) => entry.kind === 'context')
+      return contexts[contexts.length - 1]!
+    }
+    window.dispatchEvent(new Event('blur'))
+    expect(latestContext().enabled).toBe(false)
+    expect(latestContext().connected).toBe(false)
+    window.dispatchEvent(new Event('focus'))
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { action: NATIVE_CLIPBOARD_ACTION, version: NATIVE_CLIPBOARD_VERSION, kind: 'ready' },
+      source: iframe.contentWindow,
+      origin: window.location.origin,
+    }))
+    await nextTick()
+    expect(latestContext().enabled).toBe(true)
+    expect(latestContext().connected).toBe(false)
+
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(latestContext().connected).toBe(true)
+    expect(posts.every((entry) => entry.origin === window.location.origin)).toBe(true)
+  })
+
+  it('closes the native clipboard context for parent text focus, hidden host, workspace mismatch and Computer-use', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    const wrapper = mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    const posts: Array<Record<string, unknown>> = []
+    vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation((data) => {
+      posts.push(data as Record<string, unknown>)
+    })
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { action: NATIVE_CLIPBOARD_ACTION, version: NATIVE_CLIPBOARD_VERSION, kind: 'ready' },
+      source: iframe.contentWindow,
+      origin: window.location.origin,
+    }))
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    const latest = () => {
+      const contexts = posts.filter((entry) => entry.kind === 'context')
+      return contexts[contexts.length - 1]!
+    }
+
+    const input = document.createElement('textarea')
+    document.body.appendChild(input)
+    input.focus()
+    input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    await nextTick()
+    expect(latest().parentFocused).toBe(false)
+
+    input.blur()
+    // Hidden ancestor invalidates the placement synchronously via mutation observer.
+    sidebarHost.style.display = 'none'
+    await nextTick()
+    expect(latest().visible).toBe(false)
+    sidebarHost.style.display = ''
+    store.workspaceId = 'ws-other'
+    await nextTick()
+    expect(latest().enabled).toBe(false)
+    store.workspaceId = 'ws-1'
+    store.setComputerUseActive(true)
+    await nextTick()
+    expect(latest().computerUseActive).toBe(true)
+    expect(wrapper.find('[data-testid="desktop-clipboard-fallback"]').exists()).toBe(false)
+  })
+
+  it('sends one-click fallback open request only for the active visible desktop', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    store.open()
+    const wrapper = mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    const posts: Array<Record<string, unknown>> = []
+    vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation((data) => {
+      posts.push(data as Record<string, unknown>)
+    })
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { action: NATIVE_CLIPBOARD_ACTION, version: NATIVE_CLIPBOARD_VERSION, kind: 'ready' },
+      source: iframe.contentWindow,
+      origin: window.location.origin,
+    }))
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    window.dispatchEvent(new MessageEvent('message', {
+      data: {
+        action: NATIVE_CLIPBOARD_ACTION, version: NATIVE_CLIPBOARD_VERSION,
+        kind: 'fallback', reason: 'permission',
+      },
+      source: iframe.contentWindow,
+      origin: window.location.origin,
+    }))
+    await nextTick()
+    const button = [...document.querySelectorAll('button')]
+      .find((entry) => entry.textContent?.includes('Open KasmVNC clipboard'))
+    expect(document.body.textContent).toContain('Clipboard access was denied')
+    expect(button).toBeTruthy()
+    const hint = wrapper.find('[data-testid="desktop-clipboard-fallback"]')
+    expect(hint.classes()).toEqual(expect.arrayContaining([
+      'w-[calc(100%-1.5rem)]',
+      'max-w-xl',
+      'flex-wrap',
+    ]))
+    expect(hint.find('span').classes()).toEqual(expect.arrayContaining(['min-w-0', 'flex-1']))
+    expect(hint.findAll('button').every((entry) => entry.classes().includes('shrink-0'))).toBe(true)
+    button!.click()
+    expect(posts.filter((entry) => entry.kind === 'open-panel')).toHaveLength(1)
   })
 
   it('remounts the iframe when viewer generation bumps', async () => {

@@ -9,7 +9,7 @@ Canonical home for the desktop session management previously living on
   ``_CLICK_BUTTONS`` sentinels,
 - the ``_desktop_sessions`` / ``_desktop_recordings`` state plus the
   ``_desktop_lock_map`` keyed lock map (never-evict semantics), and
-- the start / acquire / release / action / clipboard operations
+- the start / acquire / release / action operations
   (``desktop_action`` is a thin dispatcher plus one private
   ``_desktop_action_<action>`` helper per branch — Step 6b split,
   same order/checks/messages as the verbatim Step 6a method).
@@ -47,7 +47,6 @@ Step 6b splits ``desktop_action`` into dispatcher + per-action helpers.
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import re
 import shlex
@@ -344,7 +343,7 @@ class DesktopManager:
             "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
             "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
             "-AcceptPointerEvents -SendCutText -AcceptCutText "
-            "-AcceptSetDesktopSize=0 "
+            "-AcceptSetDesktopSize=0 -DLP_ClipTypes text/plain,text/html,image/png "
             ">>/root/.vnc/server.log 2>&1 &\n"
             "for _ in $(seq 1 120); do\n"
             # xstartup launches exactly once as soon as the X11 socket
@@ -1369,73 +1368,6 @@ class DesktopManager:
             "stdout": stdout,
             "stderr": stderr,
         }
-
-    async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
-        """Write plain text into the desktop clipboard inside the workspace VM/container."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
-
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        command = (
-            "set -e;"
-            "TOOL='';"
-            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v apt-get >/dev/null 2>&1; then "
-            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
-            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
-            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; fi; "
-            "fi; "
-            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
-            f"printf %s '{encoded_text}' | base64 -d | "
-            "if [ \"$TOOL\" = 'xsel' ]; then "
-            "DISPLAY=:1 xsel --clipboard --input; "
-            "else DISPLAY=:1 timeout 3 xclip -selection clipboard -in >/dev/null 2>&1 || true; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            ["sh", "-lc", command],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to write desktop clipboard: {output}")
-
-    async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
-        """Read plain text from the desktop clipboard inside the workspace VM/container."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
-
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        command = (
-            "set -e;"
-            "TOOL='';"
-            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
-            "elif command -v apt-get >/dev/null 2>&1; then "
-            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
-            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
-            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
-            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; fi; "
-            "fi; "
-            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
-            "if [ \"$TOOL\" = 'xclip' ]; then "
-            "DISPLAY=:1 xclip -selection clipboard -o 2>/dev/null || true; "
-            "else DISPLAY=:1 xsel --clipboard --output 2>/dev/null || true; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            ["sh", "-lc", command],
-            env={"HOME": "/root", "DISPLAY": ":1"},
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to read desktop clipboard: {output}")
-        return output
 
     def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
         """Return the active desktop session if any."""

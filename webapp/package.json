@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "build-only": "vite build",
     "test": "vitest run",
+    "test:native-clipboard-bridge": "vitest run src/lib/nativeClipboardBridge.test.ts",
     "type-check": "vue-tsc --build",
     "lint": "run-s lint:*",
     "lint:oxlint": "oxlint . --fix",

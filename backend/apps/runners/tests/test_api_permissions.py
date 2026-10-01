@@ -84,3 +84,44 @@ def test_legacy_conversations_endpoint_is_gone(client: Client):
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_legacy_desktop_clipboard_endpoints_are_gone(client: Client):
+    user_model = get_user_model()
+    user = user_model.objects.create_user(
+        email="clipboard-gone@test.local", password="secret"
+    )
+    org = Organization.objects.create(
+        name="Clipboard Gone Org", slug="clipboard-gone-org"
+    )
+    Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="clipboard-runner",
+        api_token_hash=hash_token("clipboard-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+        available_runtimes=["docker"],
+    )
+    workspace = Workspace.objects.create(
+        runner=runner,
+        name="Clipboard Workspace",
+        status=WorkspaceStatus.RUNNING,
+        created_by=user,
+    )
+    token = _create_api_key(
+        user=user,
+        permissions=[APIKeyPermission.TERMINAL_ACCESS.value],
+    )
+
+    for path in (
+        f"/api/v1/workspaces/{workspace.id}/desktop/clipboard/read/",
+        f"/api/v1/workspaces/{workspace.id}/desktop/clipboard/write/",
+    ):
+        response = client.post(
+            path,
+            data=json.dumps({"text": "legacy clipboard"}),
+            content_type="application/json",
+            **_auth_headers(token, str(org.id)),
+        )
+        assert response.status_code == 404, path

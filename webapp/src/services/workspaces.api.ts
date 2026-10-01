@@ -97,22 +97,6 @@ export function takeDesktopControl(
   )
 }
 
-export function writeDesktopClipboard(
-  id: string,
-  text: string,
-): Promise<{ text: string }> {
-  return post<{ text: string }>(
-    `/workspaces/${id}/desktop/clipboard/write/`,
-    { text },
-  )
-}
-
-export function readDesktopClipboard(id: string): Promise<{ text: string }> {
-  return post<{ text: string }>(
-    `/workspaces/${id}/desktop/clipboard/read/`,
-  )
-}
-
 // --- Background process API (workspace-bound) ---
 
 export function listProcesses(workspaceId: string): Promise<WorkspaceProcess[]> {

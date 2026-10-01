@@ -277,18 +277,6 @@ class DesktopTakeControlOut(Schema):
     aborted_session_ids: list[uuid.UUID]
 
 
-class DesktopClipboardWriteIn(Schema):
-    """Request schema for writing plain text into the VM clipboard."""
-
-    text: str
-
-
-class DesktopClipboardReadOut(Schema):
-    """Response schema for reading plain text from the VM clipboard."""
-
-    text: str
-
-
 # ---------------------------------------------------------------------------
 # Background process schemas
 # ---------------------------------------------------------------------------

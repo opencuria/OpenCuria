@@ -12,8 +12,6 @@ vi.mock('@/services/workspaces.api', () => ({
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
-  writeDesktopClipboard: vi.fn(),
-  readDesktopClipboard: vi.fn(),
 }))
 
 vi.mock('@/services/config', () => ({

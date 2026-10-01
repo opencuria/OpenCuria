@@ -128,11 +128,18 @@ class WebSocketInterface(Interface):
             async with session.get(upstream_url) as resp:
                 headers: list[list[str]] = []
                 for key, value in resp.headers.items():
-                    if key.lower() in ("transfer-encoding", "connection", "keep-alive"):
+                    if key.lower() in (
+                        "transfer-encoding",
+                        "connection",
+                        "keep-alive",
+                        "content-encoding",
+                        "content-length",
+                    ):
                         continue
                     headers.append([key, value])
 
                 body = await resp.read()
+                headers.append(["Content-Length", str(len(body))])
                 return {
                     "status": resp.status,
                     "headers": headers,
@@ -1255,33 +1262,6 @@ class WebSocketInterface(Interface):
                     {"task_id": task_id, "error": str(exc)},
                 )
                 log.exception("stop_desktop_failed")
-
-        @sio.on("desktop:clipboard_write")
-        async def on_desktop_clipboard_write(data: dict) -> dict:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(workspace_id=str(workspace_id))
-            try:
-                await self._service.desktop.write_desktop_clipboard(
-                    workspace_id,
-                    data.get("text", ""),
-                )
-                return {"ok": True}
-            except Exception as exc:
-                log.exception("desktop_clipboard_write_failed")
-                return {"ok": False, "error": str(exc)}
-
-        @sio.on("desktop:clipboard_read")
-        async def on_desktop_clipboard_read(data: dict) -> dict:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(workspace_id=str(workspace_id))
-            try:
-                text = await self._service.desktop.read_desktop_clipboard(
-                    workspace_id
-                )
-                return {"ok": True, "text": text}
-            except Exception as exc:
-                log.exception("desktop_clipboard_read_failed")
-                return {"ok": False, "error": str(exc)}
 
         @sio.on("desktop:proxy_http_request")
         async def on_desktop_proxy_http_request(data: dict) -> dict:

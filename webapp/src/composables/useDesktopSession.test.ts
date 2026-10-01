@@ -11,12 +11,6 @@ vi.mock('@/services/workspaces.api', () => ({
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
-  writeDesktopClipboard: vi.fn(),
-  readDesktopClipboard: vi.fn(),
-}))
-
-vi.mock('@/stores/notifications', () => ({
-  useNotificationStore: () => ({ success: vi.fn(), error: vi.fn() }),
 }))
 
 type Handler = (data: Record<string, unknown>) => void

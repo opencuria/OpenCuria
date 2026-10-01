@@ -24,7 +24,7 @@ describe('desktopGeometry', () => {
 
   it('asks KasmVNC to scale locally instead of resizing the desktop', () => {
     expect(desktopIframeSrc('http://ws.test', '/ws/desktop/ws-1/', 'tok')).toBe(
-      'http://ws.test/ws/desktop/ws-1/?token=tok&resize=scale',
+      'http://ws.test/ws/desktop/ws-1/?token=tok&resize=scale&clipboard_up=true&clipboard_down=true&clipboard_seamless=true',
     )
   })
 

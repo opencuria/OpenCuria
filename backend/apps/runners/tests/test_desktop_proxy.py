@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -23,6 +25,7 @@ from apps.runners.desktop_proxy import (
     build_vnc_redirect_url,
     desktop_proxy_app,
     inject_kasm_idle_guard,
+    patch_kasm_133_clipboard_bundle,
     push_runner_ws_closed,
     push_runner_ws_frame,
 )
@@ -152,7 +155,7 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
     scope = {
         "type": "http",
         "method": "GET",
-        "path": f"/ws/desktop/{workspace_id}/dist/main.bundle.js",
+        "path": f"/ws/desktop/{workspace_id}/dist/style.bundle.css",
         "query_string": b"token=test-token",
         "headers": [],
     }
@@ -163,7 +166,7 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
         "desktop:proxy_http_request",
         {
             "workspace_id": workspace_id,
-            "path": "/dist/main.bundle.js",
+            "path": "/dist/style.bundle.css",
             "query_string": "token=test-token",
             "method": "GET",
         },
@@ -354,10 +357,7 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
         {"tunnel_id": tunnel_id},
         to="runner-sid",
     )
-    assert not any(
-        event.get("code") in {1005, 1006, 1015}
-        for event in sent
-    )
+    assert not any(event.get("code") in {1005, 1006, 1015} for event in sent)
     assert "secret-token" not in caplog.text
     assert "desktop.example" not in caplog.text
 
@@ -426,15 +426,33 @@ def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
     assert "autoconnect=true" in location
     assert "resize=scale" in location
     assert "reconnect=false" in location
+    assert "clipboard_up=true" in location
+    assert "clipboard_down=true" in location
+    assert "clipboard_seamless=true" in location
     assert "path=ws%2Fdesktop%2F" in location
     assert "%3Ftoken%3D" in location
     assert f"path=ws/desktop/{workspace_id}/?token=" not in location
 
 
+def test_provisioned_xvnc_start_sets_native_clipboard_mimes_and_qemu_scripts_match():
+    root = Path(__file__).parents[4]
+    qemu = (root / "backend/apps/runners/scripts/qemu_desktop_session.sh").read_bytes()
+    packer = (root / "runner/packer/desktop-session.sh").read_bytes()
+    assert qemu == packer
+    assert b"-DLP_ClipTypes text/plain,text/html,image/png" in qemu
+
+    lifecycle = (
+        root / "backend/apps/runners/services/domains/image_lifecycle.py"
+    ).read_text()
+    start_line = next(
+        line for line in lifecycle.splitlines() if "/usr/bin/Xvnc :1" in line
+    )
+    assert "-DLP_ClipTypes text/plain,text/html,image/png" in start_line
+
+
 def test_inject_kasm_idle_guard_inserts_into_head_and_is_idempotent():
     original = (
-        b"<html><head lang='en'><title>KasmVNC</title></head>"
-        b"<body></body></html>"
+        b"<html><head lang='en'><title>KasmVNC</title></head><body></body></html>"
     )
     patched = inject_kasm_idle_guard(original)
 
@@ -453,11 +471,11 @@ def test_kasm_idle_guard_handles_only_last_active_exception():
 
 
 def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():
-    original = b"<!doctype html><html lang=\"en\"><body>vnc</body></html>"
+    original = b'<!doctype html><html lang="en"><body>vnc</body></html>'
 
     patched = inject_kasm_idle_guard(original)
 
-    assert patched.startswith(b"<!doctype html><html lang=\"en\">")
+    assert patched.startswith(b'<!doctype html><html lang="en">')
     assert patched.index(b"<!doctype html>") < patched.index(
         b"data-opencuria-kasm-idle-guard"
     )
@@ -480,12 +498,89 @@ def test_apply_vnc_client_patches_rewrites_vnc_html_content_length():
     assert header_map[b"content-type"] == b"text/html"
 
 
+def test_apply_vnc_client_patches_pins_native_clipboard_patch_and_headers(monkeypatch):
+    source = Path(__file__).with_name("fixtures") / "kasm_133_clipboard_excerpt.js"
+    source = source.read_bytes()
+    monkeypatch.setattr("apps.runners.desktop_proxy._KASM_133_BUNDLE_SIZE", len(source))
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._KASM_133_BUNDLE_SHA256",
+        hashlib.sha256(source).hexdigest(),
+    )
+    headers = [
+        [b"Content-Type", b"application/javascript"],
+        [b"Content-Length", str(len(source)).encode()],
+        [b"Content-Encoding", b"gzip"],
+        [b"ETag", b"old"],
+        [b"Content-MD5", b"old"],
+    ]
+
+    next_headers, patched = apply_vnc_client_patches(
+        "/dist/main.bundle.js", headers, source
+    )
+
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._KASM_133_PATCHED_SHA256",
+        hashlib.sha256(patched).hexdigest(),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._KASM_133_PATCHED_BUNDLE_SIZE", len(patched)
+    )
+
+    # Generator-local var declaration survives the async regenerator resumes.
+    paste_start = patched.index(b'key: "clipboardPasteDataFrom"')
+    paste_end = patched.index(b'key: "requestBottleneckStats"', paste_start)
+    generator = patched[paste_start:paste_end]
+    assert b"var _opencuriaGeneration;" in generator
+    assert b"_opencuriaGeneration = window.__opencuriaClipboardCapture();" in generator
+    assert generator.index(b"var _opencuriaGeneration;") < generator.index(b"case 0:")
+    assert (
+        generator.count(
+            b"window.__opencuriaClipboardAllowed(this, _opencuriaGeneration)"
+        )
+        == 2
+    )
+    assert b"navigator.clipboard.read().then(function (items)" in patched
+    assert b"window.__opencuriaClipboardCanReceive(UI.rfb)" in patched
+    assert (
+        b"navigator.clipboard.write([new ClipboardItem(clipItemData)]).then("
+        b"function () {" in patched
+    )
+    assert b"window.__opencuriaClipboardFallback(\n            'permission'" in patched
+    assert (
+        b"window.__opencuriaClipboardFallback(\n                'unavailable'"
+        in patched
+    )
+    assert b'return _context.abrupt("return", dataset.length > 0)' in generator
+    assert b"blob.size === 0" in generator
+    assert b"message.kind === 'context'" in patched
+    assert b"__opencuriaSuppressNextNativeRead" not in patched
+    assert b"__opencuriaLastClipboardSentGeneration" not in patched
+    assert b"sendBinaryClipboard" in generator
+
+    header_map = {key.lower(): value for key, value in next_headers}
+    assert header_map[b"content-length"] == str(len(patched)).encode()
+    assert b"content-encoding" not in header_map
+    assert b"etag" not in header_map
+    assert b"content-md5" not in header_map
+    assert header_map[b"content-type"] == b"application/javascript"
+
+    with pytest.raises(ValueError, match="Unsupported KasmVNC"):
+        patch_kasm_133_clipboard_bundle(source + b"unknown")
+    with pytest.raises(ValueError, match="Unsupported KasmVNC"):
+        patch_kasm_133_clipboard_bundle(b"UI.rfb = unknown")
+    # The exact output of this trusted patch is idempotent, unknown markers are not.
+    patch_kasm_133_clipboard_bundle.cache_clear()
+    assert patch_kasm_133_clipboard_bundle(patched) == patched
+    with pytest.raises(ValueError, match="Unsupported KasmVNC"):
+        patch_kasm_133_clipboard_bundle(patched.replace(b"opencuria", b"attacker", 1))
+
+
 def test_apply_vnc_client_patches_leaves_non_html_assets_unchanged():
     body = b"/* kasm bundle */ UI.rfb.lastActiveAt"
     headers = [[b"Content-Type", b"application/javascript"], [b"Content-Length", b"99"]]
 
     next_headers, next_body = apply_vnc_client_patches(
-        "/dist/main.bundle.js",
+        "/dist/style.bundle.css",
         headers,
         body,
     )

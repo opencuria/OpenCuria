@@ -1865,20 +1865,6 @@ class WorkspaceService:
         """
         return await self._desktop.desktop_action(workspace_id, action, args)
 
-    async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
-        """Write plain text into the desktop clipboard inside the workspace VM/container.
-
-        Step 6a: thin facade over ``DesktopManager.write_desktop_clipboard``.
-        """
-        return await self._desktop.write_desktop_clipboard(workspace_id, text)
-
-    async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
-        """Read plain text from the desktop clipboard inside the workspace VM/container.
-
-        Step 6a: thin facade over ``DesktopManager.read_desktop_clipboard``.
-        """
-        return await self._desktop.read_desktop_clipboard(workspace_id)
-
     def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
         """Return the active desktop session if any.
 

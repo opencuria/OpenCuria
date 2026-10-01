@@ -5,7 +5,7 @@
  * placement is aligned with the active sidebar/modal viewport. Keeping the
  * browsing context stationary avoids WebKit/Chrome resetting VNC on moves.
  * This component also owns session lifecycle, viewer recovery, scaling,
- * computer-use overlay and clipboard shortcuts.
+ * computer-use overlay.
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, toRef, nextTick } from 'vue'
 import type { CSSProperties } from 'vue'
@@ -22,7 +22,11 @@ import {
   createDesktopReconnectBackoff,
   createPausableTimer,
   isTrustedDesktopMessage,
+  createNativeClipboardContext,
+  NATIVE_CLIPBOARD_ACTION,
+  NATIVE_CLIPBOARD_VERSION,
   parseDesktopConnectionStatus,
+  parseNativeClipboardMessage,
 } from '@/lib/desktopSurfaceRecovery'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -38,8 +42,6 @@ const {
   startDesktop,
   stopDesktopIfActive,
   takeControl,
-  copyFromVmClipboard,
-  pasteToVmClipboard,
   setupSocketListeners,
   cleanupSocketListeners,
 } = useDesktopSession(toRef(props, 'workspaceId'))
@@ -51,6 +53,12 @@ const viewportHeight = ref(0)
 const iframeLoaded = ref(false)
 const viewerStatus = ref<'connecting' | 'connected' | 'disconnected'>('connecting')
 const recoveryError = ref(false)
+const clipboardHint = ref('')
+const bridgeReady = ref(false)
+let clipboardSequence = 0
+let clipboardHintTimer: ReturnType<typeof setTimeout> | null = null
+const parentFocused = ref(typeof document === 'undefined' ? false : document.hasFocus())
+const modalVisible = ref(false)
 const surfaceStyle = ref<CSSProperties>({
   position: 'fixed',
   left: '-10000px',
@@ -62,9 +70,11 @@ const surfaceStyle = ref<CSSProperties>({
   pointerEvents: 'none',
 })
 let hostResizeObserver: ResizeObserver | null = null
-let iframeKeydownCleanup: (() => void) | null = null
+let hostMutationObserver: MutationObserver | null = null
 let iframeErrorCleanup: (() => void) | null = null
-let isDispatchingSyntheticPasteShortcut = false
+let blurTimer: ReturnType<typeof setTimeout> | null = null
+const surfaceVisible = ref(false)
+let bridgeConnectionConfirmed = false
 
 const desktopSize = computed(() => {
   const workspace =
@@ -103,108 +113,16 @@ const desktopIframeSrc = computed(() => {
   return buildDesktopIframeSrc(config.wsBaseUrl || '', desktopStore.proxyUrl, token)
 })
 
-// --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
-
-function shouldHandleClipboardShortcut(event: KeyboardEvent): boolean {
-  if (!desktopStore.isConnected) return false
-  const target = event.target as HTMLElement | null
-  if (target?.closest('input, textarea, [contenteditable="true"]')) return false
-  return true
-}
-
-function parseClipboardShortcut(event: KeyboardEvent): 'copy' | 'paste' | null {
-  const key = event.key.toLowerCase()
-  const modifierPressed = event.metaKey || event.ctrlKey
-  if (!modifierPressed || event.altKey || event.shiftKey) return null
-  if (key === 'c') return 'copy'
-  if (key === 'v') return 'paste'
-  return null
-}
-
-function suppressClipboardEvent(event: KeyboardEvent): void {
-  event.preventDefault()
-  event.stopPropagation()
-  event.stopImmediatePropagation()
-}
-
-function dispatchPasteShortcutToVm(event: KeyboardEvent): void {
-  const iframe = desktopIframeRef.value
-  const doc = iframe?.contentDocument
-  if (!iframe || !doc) return
-
-  const activeTarget = (doc.activeElement as HTMLElement | null) ?? doc.body ?? doc.documentElement
-  if (!activeTarget) return
-
-  const modifierKey = event.metaKey ? 'Meta' : 'Control'
-  const shortcutEventInit: KeyboardEventInit = {
-    key: 'v',
-    code: 'KeyV',
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    ctrlKey: modifierKey === 'Control',
-    metaKey: modifierKey === 'Meta',
-  }
-
-  isDispatchingSyntheticPasteShortcut = true
-  try {
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keydown', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-    activeTarget.dispatchEvent(new KeyboardEvent('keydown', shortcutEventInit))
-    activeTarget.dispatchEvent(new KeyboardEvent('keyup', shortcutEventInit))
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keyup', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-  } finally {
-    isDispatchingSyntheticPasteShortcut = false
-  }
-}
-
-async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
-  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-
-  if (shortcut === 'copy') {
-    window.setTimeout(() => void copyFromVmClipboard(), 120)
-    return
-  }
-
-  suppressClipboardEvent(event)
-  if (await pasteToVmClipboard()) dispatchPasteShortcutToVm(event)
-}
-
-function handleDesktopIframeKeyup(event: KeyboardEvent): void {
-  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
-  if (parseClipboardShortcut(event) === 'paste') suppressClipboardEvent(event)
-}
-
-function clearIframeListeners(): void {
-  iframeKeydownCleanup?.()
-  iframeKeydownCleanup = null
+function clearIframeErrorListener(): void {
   iframeErrorCleanup?.()
   iframeErrorCleanup = null
 }
 
-function bindDesktopIframeListeners(): void {
-  clearIframeListeners()
+function bindDesktopIframeErrorListener(): void {
+  clearIframeErrorListener()
   const iframe = desktopIframeRef.value
-  const doc = iframe?.contentDocument
   const win = iframe?.contentWindow
-  if (!iframe || !doc || !win) return
-  const keydownListener = (event: KeyboardEvent) => void handleDesktopIframeKeydown(event)
-  const keyupListener = (event: KeyboardEvent) => handleDesktopIframeKeyup(event)
-  win.addEventListener('keydown', keydownListener, true)
-  win.addEventListener('keyup', keyupListener, true)
-  doc.addEventListener('keydown', keydownListener, true)
-  doc.addEventListener('keyup', keyupListener, true)
-  iframeKeydownCleanup = () => {
-    win.removeEventListener('keydown', keydownListener, true)
-    win.removeEventListener('keyup', keyupListener, true)
-    doc.removeEventListener('keydown', keydownListener, true)
-    doc.removeEventListener('keyup', keyupListener, true)
-  }
+  if (!iframe || !win) return
 
   const onFrameError = (event: ErrorEvent) => {
     // Never log the raw message or URL: either may contain the desktop token.
@@ -234,11 +152,104 @@ function activeHost(): HTMLElement | null {
   return desktopStore.isOpen ? modalDesktopHost.value : sidebarDesktopHost.value
 }
 
+function isElementVisible(element: HTMLElement): boolean {
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    const style = window.getComputedStyle(node)
+    if (style.display === 'none' || style.visibility === 'hidden' ||
+        (style.opacity !== '' && Number(style.opacity) === 0))
+      return false
+  }
+  return true
+}
+
+function sendClipboardContext(): void {
+  const frame = desktopIframeRef.value
+  if (!frame?.contentWindow || !frame.src) return
+  let targetOrigin: string
+  try {
+    targetOrigin = new URL(frame.src, window.location.href).origin
+  } catch {
+    return
+  }
+  const visible = surfaceVisible.value && parentFocused.value && document.visibilityState === 'visible'
+  const enabled = bridgeReady.value && Boolean(desktopStore.proxyUrl) &&
+    desktopStore.isConnected && desktopStore.workspaceId === props.workspaceId
+  frame.contentWindow.postMessage(
+    createNativeClipboardContext(++clipboardSequence, props.workspaceId, {
+      enabled,
+      connected: enabled && bridgeConnectionConfirmed,
+      visible,
+      parentFocused: parentFocused.value && document.hasFocus(),
+      computerUseActive: desktopStore.computerUseActive,
+    }),
+    targetOrigin,
+  )
+}
+
+function showClipboardFallback(reason: 'unsupported' | 'permission' | 'unavailable'): void {
+  if (desktopStore.computerUseActive || !surfaceVisible.value || !desktopStore.isConnected ||
+      desktopStore.workspaceId !== props.workspaceId) return
+  clipboardHint.value =
+    reason === 'unsupported'
+      ? 'Native clipboard is unavailable in this browser. Use the KasmVNC text clipboard.'
+      : reason === 'permission'
+        ? 'Clipboard access was denied. Use the KasmVNC text clipboard.'
+        : 'Native clipboard could not be used. Use the KasmVNC text clipboard.'
+  if (clipboardHintTimer) clearTimeout(clipboardHintTimer)
+  clipboardHintTimer = setTimeout(() => {
+    clipboardHint.value = ''
+    clipboardHintTimer = null
+  }, 12_000)
+}
+
+function handleNativeClipboardMessage(event: MessageEvent): boolean {
+  const iframe = desktopIframeRef.value
+  if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return false
+  const message = parseNativeClipboardMessage(event.data)
+  if (!message) return false
+  if (message.kind === 'ready') {
+    bridgeReady.value = true
+    sendClipboardContext()
+  } else if (message.kind === 'fallback') {
+    if (bridgeReady.value && desktopStore.workspaceId === props.workspaceId)
+      showClipboardFallback(message.reason)
+  }
+  return true
+}
+
+function requestNativeClipboardPanel(): void {
+  const frame = desktopIframeRef.value
+  if (!frame?.contentWindow || !frame.src || desktopStore.computerUseActive ||
+      !surfaceVisible.value || !bridgeReady.value || !bridgeConnectionConfirmed ||
+      !desktopStore.isConnected || desktopStore.workspaceId !== props.workspaceId ||
+      document.visibilityState !== 'visible' || !document.hasFocus()) return
+  frame.focus()
+  try {
+    frame.contentWindow.focus()
+  } catch {
+    // Cross-origin Kasm clients cannot be focused through their WindowProxy.
+  }
+  parentFocused.value = true
+  sendClipboardContext()
+  try {
+    frame.contentWindow.postMessage(
+      { action: NATIVE_CLIPBOARD_ACTION, version: NATIVE_CLIPBOARD_VERSION, kind: 'open-panel' },
+      new URL(frame.src, window.location.href).origin,
+    )
+  } catch {
+    // A stale or invalid proxy URL simply leaves the concise hint visible.
+  }
+}
+
 function refreshHostBounds(): void {
   hostResizeObserver?.disconnect()
+  hostMutationObserver?.disconnect()
   hostResizeObserver = null
+  hostMutationObserver = null
   const host = activeHost()
+  modalVisible.value = Boolean(desktopStore.isOpen && host)
   if (!host || !surfaceRef.value) {
+    surfaceVisible.value = false
     viewportWidth.value = 0
     viewportHeight.value = 0
     surfaceStyle.value = {
@@ -247,11 +258,16 @@ function refreshHostBounds(): void {
       visibility: 'hidden',
       pointerEvents: 'none',
     }
+    sendClipboardContext()
     return
   }
 
   const update = () => {
-    if (activeHost() !== host || !surfaceRef.value) return
+    if (activeHost() !== host || !surfaceRef.value) {
+      surfaceVisible.value = false
+      sendClipboardContext()
+      return
+    }
     const rect = host.getBoundingClientRect()
     const style = window.getComputedStyle(host)
     const intersectsViewport =
@@ -260,11 +276,12 @@ function refreshHostBounds(): void {
       rect.left < window.innerWidth &&
       rect.top < window.innerHeight
     const visible =
+      isElementVisible(host) &&
       style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
       rect.width > 0 &&
       rect.height > 0 &&
       intersectsViewport
+    surfaceVisible.value = visible
     viewportWidth.value = visible ? rect.width : 0
     viewportHeight.value = visible ? rect.height : 0
     surfaceStyle.value = {
@@ -277,15 +294,56 @@ function refreshHostBounds(): void {
       visibility: visible ? 'visible' : 'hidden',
       pointerEvents: visible ? 'auto' : 'none',
     }
+    sendClipboardContext()
   }
 
   update()
   hostResizeObserver = new ResizeObserver(update)
   hostResizeObserver.observe(host)
+  hostMutationObserver = new MutationObserver(update)
+  for (let node: HTMLElement | null = host; node; node = node.parentElement)
+    hostMutationObserver.observe(node, { attributes: true, attributeFilter: ['class', 'style', 'hidden'] })
 }
 
 function onViewportChange(): void {
   refreshHostBounds()
+}
+
+function isParentDesktopFocus(): boolean {
+  if (!document.hasFocus()) return false
+  const active = document.activeElement
+  if (active === desktopIframeRef.value) return true
+  if (!(active instanceof HTMLElement)) return true
+  if (active.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return false
+  const host = activeHost()
+  return active === document.body || active === document.documentElement || Boolean(host?.contains(active))
+}
+
+function updateParentFocus(): void {
+  parentFocused.value = isParentDesktopFocus()
+  sendClipboardContext()
+}
+
+function onWindowBlur(): void {
+  if (blurTimer) clearTimeout(blurTimer)
+  parentFocused.value = false
+  sendClipboardContext()
+  blurTimer = setTimeout(() => {
+    blurTimer = null
+    if (document.hasFocus()) updateParentFocus()
+  }, 0)
+}
+
+function onWindowFocus(): void {
+  updateParentFocus()
+}
+
+function onParentFocusIn(): void {
+  updateParentFocus()
+}
+
+function onParentFocusOut(): void {
+  queueMicrotask(updateParentFocus)
 }
 
 // --- KasmVNC status, recovery and page visibility ---
@@ -315,15 +373,19 @@ const reconnectBackoff = createDesktopReconnectBackoff(
 
 function markViewerConnected(): void {
   viewerStatus.value = 'connected'
+  bridgeConnectionConfirmed = true
   iframeLoaded.value = true
+  sendClipboardContext()
   recoveryError.value = false
   connectionTimeout.cancel()
   reconnectBackoff.reset()
-  bindDesktopIframeListeners()
+  bindDesktopIframeErrorListener()
 }
 
 function markViewerDisconnected(): void {
   if (!desktopStore.isConnected) return
+  bridgeConnectionConfirmed = false
+  sendClipboardContext()
   connectionTimeout.cancel()
   viewerStatus.value = 'disconnected'
   iframeLoaded.value = false
@@ -345,7 +407,7 @@ function readIframeConnection(): boolean {
 
 function handleIframeLoad(event: Event): void {
   if (event.currentTarget !== desktopIframeRef.value) return
-  bindDesktopIframeListeners()
+  bindDesktopIframeErrorListener()
   if (readIframeConnection()) {
     markViewerConnected()
     return
@@ -356,6 +418,7 @@ function handleIframeLoad(event: Event): void {
 }
 
 function handleWindowMessage(event: MessageEvent): void {
+  if (handleNativeClipboardMessage(event)) return
   const iframe = desktopIframeRef.value
   if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
   const status = parseDesktopConnectionStatus(event.data)
@@ -369,7 +432,9 @@ function handleWindowMessage(event: MessageEvent): void {
 }
 
 function onVisibilityChange(): void {
+  updateParentFocus()
   if (document.visibilityState !== 'visible') {
+    sendClipboardContext()
     connectionTimeout.pause()
     reconnectBackoff.pause()
     return
@@ -394,26 +459,21 @@ function retryViewer(): void {
   startConnectionTimeout()
 }
 
-function onGlobalKeydown(event: KeyboardEvent): void {
-  if (!desktopStore.isOpen || !shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-  event.preventDefault()
-  if (shortcut === 'copy') void copyFromVmClipboard()
-  else void pasteToVmClipboard()
-}
-
 onMounted(() => {
   if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId)
     desktopStore.reset()
   setupSocketListeners()
   if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting)
     void startDesktop()
-  window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('message', handleWindowMessage)
+  window.addEventListener('focus', onWindowFocus)
+  window.addEventListener('blur', onWindowBlur)
+  document.addEventListener('focusin', onParentFocusIn, true)
+  document.addEventListener('focusout', onParentFocusOut, true)
   window.addEventListener('resize', onViewportChange)
   window.addEventListener('scroll', onViewportChange, true)
   document.addEventListener('visibilitychange', onVisibilityChange)
+  updateParentFocus()
   refreshHostBounds()
 })
 
@@ -422,11 +482,18 @@ onBeforeUnmount(() => {
   cleanupSocketListeners()
   hostResizeObserver?.disconnect()
   hostResizeObserver = null
-  clearIframeListeners()
+  hostMutationObserver?.disconnect()
+  hostMutationObserver = null
+  clearIframeErrorListener()
+  if (blurTimer) clearTimeout(blurTimer)
+  if (clipboardHintTimer) clearTimeout(clipboardHintTimer)
   connectionTimeout.cancel()
   reconnectBackoff.reset()
-  window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('message', handleWindowMessage)
+  window.removeEventListener('focus', onWindowFocus)
+  window.removeEventListener('blur', onWindowBlur)
+  document.removeEventListener('focusin', onParentFocusIn, true)
+  document.removeEventListener('focusout', onParentFocusOut, true)
   window.removeEventListener('resize', onViewportChange)
   window.removeEventListener('scroll', onViewportChange, true)
   document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -440,23 +507,41 @@ watch(
   },
 )
 
-watch([sidebarDesktopHost, modalDesktopHost], refreshHostBounds)
 
 watch(
   () => [desktopStore.proxyUrl, desktopStore.viewerGeneration] as const,
   async () => {
+    bridgeReady.value = false
+    bridgeConnectionConfirmed = false
+    clipboardHint.value = ''
     iframeLoaded.value = false
     viewerStatus.value = 'connecting'
     connectionTimeout.cancel()
-    clearIframeListeners()
+    clearIframeErrorListener()
     await nextTick()
     if (desktopIframeRef.value) startConnectionTimeout()
   },
 )
 
-watch(surfaceRef, refreshHostBounds)
+watch(
+  () => [desktopStore.isConnected, desktopStore.computerUseActive, desktopStore.workspaceId] as const,
+  () => {
+    if (desktopStore.workspaceId !== props.workspaceId || !desktopStore.isConnected) {
+      bridgeConnectionConfirmed = false
+      clipboardHint.value = ''
+    }
+    if (desktopStore.computerUseActive) clipboardHint.value = ''
+    sendClipboardContext()
+  },
+  { flush: 'sync' },
+)
+
+watch([surfaceRef, sidebarDesktopHost, modalDesktopHost, () => desktopStore.isOpen], refreshHostBounds)
 watch(desktopIframeRef, () => {
-  clearIframeListeners()
+  bridgeReady.value = false
+  bridgeConnectionConfirmed = false
+  clipboardHint.value = ''
+  clearIframeErrorListener()
   if (desktopIframeRef.value) startConnectionTimeout()
 })
 </script>
@@ -515,6 +600,21 @@ watch(desktopIframeRef, () => {
         @click="retryViewer"
       >
         Retry
+      </Button>
+    </div>
+
+    <div
+      v-if="clipboardHint && !desktopStore.computerUseActive && surfaceVisible && (desktopStore.isOpen ? modalVisible : !desktopStore.isOpen)"
+      class="absolute bottom-3 left-1/2 z-25 flex w-[calc(100%-1.5rem)] max-w-xl -translate-x-1/2 flex-wrap items-center gap-2 rounded-md bg-card px-3 py-2 text-xs text-foreground shadow-lg"
+      role="status"
+      data-testid="desktop-clipboard-fallback"
+    >
+      <span class="min-w-0 flex-1 basis-full sm:basis-auto">{{ clipboardHint }}</span>
+      <Button class="shrink-0" size="sm" variant="outline" @click="requestNativeClipboardPanel">
+        Open KasmVNC clipboard
+      </Button>
+      <Button class="shrink-0" size="sm" variant="ghost" aria-label="Dismiss clipboard notice" @click="clipboardHint = ''">
+        Dismiss
       </Button>
     </div>
 

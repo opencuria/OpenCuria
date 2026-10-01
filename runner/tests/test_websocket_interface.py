@@ -311,6 +311,44 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_fetch_desktop_http_drops_compressed_framing_headers(self) -> None:
+        from unittest.mock import patch
+
+        class Response:
+            status = 200
+            headers = {
+                "Content-Type": "application/javascript",
+                "Content-Encoding": "gzip",
+                "Content-Length": "3",
+                "ETag": "stale-etag",
+            }
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def read(self):
+                return b"decoded body"
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, _url):
+                return Response()
+
+        service = DummyService()
+        interface = WebSocketInterface(service, RunnerSettings())
+        with patch("aiohttp.ClientSession", return_value=Session()):
+            response = await interface._fetch_desktop_http(uuid.uuid4(), "/dist/main.bundle.js")
+        self.assertNotIn("Content-Encoding", dict(response["headers"]))
+        self.assertEqual(dict(response["headers"])["Content-Length"], "12")
+
     async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:
         service = DummyService()
         interface = WebSocketInterface(service, RunnerSettings())

@@ -15,6 +15,9 @@ export function desktopIframeSrc(base: string, proxyUrl: string, token: string):
   const params = new URLSearchParams({
     token,
     resize: 'scale',
+    clipboard_up: 'true',
+    clipboard_down: 'true',
+    clipboard_seamless: 'true',
   })
   return `${base}${proxyUrl}?${params.toString()}`
 }

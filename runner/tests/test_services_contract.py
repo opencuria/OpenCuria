@@ -1259,8 +1259,6 @@ def test_step6b_websocket_desktop_handlers_use_manager() -> None:
         "self._service.desktop.start_desktop",
         "self._service.desktop.get_desktop_network_name",
         "self._service.desktop.stop_desktop",
-        "self._service.desktop.write_desktop_clipboard",
-        "self._service.desktop.read_desktop_clipboard",
         "self._service.desktop.desktop_action",
     ):
         assert handler_snippet in source, handler_snippet
@@ -1272,10 +1270,15 @@ def test_step6b_websocket_desktop_handlers_use_manager() -> None:
         "self._service.get_desktop_state_payload(",
         "self._service.get_desktop_container_ip(",
         "self._service.get_desktop_network_name(",
-        "self._service.write_desktop_clipboard(",
-        "self._service.read_desktop_clipboard(",
     ):
         assert legacy_snippet not in source, legacy_snippet
+    assert 'desktop:clipboard_write' not in source
+    assert 'desktop:clipboard_read' not in source
+    svc = _make_service()
+    assert not hasattr(svc, "write_desktop_clipboard")
+    assert not hasattr(svc, "read_desktop_clipboard")
+    assert not hasattr(svc.desktop, "write_desktop_clipboard")
+    assert not hasattr(svc.desktop, "read_desktop_clipboard")
 
 
 # -- Step 7: git manager (verbatim move) ---------------------------------------

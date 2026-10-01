@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { Monitor, RefreshCw, Square, Copy, ClipboardPaste, X } from '@lucide/vue'
+import { Monitor, RefreshCw, Square, X } from '@lucide/vue'
 
 const props = defineProps<{
   workspaceId: string
@@ -34,12 +34,9 @@ const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const {
   error,
-  clipboardBusy,
   startDesktop,
   stopDesktop,
   handleReconnect,
-  copyFromVmClipboard,
-  pasteToVmClipboard,
 } = useDesktopSession(toRef(props, 'workspaceId'))
 
 const desktopSize = computed(() => {
@@ -100,26 +97,6 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
           />
         </div>
         <div class="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="h-6 w-6 opacity-50 hover:opacity-100"
-            :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
-            title="Copy VM clipboard to local clipboard"
-            @click="copyFromVmClipboard"
-          >
-            <Copy :size="11" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="h-6 w-6 opacity-50 hover:opacity-100"
-            :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
-            title="Paste local clipboard into VM clipboard"
-            @click="pasteToVmClipboard"
-          >
-            <ClipboardPaste :size="11" />
-          </Button>
           <Button
             v-if="desktopStore.isConnected"
             variant="ghost"

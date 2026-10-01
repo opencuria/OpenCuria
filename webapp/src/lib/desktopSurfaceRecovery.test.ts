@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createDesktopReconnectBackoff,
   createPausableTimer,
+  createNativeClipboardContext,
   isTrustedDesktopMessage,
   parseDesktopConnectionStatus,
+  parseNativeClipboardMessage,
 } from './desktopSurfaceRecovery'
 
 describe('desktop surface recovery helpers', () => {
@@ -25,6 +27,32 @@ describe('desktop surface recovery helpers', () => {
       parseDesktopConnectionStatus({ action: 'connection_state', value: 'connected\ntoken' }),
     ).toBeNull()
     expect(parseDesktopConnectionStatus(null)).toBeNull()
+  })
+
+  it('creates minimized clipboard context and rejects malformed bridge messages', () => {
+    expect(createNativeClipboardContext(3, 'workspace-1', {
+      enabled: true,
+      connected: true,
+      visible: true,
+      parentFocused: true,
+      computerUseActive: false,
+    })).toEqual({
+      action: 'opencuria_clipboard',
+      version: 1,
+      kind: 'context',
+      sequence: 3,
+      workspaceId: 'workspace-1',
+      enabled: true,
+      connected: true,
+      visible: true,
+      parentFocused: true,
+      computerUseActive: false,
+    })
+    expect(parseNativeClipboardMessage({ action: 'opencuria_clipboard', version: 1, kind: 'ready' })).toEqual({ kind: 'ready' })
+    expect(parseNativeClipboardMessage({ action: 'opencuria_clipboard', version: 2, kind: 'ready' })).toBeNull()
+    expect(parseNativeClipboardMessage({ action: 'opencuria_clipboard', version: 1, kind: 'fallback', reason: 'permission' })).toEqual({ kind: 'fallback', reason: 'permission' })
+    expect(parseNativeClipboardMessage({ action: 'opencuria_clipboard', version: 1, kind: 'fallback', reason: 'private text' })).toBeNull()
+    expect(parseNativeClipboardMessage({ action: 'opencuria_clipboard', version: 1, kind: 'focus', focused: 'yes' })).toBeNull()
   })
 
   it('authenticates messages using both iframe source and resolved iframe origin', () => {

@@ -31,6 +31,63 @@ export function isTrustedDesktopMessage(
   }
 }
 
+export type NativeClipboardFallbackReason = 'unsupported' | 'permission' | 'unavailable'
+export type NativeClipboardMessage =
+  | { kind: 'ready' }
+  | { kind: 'focus'; focused: boolean }
+  | { kind: 'fallback'; reason: NativeClipboardFallbackReason }
+
+export const NATIVE_CLIPBOARD_ACTION = 'opencuria_clipboard'
+export const NATIVE_CLIPBOARD_VERSION = 1
+
+export interface NativeClipboardContext {
+  action: typeof NATIVE_CLIPBOARD_ACTION
+  version: typeof NATIVE_CLIPBOARD_VERSION
+  kind: 'context'
+  sequence: number
+  workspaceId: string
+  enabled: boolean
+  connected: boolean
+  visible: boolean
+  parentFocused: boolean
+  computerUseActive: boolean
+}
+
+/** Construct the minimized, typed context sent to the trusted Kasm frame. */
+export function createNativeClipboardContext(
+  sequence: number,
+  workspaceId: string,
+  values: Omit<NativeClipboardContext, 'action' | 'version' | 'kind' | 'sequence' | 'workspaceId'>,
+): NativeClipboardContext {
+  return {
+    action: NATIVE_CLIPBOARD_ACTION,
+    version: NATIVE_CLIPBOARD_VERSION,
+    kind: 'context',
+    sequence,
+    workspaceId,
+    ...values,
+  }
+}
+
+/** Parse only versioned, non-secret status messages from the Kasm bridge. */
+export function parseNativeClipboardMessage(value: unknown): NativeClipboardMessage | null {
+  if (!value || typeof value !== 'object') return null
+  const message = value as Record<string, unknown>
+  if (message.action !== NATIVE_CLIPBOARD_ACTION || message.version !== NATIVE_CLIPBOARD_VERSION)
+    return null
+  if (message.kind === 'ready') return { kind: 'ready' }
+  if (message.kind === 'focus' && typeof message.focused === 'boolean')
+    return { kind: 'focus', focused: message.focused }
+  if (
+    message.kind === 'fallback' &&
+    (message.reason === 'unsupported' ||
+      message.reason === 'permission' ||
+      message.reason === 'unavailable')
+  )
+    return { kind: 'fallback', reason: message.reason }
+  return null
+}
+
 export interface PausableTimer {
   start(delayMs: number): void
   pause(): void

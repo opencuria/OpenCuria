@@ -12,8 +12,6 @@ vi.mock('@/services/workspaces.api', () => ({
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
-  writeDesktopClipboard: vi.fn(),
-  readDesktopClipboard: vi.fn(),
 }))
 
 vi.mock('@/services/config', () => ({
@@ -116,6 +114,17 @@ describe('WorkspaceDesktop modal', () => {
 
     expect(stopDesktop).toHaveBeenCalledWith('ws-1')
     expect(store.isConnected).toBe(false)
+  })
+
+  it('does not render the removed VM/local clipboard controls', () => {
+    const store = useDesktopStore()
+    store.open()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    const wrapper = mountDesktop()
+
+    expect(wrapper.find('[title="Copy VM clipboard to local clipboard"]').exists()).toBe(false)
+    expect(wrapper.find('[title="Paste local clipboard into VM clipboard"]').exists()).toBe(false)
   })
 
   it('shows the not-active state with a start button when disconnected', () => {

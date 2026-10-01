@@ -76,6 +76,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(start_command[0], "bash")
         self.assertIn("-geometry 1280x720", start_command[2])
         self.assertIn("-AcceptSetDesktopSize=0", start_command[2])
+        self.assertIn("-DLP_ClipTypes text/plain,text/html,image/png", start_command[2])
         self.assertNotIn("opencuria-desktop-start", start_command)
         self.assertNotIn("opencuria-desktop-stop", start_command[2])
 
@@ -90,6 +91,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         # so a restart re-runs xstartup instead of showing an empty desktop.
         marker_clear = command.index("rm -f /root/.vnc/.xstartup-started")
         xvnc_launch = command.index("/usr/bin/Xvnc :1")
+        self.assertIn("-DLP_ClipTypes text/plain,text/html,image/png", command)
         xstartup_launch = command.index("/root/.vnc/xstartup >>")
         self.assertLess(marker_clear, xvnc_launch)
         self.assertLess(xvnc_launch, xstartup_launch)

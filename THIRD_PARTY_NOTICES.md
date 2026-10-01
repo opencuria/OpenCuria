@@ -141,3 +141,28 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+## KasmVNC 1.3.3 / noVNC clipboard excerpt and patch anchors
+
+The test fixture excerpt at `backend/apps/runners/tests/fixtures/kasm_133_clipboard_excerpt.js` is
+copied from the JavaScript bundled with KasmVNC 1.3.3. The pinned stock
+clipboard-writer source string used as a patch anchor in
+`backend/apps/runners/desktop_proxy.py` is from the same upstream bundle. The
+project's native clipboard bridge and patch logic are OpenCuria code; the
+excerpt and stock upstream source remain separately subject to their upstream
+license.
+
+- **Upstream project:** KasmVNC 1.3.3's noVNC-derived core, distributed by
+  Kasm Technologies
+- **Copyright attribution:** Copyright (C) 2019 The noVNC Authors (and other
+  individual contributors as noted in upstream files/history)
+- **KasmVNC source:** https://github.com/kasmtech/noVNC
+- **Original noVNC upstream:** https://github.com/novnc/noVNC
+- **License:** Mozilla Public License 2.0 (MPL-2.0). The installed KasmVNC
+  distribution identifies its noVNC core JavaScript as MPL-2.0 in
+  `/usr/share/kasmvnc/www/LICENSE.txt` and supplies the license text at
+  `/usr/share/kasmvnc/www/docs/LICENSE.MPL-2.0`; the license is also available
+  at https://www.mozilla.org/MPL/2.0/.
+
+This attribution does not change the AGPL-3.0-only license of the surrounding
+OpenCuria project or assert a different license for other project files.

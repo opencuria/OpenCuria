@@ -22,7 +22,9 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from http.cookies import SimpleCookie
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from asgiref.sync import sync_to_async
@@ -36,6 +38,28 @@ _PATH_RE = re.compile(r"^/ws/desktop/(?P<workspace_id>[0-9a-f\-]{36})(?P<rest>/.
 
 _COOKIE_NAME = "desktop_auth"
 _COOKIE_MAX_AGE = 3600  # 1 hour
+_KASM_133_BUNDLE_SHA256 = (
+    "3f2d6ca7c7d12944441bd6450b5d74b312abd86b51ef7e04cefa9617205caa50"
+)
+_KASM_133_BUNDLE_SIZE = 777428
+_KASM_133_PATCHED_SHA256 = (
+    "0925de9391b292719772328ab070408efa0b2a6be1454121c10fcf7918e69d3c"
+)
+_KASM_133_PATCHED_BUNDLE_SIZE = 800631
+_KASM_PATCH_ANCHOR = b"}; // Set up translations"
+_KASM_RFB_FOCUS = b'    key: "_focusCanvas",\n    value: function _focusCanvas(event) {'
+_KASM_PASTE_DATA_START = (
+    b"                dataset = [];\n                mimes = [];\n"
+    b"                h = 0;"
+)
+_KASM_PRIMARY_SEND = (
+    b"                    RFB.messages.sendBinaryClipboard(this._sock, dataset, mimes);"
+)
+_KASM_SECONDARY_SEND = (
+    b"                    this._proxyRFBMessage('sendBinaryClipboard', "
+    b"[dataset, mimes]);"
+)
+_CLIPBOARD_BRIDGE = Path(__file__).with_name("assets") / "native_kasm_clipboard.js"
 
 # KasmVNC 1.3.3 treats any iframe as Kasm VDI and starts a 5s idle timer
 # that reads ``UI.rfb.lastActiveAt`` with no null check. After a websocket
@@ -77,6 +101,9 @@ def build_vnc_redirect_url(workspace_id: str, token: str | None) -> str:
             "resize": "scale",
             "reconnect": "false",
             "path": ws_path,
+            "clipboard_up": "true",
+            "clipboard_down": "true",
+            "clipboard_seamless": "true",
         }
     )
     return f"/ws/desktop/{workspace_id}/vnc.html?{query}"
@@ -119,20 +146,239 @@ def _is_vnc_html_path(rest_path: str) -> bool:
     return rest_path.split("?", 1)[0] == "/vnc.html"
 
 
+def _is_kasm_bundle_path(rest_path: str) -> bool:
+    """Return whether this is the version-pinned KasmVNC main bundle."""
+    return rest_path.split("?", 1)[0] == "/dist/main.bundle.js"
+
+
+def _patch_headers_for_body(
+    headers: list[list[bytes]], body: bytes
+) -> list[list[bytes]]:
+    """Keep validators and framing valid after editing a proxied resource."""
+    headers = [
+        item
+        for item in headers
+        if item[0].lower()
+        not in {b"content-length", b"content-encoding", b"etag", b"content-md5"}
+    ]
+    headers.append([b"content-length", str(len(body)).encode()])
+    return headers
+
+
+@lru_cache(maxsize=1)
+def patch_kasm_133_clipboard_bundle(body: bytes) -> bytes:
+    """Patch only the authenticated, exact KasmVNC 1.3.3 bundle."""
+    digest = hashlib.sha256(body).hexdigest()
+    if (
+        digest == _KASM_133_PATCHED_SHA256
+        and len(body) == _KASM_133_PATCHED_BUNDLE_SIZE
+    ):
+        return body
+    if len(body) != _KASM_133_BUNDLE_SIZE or digest != _KASM_133_BUNDLE_SHA256:
+        raise ValueError("Unsupported KasmVNC main bundle")
+
+    required = (
+        _KASM_PATCH_ANCHOR,
+        _KASM_RFB_FOCUS,
+        _KASM_PASTE_DATA_START,
+        _KASM_PRIMARY_SEND,
+        _KASM_SECONDARY_SEND,
+    )
+    if any(body.count(anchor) != 1 for anchor in required):
+        raise ValueError("KasmVNC clipboard patch anchor mismatch")
+
+    bridge = _CLIPBOARD_BRIDGE.read_bytes()
+    paste_start = body.index(b'key: "clipboardPasteDataFrom"')
+    paste_end = body.index(b'key: "requestBottleneckStats"', paste_start)
+    paste = body[paste_start:paste_end]
+    if paste.count(_KASM_PRIMARY_SEND) != 1 or paste.count(_KASM_SECONDARY_SEND) != 1:
+        raise ValueError("KasmVNC clipboard send anchor mismatch")
+
+    # Keep the generation in the async-generator closure, not the regenerator
+    # state-machine handler: that handler is re-entered after every await.
+    declaration = b"var dataset, mimes, h, i, ti, mime, blob, buff, data, _i2, _i3;"
+    if paste.count(declaration) != 1:
+        raise ValueError("KasmVNC clipboard generator declaration mismatch")
+    paste = paste.replace(
+        declaration,
+        declaration + b"\n        var _opencuriaGeneration;",
+        1,
+    )
+    case_zero = b"              case 0:\n                if (!(this._rfbConnectionState"
+    if paste.count(case_zero) != 1:
+        raise ValueError("KasmVNC clipboard generator entry mismatch")
+    paste = paste.replace(
+        case_zero,
+        b"              case 0:\n"
+        b"                _opencuriaGeneration = window.__opencuriaClipboardCapture();"
+        b"\n                if (!(this._rfbConnectionState",
+        1,
+    )
+    send_guard = (
+        b"                    if (!window.__opencuriaClipboardAllowed(this, "
+        b"_opencuriaGeneration)) { this._clipHash = 0; "
+        b"this._resendClipboardNextUserDrivenEvent = true; return _context.stop(); }\n"
+    )
+    paste = paste.replace(_KASM_PRIMARY_SEND, send_guard + _KASM_PRIMARY_SEND, 1)
+    paste = paste.replace(_KASM_SECONDARY_SEND, send_guard + _KASM_SECONDARY_SEND, 1)
+    unchanged_anchor = (
+        b"                Debug('No clipboard changes');\n"
+        b'                return _context.abrupt("return");'
+    )
+    if paste.count(unchanged_anchor) != 1:
+        raise ValueError("KasmVNC unchanged clipboard outcome anchor mismatch")
+    paste = paste.replace(
+        unchanged_anchor,
+        b"                Debug('No clipboard changes');\n"
+        b'                return _context.abrupt("return", true);',
+        1,
+    )
+    empty_blob_anchor = b"              case 18:\n                _context.next = 20;"
+    if paste.count(empty_blob_anchor) != 1:
+        raise ValueError("KasmVNC empty clipboard MIME anchor mismatch")
+    paste = paste.replace(
+        empty_blob_anchor,
+        b"              case 18:\n"
+        b'                if (blob.size === 0) return _context.abrupt("continue", 37);'
+        b"\n                _context.next = 20;",
+        1,
+    )
+    send_completion = b'              case 45:\n              case "end":'
+    if paste.count(send_completion) != 1:
+        raise ValueError("KasmVNC clipboard outcome completion anchor mismatch")
+    paste = paste.replace(
+        send_completion,
+        b'                return _context.abrupt("return", dataset.length > 0);\n'
+        + send_completion,
+        1,
+    )
+
+    patched = body[:paste_start] + paste + body[paste_end:]
+    focus_start = patched.index(_KASM_RFB_FOCUS)
+    focus_end = patched.index(b'key: "_setDesktopName"', focus_start)
+    focus = patched[focus_start:focus_end]
+    resend_marker = b"      if (this._resendClipboardNextUserDrivenEvent) {"
+    if focus.count(resend_marker) != 1:
+        raise ValueError("KasmVNC user-focus clipboard anchor mismatch")
+    focus = focus.replace(
+        resend_marker,
+        b"      if (this._resendClipboardNextUserDrivenEvent && "
+        b"window.__opencuriaClipboardCanRead()) {",
+        1,
+    )
+    patched = patched[:focus_start] + focus + patched[focus_end:]
+
+    receive_anchor = b"  clipboardReceive: function clipboardReceive(e) {"
+    receive_start = patched.index(receive_anchor)
+    receive_end = patched.index(
+        b"  bottleneckStatsRecieve: function bottleneckStatsRecieve(e) {", receive_start
+    )
+    receive = patched[receive_start:receive_end]
+    if receive.count(receive_anchor) != 1:
+        raise ValueError("KasmVNC clipboard receive anchor mismatch")
+    receive_gate = (
+        b"      if (!window.__opencuriaClipboardCanReceive(UI.rfb)) return;\n"
+    )
+    patched = (
+        patched[:receive_start]
+        + receive.replace(receive_anchor, receive_anchor + b"\n" + receive_gate, 1)
+        + patched[receive_end:]
+    )
+
+    # Guard every delayed browser write, preserving Kasm's native MIME handling.
+    writer_key = b'key: "_write_binary_clipboard"'
+    writer_start = patched.index(writer_key)
+    writer_end = patched.index(b'key: "_handle_server_stats_msg"', writer_start)
+    writer = patched[writer_start:writer_end]
+    write_anchor = (
+        b"    value: function _write_binary_clipboard(clipItemData, textdata) {\n"
+        b"      var _this8 = this;"
+    )
+    if writer.count(write_anchor) != 1:
+        raise ValueError("KasmVNC clipboard write anchor mismatch")
+    writer = writer.replace(
+        write_anchor,
+        write_anchor
+        + (
+            b"\n      var _opencuriaWriteGeneration = "
+            b"window.__opencuriaClipboardCapture();"
+            b"\n      if (!window.__opencuriaClipboardCanWrite(this, "
+            b"_opencuriaWriteGeneration)) return;"
+        ),
+        1,
+    )
+    write_marker = (
+        b"      navigator.clipboard.write([new ClipboardItem(clipItemData)])"
+        b".then(function () {"
+    )
+    writer_end_marker = b"\n    }\n  }, {\n    "
+    if writer.count(write_marker) != 1 or writer.count(writer_end_marker) != 1:
+        raise ValueError("KasmVNC clipboard writer await anchor mismatch")
+    write_start = writer.index(write_marker)
+    write_end = writer.index(writer_end_marker, write_start)
+    writer_body = b"""      try {
+        navigator.clipboard.write([new ClipboardItem(clipItemData)]).then(function () {
+          var current = window.__opencuriaClipboardCanWrite(
+            _this8, _opencuriaWriteGeneration);
+          if (!current) return;
+          if (textdata) {
+            current = window.__opencuriaClipboardCanWrite(
+              _this8, _opencuriaWriteGeneration);
+            if (!current) return;
+            _this8._clipHash = hashUInt8Array(textdata);
+          }
+        }, function (err) {
+          var current = window.__opencuriaClipboardCanWrite(
+            _this8, _opencuriaWriteGeneration);
+          if (!current) return;
+          logging_Error(\"Error writing to client clipboard: \" + err);
+          window.__opencuriaClipboardFallback(
+            'permission', _this8, _opencuriaWriteGeneration);
+          if (textdata.length > 0) {
+            try {
+              navigator.clipboard.writeText(textdata).then(function () {
+                var current = window.__opencuriaClipboardCanWrite(
+                  _this8, _opencuriaWriteGeneration);
+                if (!current) return;
+                _this8._clipHash = hashUInt8Array(textdata);
+              }, function (err) {
+                var current = window.__opencuriaClipboardCanWrite(
+                  _this8, _opencuriaWriteGeneration);
+                if (!current) return;
+                logging_Error(\"Error writing text to client clipboard: \" + err);
+                window.__opencuriaClipboardFallback(
+                  'permission', _this8, _opencuriaWriteGeneration);
+              });
+            } catch (err) {
+              window.__opencuriaClipboardFallback(
+                'unavailable', _this8, _opencuriaWriteGeneration);
+            }
+          }
+        });
+      } catch (err) {
+        window.__opencuriaClipboardFallback(
+          'unavailable', _this8, _opencuriaWriteGeneration);
+      }"""
+    writer = writer[:write_start] + writer_body + writer[write_end:]
+    patched = patched[:writer_start] + writer + patched[writer_end:]
+    return patched.replace(_KASM_PATCH_ANCHOR, _KASM_PATCH_ANCHOR + b"\n" + bridge, 1)
+
+
 def apply_vnc_client_patches(
     rest_path: str,
     headers: list[list[bytes]],
     body: bytes,
 ) -> tuple[list[list[bytes]], bytes]:
-    """Inject the idle-timer guard into vnc.html and fix Content-Length."""
-    if not _is_vnc_html_path(rest_path):
+    """Patch the VNC page and pinned native clipboard bridge bundle."""
+    if _is_vnc_html_path(rest_path):
+        patched = inject_kasm_idle_guard(body)
+    elif _is_kasm_bundle_path(rest_path):
+        patched = patch_kasm_133_clipboard_bundle(body)
+    else:
         return headers, body
-    patched = inject_kasm_idle_guard(body)
     if patched == body:
         return headers, body
-    headers = [item for item in headers if item[0].lower() != b"content-length"]
-    headers.append([b"content-length", str(len(patched)).encode()])
-    return headers, patched
+    return _patch_headers_for_body(headers, patched), patched
 
 
 @dataclass
@@ -274,10 +520,12 @@ async def desktop_proxy_app(scope, receive, send):
             await send({"type": "websocket.close", "code": 4004})
         else:
             await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({
-                "type": "http.response.body",
-                "body": b"No active desktop session",
-            })
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"No active desktop session",
+                }
+            )
         return
 
     cookie_header = None
@@ -339,11 +587,13 @@ async def _proxy_http(
         resp_headers = [[b"location", redirect_url.encode()]]
         if cookie_header:
             resp_headers.append([b"set-cookie", cookie_header.encode()])
-        await send({
-            "type": "http.response.start",
-            "status": 302,
-            "headers": resp_headers,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 302,
+                "headers": resp_headers,
+            }
+        )
         await send({"type": "http.response.body", "body": b""})
         return
 
@@ -363,8 +613,7 @@ async def _proxy_http(
         )
 
         headers = [
-            [key.encode(), value.encode()]
-            for key, value in response.get("headers", [])
+            [key.encode(), value.encode()] for key, value in response.get("headers", [])
         ]
         if cookie_header:
             headers.append([b"set-cookie", cookie_header.encode()])
@@ -377,19 +626,21 @@ async def _proxy_http(
         else:
             body_bytes = bytes(body)
 
-        headers, body_bytes = apply_vnc_client_patches(
-            rest_path, headers, body_bytes
-        )
+        headers, body_bytes = apply_vnc_client_patches(rest_path, headers, body_bytes)
 
-        await send({
-            "type": "http.response.start",
-            "status": int(response.get("status", 200)),
-            "headers": headers,
-        })
-        await send({
-            "type": "http.response.body",
-            "body": body_bytes,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": int(response.get("status", 200)),
+                "headers": headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": body_bytes,
+            }
+        )
     except SocketIOTimeoutError:
         logger.error("Desktop HTTP proxy via runner timed out")
         await send({"type": "http.response.start", "status": 504, "headers": []})
@@ -412,8 +663,7 @@ async def _proxy_websocket(
     """Reverse-proxy WebSocket connections to KasmVNC through the runner."""
     # Negotiate subprotocol — KasmVNC uses "binary"
     client_protocols = [
-        p.decode() if isinstance(p, bytes) else p
-        for p in scope.get("subprotocols", [])
+        p.decode() if isinstance(p, bytes) else p for p in scope.get("subprotocols", [])
     ]
     tunnel_id = uuid.uuid4().hex
     queue = _register_ws_tunnel(tunnel_id, workspace_id, runner_id)
@@ -540,15 +790,19 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
             while True:
                 msg = await queue.get()
                 if msg["type"] == "binary":
-                    await send({
-                        "type": "websocket.send",
-                        "bytes": msg["data"],
-                    })
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "bytes": msg["data"],
+                        }
+                    )
                 elif msg["type"] == "text":
-                    await send({
-                        "type": "websocket.send",
-                        "text": msg["data"],
-                    })
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": msg["data"],
+                        }
+                    )
                 elif msg["type"] == "close":
                     try:
                         await close_runner_tunnel()

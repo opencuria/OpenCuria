@@ -32,7 +32,7 @@ Module map (each = a meaningful responsibility boundary):
 - :mod:`src.services.sessions.streams` — generic bidirectional streams
   (process + workspace-local TCP relay) + validators.
 - :mod:`src.services.sessions.desktop` — desktop lifecycle: Xvnc leases,
-  per-action dispatcher, clipboard, geometry, xauthority, recordings.
+  per-action dispatcher, geometry, xauthority, recordings.
 - :mod:`src.services.sessions.xdotool` — pure xdotool key/combo builders
   + failure markers (Ubuntu 22.04 compat).
 - :mod:`src.services.git_service` — full git orchestration (locks,
