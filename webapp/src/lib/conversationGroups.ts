@@ -3,7 +3,7 @@ import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 
 export const ACTIVE_CONVERSATION_LIMIT = 5
-export const VISIBLE_CONVERSATION_LIMIT = 15
+export const VISIBLE_CONVERSATION_LIMIT = 8
 export const SIDEBAR_WORKSPACE_LIMIT = 4
 
 export type TimeBucketKey = 'today' | 'yesterday' | 'last7days' | 'last30days' | 'older'

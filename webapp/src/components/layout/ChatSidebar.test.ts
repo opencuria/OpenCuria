@@ -1,9 +1,10 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent } from 'vue'
+import { defineComponent, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatSidebar from './ChatSidebar.vue'
+import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
@@ -258,7 +259,7 @@ describe('ChatSidebar', () => {
     })
   })
 
-  it('caps the time list at 15 rows and expands the rest', async () => {
+  it('caps the time list at 8 rows and expands the rest', async () => {
     conversationStore.conversations = Array.from({ length: 20 }, (_, index) =>
       makeConversation({
         session_id: `s-${index}`,
@@ -271,12 +272,84 @@ describe('ChatSidebar', () => {
     const wrapper = mountSidebar()
 
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
-    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(15)
-    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 5 more chats')
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(8)
+    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 12 more chats')
 
     await wrapper.get('[data-testid="show-more-chats"]').trigger('click')
 
     expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(20)
+  })
+
+  it('places scheduled tasks after the time-chat section and opens settings without navigation', async () => {
+    conversationStore.conversations = [makeConversation({ session_id: 'history', unread: false })]
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    store.tasks = [
+      {
+        id: 'task-1',
+        name: 'Morning check',
+        workspace_id: 'ws-1',
+        prompt: 'Check',
+        mode: 'build',
+        model: '',
+        reasoning_effort: '',
+        skill_ids: [],
+        recurrence: 'daily',
+        weekdays: [],
+        local_time: '09:00',
+        timezone_name: 'UTC',
+        enabled: false,
+        next_run_at: '2026-10-08T09:00:00Z',
+        created_at: '',
+        updated_at: '',
+      },
+    ]
+    await nextTick()
+    expect(wrapper.find('[data-testid="scheduled-tasks-section"]').exists()).toBe(true)
+    expect(
+      wrapper
+        .find('[data-testid="time-list"]')
+        .element.compareDocumentPosition(
+          wrapper.find('[data-testid="scheduled-tasks-section"]').element,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    const before = routerPush.mock.calls.length
+    await wrapper.get('[data-testid="scheduled-task-task-1"]').trigger('click')
+    expect(store.dialogOpen).toBe(true)
+    expect(store.selectedTaskId).toBe('task-1')
+    expect(routerPush).toHaveBeenCalledTimes(before)
+  })
+
+  it('shows scheduled task titles on their own line with concise cadence and pauses', async () => {
+    conversationStore.conversations = []
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    store.tasks = [
+      {
+        id: 'long-task',
+        name: 'A full task title remains visible',
+        workspace_id: 'ws-1',
+        prompt: 'Check',
+        mode: 'build',
+        model: '',
+        reasoning_effort: '',
+        skill_ids: [],
+        recurrence: 'weekly',
+        weekdays: [0, 2],
+        local_time: '09:00',
+        timezone_name: 'UTC',
+        enabled: false,
+        next_run_at: '2026-10-08T09:00:00Z',
+        created_at: '',
+        updated_at: '',
+      },
+    ]
+    await nextTick()
+    const row = wrapper.get('[data-testid="scheduled-task-long-task"]')
+    expect(row.attributes('aria-label')).toContain('A full task title remains visible')
+    expect(row.text()).toContain('Mon, Wed · 09:00')
+    expect(row.find('.lucide-circle-pause').exists()).toBe(true)
+    expect(row.classes()).toContain('min-h-11')
   })
 
   it('shows an empty chat prompt when there are no conversations', () => {

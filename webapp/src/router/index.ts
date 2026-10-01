@@ -55,9 +55,11 @@ const router = createRouter({
           meta: { title: 'Workspaces' },
         },
         {
+          // Keep legacy URLs working by opening the task dialog from a query;
+          // ScheduledTaskDialogHost strips only this query and preserves others.
           path: 'scheduled-tasks',
           name: 'scheduled-tasks',
-          component: () => import('@/views/ScheduledTasksView.vue'),
+          redirect: (to) => ({ path: '/', query: { ...to.query, scheduledTask: to.query.task ?? 'latest' } }),
           meta: { title: 'Scheduled tasks' },
         },
         {

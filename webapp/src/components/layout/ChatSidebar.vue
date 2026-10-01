@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
- * active sessions, time-grouped conversations, compact workspaces, account.
+ * active sessions, time-grouped conversations, scheduled tasks, workspaces, account.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { CalendarClock, Layers, Plus, Search } from '@lucide/vue'
+import { CalendarClock as CalendarClockIcon, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
 import ActiveConversationsSection from './sidebar/ActiveConversationsSection.vue'
 import ActionRequiredSection from './sidebar/ActionRequiredSection.vue'
@@ -13,6 +13,7 @@ import ConversationTimeList from './sidebar/ConversationTimeList.vue'
 import SidebarBrandHeader from './sidebar/SidebarBrandHeader.vue'
 import SidebarUserFooter from './sidebar/SidebarUserFooter.vue'
 import WorkspaceSection from './sidebar/WorkspaceSection.vue'
+import ScheduledTasksSection from './sidebar/ScheduledTasksSection.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -32,6 +33,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { usePolling } from '@/composables/usePolling'
+import { storeToRefs } from 'pinia'
 import {
   countableWorkspaces,
   conversationTitle,
@@ -43,6 +45,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useHarnessStore } from '@/stores/harness'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import {
   connect as connectSocket,
   disconnect as disconnectSocket,
@@ -58,9 +61,11 @@ const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const workspaceStore = useWorkspaceStore()
+const scheduledTaskStore = useScheduledTaskStore()
+const { tasks: scheduledTasks } = storeToRefs(scheduledTaskStore)
 const conversationStore = useHarnessConversationStore()
 const harnessStore = useHarnessStore()
-const { isMobile, setOpenMobile } = useSidebar()
+const { isMobile, state: sidebarState, setOpenMobile, setOpen } = useSidebar()
 
 const searchOpen = ref(false)
 const deleteTarget = ref<HarnessConversation | null>(null)
@@ -85,9 +90,7 @@ const sidebarWorkspaces = computed(() =>
   selectSidebarWorkspaces(workspaceStore.workspaces, conversationStore.conversations),
 )
 
-const workspaceTotal = computed(
-  () => countableWorkspaces(workspaceStore.workspaces).length,
-)
+const workspaceTotal = computed(() => countableWorkspaces(workspaceStore.workspaces).length)
 
 const activeSessionId = computed(() => {
   const query = route.query.session
@@ -128,9 +131,22 @@ function handleOpenWorkspaces(): void {
   void router.push('/workspaces')
 }
 
-function handleOpenScheduledTasks(): void {
+async function handleOpenScheduledTasks(): Promise<void> {
+  if (!isMobile.value && sidebarState.value === 'collapsed') {
+    setOpen(true)
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    document.querySelector<HTMLElement>('[data-testid="new-scheduled-task"]')?.focus()
+    return
+  }
   closeMobileSidebar()
-  void router.push('/scheduled-tasks')
+  if (isMobile.value) {
+    await nextTick()
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    )
+  }
+  scheduledTaskStore.openNew()
 }
 
 function handleMarkAllRead(): void {
@@ -211,13 +227,17 @@ function setupSocketListeners(): void {
 
   // Mutations and completed runs emit an invalidation once, rather than
   // requiring a continuous conversations poll while the socket is healthy.
-  cleanupFns.push(onEvent('harness.conversations_changed', () => {
-    conversationStore.scheduleAttentionRefresh()
-  }))
-  cleanupFns.push(onReconnect(() => {
-    void workspaceStore.fetchWorkspaces()
-    void conversationStore.fetchConversations()
-  }))
+  cleanupFns.push(
+    onEvent('harness.conversations_changed', () => {
+      conversationStore.scheduleAttentionRefresh()
+    }),
+  )
+  cleanupFns.push(
+    onReconnect(() => {
+      void workspaceStore.fetchWorkspaces()
+      void conversationStore.fetchConversations()
+    }),
+  )
 
   cleanupFns.push(
     onEvent('harness.session_status', (data) => {
@@ -334,10 +354,7 @@ watch(
 <template>
   <Sidebar collapsible="icon">
     <SidebarHeader>
-      <SidebarBrandHeader
-        @home="closeMobileSidebar"
-        @switch-organization="switchOrganization"
-      />
+      <SidebarBrandHeader @home="closeMobileSidebar" @switch-organization="switchOrganization" />
 
       <div class="px-2 pt-1 group-data-[collapsible=icon]:hidden">
         <Button class="w-full rounded-xl" size="sm" @click="handleNewChat">
@@ -353,15 +370,6 @@ watch(
           <span class="flex-1 truncate">Search</span>
           <kbd class="rounded border border-border bg-background px-1 text-[10px]">⌘K</kbd>
         </button>
-        <button
-          type="button"
-          class="mt-1.5 flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
-          :class="route.name === 'scheduled-tasks' ? 'bg-muted text-foreground' : ''"
-          @click="handleOpenScheduledTasks"
-        >
-          <CalendarClock class="size-4 shrink-0" />
-          <span class="flex-1 truncate">Scheduled tasks</span>
-        </button>
       </div>
 
       <div class="hidden flex-col items-center gap-1 pt-1 group-data-[collapsible=icon]:flex">
@@ -374,8 +382,12 @@ watch(
         <SidebarMenuButton tooltip="Workspaces" @click="handleOpenWorkspaces">
           <Layers />
         </SidebarMenuButton>
-        <SidebarMenuButton tooltip="Scheduled tasks" @click="handleOpenScheduledTasks">
-          <CalendarClock />
+        <SidebarMenuButton
+          tooltip="Scheduled tasks"
+          data-testid="collapsed-scheduled-tasks"
+          @click="handleOpenScheduledTasks"
+        >
+          <CalendarClockIcon />
         </SidebarMenuButton>
       </div>
     </SidebarHeader>
@@ -415,6 +427,8 @@ watch(
           @mark-unread="handleMarkUnread"
         />
 
+        <ScheduledTasksSection :tasks="scheduledTasks" />
+
         <WorkspaceSection
           :workspaces="sidebarWorkspaces"
           :total-count="workspaceTotal"
@@ -439,12 +453,20 @@ watch(
 
   <CommandPalette v-model:open="searchOpen" />
 
-  <Dialog :open="deleteTarget !== null" @update:open="(open) => { if (!open) deleteTarget = null }">
+  <Dialog
+    :open="deleteTarget !== null"
+    @update:open="
+      (open) => {
+        if (!open) deleteTarget = null
+      }
+    "
+  >
     <DialogContent>
       <DialogHeader>
         <DialogTitle>Delete chat?</DialogTitle>
         <DialogDescription>
-          "{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}" will be permanently deleted. A running session will be cancelled.
+          "{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}" will be permanently deleted. A
+          running session will be cancelled.
         </DialogDescription>
       </DialogHeader>
       <DialogFooter>

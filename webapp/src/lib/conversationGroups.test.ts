@@ -11,6 +11,7 @@ import {
   formatTimeAgo,
   groupConversationsByTime,
   selectSidebarWorkspaces,
+  VISIBLE_CONVERSATION_LIMIT,
 } from './conversationGroups'
 
 const NOW = new Date('2026-03-15T15:00:00').getTime()
@@ -186,6 +187,15 @@ describe('groupConversationsByTime', () => {
 })
 
 describe('capConversationGroups', () => {
+  it('uses an eight-chat default limit while preserving explicit expansion limits', () => {
+    expect(VISIBLE_CONVERSATION_LIMIT).toBe(8)
+    const groups = groupConversationsByTime(Array.from({ length: 10 }, (_, index) => conversation({ session_id: `chat-${index}`, last_message_at: atHour('2026-03-15', 14 - index) })), NOW)
+    const capped = capConversationGroups(groups)
+    expect(capped.groups.flatMap((group) => group.conversations)).toHaveLength(8)
+    expect(capped.hiddenCount).toBe(2)
+    expect(capConversationGroups(groups, 20).hiddenCount).toBe(0)
+  })
+
   it('trims later groups and reports the hidden count', () => {
     const groups = groupConversationsByTime(
       [
