@@ -7,7 +7,10 @@ const props = withDefaults(defineProps<{
   modelValue: string
   disabled?: boolean
   placeholder?: string
-}>(), { disabled: false, placeholder: '' })
+  ariaLabel?: string
+  ariaInvalid?: boolean
+  ariaDescribedby?: string
+}>(), { disabled: false, placeholder: '', ariaLabel: 'Chat prompt', ariaInvalid: undefined, ariaDescribedby: undefined })
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   input: []
@@ -269,8 +272,10 @@ defineExpose({ focus, setCursor, cursor, value, resize, el: editor })
       ref="editor"
       data-testid="composer-textarea"
       role="textbox"
-      aria-label="Chat prompt"
+      :aria-label="ariaLabel"
       aria-multiline="true"
+      :aria-invalid="ariaInvalid"
+      :aria-describedby="ariaDescribedby"
       :aria-disabled="disabled"
       :contenteditable="disabled ? 'false' : 'true'"
       :data-placeholder="placeholder"

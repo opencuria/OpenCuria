@@ -892,6 +892,7 @@ class HarnessService:
         workspace_id: str = "",
         user_id: int | None = None,
         skill_ids: list[str] | None = None,
+        scheduled: bool = False,
     ) -> HarnessMessage:
         """Persist user+assistant messages and start the runner task.
 
@@ -936,98 +937,126 @@ class HarnessService:
         else:
             provider_id, _ = parse_model_ref(resolved_model)
             resolved_provider = provider_id
-        prior_user_messages = await sync_to_async(
-            lambda: self.messages.model.objects.filter(
-                session_id=session.id, role="user"
-            ).count()
-        )()
-        effective_skill_ids = list(session.skill_ids or [])
-        user_message = await sync_to_async(self.messages.create)(
-            session_id=session.id,
-            role="user",
-            content=prompt.strip(),
-            skill_ids=effective_skill_ids,
+        admitted = await sync_to_async(self.sessions.reserve_workspace_run)(
+            session.id, scheduled=scheduled
         )
-        assistant = await sync_to_async(self.messages.create)(
-            session_id=session.id,
-            role="assistant",
-            content="",
-            model=resolved_model,
-            reasoning_effort=session.reasoning_effort or "",
-            provider=resolved_provider,
-        )
-        # A new send clears older stopped/failed notices of the session;
-        # the fresh run gets its own notice only when it stops or fails.
-        await sync_to_async(self.messages.dismiss_prior_notices)(
-            session.id, exclude_ids=[assistant.id]
-        )
-        await sync_to_async(self.sessions.mark_status)(
-            session, HarnessSessionStatus.BUSY
-        )
-        session.status = HarnessSessionStatus.BUSY
-        history = await self._build_history(
-            session,
-            exclude_message_id=assistant.id,
-            exclude_user_message_id=user_message.id,
-        )
-        skill_bodies: list[str] = []
-        if session.skill_ids and user_id is not None:
-            skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                list(session.skill_ids or []),
-                user_id=user_id,
-                organization_id=org_id,
+        if not admitted:
+            detail = (
+                "Another chat is already active in this workspace"
+                if scheduled
+                else f"Harness session '{session.id}' already has an active run"
             )
-        run_ctx: dict[str, Any] = {
-            "session_id": key,
-            "workspace_id": workspace_id or str(session.workspace_id),
-            "organization_id": str(org_id),
-            "message_id": str(assistant.id),
-            "user_message_id": str(user_message.id),
-            "text_part_id": None,
-            "reasoning_part_id": None,
-            "tool_parts": {},
-            "step_parts": {},
-            "subtask_parts": {},
-            "skill_bodies": skill_bodies,
-        }
-        self._runs[key] = run_ctx
-        task = self._spawn_background(
-            self._execute_run(
-                session=session,
-                prompt=prompt.strip(),
-                history=history,
-                assistant=assistant,
-                provider=provider,
-                organization_id=org_id,
+            raise ConflictError(detail)
+
+        assistant: HarnessMessage | None = None
+        try:
+            prior_user_messages = await sync_to_async(
+                lambda: self.messages.model.objects.filter(
+                    session_id=session.id, role="user"
+                ).count()
+            )()
+            user_message = await sync_to_async(self.messages.create)(
+                session_id=session.id,
+                role="user",
+                content=prompt.strip(),
+                skill_ids=list(session.skill_ids or []),
             )
-        )
-        self._tasks[key] = task
-        task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
-        if session.parent_id is None and prior_user_messages == 0:
-            self._spawn_background(
-                self._generate_title(
-                    session_id=session.id,
+            assistant = await sync_to_async(self.messages.create)(
+                session_id=session.id,
+                role="assistant",
+                content="",
+                model=resolved_model,
+                reasoning_effort=session.reasoning_effort or "",
+                provider=resolved_provider,
+            )
+            # A new send clears older stopped/failed notices of the session;
+            # the fresh run gets its own notice only when it stops or fails.
+            await sync_to_async(self.messages.dismiss_prior_notices)(
+                session.id, exclude_ids=[assistant.id]
+            )
+            await sync_to_async(self.sessions.mark_status)(
+                session, HarnessSessionStatus.BUSY
+            )
+            session.status = HarnessSessionStatus.BUSY
+            history = await self._build_history(
+                session,
+                exclude_message_id=assistant.id,
+                exclude_user_message_id=user_message.id,
+            )
+            skill_bodies: list[str] = []
+            if session.skill_ids and user_id is not None:
+                skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                    list(session.skill_ids or []),
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+            self._runs[key] = {
+                "session_id": key,
+                "workspace_id": workspace_id or str(session.workspace_id),
+                "organization_id": str(org_id),
+                "message_id": str(assistant.id),
+                "user_message_id": str(user_message.id),
+                "text_part_id": None,
+                "reasoning_part_id": None,
+                "tool_parts": {},
+                "step_parts": {},
+                "subtask_parts": {},
+                "skill_bodies": skill_bodies,
+            }
+            task = self._spawn_background(
+                self._execute_run(
+                    session=session,
                     prompt=prompt.strip(),
+                    history=history,
+                    assistant=assistant,
+                    provider=provider,
                     organization_id=org_id,
                 )
             )
-        await self._emit_frontend(
-            FRONTEND_EVENT_STATUS,
-            self._session_status_payload(
-                session,
-                "busy",
-                model=resolved_model,
-                assistant=assistant,
+            self._tasks[key] = task
+            task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
+            if session.parent_id is None and prior_user_messages == 0:
+                self._spawn_background(
+                    self._generate_title(
+                        session_id=session.id,
+                        prompt=prompt.strip(),
+                        organization_id=org_id,
+                    )
+                )
+            await self._emit_frontend(
+                FRONTEND_EVENT_STATUS,
+                self._session_status_payload(
+                    session,
+                    "busy",
+                    model=resolved_model,
+                    assistant=assistant,
+                    user_message_id=str(user_message.id),
+                ),
+                str(session.workspace_id),
+            )
+            log.info(
+                "harness_run_started",
+                session_id=key,
                 user_message_id=str(user_message.id),
-            ),
-            str(session.workspace_id),
-        )
-        log.info(
-            "harness_run_started",
-            session_id=key,
-            user_message_id=str(user_message.id),
-        )
-        return assistant
+            )
+            return assistant
+        except BaseException:
+            if assistant is not None and key in self._tasks:
+                # Once the background turn is spawned the durable chat is live;
+                # a caller's cancellation or emission error must not erase it.
+                log.exception("harness_run_admitted_with_caller_error")
+                return assistant
+            await sync_to_async(self.sessions.mark_status)(
+                session, HarnessSessionStatus.IDLE
+            )
+            session.status = HarnessSessionStatus.IDLE
+            if assistant is not None:
+                await sync_to_async(self.messages.complete)(
+                    assistant,
+                    finish="error",
+                    error="Run admission failed before the harness started",
+                )
+            raise
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run task, reject pending user gates, and mark aborted."""

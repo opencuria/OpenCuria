@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Layers, Plus, Search } from '@lucide/vue'
+import { CalendarClock, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
 import ActiveConversationsSection from './sidebar/ActiveConversationsSection.vue'
 import ActionRequiredSection from './sidebar/ActionRequiredSection.vue'
@@ -126,6 +126,11 @@ function handleOpenWorkspace(workspaceId: string): void {
 function handleOpenWorkspaces(): void {
   closeMobileSidebar()
   void router.push('/workspaces')
+}
+
+function handleOpenScheduledTasks(): void {
+  closeMobileSidebar()
+  void router.push('/scheduled-tasks')
 }
 
 function handleMarkAllRead(): void {
@@ -348,6 +353,15 @@ watch(
           <span class="flex-1 truncate">Search</span>
           <kbd class="rounded border border-border bg-background px-1 text-[10px]">⌘K</kbd>
         </button>
+        <button
+          type="button"
+          class="mt-1.5 flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+          :class="route.name === 'scheduled-tasks' ? 'bg-muted text-foreground' : ''"
+          @click="handleOpenScheduledTasks"
+        >
+          <CalendarClock class="size-4 shrink-0" />
+          <span class="flex-1 truncate">Scheduled tasks</span>
+        </button>
       </div>
 
       <div class="hidden flex-col items-center gap-1 pt-1 group-data-[collapsible=icon]:flex">
@@ -359,6 +373,9 @@ watch(
         </SidebarMenuButton>
         <SidebarMenuButton tooltip="Workspaces" @click="handleOpenWorkspaces">
           <Layers />
+        </SidebarMenuButton>
+        <SidebarMenuButton tooltip="Scheduled tasks" @click="handleOpenScheduledTasks">
+          <CalendarClock />
         </SidebarMenuButton>
       </div>
     </SidebarHeader>

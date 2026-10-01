@@ -26,7 +26,25 @@ mcp_asgi = get_mcp_app()
 
 
 async def application(scope, receive, send):
-    """Route requests between Socket.IO, MCP, Desktop proxy, and Django."""
+    """Route requests and run the scheduler in the ASGI server's event loop."""
+    if scope["type"] == "lifespan":
+        from apps.scheduled_tasks.services import ScheduledTaskScheduler
+
+        scheduler = ScheduledTaskScheduler()
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                try:
+                    await scheduler.start()
+                except Exception as exc:
+                    await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                    return
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await scheduler.stop()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
     path = scope.get("path", "")
 
     if path.startswith("/ws/desktop/"):

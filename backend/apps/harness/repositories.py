@@ -376,6 +376,55 @@ class HarnessSessionRepository:
         )
 
     @staticmethod
+    def reserve_workspace_run(
+        session_id: uuid.UUID, *, scheduled: bool = False
+    ) -> bool:
+        """Atomically reserve a session; scheduled roots also gate on workspace activity.
+
+        The workspace row serializes the short admission transaction. A scheduled
+        launch rejects any other busy root observed at that boundary. Manual roots
+        still acquire the same lock, but do not reject an already-running chat, so
+        a scheduled run never blocks a user's later chat.
+        """
+        from apps.runners.models import Workspace
+
+        session = HarnessSession.objects.get(id=session_id)
+        if session.parent_id is not None:
+            with transaction.atomic():
+                return (
+                    HarnessSession.objects.filter(id=session_id)
+                    .exclude(status=HarnessSessionStatus.BUSY)
+                    .update(status=HarnessSessionStatus.BUSY)
+                    == 1
+                )
+
+        with transaction.atomic():
+            # Acquire the workspace write lock before reading eligibility. This
+            # serializes scheduled/manual launch admission across all sessions,
+            # including on SQLite where select_for_update() is unavailable.
+            workspace_query = Workspace.objects.filter(id=session.workspace_id)
+            if scheduled:
+                workspace_query = workspace_query.filter(status="running")
+            reserved_workspace = workspace_query.update(updated_at=F("updated_at"))
+            if not reserved_workspace:
+                return False
+            session = HarnessSession.objects.get(id=session_id)
+            if session.status == HarnessSessionStatus.BUSY:
+                return False
+            if scheduled and HarnessSession.objects.filter(
+                workspace_id=session.workspace_id,
+                parent__isnull=True,
+                status=HarnessSessionStatus.BUSY,
+            ).exclude(id=session_id).exists():
+                return False
+            return (
+                HarnessSession.objects.filter(id=session_id)
+                .exclude(status=HarnessSessionStatus.BUSY)
+                .update(status=HarnessSessionStatus.BUSY)
+                == 1
+            )
+
+    @staticmethod
     def get_by_id(session_id: uuid.UUID) -> HarnessSession | None:
         """Fetch a session by ID."""
         return HarnessSession.objects.filter(id=session_id).first()

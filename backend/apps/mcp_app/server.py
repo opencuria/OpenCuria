@@ -47,6 +47,9 @@ Tools and their required permissions
 - chatgpt_oauth_cancel → harness:providers
 - list_harness_sessions → harness:read
 - create_harness_session → harness:run
+- list_scheduled_tasks / get_scheduled_task / list_scheduled_task_runs → harness:read
+- create_scheduled_task / update_scheduled_task / delete_scheduled_task /
+  run_scheduled_task_now → harness:run
 - send_harness_message → harness:run
 - fork_harness_session → harness:run
 - edit_harness_message → harness:run
@@ -590,6 +593,97 @@ _TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
+        name="list_scheduled_tasks",
+        description="List your scheduled tasks.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="create_scheduled_task",
+        description="Create a personal recurring prompt schedule.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string"},
+                "name": {"type": "string"},
+                "prompt": {"type": "string"},
+                "mode": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
+                "skill_ids": {"type": "array", "items": {"type": "string"}},
+                "recurrence": {"type": "string", "enum": ["daily", "weekly"]},
+                "weekdays": {"type": "array", "items": {"type": "integer"}},
+                "local_time": {"type": "string"},
+                "timezone_name": {"type": "string"},
+                "enabled": {"type": "boolean"},
+            },
+            "required": [
+                "workspace_id",
+                "name",
+                "prompt",
+                "local_time",
+                "timezone_name",
+            ],
+        },
+    ),
+    Tool(
+        name="update_scheduled_task",
+        description="Update or pause a personal scheduled task.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "name": {"type": "string"},
+                "prompt": {"type": "string"},
+                "mode": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
+                "skill_ids": {"type": "array", "items": {"type": "string"}},
+                "recurrence": {"type": "string"},
+                "weekdays": {"type": "array", "items": {"type": "integer"}},
+                "local_time": {"type": "string"},
+                "timezone_name": {"type": "string"},
+                "enabled": {"type": "boolean"},
+            },
+            "required": ["task_id"],
+        },
+    ),
+    Tool(
+        name="delete_scheduled_task",
+        description="Delete a personal scheduled task.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    ),
+    Tool(
+        name="run_scheduled_task_now",
+        description="Run a scheduled task immediately without changing its schedule.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    ),
+    Tool(
+        name="get_scheduled_task",
+        description="Get one scheduled task you own.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    ),
+    Tool(
+        name="list_scheduled_task_runs",
+        description="List history for one scheduled task.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    ),
+    Tool(
         name="list_harness_sessions",
         description="List harness sessions for a workspace.",
         inputSchema={
@@ -1123,6 +1217,13 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "chatgpt_oauth_start": APIKeyPermission.HARNESS_PROVIDERS,
     "chatgpt_oauth_status": APIKeyPermission.HARNESS_PROVIDERS,
     "chatgpt_oauth_cancel": APIKeyPermission.HARNESS_PROVIDERS,
+    "list_scheduled_tasks": APIKeyPermission.HARNESS_READ,
+    "get_scheduled_task": APIKeyPermission.HARNESS_READ,
+    "list_scheduled_task_runs": APIKeyPermission.HARNESS_READ,
+    "create_scheduled_task": APIKeyPermission.HARNESS_RUN,
+    "update_scheduled_task": APIKeyPermission.HARNESS_RUN,
+    "delete_scheduled_task": APIKeyPermission.HARNESS_RUN,
+    "run_scheduled_task_now": APIKeyPermission.HARNESS_RUN,
     "list_harness_sessions": APIKeyPermission.HARNESS_READ,
     "create_harness_session": APIKeyPermission.HARNESS_RUN,
     "send_harness_message": APIKeyPermission.HARNESS_RUN,
@@ -2630,6 +2731,203 @@ async def _call_chatgpt_oauth_cancel(api_key, org_id, args: dict) -> list[TextCo
     return _text({"cancelled": True})
 
 
+def _call_list_scheduled_tasks(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.scheduled_tasks.services import ScheduledTaskService
+
+    rows = ScheduledTaskService().list(organization_id=org_id, owner_id=api_key.user.id)
+    return _text([_scheduled_task_dict(row) for row in rows])
+
+
+def _scheduled_task_dict(task) -> dict:
+    return {
+        "id": str(task.id),
+        "name": task.name,
+        "workspace_id": str(task.workspace_id),
+        "prompt": task.prompt,
+        "mode": task.mode,
+        "model": task.model,
+        "reasoning_effort": task.reasoning_effort,
+        "skill_ids": list(task.skill_ids or []),
+        "recurrence": task.recurrence,
+        "weekdays": list(task.weekdays or []),
+        "local_time": task.local_time.strftime("%H:%M"),
+        "timezone_name": task.timezone_name,
+        "enabled": task.enabled,
+        "next_run_at": task.next_run_at.isoformat(),
+    }
+
+
+async def _call_create_scheduled_task(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+
+    try:
+        await sync_to_async(OrganizationService().require_membership)(
+            api_key.user, org_id
+        )
+        workspace_id = _uuid.UUID(str(args.get("workspace_id", "")))
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+    except Exception as exc:
+        return _error(str(exc))
+    workspace, error = await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, workspace_id
+    )
+    if error:
+        return error
+    try:
+        task = await sync_to_async(ScheduledTaskService().create)(
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+            workspace=workspace,
+            values=args,
+        )
+        return _text(_scheduled_task_dict(task))
+    except (ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+async def _call_update_scheduled_task(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+    from common.exceptions import NotFoundError
+
+    try:
+        await sync_to_async(OrganizationService().require_membership)(
+            api_key.user, org_id
+        )
+        service = ScheduledTaskService()
+        task = await sync_to_async(service.get)(
+            _uuid.UUID(str(args.get("task_id", ""))),
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+        )
+        values = {key: value for key, value in args.items() if key != "task_id"}
+        task = await sync_to_async(service.update)(task, values)
+        return _text(_scheduled_task_dict(task))
+    except (ValueError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
+async def _call_delete_scheduled_task(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+    from common.exceptions import NotFoundError
+
+    try:
+        await sync_to_async(OrganizationService().require_membership)(
+            api_key.user, org_id
+        )
+        service = ScheduledTaskService()
+        task = await sync_to_async(service.get)(
+            _uuid.UUID(str(args.get("task_id", ""))),
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+        )
+        await sync_to_async(service.delete)(task)
+        return _text({"deleted": True})
+    except (ValueError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
+async def _call_run_scheduled_task_now(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+    from common.exceptions import NotFoundError
+
+    try:
+        await sync_to_async(OrganizationService().require_membership)(
+            api_key.user, org_id
+        )
+        service = ScheduledTaskService()
+        task = await sync_to_async(service.get)(
+            _uuid.UUID(str(args.get("task_id", ""))),
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+        )
+        run = await service.run_now(task)
+        return _text(_scheduled_run_dict(run))
+    except (ValueError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
+def _scheduled_run_dict(run) -> dict:
+    return {
+        "id": str(run.id),
+        "scheduled_for": run.scheduled_for.isoformat(),
+        "trigger": run.trigger,
+        "configuration_snapshot": run.configuration_snapshot or {},
+        "status": run.status,
+        "session_id": str(run.session_id) if run.session_id else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "error": run.error,
+        "reason": run.reason,
+        "assistant_finish": run.assistant_message.finish
+        if run.assistant_message
+        else "",
+        "assistant_error": run.assistant_message.error if run.assistant_message else "",
+    }
+
+
+def _call_get_scheduled_task(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+        task = ScheduledTaskService().get(
+            _uuid.UUID(str(args.get("task_id", ""))),
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+        )
+        return _text(_scheduled_task_dict(task))
+    except (ValueError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
+def _call_list_scheduled_task_runs(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
+    from apps.organizations.services import OrganizationService
+    from apps.scheduled_tasks.services import ScheduledTaskService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+        service = ScheduledTaskService()
+        task = service.get(
+            _uuid.UUID(str(args.get("task_id", ""))),
+            organization_id=org_id,
+            owner_id=api_key.user.id,
+            include_deleted=True,
+        )
+        return _text([_scheduled_run_dict(run) for run in service.list_runs(task)])
+    except (ValueError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
 def _call_list_harness_sessions(api_key, org_id, args: dict) -> list[TextContent]:
     import uuid as _uuid
 
@@ -4134,6 +4432,13 @@ _TOOL_HANDLERS = {
     "chatgpt_oauth_start": _call_chatgpt_oauth_start,
     "chatgpt_oauth_status": _call_chatgpt_oauth_status,
     "chatgpt_oauth_cancel": _call_chatgpt_oauth_cancel,
+    "list_scheduled_tasks": _call_list_scheduled_tasks,
+    "get_scheduled_task": _call_get_scheduled_task,
+    "list_scheduled_task_runs": _call_list_scheduled_task_runs,
+    "create_scheduled_task": _call_create_scheduled_task,
+    "update_scheduled_task": _call_update_scheduled_task,
+    "delete_scheduled_task": _call_delete_scheduled_task,
+    "run_scheduled_task_now": _call_run_scheduled_task_now,
     "list_harness_sessions": _call_list_harness_sessions,
     "create_harness_session": _call_create_harness_session,
     "send_harness_message": _call_send_harness_message,

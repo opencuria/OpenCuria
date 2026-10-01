@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 
 import HarnessModelPicker from './HarnessModelPicker.vue'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -125,6 +126,16 @@ describe('HarnessModelPicker', () => {
     const plain = wrapper.find('[data-testid="composer-model-chatgpt/plain"]')
     expect(think.text()).toContain('OpenRouter')
     expect(plain.text()).toContain('ChatGPT')
+  })
+
+  it('does not invent an effort when catalog data arrives for an inherited default model', async () => {
+    const wrapper = mount(HarnessModelPicker, {
+      props: { model: 'openrouter/think', effort: '', models: [] },
+      global: { stubs },
+    })
+    await wrapper.setProps({ models })
+    await nextTick()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
   })
 
   it('shows the model without duplicating the separately selected effort', () => {

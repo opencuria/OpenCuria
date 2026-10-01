@@ -69,6 +69,8 @@ class HeartbeatReconcilerMixin:
             return False
         if workspace.active_operation:
             return False
+        if getattr(workspace, "has_active_harness_session", False):
+            return False
         runner = getattr(workspace, "runner", None)
         if runner is None or not runner.is_online:
             return False

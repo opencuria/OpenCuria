@@ -25,17 +25,15 @@ else:
 "
 fi
 
-echo "==> Starting Daphne ASGI server..."
-# Align with Django DAPHNE_WEBSOCKET_MAX_MESSAGE/FRAME_SIZE (200 MiB).
-# Daphne 4.2.2+ defaults both to 1 MiB (CVE-2026-44545), which drops
-# computer-use PNG screenshots on the runner WebSocket. Both flags are
-# required: a screenshot is one frame.
-WS_MAX=$((200 * 1024 * 1024))
-exec daphne \
-    -b 0.0.0.0 \
-    -p 8000 \
+echo "==> Starting Uvicorn ASGI server (single worker; scheduler shares its event loop)..."
+# The explicit `websockets` dependency enables this backend without uvicorn[standard].
+# Allow the existing 200 MiB Socket.IO frames carrying computer-use screenshots.
+exec uvicorn config.asgi:application \
+    --workers 1 \
+    --host 0.0.0.0 \
+    --port 8000 \
     --proxy-headers \
-    --websocket-max-message-size "$WS_MAX" \
-    --websocket-max-frame-size "$WS_MAX" \
-    --access-log - \
-    config.asgi:application
+    --ws websockets-sansio \
+    --ws-max-size $((200 * 1024 * 1024)) \
+    --ws-max-queue 32 \
+    --lifespan on

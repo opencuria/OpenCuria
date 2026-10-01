@@ -55,6 +55,12 @@ const router = createRouter({
           meta: { title: 'Workspaces' },
         },
         {
+          path: 'scheduled-tasks',
+          name: 'scheduled-tasks',
+          component: () => import('@/views/ScheduledTasksView.vue'),
+          meta: { title: 'Scheduled tasks' },
+        },
+        {
           path: 'workspaces/:id',
           name: 'workspace-detail',
           component: () => import('@/views/WorkspaceDetailView.vue'),

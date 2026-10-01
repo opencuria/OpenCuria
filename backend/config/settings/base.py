@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "apps.runners",
     "apps.credentials",
     "apps.harness",
+    "apps.scheduled_tasks",
     "apps.plugins",
     "apps.skills",
 ]

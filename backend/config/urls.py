@@ -32,6 +32,7 @@ from apps.runners.api import (
     workspace_image_artifact_router,
     workspace_router,
 )
+from apps.scheduled_tasks.api import scheduled_task_router
 from apps.skills.api import skill_router
 
 api = NinjaAPI(
@@ -65,6 +66,7 @@ api.add_router("/credentials/", credential_router)
 api.add_router("/mcp-oauth/", mcp_oauth_router)
 api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
+api.add_router("/", scheduled_task_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
 api.add_router("/plugins/", plugin_router)

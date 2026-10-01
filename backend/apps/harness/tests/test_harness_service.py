@@ -179,6 +179,141 @@ async def test_start_run_persists_messages_parts_and_history(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_manual_chat_can_start_while_scheduled_run_is_active(
+    harness_workspace, monkeypatch
+) -> None:
+    """Scheduled admission gates launches, not later manual conversations."""
+    scheduled_gate = asyncio.Event()
+    manual_gate = asyncio.Event()
+    scheduled_started = asyncio.Event()
+    manual_started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            prompt = messages[-1].content
+            if prompt == "scheduled run":
+                scheduled_started.set()
+                await scheduled_gate.wait()
+            else:
+                manual_started.set()
+                await manual_gate.wait()
+            yield Delta(text="finished", usage=Usage(1, 1, 2))
+
+    reservations: list[tuple[uuid.UUID, bool]] = []
+    original_reserve = HarnessSessionRepository.reserve_workspace_run
+
+    def record_reservation(session_id: uuid.UUID, *, scheduled: bool = False) -> bool:
+        reservations.append((session_id, scheduled))
+        return original_reserve(session_id, scheduled=scheduled)
+
+    monkeypatch.setattr(
+        HarnessSessionRepository, "reserve_workspace_run", record_reservation
+    )
+    service, _, _ = _service(provider=SlowProvider([]))
+    scheduled_session = await _db_create_session(harness_workspace)
+    manual_session = await _db_create_session(harness_workspace)
+
+    await service.start_run(
+        scheduled_session,
+        "scheduled run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+        scheduled=True,
+    )
+    await asyncio.wait_for(scheduled_started.wait(), timeout=2)
+
+    await service.start_run(
+        manual_session,
+        "manual chat",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(manual_started.wait(), timeout=2)
+    assert service.is_running(scheduled_session.id)
+    assert service.is_running(manual_session.id)
+    assert reservations == [
+        (scheduled_session.id, True),
+        (manual_session.id, False),
+    ]
+
+    scheduled_gate.set()
+    manual_gate.set()
+    await asyncio.gather(
+        service._tasks[str(scheduled_session.id)],
+        service._tasks[str(manual_session.id)],
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_run_rejected_after_manual_root_reservation(
+    harness_workspace,
+) -> None:
+    """A user start admitted first makes a competing schedule skip cleanly."""
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            started.set()
+            await gate.wait()
+            yield Delta(text="manual", usage=Usage(1, 1, 2))
+
+    service, _, _ = _service(provider=SlowProvider([]))
+    manual_session = await _db_create_session(harness_workspace)
+    scheduled_session = await _db_create_session(harness_workspace)
+
+    await service.start_run(
+        manual_session,
+        "manual first",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    with pytest.raises(ConflictError, match="already active in this workspace"):
+        await service.start_run(
+            scheduled_session,
+            "scheduled second",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+            scheduled=True,
+        )
+    assert HarnessMessageRepository.list_for_session(scheduled_session.id) == []
+
+    gate.set()
+    await service._tasks[str(manual_session.id)]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_admission_error_returns_session_to_idle(
+    harness_workspace, monkeypatch
+) -> None:
+    """Failures before spawning complete the shell and release the reservation."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+
+    async def fail_history(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("history unavailable")
+
+    monkeypatch.setattr(service, "_build_history", fail_history)
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await service.start_run(
+            session,
+            "scheduled failure",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+            scheduled=True,
+        )
+
+    session.refresh_from_db()
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    assert session.status == "idle"
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[-1].finish == "error"
+    assert "Run admission failed" in messages[-1].error
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_double_run_rejected_with_conflict(harness_workspace) -> None:
     """A second start while a run is active raises ConflictError (409)."""
     gate = asyncio.Event()

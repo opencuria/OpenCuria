@@ -242,15 +242,26 @@ Optional local workspace image build:
 ```
 
 After that you can run `backend`, `webapp`, and `runner` individually. When
-updating a source checkout, apply backend migrations before starting `runserver`:
+updating a source checkout, apply backend migrations before starting the ASGI server:
 
 ```bash
 cd backend
 .venv/bin/python manage.py migrate --noinput
+.venv/bin/uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --workers 1 --lifespan on --ws websockets-sansio --ws-max-size 209715200
 ```
 
-The Docker backend entrypoint runs migrations automatically; a raw Django
-`runserver` does not.
+The Docker backend entrypoint runs migrations automatically and starts one Uvicorn
+ASGI worker. The worker owns the in-process scheduled-task loop alongside Socket.IO
+and the harness; keep it single-process/single-worker. A PostgreSQL advisory lock
+rejects duplicate workers before recovery starts; SQLite uses a renewed TTL-row lease
+(best effort, not suitable for separate hosts without shared locking semantics).
+Raw Django `runserver` has no scheduler startup hook and is not suitable for production.
+Scheduled tasks are personal
+recurring prompts (daily or selected weekdays, local `HH:MM` and an IANA timezone),
+with DST gaps skipped and fall-back repeated times executed once. Each occurrence
+creates a new root harness session. REST endpoints are under
+`/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
+create/edit/pause/delete/run-now); matching MCP tools are exposed.
 
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point

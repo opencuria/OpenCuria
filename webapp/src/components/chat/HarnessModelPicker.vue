@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { ArrowLeft, Check, ChevronDown, Search } from '@lucide/vue'
 import {
   DropdownMenu,
@@ -112,13 +112,6 @@ const listTitle = computed(() => {
   return showAll.value ? 'All models' : 'Recent'
 })
 
-watch(
-  () => [props.model, props.models] as const,
-  () => {
-    const next = snapEffort(catalogModel.value, props.effort)
-    if (next !== props.effort) emit('update:effort', next)
-  },
-)
 
 function rememberedEffort(id: string): string {
   return recentEffortById.value.get(id) ?? ''
@@ -127,9 +120,12 @@ function rememberedEffort(id: string): string {
 function selectModel(id: string): void {
   emit('update:model', id)
   const selected = resolveCatalogModel(props.models, id)
-  // Restore the last-used effort for this model; fall back to keeping the
-  // current effort when still supported, else the model default.
-  emit('update:effort', snapEffort(selected, rememberedEffort(id) || props.effort))
+  // Empty effort means inherit the mode's current agent default; don't fill
+  // it with a model default behind the user's back. A remembered explicit
+  // effort can still be restored when selecting this model again.
+  const remembered = rememberedEffort(id)
+  if (remembered) emit('update:effort', snapEffort(selected, remembered))
+  else if (props.effort) emit('update:effort', snapEffort(selected, props.effort))
 }
 
 function selectEffort(value: string): void {
