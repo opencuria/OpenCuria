@@ -31,6 +31,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { usePolling } from '@/composables/usePolling'
+import { useSidebarWorkspaceCollapse } from '@/composables/useSidebarWorkspaceCollapse'
 import { storeToRefs } from 'pinia'
 import {
   countableWorkspaces,
@@ -66,9 +67,26 @@ const { isMobile, state: sidebarState, setOpenMobile, setOpen } = useSidebar()
 const searchOpen = ref(false)
 const visibleConversationCounts = ref<Record<string, number>>({})
 const deleteTarget = ref<HarnessConversation | null>(null)
+const { collapsedWorkspaceIds, setCollapsed } = useSidebarWorkspaceCollapse(() =>
+  authStore.user?.id && authStore.activeOrganizationId
+    ? `${authStore.user.id}:${authStore.activeOrganizationId}`
+    : '',
+)
+const runningWorkspaceIds = computed(
+  () =>
+    new Set(
+      workspaceStore.workspaces
+        .filter((workspace) => workspace.status === WorkspaceStatus.RUNNING)
+        .map((workspace) => workspace.id),
+    ),
+)
 
 const actionRequiredConversations = computed(() =>
-  extractActionRequired(conversationStore.conversations),
+  extractActionRequired(
+    conversationStore.conversations.filter((row) =>
+      runningWorkspaceIds.value.has(row.workspace_id),
+    ),
+  ),
 )
 
 const workspaceTotal = computed(() => countableWorkspaces(workspaceStore.workspaces).length)
@@ -131,7 +149,9 @@ async function handleOpenScheduledTasks(): Promise<void> {
 }
 
 function handleMarkAllRead(): void {
-  const unread = conversationStore.conversations.filter((row) => row.unread)
+  const unread = conversationStore.conversations.filter(
+    (row) => row.unread && runningWorkspaceIds.value.has(row.workspace_id),
+  )
   void Promise.all(unread.map((row) => conversationStore.markAsRead(row.session_id)))
 }
 
@@ -387,6 +407,8 @@ watch(
 
         <ConversationWorkspaceList
           v-model:visible-counts="visibleConversationCounts"
+          :collapsed-workspace-ids="collapsedWorkspaceIds"
+          @set-collapsed="setCollapsed"
           :workspaces="workspaceStore.workspaces"
           :conversations="conversationStore.conversations"
           :total-count="workspaceTotal"

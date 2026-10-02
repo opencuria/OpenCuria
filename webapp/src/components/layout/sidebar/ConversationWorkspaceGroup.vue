@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /** One workspace's chat history with independent four-row pagination. */
 import { computed, watch } from 'vue'
-import { Loader2 } from '@lucide/vue'
+import { ChevronRight, Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   isOperatingWorkspace,
   WORKSPACE_CONVERSATION_PAGE_SIZE,
@@ -25,6 +26,8 @@ const emit = defineEmits<{
   'mark-read': [conversation: HarnessConversation]
   'mark-unread': [conversation: HarnessConversation]
 }>()
+
+const collapsed = defineModel<boolean>('collapsed', { default: false })
 
 const visibleCount = defineModel<number>('visibleCount', {
   default: WORKSPACE_CONVERSATION_PAGE_SIZE,
@@ -58,42 +61,55 @@ watch(
 </script>
 
 <template>
-  <section
+  <Collapsible
+    :open="!collapsed"
+    @update:open="collapsed = !$event"
     data-testid="workspace-conversation-group"
     :data-workspace-id="props.group.workspaceId"
     :data-online="props.group.online"
     class="flex min-w-0 flex-col gap-0.5"
   >
-    <Button
-      variant="ghost"
-      size="sm"
-      data-testid="workspace-row"
-      :aria-label="`Open workspace ${props.group.name}`"
-      :title="`${props.group.name} — ${statusLabel}`"
-      class="h-7 w-full justify-start gap-1.5 rounded-xl px-2 text-left"
+    <div
+      class="flex h-7 min-w-0 items-center rounded-xl"
       :class="props.activeWorkspaceId === props.group.workspaceId ? 'bg-primary/10' : ''"
-      @click="emit('open', props.group.workspaceId)"
     >
-      <span
-        data-testid="workspace-status"
-        class="size-1.5 shrink-0 rounded-full"
-        :class="
-          operating
-            ? 'bg-amber-500'
-            : props.group.online
-              ? 'bg-green-500'
-              : 'bg-muted-foreground/40'
-        "
-      />
-      <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{ props.group.name }}</span>
-      <Loader2
-        v-if="busy"
-        data-testid="workspace-busy"
-        class="size-3 shrink-0 animate-spin text-primary"
-      />
-    </Button>
+      <CollapsibleTrigger as-child>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          type="button"
+          data-testid="workspace-collapse-toggle"
+          :aria-label="`${collapsed ? 'Expand' : 'Collapse'} workspace ${props.group.name}`"
+          class="shrink-0 rounded-lg text-muted-foreground"
+        >
+          <ChevronRight
+            class="size-3.5 transition-transform"
+            :class="collapsed ? '' : 'rotate-90'"
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        data-testid="workspace-row"
+        :aria-label="`Open workspace ${props.group.name}`"
+        :title="`${props.group.name} — ${statusLabel}`"
+        class="h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-1 text-left"
+        @click="emit('open', props.group.workspaceId)"
+      >
+        <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{
+          props.group.name
+        }}</span>
+        <Loader2
+          v-if="busy"
+          data-testid="workspace-busy"
+          class="size-3 shrink-0 animate-spin text-primary"
+        />
+      </Button>
+    </div>
 
-    <div class="min-w-0 pl-2">
+    <CollapsibleContent class="min-w-0 pl-2">
       <ConversationRow
         v-for="conversation in visibleConversations"
         :key="conversation.session_id"
@@ -122,6 +138,6 @@ watch(
       >
         Show {{ nextPageSize }} more {{ nextPageSize === 1 ? 'chat' : 'chats' }}
       </Button>
-    </div>
-  </section>
+    </CollapsibleContent>
+  </Collapsible>
 </template>

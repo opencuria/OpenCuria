@@ -17,7 +17,7 @@ const authStore = {
   activeOrganization: { id: 'org-1', name: 'Acme', role: 'admin' },
   activeOrganizationId: 'org-1',
   isAdmin: true,
-  user: { email: 'admin@example.com' },
+  user: { id: 1, email: 'admin@example.com' },
   setActiveOrganization: vi.fn(),
   logout: vi.fn(),
 }
@@ -246,6 +246,37 @@ describe('ChatSidebar', () => {
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
   })
 
+  it('hides stopped-workspace chats even when they require action', () => {
+    conversationStore.conversations = [
+      makeConversation({ workspace_id: 'ws-2', workspace_name: 'Beta', needs_attention: true }),
+    ]
+    const wrapper = mountSidebar()
+    expect(wrapper.find('[data-testid="action-required-section"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('First chat')
+  })
+
+  it('persists collapsed workspace IDs across sidebar remounts, without navigating', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Collapse workspace Alpha"]').trigger('click')
+    expect(wrapper.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(
+      JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
+    ).toEqual(['ws-1'])
+    wrapper.unmount()
+    const reopened = mountSidebar()
+    expect(reopened.get('[aria-label="Expand workspace Alpha"]').attributes('aria-expanded')).toBe(
+      'false',
+    )
+    expect(reopened.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    await reopened.get('[aria-label="Expand workspace Alpha"]').trigger('click')
+    expect(reopened.find('[data-testid="conversation-row"]').exists()).toBe(true)
+    expect(
+      JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
+    ).toEqual([])
+  })
+
   it('renders new chat and search actions', () => {
     const wrapper = mountSidebar()
 
@@ -287,7 +318,7 @@ describe('ChatSidebar', () => {
     expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(8)
   })
 
-  it('marks unread chats in all workspaces as read from the shared header', async () => {
+  it('marks only unread chats from running workspaces as read', async () => {
     conversationStore.conversations = [
       makeConversation({ session_id: 'unread-1', unread: true }),
       makeConversation({ session_id: 'unread-2', workspace_id: 'ws-2', unread: true }),
@@ -295,7 +326,7 @@ describe('ChatSidebar', () => {
     ]
     const wrapper = mountSidebar()
     await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
-    expect(conversationStore.markAsRead.mock.calls).toEqual([['unread-1'], ['unread-2']])
+    expect(conversationStore.markAsRead.mock.calls).toEqual([['unread-1']])
   })
 
   it('opens workspace navigation and management from the merged list', async () => {
@@ -391,11 +422,11 @@ describe('ChatSidebar', () => {
     expect(row.classes()).toContain('min-h-11')
   })
 
-  it('shows an empty chat prompt when there are no conversations', () => {
+  it('shows empty chat state for a running workspace', () => {
     conversationStore.conversations = []
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('No chats yet — start with New chat')
+    expect(wrapper.text()).toContain('No chats yet')
   })
 
   it('emits opencuria:open-settings from the user menu', async () => {

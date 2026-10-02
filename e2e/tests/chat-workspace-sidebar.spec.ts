@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { test, expect, type Page } from "@playwright/test";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://127.0.0.1:5173";
+const COLLAPSED_KEY = "opencuria-sidebar-collapsed-workspaces:1:sidebar-org";
 const artifacts = "/workspace/.opencuria/playwright";
 mkdirSync(artifacts, { recursive: true });
 test.use({
@@ -80,6 +81,14 @@ async function installFixtures(page: Page) {
   conversations[0]!.needs_attention = true;
   conversations[0]!.attention_kind = "permission";
   conversations[1]!.unread = true;
+  // Hidden history must not leak into Action required or mark-all-read.
+  const archivedChat = conversations.find(
+    (row) => row.session_id === "archive-0",
+  )!;
+  archivedChat.needs_attention = true;
+  archivedChat.attention_kind = "permission";
+  archivedChat.unread = true;
+  const readSessionIds: string[] = [];
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const payload = Buffer.from(JSON.stringify({ exp: 4102444800 })).toString(
@@ -146,6 +155,7 @@ async function installFixtures(page: Page) {
           return route.fulfill({ status: 204 });
         }
         if (path.endsWith("/read")) {
+          readSessionIds.push(sessionId);
           chat.unread = false;
           chat.manual_unread = false;
           return route.fulfill({ status: 204 });
@@ -182,6 +192,7 @@ async function installFixtures(page: Page) {
   });
   return {
     workspaces,
+    readSessionIds,
     errors,
     conversations,
     emit: async (event: string, data: unknown) => {
@@ -196,6 +207,69 @@ const group = (page: Page, id: string) =>
     `[data-testid="workspace-conversation-group"][data-workspace-id="${id}"]`,
   );
 const groups = (page: Page) => page.getByTestId("workspace-conversation-group");
+const collapseToggle = (page: Page, id: string) =>
+  group(page, id).getByTestId("workspace-collapse-toggle");
+
+async function expectCollapsed(page: Page, id: string, name: string) {
+  const toggle = collapseToggle(page, id);
+  await expect(toggle).toHaveAttribute(
+    "aria-label",
+    `Expand workspace ${name}`,
+  );
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    group(page, id).getByRole("button", {
+      name: `Open workspace ${name}`,
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(group(page, id).getByTestId("conversation-row")).toHaveCount(0);
+  await expect(group(page, id).getByTestId("show-more-chats")).toHaveCount(0);
+}
+
+async function expectExpanded(page: Page, id: string, name: string, rows = 4) {
+  await expect(collapseToggle(page, id)).toHaveAttribute(
+    "aria-label",
+    `Collapse workspace ${name}`,
+  );
+  await expect(collapseToggle(page, id)).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(group(page, id).getByTestId("conversation-row")).toHaveCount(
+    rows,
+  );
+}
+
+async function expectStoredCollapse(page: Page, ids: string[]) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => JSON.parse(localStorage.getItem(key) ?? "null"),
+        COLLAPSED_KEY,
+      ),
+    )
+    .toEqual(ids);
+}
+
+async function settledScreenshot(page: Page, filename: string) {
+  // Wait for drawer/collapsible animations, not a screenshot-driven action.
+  await page.evaluate(async () => {
+    await Promise.all(
+      document
+        .getAnimations()
+        .filter(
+          (animation) =>
+            animation.effect?.getComputedTiming().iterations !== Infinity,
+        )
+        .map((animation) => animation.finished.catch(() => {})),
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  });
+  await page.screenshot({ path: `${artifacts}/${filename}` });
+}
 
 async function rowMenu(page: Page, title: string) {
   const row = page.getByRole("button", {
@@ -211,20 +285,24 @@ async function rowMenu(page: Page, title: string) {
 test("desktop: workspace order, independent pagination, actions and global search", async ({
   page,
 }) => {
-  const { errors } = await installFixtures(page);
+  const { errors, readSessionIds, conversations } = await installFixtures(page);
   await page.goto("/");
-  await expect(groups(page)).toHaveCount(3);
+  await expect(groups(page)).toHaveCount(2);
   expect(
     await groups(page).evaluateAll((els) =>
       els.map((el) => el.getAttribute("data-workspace-id")),
     ),
-  ).toEqual(["alpha", "zebra", "archive"]);
+  ).toEqual(["alpha", "zebra"]);
   await expect(
     group(page, "alpha").getByTestId("conversation-row"),
   ).toHaveCount(4);
   await expect(
     group(page, "zebra").getByTestId("conversation-row"),
   ).toHaveCount(4);
+  await expect(group(page, "archive")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Open chat Archive chat 1", exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByTestId("active-section")).toHaveCount(0);
   await expect(page.getByTestId("time-list")).toHaveCount(0);
   await expect(page.getByTestId("workspace-section")).toHaveCount(0);
@@ -278,6 +356,12 @@ test("desktop: workspace order, independent pagination, actions and global searc
     .getByRole("button", { name: "Mark all as read", exact: true })
     .click();
   await expect(page.getByTestId("unread-dot")).toHaveCount(0);
+  await expect
+    .poll(() => [...readSessionIds].sort())
+    .toEqual(["alpha-1", "zebra-1"]);
+  expect(
+    conversations.find((row) => row.session_id === "archive-0")!.unread,
+  ).toBe(true);
   await rowMenu(page, "Renamed sidebar chat");
   await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Delete chat?" });
@@ -383,8 +467,10 @@ test("live runner/workspace events reorder groups without losing expansion or st
 }) => {
   const fixture = await installFixtures(page);
   await page.goto("/");
-  await expect(groups(page)).toHaveCount(3);
+  await expect(groups(page)).toHaveCount(2);
   await group(page, "alpha").getByTestId("show-more-chats").click();
+  await collapseToggle(page, "alpha").click();
+  await expectCollapsed(page, "alpha", "Alpha");
   fixture.workspaces.find((row) => row.id === "alpha")!.runner_online = false;
   await fixture.emit("runner:offline", {
     workspace_id: "alpha",
@@ -395,10 +481,8 @@ test("live runner/workspace events reorder groups without losing expansion or st
     await groups(page).evaluateAll((els) =>
       els.map((el) => el.getAttribute("data-workspace-id")),
     ),
-  ).toEqual(["zebra", "alpha", "archive"]);
-  await expect(
-    group(page, "alpha").getByTestId("conversation-row"),
-  ).toHaveCount(8);
+  ).toEqual(["zebra", "alpha"]);
+  await expectCollapsed(page, "alpha", "Alpha");
   fixture.workspaces.find((row) => row.id === "archive")!.status = "running";
   await fixture.emit("workspace:status_changed", {
     workspace_id: "archive",
@@ -422,9 +506,29 @@ test("live runner/workspace events reorder groups without losing expansion or st
       els.map((el) => el.getAttribute("data-workspace-id")),
     ),
   ).toEqual(["alpha", "archive", "zebra"]);
+  await expectCollapsed(page, "alpha", "Alpha");
+
+  await expectStoredCollapse(page, ["alpha"]);
+  // Stop removes the whole group; a start recreates it without forgetting collapse.
+  fixture.workspaces.find((row) => row.id === "alpha")!.status = "stopped";
+  await fixture.emit("workspace:status_changed", {
+    workspace_id: "alpha",
+    status: "stopped",
+    credentials_present: false,
+  });
+  await expect(group(page, "alpha")).toHaveCount(0);
   await expect(
-    group(page, "alpha").getByTestId("conversation-row"),
-  ).toHaveCount(8);
+    page.getByTestId("action-required-section").getByTestId("conversation-row"),
+  ).toHaveCount(1);
+  fixture.workspaces.find((row) => row.id === "alpha")!.status = "running";
+  await fixture.emit("workspace:status_changed", {
+    workspace_id: "alpha",
+    status: "running",
+    credentials_present: false,
+  });
+  await expectCollapsed(page, "alpha", "Alpha");
+  await collapseToggle(page, "alpha").click();
+  await expectExpanded(page, "alpha", "Alpha", 8);
 
   const oldChat = fixture.conversations.find(
     (row) => row.session_id === "alpha-9",
@@ -450,5 +554,188 @@ test("live runner/workspace events reorder groups without losing expansion or st
       .getByRole("button", { name: "Open chat Alpha chat 10", exact: true })
       .getByTestId("conversation-row-meta"),
   ).toContainText("10m");
+  expect(fixture.errors).toEqual([]);
+});
+
+test("desktop: separate arrow, native disclosure keyboard and durable browser storage", async ({
+  page,
+  context,
+  browser,
+}) => {
+  const fixture = await installFixtures(page);
+  await page.goto("/");
+  await expectExpanded(page, "alpha", "Alpha");
+  const toggle = collapseToggle(page, "alpha");
+  const controls = await toggle.getAttribute("aria-controls");
+  expect(controls).toBeTruthy();
+  await expect(page.locator(`[id="${controls}"]`)).toBeVisible();
+  const initialUrl = page.url();
+  await toggle.click();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expect(page.locator(`[id="${controls}"]`)).toBeHidden();
+  await expect(page).toHaveURL(initialUrl);
+  await expectStoredCollapse(page, ["alpha"]);
+  await settledScreenshot(page, "sidebar-collapse-desktop.png");
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await expectExpanded(page, "alpha", "Alpha");
+  await expectStoredCollapse(page, []);
+  await page.keyboard.press("Enter");
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expect(page).toHaveURL(initialUrl);
+  await page.reload();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expectExpanded(page, "zebra", "Zebra");
+  const storageState = await context.storageState();
+  expect(fixture.errors).toEqual([]);
+  await page.close();
+
+  // A real new page exercises persisted state, not only a component remount.
+  const reopened = await context.newPage();
+  const reopenedFixture = await installFixtures(reopened);
+  await reopened.goto("/");
+  await expectCollapsed(reopened, "alpha", "Alpha");
+  await collapseToggle(reopened, "alpha").click();
+  await expectExpanded(reopened, "alpha", "Alpha");
+  await expectStoredCollapse(reopened, []);
+  await reopened.reload();
+  await expectExpanded(reopened, "alpha", "Alpha");
+  expect(reopenedFixture.errors).toEqual([]);
+
+  const restoredContext = await browser.newContext({
+    storageState,
+    viewport: { width: 1440, height: 960 },
+  });
+  try {
+    const restored = await restoredContext.newPage();
+    const restoredFixture = await installFixtures(restored);
+    await restored.goto(BASE_URL);
+    await expectCollapsed(restored, "alpha", "Alpha");
+    await expectStoredCollapse(restored, ["alpha"]);
+    expect(restoredFixture.errors).toEqual([]);
+  } finally {
+    await restoredContext.close();
+  }
+});
+
+test("selected older direct link and refresh respect collapse, preparing older rows when expanded", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page);
+  await page.goto("/");
+  await expectExpanded(page, "alpha", "Alpha");
+  await collapseToggle(page, "alpha").click();
+  await expectStoredCollapse(page, ["alpha"]);
+  await page.goto("/workspaces/alpha?session=alpha-8");
+  await expectCollapsed(page, "alpha", "Alpha");
+  await page.reload();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await collapseToggle(page, "alpha").click();
+  await expectExpanded(page, "alpha", "Alpha", 10);
+  await expect(
+    group(page, "alpha").getByRole("button", {
+      name: "Open chat Alpha chat 9",
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expectStoredCollapse(page, []);
+  await page.reload();
+  await expectExpanded(page, "alpha", "Alpha", 10);
+  expect(fixture.errors).toEqual([]);
+});
+
+test("mobile: collapse survives drawer remount and arrow never navigates or closes drawer", async ({
+  page,
+}) => {
+  const fixture = await installFixtures(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const openDrawer = async () => {
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .first()
+      .click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+  };
+  await openDrawer();
+  await expectExpanded(page, "alpha", "Alpha");
+  const initialUrl = page.url();
+  await collapseToggle(page, "alpha").click();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page).toHaveURL(initialUrl);
+  await settledScreenshot(page, "sidebar-collapse-mobile.png");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await openDrawer();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await group(page, "alpha")
+    .getByRole("button", { name: "Open workspace Alpha", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page).toHaveURL(/\/workspaces\/alpha$/);
+  await openDrawer();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await collapseToggle(page, "alpha").click();
+  await expectExpanded(page, "alpha", "Alpha");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page).toHaveURL(/\/workspaces\/alpha$/);
+  await expectStoredCollapse(page, []);
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await openDrawer();
+  await expectExpanded(page, "alpha", "Alpha");
+  expect(fixture.errors).toEqual([]);
+});
+
+test("polling: only running groups survive stop/start, with collapse keyed by workspace id", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const fixture = await installFixtures(page);
+  // Creating and orphaned history are excluded as well as stopped Archive.
+  fixture.workspaces.find((row) => row.id === "empty")!.status = "creating";
+  const hiddenHistory = [
+    ...chats("missing", "Missing", 1),
+    ...chats("empty", "Empty", 1),
+  ];
+  for (const row of hiddenHistory) {
+    row.needs_attention = true;
+    row.attention_kind = "permission";
+    row.unread = true;
+  }
+  fixture.conversations.push(...hiddenHistory);
+  await page.goto("/");
+  await expect(groups(page)).toHaveCount(2);
+  await expect(page.getByTestId("all-workspaces")).toHaveText(
+    "All workspaces (4)",
+  );
+  await collapseToggle(page, "alpha").click();
+  const alpha = fixture.workspaces.find((row) => row.id === "alpha")!;
+  alpha.runner_online = false;
+  await page.clock.fastForward(30_000);
+  await expect(group(page, "alpha")).toHaveAttribute("data-online", "false");
+  await expectCollapsed(page, "alpha", "Alpha");
+  expect(
+    await groups(page).evaluateAll((els) =>
+      els.map((el) => el.getAttribute("data-workspace-id")),
+    ),
+  ).toEqual(["zebra", "alpha"]);
+  alpha.status = "stopped";
+  await page.clock.fastForward(30_000);
+  await expect(group(page, "alpha")).toHaveCount(0);
+  await expect(page.getByTestId("action-required-section")).toHaveCount(0);
+  await expectStoredCollapse(page, ["alpha"]);
+  alpha.status = "running";
+  await page.clock.fastForward(30_000);
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expect(
+    page.getByTestId("action-required-section").getByTestId("conversation-row"),
+  ).toHaveCount(1);
+  await collapseToggle(page, "alpha").click();
+  await expectExpanded(page, "alpha", "Alpha");
+  alpha.status = "deleted";
+  await page.clock.fastForward(30_000);
+  await expect(group(page, "alpha")).toHaveCount(0);
   expect(fixture.errors).toEqual([]);
 });

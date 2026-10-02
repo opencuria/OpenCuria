@@ -18,6 +18,7 @@ const props = defineProps<{
   totalCount: number
   activeSessionId: string | null
   activeWorkspaceId: string | null
+  collapsedWorkspaceIds?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   'mark-read': [conversation: HarnessConversation]
   'mark-unread': [conversation: HarnessConversation]
   'mark-all-read': []
+  'set-collapsed': [workspaceId: string, collapsed: boolean]
 }>()
 
 // Controlled by ChatSidebar so closing the mobile drawer does not reset pagination.
@@ -40,7 +42,9 @@ function setVisibleCount(workspaceId: string, count: number): void {
 }
 
 const groups = computed(() => groupConversationsByWorkspace(props.workspaces, props.conversations))
-const hasUnread = computed(() => props.conversations.some((conversation) => conversation.unread))
+const hasUnread = computed(() =>
+  groups.value.some((group) => group.conversations.some((conversation) => conversation.unread)),
+)
 </script>
 
 <template>
@@ -77,11 +81,11 @@ const hasUnread = computed(() => props.conversations.some((conversation) => conv
     </div>
 
     <div
-      v-if="props.conversations.length === 0"
+      v-if="groups.length === 0"
       class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground"
     >
       <MessageSquare class="size-3.5 shrink-0 opacity-60" />
-      <span>No chats yet — start with New chat</span>
+      <span>No running workspaces</span>
     </div>
 
     <div class="flex flex-col gap-3 pt-1">
@@ -89,6 +93,8 @@ const hasUnread = computed(() => props.conversations.some((conversation) => conv
         v-for="group in groups"
         :key="group.workspaceId"
         :group="group"
+        :collapsed="props.collapsedWorkspaceIds?.includes(group.workspaceId) ?? false"
+        @update:collapsed="emit('set-collapsed', group.workspaceId, $event)"
         :visible-count="visibleCounts[group.workspaceId] ?? WORKSPACE_CONVERSATION_PAGE_SIZE"
         @update:visible-count="setVisibleCount(group.workspaceId, $event)"
         :active-session-id="props.activeSessionId"

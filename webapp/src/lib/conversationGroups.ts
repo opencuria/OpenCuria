@@ -76,48 +76,35 @@ export function extractActionRequired(conversations: HarnessConversation[]): Har
 }
 
 /**
- * Group all chat history by workspace, online first and alphabetically within
- * each partition. Keep archived/unknown history, but omit stopped empty workspaces.
+ * Group running workspaces' chats, online first and alphabetically within each
+ * partition. Include empty running workspaces; omit stopped and unknown history.
  */
 export function groupConversationsByWorkspace(
   workspaces: Workspace[],
   conversations: HarnessConversation[],
 ): WorkspaceConversationGroup[] {
-  const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]))
   const groups = new Map<string, WorkspaceConversationGroup>()
-
-  function addGroup(workspaceId: string, fallbackName = ''): WorkspaceConversationGroup {
-    const workspace = workspaceById.get(workspaceId) ?? null
-    const group: WorkspaceConversationGroup = {
-      workspaceId,
-      name: workspace?.name.trim() || fallbackName.trim() || `Workspace ${workspaceId.slice(0, 8)}`,
+  for (const workspace of workspaces) {
+    if (workspace.status !== WorkspaceStatus.RUNNING) continue
+    groups.set(workspace.id, {
+      workspaceId: workspace.id,
+      name:
+        workspace.name.trim() ||
+        conversations.find((row) => row.workspace_id === workspace.id)?.workspace_name.trim() ||
+        `Workspace ${workspace.id.slice(0, 8)}`,
       workspace,
-      online: workspace ? isLiveWorkspace(workspace) : false,
+      online: isLiveWorkspace(workspace),
       conversations: [],
-    }
-    groups.set(workspaceId, group)
-    return group
+    })
   }
 
-  // Sorting a copy also makes the result independent of API arrival order.
   const newestFirst = [...conversations].sort(
     (a, b) =>
       new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime() ||
       a.session_id.localeCompare(b.session_id),
   )
   for (const conversation of newestFirst) {
-    const group =
-      groups.get(conversation.workspace_id) ??
-      addGroup(conversation.workspace_id, conversation.workspace_name)
-    group.conversations.push(conversation)
-  }
-  for (const workspace of countableWorkspaces(workspaces)) {
-    if (
-      !groups.has(workspace.id) &&
-      (workspace.status === WorkspaceStatus.RUNNING || isOperatingWorkspace(workspace))
-    ) {
-      addGroup(workspace.id)
-    }
+    groups.get(conversation.workspace_id)?.conversations.push(conversation)
   }
 
   return [...groups.values()].sort(

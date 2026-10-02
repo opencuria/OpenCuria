@@ -1,6 +1,6 @@
 import { nextTick } from 'vue'
 import { afterEach, describe, expect, it } from 'vitest'
-import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import ConversationWorkspaceList from './ConversationWorkspaceList.vue'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
@@ -144,7 +144,11 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.get('[aria-label="Open chat Alpha chat 8"]').attributes('aria-selected')).toBe(
       'true',
     )
-    expect(wrapper.get('[aria-label="Open workspace Alpha"]').classes()).toContain('bg-primary/10')
+    expect(
+      wrapper
+        .get('[aria-label="Open workspace Alpha"]')
+        .element.parentElement!.classList.contains('bg-primary/10'),
+    ).toBe(true)
     expect(wrapper.get(groupSelector('Beta')).findAll(rows)).toHaveLength(4)
     await wrapper.setProps({ activeSessionId: 'Beta-4', activeWorkspaceId: 'Beta' })
     expect(wrapper.get(groupSelector('Beta')).findAll(rows)).toHaveLength(5)
@@ -213,7 +217,7 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(true)
   })
 
-  it('shows empty live/starting workspaces and navigation, but not stopped empty ones', async () => {
+  it('shows only empty running workspaces and navigation', async () => {
     const wrapper = mountList({
       conversations: [],
       totalCount: 3,
@@ -226,13 +230,11 @@ describe('ConversationWorkspaceList', () => {
         workspace('Stopped', { status: WorkspaceStatus.STOPPED }),
       ],
     })
-    expect(wrapper.text()).toContain('No chats yet — start with New chat')
-    expect(wrapper.findAll('[data-testid="workspace-conversation-group"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('No chats yet')
+    expect(wrapper.findAll('[data-testid="workspace-conversation-group"]')).toHaveLength(1)
     expect(wrapper.find(groupSelector('Stopped')).exists()).toBe(false)
     expect(wrapper.get('[data-testid="all-workspaces"]').text()).toBe('All workspaces (3)')
-    expect(
-      wrapper.get(groupSelector('Booting')).get('[data-testid="workspace-status"]').classes(),
-    ).toContain('bg-amber-500')
+    expect(wrapper.find(groupSelector('Booting')).exists()).toBe(false)
     await wrapper.get('[data-testid="workspaces-create"]').trigger('click')
     await wrapper.get('[data-testid="all-workspaces"]').trigger('click')
     expect(wrapper.emitted('create')).toHaveLength(1)
@@ -240,10 +242,67 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(false)
   })
 
-  it('keeps unknown workspace history while workspace fetching is unavailable', () => {
+  it('does not show history without a known running workspace', () => {
     const wrapper = mountList({ workspaces: [], conversations: chats('Alpha', 1) })
-    expect(wrapper.get(groupSelector('Alpha')).attributes('data-online')).toBe('false')
-    expect(wrapper.find('[aria-label="Open chat Alpha chat 0"]').exists()).toBe(true)
+    expect(wrapper.find(groupSelector('Alpha')).exists()).toBe(false)
+    expect(wrapper.text()).toContain('No running workspaces')
+  })
+
+  it('replaces the status dot with an accessible arrow and forwards collapse separately from navigation', async () => {
+    const wrapper = mountList()
+    const toggle = wrapper
+      .get(groupSelector('Alpha'))
+      .get('[data-testid="workspace-collapse-toggle"]')
+    await flushPromises()
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('[data-testid="workspace-status"]').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(wrapper.emitted('set-collapsed')?.[0]).toEqual(['Alpha', true])
+    expect(wrapper.emitted('open')).toBeUndefined()
+    await wrapper.setProps({ collapsedWorkspaceIds: ['Alpha'] })
+    await flushPromises()
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBeTruthy()
+    expect(wrapper.find(`[id="${toggle.attributes('aria-controls')}"]`).exists()).toBe(true)
+    expect(toggle.attributes('aria-label')).toBe('Expand workspace Alpha')
+    expect(wrapper.get(groupSelector('Alpha')).find(rows).exists()).toBe(false)
+    expect(wrapper.get(groupSelector('Beta')).findAll(rows)).toHaveLength(4)
+    await wrapper.get('[aria-label="Open workspace Alpha"]').trigger('click')
+    expect(wrapper.emitted('open')?.[0]).toEqual(['Alpha'])
+  })
+
+  it('honors explicit collapse for the selected older session and retains pagination on reopen', async () => {
+    const wrapper = mountList({
+      collapsedWorkspaceIds: ['Alpha'],
+      activeSessionId: 'Alpha-8',
+      activeWorkspaceId: 'Alpha',
+    })
+    await nextTick()
+    expect(wrapper.get(groupSelector('Alpha')).find(rows).exists()).toBe(false)
+    await wrapper.setProps({ collapsedWorkspaceIds: [] })
+    await flushPromises()
+    expect(wrapper.get(groupSelector('Alpha')).findAll(rows)).toHaveLength(10)
+    expect(wrapper.get('[aria-label="Open chat Alpha chat 8"]').attributes('aria-selected')).toBe(
+      'true',
+    )
+    await wrapper.setProps({
+      collapsedWorkspaceIds: ['Alpha'],
+      workspaces: [workspace('Beta'), workspace('Alpha', { runner_online: false })],
+    })
+    await flushPromises()
+    expect(wrapper.get(groupSelector('Alpha')).find(rows).exists()).toBe(false)
+  })
+
+  it('shows stopped history only in All workspaces, without unread controls in the sidebar', () => {
+    const history = chats('Stopped', 2)
+    history[0]!.unread = true
+    const wrapper = mountList({
+      workspaces: [workspace('Stopped', { status: WorkspaceStatus.STOPPED })],
+      conversations: history,
+    })
+    expect(wrapper.find('[data-testid="workspace-conversation-group"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('No running workspaces')
   })
 
   it('forwards workspace and keyboard chat selection plus chat management events', async () => {

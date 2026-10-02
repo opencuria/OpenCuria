@@ -211,7 +211,7 @@ describe('groupConversationsByWorkspace', () => {
     expect(groupConversationsByWorkspace([...workspaces].reverse(), [])).toEqual(groups)
   })
 
-  it('marks only RUNNING workspaces with an online runner online', () => {
+  it('includes only RUNNING workspaces, even when their runner is offline', () => {
     const groups = groupConversationsByWorkspace(
       [
         workspace({ id: 'running-online' }),
@@ -223,7 +223,6 @@ describe('groupConversationsByWorkspace', () => {
     expect(groups.map((group) => [group.workspaceId, group.online])).toEqual([
       ['running-online', true],
       ['running-offline', false],
-      ['stopped-online', false],
     ])
   })
 
@@ -283,7 +282,12 @@ describe('groupConversationsByWorkspace', () => {
 
   it('prefers current workspace names, then chat names, then a short workspace ID', () => {
     const groups = groupConversationsByWorkspace(
-      [workspace({ id: 'current', name: '  Renamed  ' }), workspace({ id: 'blank', name: '   ' })],
+      [
+        workspace({ id: 'current', name: '  Renamed  ' }),
+        workspace({ id: 'blank', name: '   ' }),
+        workspace({ id: '12345678-abcd', name: '   ' }),
+        workspace({ id: '87654321-abcd', name: '' }),
+      ],
       [
         conversation({ workspace_id: 'current', workspace_name: 'Old name' }),
         conversation({ workspace_id: 'blank', workspace_name: '  Chat name  ' }),
@@ -294,57 +298,92 @@ describe('groupConversationsByWorkspace', () => {
     expect(Object.fromEntries(groups.map((group) => [group.workspaceId, group.name]))).toEqual({
       current: 'Renamed',
       blank: 'Chat name',
-      missing: 'Historical name',
       '12345678-abcd': 'Workspace 12345678',
+      '87654321-abcd': 'Workspace 87654321',
     })
   })
 
-  it('preserves missing and deleted history offline but omits hidden empty workspaces', () => {
-    const hiddenStatuses = [
-      WorkspaceStatus.REMOVED,
-      WorkspaceStatus.DELETED,
-      WorkspaceStatus.DELETING,
-      WorkspaceStatus.PENDING_DELETION,
-    ]
-    const workspaces = hiddenStatuses.flatMap((status) => [
-      workspace({ id: `${status}-history`, status }),
-      workspace({ id: `${status}-empty`, status, active_operation: WorkspaceOperation.CREATING }),
-    ])
-    const conversations = [
-      conversation({ workspace_id: 'missing' }),
-      ...hiddenStatuses.map((status) => conversation({ workspace_id: `${status}-history` })),
-    ]
-    const groups = groupConversationsByWorkspace(workspaces, conversations)
-    expect(groups.map((group) => group.workspaceId).sort()).toEqual(
-      conversations.map((row) => row.workspace_id).sort(),
-    )
-    expect(groups.every((group) => !group.online && group.conversations.length === 1)).toBe(true)
-    expect(groups.find((group) => group.workspaceId === 'missing')?.workspace).toBeNull()
-  })
+  const nonRunningStatuses = Object.values(WorkspaceStatus).filter(
+    (status) => status !== WorkspaceStatus.RUNNING,
+  )
 
-  it('shows online, creating, operating and runner-offline RUNNING empty workspaces, not stopped empty ones', () => {
+  it.each(nonRunningStatuses)(
+    'excludes %s workspaces with chats, even during active operations',
+    (status) => {
+      const workspaces = [
+        workspace({ id: 'running' }),
+        workspace({ id: `${status}-history`, status }),
+        ...Object.values(WorkspaceOperation).flatMap((active_operation) => [
+          workspace({ id: `${status}-${active_operation}-history`, status, active_operation }),
+          workspace({ id: `${status}-${active_operation}-empty`, status, active_operation }),
+        ]),
+      ]
+      const conversations = workspaces
+        .filter(({ id }) => !id.endsWith('-empty'))
+        .map(({ id }) =>
+          conversation({
+            workspace_id: id,
+            session_id: `${id}-chat`,
+            status: 'busy',
+            unread: true,
+          }),
+        )
+      conversations.push(conversation({ workspace_id: 'missing' }))
+
+      const groups = groupConversationsByWorkspace(workspaces, conversations)
+
+      expect(groups.map((group) => group.workspaceId)).toEqual(['running'])
+      expect(groups[0]?.conversations).toEqual([conversations[0]])
+    },
+  )
+
+  it('shows empty running workspaces, including literal running status with an offline runner', () => {
     const groups = groupConversationsByWorkspace(
       [
         workspace({ id: 'online' }),
-        workspace({ id: 'creating', status: WorkspaceStatus.CREATING, runner_online: false }),
         workspace({
-          id: 'operating',
-          status: WorkspaceStatus.STOPPED,
-          active_operation: WorkspaceOperation.CREATING,
+          id: 'runner-offline',
+          status: 'running' as WorkspaceStatus,
+          runner_online: false,
         }),
-        workspace({ id: 'runner-offline', runner_online: false }),
-        workspace({ id: 'stopped', status: WorkspaceStatus.STOPPED }),
+        workspace({
+          id: 'starting',
+          status: WorkspaceStatus.STOPPED,
+          active_operation: WorkspaceOperation.STARTING,
+        }),
+        workspace({ id: 'creating', status: WorkspaceStatus.CREATING }),
       ],
       [],
     )
-    expect(groups.map((group) => group.workspaceId)).toEqual([
-      'online',
-      'creating',
-      'operating',
-      'runner-offline',
+    expect(groups.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['online', true],
+      ['runner-offline', false],
     ])
-    expect(groups.map((group) => group.online)).toEqual([true, false, false, false])
     expect(groups.every((group) => group.conversations.length === 0)).toBe(true)
+  })
+
+  it('omits unknown history while the workspace list loads until a running workspace arrives', () => {
+    const conversations = [conversation({ workspace_name: 'Historical name' })]
+    const before = structuredClone(conversations)
+
+    expect(groupConversationsByWorkspace([], conversations)).toEqual([])
+    expect(
+      groupConversationsByWorkspace(
+        [workspace({ status: WorkspaceStatus.CREATING })],
+        conversations,
+      ),
+    ).toEqual([])
+    const groups = groupConversationsByWorkspace(
+      [workspace({ name: 'Current name' })],
+      conversations,
+    )
+
+    expect(groups.map((group) => [group.workspaceId, group.name])).toEqual([
+      ['ws-1', 'Current name'],
+    ])
+    expect(groups[0]?.conversations).toEqual(conversations)
+    expect(groups[0]?.conversations[0]).toBe(conversations[0])
+    expect(conversations).toEqual(before)
   })
 
   it('does not apply a global workspace or conversation cap', () => {
@@ -359,31 +398,51 @@ describe('groupConversationsByWorkspace', () => {
     expect(groups.every((group) => group.conversations.length === 8)).toBe(true)
   })
 
-  it('reorders after workspace and runner status changes without losing history', () => {
-    const alpha = workspace({ id: 'a', name: 'Alpha', status: WorkspaceStatus.STOPPED })
+  it('removes stopped groups and restores their chats on start without changing raw inputs', () => {
+    const alpha = workspace({ id: 'a', name: 'Alpha' })
     const zebra = workspace({ id: 'z', name: 'Zebra' })
-    const conversations = [conversation({ workspace_id: 'a' }), conversation({ workspace_id: 'z' })]
+    const conversations = [
+      conversation({
+        session_id: 'a-old',
+        workspace_id: 'a',
+        last_message_at: new Date(NOW - 1).toISOString(),
+      }),
+      conversation({ session_id: 'z-chat', workspace_id: 'z' }),
+      conversation({ session_id: 'a-new', workspace_id: 'a' }),
+    ]
+    const before = structuredClone(conversations)
+    conversations.forEach(Object.freeze)
+    Object.freeze(conversations)
     const initial = groupConversationsByWorkspace([alpha, zebra], conversations)
-    expect(initial.map((group) => [group.workspaceId, group.online])).toEqual([
-      ['z', true],
-      ['a', false],
-    ])
-    const changed = groupConversationsByWorkspace(
+    const stopped = groupConversationsByWorkspace(
       [
-        { ...alpha, status: WorkspaceStatus.RUNNING },
-        { ...zebra, runner_online: false },
+        {
+          ...alpha,
+          status: WorkspaceStatus.STOPPED,
+          active_operation: WorkspaceOperation.STARTING,
+        },
+        zebra,
       ],
       conversations,
     )
-    expect(changed.map((group) => [group.workspaceId, group.online])).toEqual([
+    expect(stopped.map((group) => group.workspaceId)).toEqual(['z'])
+
+    const restarted = groupConversationsByWorkspace(
+      [alpha, { ...zebra, runner_online: false }],
+      conversations,
+    )
+    expect(restarted.map((group) => [group.workspaceId, group.online])).toEqual([
       ['a', true],
       ['z', false],
     ])
-    expect(changed.map((group) => group.conversations.length)).toEqual([1, 1])
+    expect(restarted[0]?.conversations.map((row) => row.session_id)).toEqual(['a-new', 'a-old'])
+    expect(restarted[0]?.conversations[0]).toBe(conversations[2])
+    expect(restarted[0]?.conversations).toEqual(initial[0]?.conversations)
     expect(initial.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['a', true],
       ['z', true],
-      ['a', false],
     ])
+    expect(conversations).toEqual(before)
   })
 })
 
