@@ -3,23 +3,15 @@ import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 
 export const ACTIVE_CONVERSATION_LIMIT = 5
-export const VISIBLE_CONVERSATION_LIMIT = 15
+export const WORKSPACE_CONVERSATION_PAGE_SIZE = 4
 export const SIDEBAR_WORKSPACE_LIMIT = 4
 
-export type TimeBucketKey = 'today' | 'yesterday' | 'last7days' | 'last30days' | 'older'
-
-export interface TimeBucket {
-  key: TimeBucketKey
-  label: string
+export interface WorkspaceConversationGroup {
+  workspaceId: string
+  name: string
+  workspace: Workspace | null
+  online: boolean
   conversations: HarnessConversation[]
-}
-
-const TIME_BUCKET_LABELS: Record<TimeBucketKey, string> = {
-  today: 'Today',
-  yesterday: 'Yesterday',
-  last7days: 'Last 7 days',
-  last30days: 'Last 30 days',
-  older: 'Older',
 }
 
 const HIDDEN_WORKSPACE_STATUSES = new Set<string>([
@@ -28,14 +20,6 @@ const HIDDEN_WORKSPACE_STATUSES = new Set<string>([
   WorkspaceStatus.DELETING,
   WorkspaceStatus.PENDING_DELETION,
 ])
-
-const BUCKET_ORDER: TimeBucketKey[] = [
-  'today',
-  'yesterday',
-  'last7days',
-  'last30days',
-  'older',
-]
 
 /**
  * Display title for a conversation row (fallback when the session has no title yet).
@@ -72,8 +56,7 @@ export function extractActiveConversations(
   return [...conversations]
     .filter(
       (conversation) =>
-        !conversation.needs_attention &&
-        (conversation.status === 'busy' || conversation.unread),
+        !conversation.needs_attention && (conversation.status === 'busy' || conversation.unread),
     )
     .sort((a, b) => {
       if (a.status === 'busy' && b.status !== 'busy') return -1
@@ -86,71 +69,63 @@ export function extractActiveConversations(
 /**
  * Conversations waiting on a permission or question gate, newest first.
  */
-export function extractActionRequired(
-  conversations: HarnessConversation[],
-): HarnessConversation[] {
+export function extractActionRequired(conversations: HarnessConversation[]): HarnessConversation[] {
   return [...conversations]
     .filter((conversation) => Boolean(conversation.needs_attention))
     .sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime())
 }
 
 /**
- * Group conversations into calendar-day buckets relative to `now`.
- *
- * Conversations should already be sorted newest-first; this function preserves
- * relative order inside each bucket.
+ * Group all chat history by workspace, online first and alphabetically within
+ * each partition. Keep archived/unknown history, but omit stopped empty workspaces.
  */
-export function groupConversationsByTime(
+export function groupConversationsByWorkspace(
+  workspaces: Workspace[],
   conversations: HarnessConversation[],
-  now = Date.now(),
-): TimeBucket[] {
-  const startToday = startOfLocalDay(now)
-  const startYesterday = addLocalDays(startToday, -1)
-  const start7 = addLocalDays(startToday, -7)
-  const start30 = addLocalDays(startToday, -30)
+): WorkspaceConversationGroup[] {
+  const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]))
+  const groups = new Map<string, WorkspaceConversationGroup>()
 
-  const buckets: Record<TimeBucketKey, HarnessConversation[]> = {
-    today: [],
-    yesterday: [],
-    last7days: [],
-    last30days: [],
-    older: [],
+  function addGroup(workspaceId: string, fallbackName = ''): WorkspaceConversationGroup {
+    const workspace = workspaceById.get(workspaceId) ?? null
+    const group: WorkspaceConversationGroup = {
+      workspaceId,
+      name: workspace?.name.trim() || fallbackName.trim() || `Workspace ${workspaceId.slice(0, 8)}`,
+      workspace,
+      online: workspace ? isLiveWorkspace(workspace) : false,
+      conversations: [],
+    }
+    groups.set(workspaceId, group)
+    return group
   }
 
-  for (const conversation of conversations) {
-    const timestamp = new Date(conversation.last_message_at).getTime()
-    buckets[bucketForTimestamp(timestamp, startToday, startYesterday, start7, start30)].push(
-      conversation,
-    )
+  // Sorting a copy also makes the result independent of API arrival order.
+  const newestFirst = [...conversations].sort(
+    (a, b) =>
+      new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime() ||
+      a.session_id.localeCompare(b.session_id),
+  )
+  for (const conversation of newestFirst) {
+    const group =
+      groups.get(conversation.workspace_id) ??
+      addGroup(conversation.workspace_id, conversation.workspace_name)
+    group.conversations.push(conversation)
+  }
+  for (const workspace of countableWorkspaces(workspaces)) {
+    if (
+      !groups.has(workspace.id) &&
+      (workspace.status === WorkspaceStatus.RUNNING || isOperatingWorkspace(workspace))
+    ) {
+      addGroup(workspace.id)
+    }
   }
 
-  return BUCKET_ORDER.filter((key) => buckets[key].length > 0).map((key) => ({
-    key,
-    label: TIME_BUCKET_LABELS[key],
-    conversations: buckets[key],
-  }))
-}
-
-/**
- * Keep the first `limit` conversations across groups; later groups are trimmed
- * or dropped. Returns how many conversations were hidden.
- */
-export function capConversationGroups(
-  groups: TimeBucket[],
-  limit = VISIBLE_CONVERSATION_LIMIT,
-): { groups: TimeBucket[]; hiddenCount: number } {
-  const total = groups.reduce((sum, group) => sum + group.conversations.length, 0)
-  if (total <= limit) return { groups, hiddenCount: 0 }
-
-  const capped: TimeBucket[] = []
-  let remaining = limit
-  for (const group of groups) {
-    if (remaining <= 0) break
-    const conversations = group.conversations.slice(0, remaining)
-    capped.push({ ...group, conversations })
-    remaining -= conversations.length
-  }
-  return { groups: capped, hiddenCount: total - limit }
+  return [...groups.values()].sort(
+    (a, b) =>
+      Number(b.online) - Number(a.online) ||
+      a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) ||
+      a.workspaceId.localeCompare(b.workspaceId),
+  )
 }
 
 /**
@@ -163,7 +138,9 @@ export function selectSidebarWorkspaces(
   conversations: HarnessConversation[],
   limit = SIDEBAR_WORKSPACE_LIMIT,
 ): Workspace[] {
-  const workspaceIdsWithChats = new Set(conversations.map((conversation) => conversation.workspace_id))
+  const workspaceIdsWithChats = new Set(
+    conversations.map((conversation) => conversation.workspace_id),
+  )
   return [...workspaces]
     .filter((workspace) => {
       if (HIDDEN_WORKSPACE_STATUSES.has(workspace.status)) return false
@@ -174,8 +151,7 @@ export function selectSidebarWorkspaces(
       const liveDelta = Number(isLiveWorkspace(b)) - Number(isLiveWorkspace(a))
       if (liveDelta !== 0) return liveDelta
       return (
-        new Date(b.last_activity_at ?? 0).getTime() -
-        new Date(a.last_activity_at ?? 0).getTime()
+        new Date(b.last_activity_at ?? 0).getTime() - new Date(a.last_activity_at ?? 0).getTime()
       )
     })
     .slice(0, limit)
@@ -191,30 +167,4 @@ export function isOperatingWorkspace(workspace: Workspace): boolean {
 
 export function countableWorkspaces(workspaces: Workspace[]): Workspace[] {
   return workspaces.filter((workspace) => !HIDDEN_WORKSPACE_STATUSES.has(workspace.status))
-}
-
-function startOfLocalDay(now: number): number {
-  const date = new Date(now)
-  date.setHours(0, 0, 0, 0)
-  return date.getTime()
-}
-
-function addLocalDays(timestamp: number, days: number): number {
-  const date = new Date(timestamp)
-  date.setDate(date.getDate() + days)
-  return date.getTime()
-}
-
-function bucketForTimestamp(
-  timestamp: number,
-  startToday: number,
-  startYesterday: number,
-  start7: number,
-  start30: number,
-): TimeBucketKey {
-  if (timestamp >= startToday) return 'today'
-  if (timestamp >= startYesterday) return 'yesterday'
-  if (timestamp >= start7) return 'last7days'
-  if (timestamp >= start30) return 'last30days'
-  return 'older'
 }

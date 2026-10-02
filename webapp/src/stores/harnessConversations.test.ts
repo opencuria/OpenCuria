@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
@@ -35,8 +35,16 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
 
 describe('harnessConversations store unread', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    localStorage.removeItem('kern_active_org_id')
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('kern_active_org_id')
+    vi.clearAllTimers()
+    vi.useRealTimers()
   })
 
   it('marks idle as unread when the session is not being viewed', () => {
@@ -147,7 +155,6 @@ describe('harnessConversations store unread', () => {
   })
 
   it('clears attention immediately then refreshes from the server', async () => {
-    vi.useFakeTimers()
     listMock.mockResolvedValueOnce([])
     const store = useHarnessConversationStore()
     store.conversations = [
@@ -158,7 +165,6 @@ describe('harnessConversations store unread', () => {
     expect(store.conversations[0]?.attention_kind).toBe('')
     await vi.advanceTimersByTimeAsync(300)
     expect(listMock).toHaveBeenCalled()
-    vi.useRealTimers()
   })
 
   it('sorts fetched conversations by last_message_at', async () => {
@@ -177,46 +183,176 @@ describe('harnessConversations store unread', () => {
     expect(store.conversations.map((row) => row.session_id)).toEqual(['newer', 'older'])
   })
 
-  it('bumps last_message_at only when session status changes', () => {
-    vi.useFakeTimers()
+  it('does not manufacture timestamps or reorder conversations on status transitions', () => {
     vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'))
     const store = useHarnessConversationStore()
     store.conversations = [
-      makeConversation({
-        session_id: 'session-1',
-        status: 'idle',
-        last_message_at: '2026-03-29T10:00:00.000Z',
-      }),
+      makeConversation({ session_id: 'recent', status: 'idle', last_message_at: '2026-03-29T11:00:00.000Z' }),
+      makeConversation({ status: 'idle' }),
     ]
-    store.updateSessionStatus('session-1', 'idle', true)
-    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+    const originalOrder = store.conversations
     store.updateSessionStatus('session-1', 'busy')
-    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T12:00:00.000Z')
-    vi.useRealTimers()
+    store.updateSessionStatus('session-1', 'idle')
+    expect(store.conversations).toBe(originalOrder)
+    expect(store.conversations.map((row) => row.session_id)).toEqual(['recent', 'session-1'])
+    expect(store.conversations.map((row) => row.last_message_at)).toEqual([
+      '2026-03-29T11:00:00.000Z',
+      '2026-03-29T10:00:00.000Z',
+    ])
+    expect(store.conversations[1]?.status).toBe('idle')
+    expect(store.conversations[1]?.unread).toBe(true)
+    expect(listMock).not.toHaveBeenCalled()
   })
 
-  it('reorders by last_message_at after a status transition', () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'))
+  it('coalesces status changes and applies authoritative timestamps and order after refresh', async () => {
     const store = useHarnessConversationStore()
     store.conversations = [
-      makeConversation({
-        session_id: 'idle-recent',
-        status: 'idle',
-        last_message_at: '2026-03-29T11:00:00.000Z',
-      }),
-      makeConversation({
-        session_id: 'session-1',
-        status: 'idle',
-        last_message_at: '2026-03-29T10:00:00.000Z',
-      }),
+      makeConversation({ session_id: 'recent', status: 'idle', last_message_at: '2026-03-29T11:00:00.000Z' }),
+      makeConversation({ status: 'idle' }),
     ]
-    store.updateSessionStatus('session-1', 'busy')
-    expect(store.conversations.map((row) => row.session_id)).toEqual([
-      'session-1',
-      'idle-recent',
+    listMock.mockResolvedValueOnce([
+      makeConversation({ session_id: 'recent', status: 'busy', last_message_at: '2026-03-29T11:00:00.000Z' }),
+      makeConversation({ status: 'idle', unread: true, last_message_at: '2026-03-29T11:30:00.000Z' }),
     ])
-    vi.useRealTimers()
+    store.updateSessionStatus('session-1', 'busy')
+    await vi.advanceTimersByTimeAsync(200)
+    store.updateSessionStatus('recent', 'busy')
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(299)
+    expect(listMock).not.toHaveBeenCalled()
+    expect(store.conversations.map((row) => row.session_id)).toEqual(['recent', 'session-1'])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    expect(store.conversations.map((row) => row.session_id)).toEqual(['session-1', 'recent'])
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T11:30:00.000Z')
+  })
+
+  it('does not refresh repeated known statuses but still updates unread immediately', async () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation({ status: 'idle', unread: true })]
+    store.updateSessionStatus('session-1', 'idle', true)
+    expect(store.conversations[0]?.unread).toBe(false)
+    store.updateSessionStatus('session-1', 'idle', false)
+    expect(store.conversations[0]?.unread).toBe(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(listMock).not.toHaveBeenCalled()
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+  })
+
+  it('does not refresh for unknown or child session statuses', async () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation()]
+    store.updateSessionStatus('new-session', 'busy')
+    store.updateSessionStatus('new-session', 'idle')
+    store.updateSessionStatus('child-session', 'busy')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(listMock).not.toHaveBeenCalled()
+    expect(store.conversations).toEqual([makeConversation()])
+  })
+
+  it('waits for an older fetch and coalesces invalidations into one fresh fetch', async () => {
+    let resolve!: (rows: HarnessConversation[]) => void
+    listMock.mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const authoritative = makeConversation({ status: 'idle', last_message_at: '2026-03-29T11:30:00.000Z' })
+    listMock.mockResolvedValueOnce([authoritative])
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation()]
+    const originalFetch = store.fetchConversations()
+    const duplicateFetch = store.fetchConversations()
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(300)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+    store.updateSessionStatus('session-1', 'busy')
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(300)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    resolve([makeConversation()])
+    await Promise.all([originalFetch, duplicateFetch])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(listMock).toHaveBeenCalledTimes(2)
+    expect(store.conversations).toEqual([authoritative])
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(listMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes after an older in-flight request rejects', async () => {
+    let reject!: (error: Error) => void
+    listMock.mockImplementationOnce(() => new Promise((_, r) => { reject = r }))
+    const authoritative = makeConversation({ status: 'idle', last_message_at: '2026-03-29T11:30:00.000Z' })
+    listMock.mockResolvedValueOnce([authoritative])
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation()]
+    const originalFetch = store.fetchConversations()
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(300)
+    reject(new Error('offline'))
+    await originalFetch
+    await vi.advanceTimersByTimeAsync(0)
+    expect(listMock).toHaveBeenCalledTimes(2)
+    expect(store.conversations).toEqual([authoritative])
+    expect(store.error).toBeNull()
+  })
+
+  it('does not follow up a waiting refresh after the organization changes', async () => {
+    localStorage.setItem('kern_active_org_id', 'org-a')
+    let resolve!: (rows: HarnessConversation[]) => void
+    listMock.mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation()]
+    const originalFetch = store.fetchConversations()
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(300)
+    localStorage.setItem('kern_active_org_id', 'org-b')
+    resolve([makeConversation()])
+    await originalFetch
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    expect(store.conversations[0]?.status).toBe('idle')
+    expect(store.conversations[0]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+  })
+
+  it('does not follow up a waiting refresh after switching organizations away and back', async () => {
+    localStorage.setItem('kern_active_org_id', 'org-a')
+    let resolve!: (rows: HarnessConversation[]) => void
+    listMock.mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    const store = useHarnessConversationStore()
+    store.conversations = [makeConversation()]
+    const originalFetch = store.fetchConversations()
+    store.updateSessionStatus('session-1', 'idle')
+    await vi.advanceTimersByTimeAsync(300)
+    localStorage.setItem('kern_active_org_id', 'org-b')
+    listMock.mockResolvedValueOnce([])
+    await store.fetchConversations()
+    localStorage.setItem('kern_active_org_id', 'org-a')
+    const current = makeConversation({ status: 'idle', last_message_at: '2026-03-29T12:00:00.000Z' })
+    listMock.mockResolvedValueOnce([current])
+    await store.fetchConversations()
+    resolve([makeConversation()])
+    await originalFetch
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(listMock).toHaveBeenCalledTimes(3)
+    expect(store.conversations).toEqual([current])
+  })
+
+  it('keeps local status, unread state, timestamps and order when refresh fails', async () => {
+    const store = useHarnessConversationStore()
+    store.conversations = [
+      makeConversation({ session_id: 'recent', last_message_at: '2026-03-29T11:00:00.000Z' }),
+      makeConversation({ manual_unread: true, unread: true }),
+    ]
+    listMock.mockRejectedValueOnce(new Error('offline'))
+    store.updateSessionStatus('session-1', 'idle', true)
+    const localState = store.conversations.map((row) => ({ ...row }))
+    await vi.advanceTimersByTimeAsync(300)
+    expect(listMock).toHaveBeenCalledTimes(1)
+    expect(store.conversations).toEqual(localState)
+    expect(store.conversations[1]?.status).toBe('idle')
+    expect(store.conversations[1]?.manual_unread).toBe(true)
+    expect(store.conversations[1]?.unread).toBe(true)
+    expect(store.conversations[1]?.last_message_at).toBe('2026-03-29T10:00:00.000Z')
+    expect(store.error).toBe('offline')
+    expect(store.loading).toBe(false)
   })
 
   it('does not bump last_message_at when marking read', async () => {

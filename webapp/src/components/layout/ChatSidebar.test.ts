@@ -1,12 +1,15 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatSidebar from './ChatSidebar.vue'
+
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
+
+enableAutoUnmount(afterEach)
 
 const authStore = {
   organizations: [{ id: 'org-1', name: 'Acme', role: 'admin' }],
@@ -206,11 +209,12 @@ describe('ChatSidebar', () => {
     wrapper.unmount()
   })
 
-  it('shows unread chats in the active section and hides empty stopped workspaces', () => {
+  it('shows unread chats in their workspace and hides empty stopped workspaces', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('Active')
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="time-list"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-section"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha')
     expect(wrapper.text()).toContain('All workspaces (2)')
@@ -219,7 +223,7 @@ describe('ChatSidebar', () => {
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
   })
 
-  it('shows action-required chats in their own section', () => {
+  it('shows action-required chats at the top and in their workspace', () => {
     conversationStore.conversations = [
       makeConversation({
         session_id: 's-gate',
@@ -234,7 +238,10 @@ describe('ChatSidebar', () => {
     expect(wrapper.find('[data-testid="action-required-section"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('Action required')
     expect(wrapper.text()).toContain('Needs a permission')
-    expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="attention-icon"]')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="workspace-conversation-group"]').text()).toContain(
+      'Needs a permission',
+    )
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
   })
 
@@ -258,7 +265,7 @@ describe('ChatSidebar', () => {
     })
   })
 
-  it('caps the time list at 15 rows and expands the rest', async () => {
+  it('starts with four chats and reveals four more per click', async () => {
     conversationStore.conversations = Array.from({ length: 20 }, (_, index) =>
       makeConversation({
         session_id: `s-${index}`,
@@ -271,12 +278,44 @@ describe('ChatSidebar', () => {
     const wrapper = mountSidebar()
 
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
-    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(15)
-    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 5 more chats')
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(4)
+    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 4 more chats')
 
     await wrapper.get('[data-testid="show-more-chats"]').trigger('click')
 
-    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(20)
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(8)
+  })
+
+  it('marks unread chats in all workspaces as read from the shared header', async () => {
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'unread-1', unread: true }),
+      makeConversation({ session_id: 'unread-2', workspace_id: 'ws-2', unread: true }),
+      makeConversation({ session_id: 'read', unread: false }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
+    expect(conversationStore.markAsRead.mock.calls).toEqual([['unread-1'], ['unread-2']])
+  })
+
+  it('opens workspace navigation and management from the merged list', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Open workspace Alpha"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith({ path: '/workspaces/ws-1' })
+    await wrapper.get('[data-testid="all-workspaces"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/workspaces')
+    await wrapper.get('[data-testid="workspaces-create"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/workspaces')
+  })
+
+  it('forwards rename and read actions from workspace chat rows', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="mark-read-item"]').trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
+    const rename = wrapper.findAll('button').find((button) => button.text() === 'Rename')!
+    await rename.trigger('click')
+    await wrapper.get('[data-testid="conversation-rename-input"]').setValue('Renamed chat')
+    await wrapper.get('[data-testid="conversation-rename-input"]').trigger('keydown.enter')
+    expect(harnessStore.renameSession).toHaveBeenCalledWith('s-1', 'Renamed chat')
   })
 
   it('shows an empty chat prompt when there are no conversations', () => {

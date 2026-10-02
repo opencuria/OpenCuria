@@ -1,18 +1,16 @@
 <script setup lang="ts">
 /**
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
- * active sessions, time-grouped conversations, compact workspaces, account.
+ * action-required chats, workspace-grouped conversations, account.
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
-import ActiveConversationsSection from './sidebar/ActiveConversationsSection.vue'
 import ActionRequiredSection from './sidebar/ActionRequiredSection.vue'
-import ConversationTimeList from './sidebar/ConversationTimeList.vue'
+import ConversationWorkspaceList from './sidebar/ConversationWorkspaceList.vue'
 import SidebarBrandHeader from './sidebar/SidebarBrandHeader.vue'
 import SidebarUserFooter from './sidebar/SidebarUserFooter.vue'
-import WorkspaceSection from './sidebar/WorkspaceSection.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -36,8 +34,6 @@ import {
   countableWorkspaces,
   conversationTitle,
   extractActionRequired,
-  extractActiveConversations,
-  selectSidebarWorkspaces,
 } from '@/lib/conversationGroups'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
@@ -63,26 +59,11 @@ const harnessStore = useHarnessStore()
 const { isMobile, setOpenMobile } = useSidebar()
 
 const searchOpen = ref(false)
+const visibleConversationCounts = ref<Record<string, number>>({})
 const deleteTarget = ref<HarnessConversation | null>(null)
 
 const actionRequiredConversations = computed(() =>
   extractActionRequired(conversationStore.conversations),
-)
-
-const activeConversations = computed(() =>
-  extractActiveConversations(conversationStore.conversations),
-)
-
-const timeListConversations = computed(() => {
-  const featuredIds = new Set([
-    ...actionRequiredConversations.value.map((row) => row.session_id),
-    ...activeConversations.value.map((row) => row.session_id),
-  ])
-  return conversationStore.conversations.filter((row) => !featuredIds.has(row.session_id))
-})
-
-const sidebarWorkspaces = computed(() =>
-  selectSidebarWorkspaces(workspaceStore.workspaces, conversationStore.conversations),
 )
 
 const workspaceTotal = computed(
@@ -375,33 +356,19 @@ watch(
           @mark-unread="handleMarkUnread"
         />
 
-        <ActiveConversationsSection
-          :conversations="activeConversations"
+        <ConversationWorkspaceList
+          v-model:visible-counts="visibleConversationCounts"
+          :workspaces="workspaceStore.workspaces"
+          :conversations="conversationStore.conversations"
+          :total-count="workspaceTotal"
           :active-session-id="activeSessionId"
+          :active-workspace-id="activeWorkspaceId"
           @select="handleSelectConversation"
           @rename="handleRename"
           @delete="requestDelete"
           @mark-read="handleMarkRead"
           @mark-unread="handleMarkUnread"
           @mark-all-read="handleMarkAllRead"
-        />
-
-        <ConversationTimeList
-          v-if="conversationStore.conversations.length === 0 || timeListConversations.length > 0"
-          :conversations="timeListConversations"
-          :active-session-id="activeSessionId"
-          :empty="conversationStore.conversations.length === 0"
-          @select="handleSelectConversation"
-          @rename="handleRename"
-          @delete="requestDelete"
-          @mark-read="handleMarkRead"
-          @mark-unread="handleMarkUnread"
-        />
-
-        <WorkspaceSection
-          :workspaces="sidebarWorkspaces"
-          :total-count="workspaceTotal"
-          :active-workspace-id="activeWorkspaceId"
           @open="handleOpenWorkspace"
           @open-all="handleOpenWorkspaces"
           @create="handleOpenWorkspaces"

@@ -171,10 +171,9 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     viewed = false,
   ): void {
     const conv = conversations.value.find((row) => row.session_id === sessionId)
+    // Backend root invalidations discover new roots; child status events are not in this feed.
     if (!conv) return
-    if (conv.status !== status) {
-      conv.last_message_at = new Date().toISOString()
-    }
+    if (conv.status !== status) scheduleAttentionRefresh()
     conv.status = status
     if (!conv.manual_unread) {
       if (status === 'idle') {
@@ -183,10 +182,6 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
         conv.unread = false
       }
     }
-    conversations.value = [...conversations.value].sort(
-      (a, b) =>
-        new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime(),
-    )
   }
 
   function setAttention(sessionId: string, kind: 'permission' | 'question'): void {
@@ -209,9 +204,16 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
 
   function scheduleAttentionRefresh(): void {
     if (attentionRefreshTimer) clearTimeout(attentionRefreshTimer)
-    attentionRefreshTimer = setTimeout(() => {
+    attentionRefreshTimer = setTimeout(async () => {
       attentionRefreshTimer = null
-      void fetchConversations()
+      const context = localStorage.getItem('kern_active_org_id') ?? ''
+      const generation = conversationsGeneration
+      const pending = fetchFlights.get(context)
+      // A pre-invalidation response cannot satisfy this refresh, even if it fails.
+      if (pending) await pending.catch(() => undefined)
+      if (context === (localStorage.getItem('kern_active_org_id') ?? '') && generation === conversationsGeneration) {
+        void fetchConversations()
+      }
     }, ATTENTION_REFRESH_MS)
   }
 
