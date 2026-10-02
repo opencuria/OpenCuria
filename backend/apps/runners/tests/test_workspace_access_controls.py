@@ -143,6 +143,7 @@ def test_owner_can_clone_workspace_image_artifact(workspace_access_setup, monkey
     body = response.json()
     assert "workspace_id" in body
     assert "task_id" in body
+    assert body["plugin_ids"] == []
 
 
 @pytest.mark.django_db

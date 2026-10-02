@@ -57,12 +57,13 @@ class OrganizationService:
 
     @staticmethod
     def _seed_activations(org) -> None:
-        """Activate global non-OAuth credential services for a new org."""
-        from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+        """Activate all visible global services, including OAuth services."""
+        from apps.credentials.models import (
+            CredentialService,
+            OrgCredentialServiceActivation,
+        )
 
-        all_services = CredentialService.objects.filter(
-            organization__isnull=True
-        ).exclude(credential_type="mcp_oauth")
+        all_services = CredentialService.objects.filter(organization__isnull=True)
         svc_activations = [
             OrgCredentialServiceActivation(organization=org, credential_service=svc)
             for svc in all_services
@@ -172,9 +173,7 @@ class OrganizationService:
         org = self.require_membership(user, org_id)
 
         if not self.memberships.is_admin(user, org):
-            raise AuthenticationError(
-                "You must be an admin of this organization"
-            )
+            raise AuthenticationError("You must be an admin of this organization")
 
         return org
 

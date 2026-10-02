@@ -11,16 +11,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import type {
-  Plugin,
-  PluginCreateIn,
-  PluginUpdateIn,
-  McpOAuthStatus,
-  WorkspacePlugin,
-} from '@/types'
-import * as mcpOAuthApi from '@/services/mcpOAuth.api'
+import type { Plugin, PluginCreateIn, PluginUpdateIn, WorkspacePlugin } from '@/types'
 import { useAuthStore } from './auth'
-import { useCredentialStore } from './credentials'
 import { useNotificationStore } from './notifications'
 import * as pluginsApi from '@/services/plugins.api'
 
@@ -35,8 +27,6 @@ export const usePluginStore = defineStore('plugins', () => {
   /** Monotonic request generation; stale org fetches are discarded. */
   let catalogRequestId = 0
   const workspacePluginsRequestId = ref<Record<string, number>>({})
-  const mcpOAuthStatuses = ref<Record<string, McpOAuthStatus>>({})
-  const mcpOAuthLoading = ref<Record<string, boolean>>({})
 
   /** Workspace plugin lists keyed by workspace id. */
   const workspacePlugins = ref<Record<string, WorkspacePlugin[]>>({})
@@ -65,8 +55,6 @@ export const usePluginStore = defineStore('plugins', () => {
     workspacePluginsLoading.value = {}
     workspacePluginsError.value = {}
     workspacePluginsRequestId.value = {}
-    mcpOAuthStatuses.value = {}
-    mcpOAuthLoading.value = {}
   }
 
   /** Ensure catalog matches the active org; refetch on org switch. */
@@ -111,9 +99,7 @@ export const usePluginStore = defineStore('plugins', () => {
     const notifications = useNotificationStore()
     try {
       const created = await pluginsApi.createPlugin(data)
-      plugins.value = [...plugins.value, created].sort((a, b) =>
-        a.name.localeCompare(b.name),
-      )
+      plugins.value = [...plugins.value, created].sort((a, b) => a.name.localeCompare(b.name))
       notifications.success('Plugin created', `"${created.name}" is ready.`)
       return created
     } catch (e: unknown) {
@@ -173,67 +159,6 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  function mcpOAuthStatusKey(pluginId: string, serverId: string): string {
-    return `${pluginId}:${serverId}`
-  }
-
-  async function fetchMcpOAuthStatus(pluginId: string, serverId: string): Promise<void> {
-    const key = mcpOAuthStatusKey(pluginId, serverId)
-    mcpOAuthLoading.value[key] = true
-    try {
-      mcpOAuthStatuses.value[key] = await mcpOAuthApi.getMcpOAuthStatus(pluginId, serverId)
-    } catch {
-      // Status is non-secret metadata; keep the UI usable if the endpoint is unavailable.
-      delete mcpOAuthStatuses.value[key]
-    } finally {
-      mcpOAuthLoading.value[key] = false
-    }
-  }
-
-  function getMcpOAuthStatus(pluginId: string, serverId: string): McpOAuthStatus | undefined {
-    return mcpOAuthStatuses.value[mcpOAuthStatusKey(pluginId, serverId)]
-  }
-
-  async function connectMcpOAuth(
-    pluginId: string,
-    serverId: string,
-    serviceId: string,
-    organizationCredential: boolean,
-  ): Promise<boolean> {
-    const notifications = useNotificationStore()
-    try {
-      const result = await mcpOAuthApi.startMcpOAuth(
-        pluginId, serverId, serviceId, organizationCredential,
-      )
-      // OAuth authorization is a top-level navigation: it must remain in this
-      // tab so the backend's HttpOnly flow-binding cookie reaches its callback.
-      mcpOAuthApi.navigateToAuthorization(result.authorization_url)
-      return true
-    } catch (e: unknown) {
-      notifications.error('OAuth connection failed', e instanceof Error ? e.message : 'Could not start OAuth connection.')
-      return false
-    }
-  }
-
-  async function disconnectMcpOAuth(
-    pluginId: string,
-    serverId: string,
-    serviceId: string,
-    organizationCredential: boolean,
-  ): Promise<boolean> {
-    const notifications = useNotificationStore()
-    try {
-      await mcpOAuthApi.disconnectMcpOAuth(pluginId, serverId, serviceId, organizationCredential)
-      await fetchMcpOAuthStatus(pluginId, serverId)
-      await useCredentialStore().fetchCredentials()
-      notifications.success('OAuth disconnected', 'The stored connection was disconnected. Workspace attachments were preserved.')
-      return true
-    } catch (e: unknown) {
-      notifications.error('Disconnect failed', e instanceof Error ? e.message : 'Could not disconnect OAuth.')
-      return false
-    }
-  }
-
   async function fetchWorkspacePlugins(workspaceId: string): Promise<void> {
     const authStore = useAuthStore()
     const orgId = authStore.activeOrganizationId
@@ -262,28 +187,6 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  async function setWorkspacePlugins(
-    workspaceId: string,
-    pluginIds: string[],
-    opts: { notify?: boolean } = {},
-  ): Promise<WorkspacePlugin[] | null> {
-    const notifications = useNotificationStore()
-    try {
-      const list = await pluginsApi.updateWorkspacePlugins(workspaceId, {
-        plugin_ids: pluginIds,
-      })
-      workspacePlugins.value[workspaceId] = list
-      if (opts.notify !== false) {
-        notifications.success('Workspace plugins updated', 'Plugin activations were saved.')
-      }
-      return list
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to update workspace plugins'
-      notifications.error('Update failed', msg)
-      return null
-    }
-  }
-
   /** Re-fetch workspace plugins after a failed multi-step save (resync UI). */
   async function resyncWorkspacePlugins(workspaceId: string): Promise<void> {
     await fetchWorkspacePlugins(workspaceId)
@@ -300,8 +203,6 @@ export const usePluginStore = defineStore('plugins', () => {
     workspacePlugins,
     workspacePluginsLoading,
     workspacePluginsError,
-    mcpOAuthStatuses,
-    mcpOAuthLoading,
     // Getters
     globalPlugins,
     orgPlugins,
@@ -315,11 +216,6 @@ export const usePluginStore = defineStore('plugins', () => {
     deletePlugin,
     toggleActivation,
     fetchWorkspacePlugins,
-    fetchMcpOAuthStatus,
-    getMcpOAuthStatus,
-    connectMcpOAuth,
-    disconnectMcpOAuth,
-    setWorkspacePlugins,
     resyncWorkspacePlugins,
   }
 })

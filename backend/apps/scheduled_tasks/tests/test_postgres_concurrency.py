@@ -16,8 +16,9 @@ from apps.accounts.models import User
 from apps.harness.models import HarnessSession
 from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Organization
-from apps.runners.enums import RunnerStatus, WorkspaceStatus
+from apps.runners.enums import RunnerStatus, WorkspaceOperation, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
+from apps.runners.repositories import WorkspaceRepository
 from apps.scheduled_tasks.models import ScheduledTask
 from apps.scheduled_tasks.repositories import ScheduledTaskRepository
 
@@ -41,11 +42,14 @@ def schedule_graph(db: Any) -> tuple[Organization, User, Workspace]:
         api_token_hash=uuid.uuid4().hex,
         status=RunnerStatus.ONLINE,
     )
+    organization.workspace_auto_stop_timeout_minutes = 5
+    organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
     workspace = Workspace.objects.create(
         runner=runner,
         created_by=owner,
         name="Concurrency workspace",
         status=WorkspaceStatus.RUNNING,
+        last_activity_at=datetime.now(timezone.utc) - timedelta(hours=1),
     )
     return organization, owner, workspace
 
@@ -167,6 +171,42 @@ def test_concurrent_scheduled_roots_reserve_workspace_once(
         ).count()
         == 1
     )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_auto_stop_and_scheduled_admission_serialize_on_workspace(
+    schedule_graph: tuple[Organization, User, Workspace],
+) -> None:
+    organization, _, workspace = schedule_graph
+    session = _create_root_session(workspace, organization)
+    timeout = organization.workspace_auto_stop_timeout_minutes
+    assert timeout == 5
+    idle_before = datetime.now(timezone.utc) - timedelta(minutes=timeout)
+
+    (pid_stop, stop_claim), (pid_run, run_reserved) = _run_concurrently(
+        (
+            lambda: WorkspaceRepository.claim_auto_stop(
+                workspace.id,
+                idle_before=idle_before,
+                expected_timeout_minutes=timeout,
+            ),
+            lambda: HarnessSessionRepository.reserve_workspace_run(
+                session.id, scheduled=True
+            ),
+        )
+    )
+
+    assert pid_stop != pid_run
+    workspace.refresh_from_db()
+    session.refresh_from_db()
+    if stop_claim is not None:
+        assert stop_claim.active_operation == WorkspaceOperation.STOPPING
+        assert run_reserved is False
+        assert session.status == "idle"
+    else:
+        assert run_reserved is True
+        assert workspace.active_operation is None
+        assert session.status == "busy"
 
 
 @pytest.mark.django_db(transaction=True)

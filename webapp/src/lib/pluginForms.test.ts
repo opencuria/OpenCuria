@@ -52,14 +52,8 @@ function makePlugin(): Plugin {
         service_name: 'Playwright Auth',
         service_slug: 'playwright-auth',
         credential_type: 'env',
-        plugin_owned_service: true,
       },
     ],
-    credential_readiness: {
-      required_service_ids: ['svc-1'],
-      missing_required_service_ids: ['svc-1'],
-      ready: false,
-    },
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   }
@@ -76,7 +70,12 @@ describe('pluginForms', () => {
       '-y',
       '@playwright/mcp@latest',
     ])
-    expect(rowsToDict([{ uid: 'a', key: 'K', value: 'v' }, { uid: 'b', key: ' ', value: 'x' }])).toEqual({
+    expect(
+      rowsToDict([
+        { uid: 'a', key: 'K', value: 'v' },
+        { uid: 'b', key: ' ', value: 'x' },
+      ]),
+    ).toEqual({
       K: 'v',
     })
   })
@@ -86,13 +85,17 @@ describe('pluginForms', () => {
     expect(form.skills).toHaveLength(1)
     expect(form.mcps[0]?.argsText).toBe('-y\n@playwright/mcp@latest')
     expect(form.mcps[0]?.env[0]).toMatchObject({ key: 'TOKEN', value: '{{credential.API_KEY}}' })
-    expect(form.requirements[0]?.mode).toBe('existing')
+    expect(form.requirements[0]?.serviceId).toBe('svc-1')
     expect(form.requirements[0]?.serviceId).toBe('svc-1')
 
     const update = formToUpdateIn(form)
-    expect(update.credential_requirements?.[0]?.credential_service).toEqual({
+    expect(update.credential_requirements?.[0]).toMatchObject({
+      key: 'api_key',
+      description: '',
+      required: true,
       service_id: 'svc-1',
     })
+    expect(update.credential_requirements?.[0]).not.toHaveProperty('credential_service')
     expect(update.skills?.[0]?.position).toBe(0)
     expect(update.mcp_servers?.[0]?.command).toBe('npx')
   })
@@ -105,13 +108,8 @@ describe('pluginForms', () => {
       reqKey: 'notion_oauth',
       description: 'Authorize Notion',
       required: true,
-      mode: 'new',
-      serviceId: '',
-      serviceName: 'Notion OAuth',
+      serviceId: 'oauth-service',
       credentialType: 'mcp_oauth',
-      envVarName: '',
-      targetPath: '',
-      label: '',
     })
     form.mcps.push({
       uid: 'mcp-oauth',
@@ -133,52 +131,77 @@ describe('pluginForms', () => {
       auth_type: 'oauth',
       oauth_requirement_key: 'notion_oauth',
     })
-    expect(formToCreateIn(form).credential_requirements?.[0]?.credential_service).toMatchObject({
-      credential_type: 'mcp_oauth',
+    expect(formToCreateIn(form).credential_requirements?.[0]).toMatchObject({
+      key: 'notion_oauth',
+      description: 'Authorize Notion',
+      required: true,
+      service_id: 'oauth-service',
     })
 
     const existing = makePlugin()
-    existing.mcp_servers = [{
-      id: 'server-oauth', name: 'Notion', slug: 'notion', transport: 'streamable_http',
-      command: '', args: [], cwd: '/workspace', env: {}, url: 'https://mcp.example.com/mcp',
-      headers: {}, startup_timeout_seconds: 30, request_timeout_seconds: 60,
-      auth_type: 'oauth', oauth_requirement_key: 'notion_oauth',
-    }]
-    existing.credential_requirements = [{
-      id: 'req-oauth', key: 'notion_oauth', description: '', required: true,
-      service_id: 'oauth-service', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
-      credential_type: 'mcp_oauth', plugin_owned_service: true,
-    }]
+    existing.mcp_servers = [
+      {
+        id: 'server-oauth',
+        name: 'Notion',
+        slug: 'notion',
+        transport: 'streamable_http',
+        command: '',
+        args: [],
+        cwd: '/workspace',
+        env: {},
+        url: 'https://mcp.example.com/mcp',
+        headers: {},
+        startup_timeout_seconds: 30,
+        request_timeout_seconds: 60,
+        auth_type: 'oauth',
+        oauth_requirement_key: 'notion_oauth',
+      },
+    ]
+    existing.credential_requirements = [
+      {
+        id: 'req-oauth',
+        key: 'notion_oauth',
+        description: '',
+        required: true,
+        service_id: 'oauth-service',
+        service_name: 'Notion OAuth',
+        service_slug: 'notion-oauth',
+        credential_type: 'mcp_oauth',
+      },
+    ]
     const update = formToUpdateIn(pluginToForm(existing))
-    expect(update.mcp_servers?.[0]).toMatchObject({ auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' })
-    expect(update.credential_requirements?.[0]?.credential_service).toEqual({ service_id: 'oauth-service' })
+    expect(update.mcp_servers?.[0]).toMatchObject({
+      auth_type: 'oauth',
+      oauth_requirement_key: 'notion_oauth',
+    })
+    expect(update.credential_requirements?.[0]?.service_id).toBe('oauth-service')
 
     form.mcps[0]!.oauthRequirementKey = 'other'
-    expect(validatePluginForm(form).some((error) => error.includes('required MCP OAuth credential service'))).toBe(true)
+    expect(
+      validatePluginForm(form).some((error) =>
+        error.includes('required MCP OAuth credential service'),
+      ),
+    ).toBe(true)
     form.mcps[0]!.oauthRequirementKey = 'notion_oauth'
-    form.mcps.push({ ...form.mcps[0]!, uid: 'mcp-duplicate', name: 'Duplicate' })
-    expect(validatePluginForm(form).some((error) => error.includes('used by exactly one'))).toBe(true)
-  })
-
-  it('serializes new-service requirements with normalized fields', () => {
-    const form = emptyPluginForm()
-    form.name = 'Demo'
-    form.requirements.push({
-      uid: 'r1',
-      reqKey: 'api_key',
+    const service = {
+      id: 'oauth-service',
+      name: 'Notion OAuth',
+      slug: 'notion-oauth',
       description: '',
-      required: true,
-      mode: 'new',
-      serviceId: '',
-      serviceName: 'Demo Auth',
-      credentialType: 'env',
-      envVarName: 'demo_token',
-      targetPath: '',
+      credential_type: 'mcp_oauth',
+      env_var_name: '',
+      target_path: '',
       label: '',
-    })
-    const create = formToCreateIn(form)
-    expect(create.slug).toBe('')
-    expect(create.credential_requirements?.[0]?.credential_service.env_var_name).toBe('DEMO_TOKEN')
+      oauth_server_url: 'https://mcp.example.com/mcp',
+      organization_id: 'org-1',
+      is_active: true,
+    }
+    form.availableServices = [service]
+    form.mcps[0]!.url = 'https://different.example.com/mcp'
+    expect(validatePluginForm(form).some((error) => error.includes('exactly match'))).toBe(true)
+    form.mcps[0]!.url = service.oauth_server_url
+    form.mcps.push({ ...form.mcps[0]!, uid: 'mcp-duplicate', name: 'Duplicate' })
+    expect(validatePluginForm(form).some((error) => error.includes('exactly one'))).toBe(true)
   })
 
   it('validates required fields, transports, and requirement sources', () => {
@@ -206,13 +229,8 @@ describe('pluginForms', () => {
       reqKey: 'api_key',
       description: '',
       required: true,
-      mode: 'existing',
       serviceId: '',
-      serviceName: '',
       credentialType: 'env',
-      envVarName: '',
-      targetPath: '',
-      label: '',
     })
     const errors = validatePluginForm(form)
     expect(errors.some((e) => e.includes('command is required'))).toBe(true)
@@ -229,13 +247,8 @@ describe('pluginForms', () => {
       reqKey: 'api_key',
       description: '',
       required: true,
-      mode: 'existing',
       serviceId: 'svc-1',
-      serviceName: '',
       credentialType: 'env',
-      envVarName: '',
-      targetPath: '',
-      label: '',
     })
     form.mcps.push({
       uid: 'm1',
@@ -263,7 +276,9 @@ describe('pluginForms', () => {
     form.mcps[0]!.command = 'npx'
     form.mcps[0]!.argsText = '-y'
     form.mcps[0]!.env = [{ uid: 'e1', key: 'TOKEN', value: 'x' }]
-    form.mcps[0]!.headers = [{ uid: 'h1', key: 'Authorization', value: 'Bearer {{credential.api_key}}' }]
+    form.mcps[0]!.headers = [
+      { uid: 'h1', key: 'Authorization', value: 'Bearer {{credential.api_key}}' },
+    ]
     const http = formToCreateIn(form).mcp_servers?.[0]
     expect(http?.command).toBe('')
     expect(http?.args).toEqual([])
@@ -276,16 +291,28 @@ describe('pluginForms', () => {
     form.name = 'Demo'
     form.requirements.push(
       {
-        uid: 'r1', reqKey: 'api_key', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-1', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        uid: 'r1',
+        reqKey: 'api_key',
+        description: '',
+        required: true,
+        serviceId: 'svc-1',
+        credentialType: 'env',
       },
       {
-        uid: 'r2', reqKey: 'api_key', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-2', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        uid: 'r2',
+        reqKey: 'api_key',
+        description: '',
+        required: true,
+        serviceId: 'svc-2',
+        credentialType: 'env',
       },
       {
-        uid: 'r3', reqKey: 'bad key!', description: '', required: true, mode: 'existing',
-        serviceId: 'svc-3', serviceName: '', credentialType: 'env', envVarName: '', targetPath: '', label: '',
+        uid: 'r3',
+        reqKey: 'bad key!',
+        description: '',
+        required: true,
+        serviceId: 'svc-3',
+        credentialType: 'env',
       },
     )
     form.mcps.push({
@@ -318,10 +345,19 @@ describe('pluginForms', () => {
     const urlForm = emptyPluginForm()
     urlForm.name = 'Demo'
     urlForm.mcps.push({
-      uid: 'm1', name: 'Runner', transport: 'streamable_http', command: '', argsText: '',
-      cwd: '/workspace', env: [], headers: [],
+      uid: 'm1',
+      name: 'Runner',
+      transport: 'streamable_http',
+      command: '',
+      argsText: '',
+      cwd: '/workspace',
+      env: [],
+      headers: [],
       url: 'https://user:pass@mcp.example.com/mcp#frag',
-      startupTimeout: 30, requestTimeout: 60, authType: 'none', oauthRequirementKey: '',
+      startupTimeout: 30,
+      requestTimeout: 60,
+      authType: 'none',
+      oauthRequirementKey: '',
     })
     expect(validatePluginForm(urlForm).some((e) => e.includes('userinfo or a fragment'))).toBe(true)
   })

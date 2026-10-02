@@ -29,10 +29,19 @@ Tools and their required permissions
 - delete_build_job → image_definitions:manage_runners
 - get_build_job_log → image_definitions:read
 - list_credentials       → credentials:read
+- list_credential_services → credentials:read
+- create_credential/update_credential/delete_credential → credentials:write
+- connect_credential_oauth → credentials:read (frontend deep link only)
+- disconnect_credential_oauth → credentials:write
+- create_org_credential_service → org_credential_services:write
 - list_plugins           → plugins:read
 - toggle_org_plugin_activation → plugins:write (admin only)
 - list_workspace_plugins → plugins:read
-- set_workspace_plugins  → plugins:write
+- create/update workspace plugin_ids → plugins:write (when non-empty)
+- create/update workspace credential_ids → credentials:read (when non-empty)
+- create_workspace non-empty plugin_ids → plugins:write;
+  credential_ids → credentials:read
+- update_workspace plugin_ids → plugins:write; credential_ids → credentials:read
 - get_provider_config → harness:read
 - list_provider_models → harness:read
 - save_provider_config → harness:run
@@ -176,8 +185,11 @@ _TOOLS: list[Tool] = [
                     "type": "integer",
                     "description": "Fixed desktop height in pixels (default 1080).",
                 },
+                "credential_ids": {"type": "array", "items": {"type": "string"}},
+                "plugin_ids": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["name"],
+            "additionalProperties": False,
         },
     ),
     Tool(
@@ -202,8 +214,11 @@ _TOOLS: list[Tool] = [
                 "qemu_vcpus": {"type": "integer"},
                 "qemu_memory_mb": {"type": "integer"},
                 "qemu_disk_size_gb": {"type": "integer"},
+                "credential_ids": {"type": "array", "items": {"type": "string"}},
+                "plugin_ids": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["workspace_id"],
+            "additionalProperties": False,
         },
     ),
     Tool(
@@ -401,7 +416,7 @@ _TOOLS: list[Tool] = [
         name="list_plugins",
         description=(
             "List plugins visible in the active organization (global + "
-            "org-owned) with components and org credential readiness "
+            "org-owned) with components and credential requirements "
             "(metadata only, no secrets)."
         ),
         inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -426,7 +441,7 @@ _TOOLS: list[Tool] = [
         name="list_workspace_plugins",
         description=(
             "List org-enabled plugins for a workspace with activation "
-            "state and credential gaps (metadata only, no secrets)."
+            "state and required-credential gaps (metadata only, no secrets)."
         ),
         inputSchema={
             "type": "object",
@@ -434,26 +449,6 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string", "description": "Workspace UUID."}
             },
             "required": ["workspace_id"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="set_workspace_plugins",
-        description=(
-            "Replace workspace plugin activations atomically. Required "
-            "credential services must be attached to the workspace."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "plugin_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Desired plugin UUIDs (empty clears all).",
-                },
-            },
-            "required": ["workspace_id", "plugin_ids"],
             "additionalProperties": False,
         },
     ),
@@ -506,8 +501,7 @@ _TOOLS: list[Tool] = [
                 "provider": {
                     "type": "string",
                     "description": (
-                        "Provider id: openrouter, openai-compatible, "
-                        "or amazon-bedrock."
+                        "Provider id: openrouter, openai-compatible, or amazon-bedrock."
                     ),
                 },
                 "api_key": {"type": "string"},
@@ -926,6 +920,95 @@ _TOOLS: list[Tool] = [
                 "active": {"type": "boolean"},
             },
             "required": ["service_id", "active"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="list_credential_services",
+        description="List visible credential services, endpoint and activation state.",
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+    ),
+    Tool(
+        name="create_org_credential_service",
+        description="Create and activate an organization credential service (admin).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "slug": {"type": "string"},
+                "description": {"type": "string"},
+                "credential_type": {
+                    "type": "string",
+                    "enum": ["env", "file", "ssh_key", "mcp_oauth"],
+                },
+                "env_var_name": {"type": "string"},
+                "target_path": {"type": "string"},
+                "label": {"type": "string"},
+                "oauth_server_url": {"type": "string"},
+            },
+            "required": ["name", "credential_type"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="create_credential",
+        description="Create a personal or org credential (secret values never returned).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "string"},
+                "name": {"type": "string"},
+                "value": {"type": "string"},
+                "organization_credential": {"type": "boolean"},
+            },
+            "required": ["service_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="update_credential",
+        description="Update credential name/value without returning secrets.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "credential_id": {"type": "string"},
+                "name": {"type": "string"},
+                "value": {"type": "string"},
+            },
+            "required": ["credential_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="delete_credential",
+        description="Delete a credential unless a selected plugin requires it.",
+        inputSchema={
+            "type": "object",
+            "properties": {"credential_id": {"type": "string"}},
+            "required": ["credential_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="connect_credential_oauth",
+        description="Open the trusted frontend credential settings to connect/reconnect OAuth; no browser grant starts through MCP.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "string"},
+                "credential_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="disconnect_credential_oauth",
+        description="Disconnect an OAuth grant while keeping workspace links.",
+        inputSchema={
+            "type": "object",
+            "properties": {"credential_id": {"type": "string"}},
+            "required": ["credential_id"],
+            "additionalProperties": False,
         },
     ),
     Tool(
@@ -1201,10 +1284,16 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "list_credentials": APIKeyPermission.CREDENTIALS_READ,
+    "list_credential_services": APIKeyPermission.CREDENTIALS_READ,
+    "create_credential": APIKeyPermission.CREDENTIALS_WRITE,
+    "update_credential": APIKeyPermission.CREDENTIALS_WRITE,
+    "delete_credential": APIKeyPermission.CREDENTIALS_WRITE,
+    "connect_credential_oauth": APIKeyPermission.CREDENTIALS_READ,
+    "disconnect_credential_oauth": APIKeyPermission.CREDENTIALS_WRITE,
+    "create_org_credential_service": APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE,
     "list_plugins": APIKeyPermission.PLUGINS_READ,
     "toggle_org_plugin_activation": APIKeyPermission.PLUGINS_WRITE,
     "list_workspace_plugins": APIKeyPermission.PLUGINS_READ,
-    "set_workspace_plugins": APIKeyPermission.PLUGINS_WRITE,
     "get_provider_config": APIKeyPermission.HARNESS_READ,
     "list_provider_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
@@ -1325,10 +1414,10 @@ def _get_owned_workspace_or_error(api_key, org_id, workspace_id):
 
 
 def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
-
     import uuid as _uuid
+
+    from apps.organizations.services import OrganizationService
+    from apps.runners.sio_server import get_runner_service
 
     svc = get_runner_service()
     org_service = OrganizationService()
@@ -1383,6 +1472,10 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "runtime_type": str(workspace.runtime_type),
         "desktop_width": workspace.desktop_width,
         "desktop_height": workspace.desktop_height,
+        "credential_ids": [str(item.id) for item in workspace.credentials.all()],
+        "plugin_ids": [
+            str(item.plugin_id) for item in workspace.plugin_activations.all()
+        ],
         "created_at": workspace.created_at.isoformat(),
     }
     return _text(result)
@@ -1390,12 +1483,11 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     """Synchronously dispatch workspace creation (fires and returns task info)."""
-    from apps.runners.sio_server import get_runner_service
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError, ConflictError
-
     import asyncio
     import uuid as _uuid
+
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import ConflictError, NotFoundError
 
     name = args.get("name")
     if not name:
@@ -1410,6 +1502,29 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
     repos = args.get("repos", [])
     runtime_type = args.get("runtime_type", "docker")
+    credential_ids = args.get("credential_ids", [])
+    plugin_ids = args.get("plugin_ids", [])
+    if not isinstance(credential_ids, list) or not isinstance(plugin_ids, list):
+        return _error("credential_ids and plugin_ids must be arrays")
+    try:
+        credential_ids = [_uuid.UUID(str(value)) for value in credential_ids]
+        plugin_ids = [_uuid.UUID(str(value)) for value in plugin_ids]
+    except ValueError:
+        return _error("Invalid credential_ids or plugin_ids UUID")
+    if "credential_ids" in args and not api_key.has_permission(
+        APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _error("Permission denied: credentials:read required")
+    if plugin_ids and not api_key.has_permission(APIKeyPermission.PLUGINS_WRITE):
+        return _error("Permission denied: plugins:write required")
+    from apps.credentials.services import CredentialSvc
+
+    try:
+        resolved = CredentialSvc().resolve_credentials(
+            credential_ids, org_id=org_id, user=api_key.user
+        )
+    except Exception as exc:
+        return _error(str(exc))
     desktop_width = args.get("desktop_width")
     desktop_height = args.get("desktop_height")
     image_artifact_id = None
@@ -1426,15 +1541,18 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             name=name,
             repos=repos,
             runtime_type=runtime_type,
-            env_vars={},
-            ssh_keys=[],
-            credentials=[],
+            env_vars=resolved.env_vars,
+            files=resolved.files,
+            ssh_keys=resolved.ssh_keys,
+            credentials=resolved.credentials,
+            resolved_credentials=resolved,
             runner_id=runner_id,
             image_artifact_id=image_artifact_id,
             desktop_width=desktop_width,
             desktop_height=desktop_height,
             user=api_key.user,
             organization_id=org_id,
+            plugin_ids=plugin_ids,
         )
         return workspace, task
 
@@ -1442,25 +1560,41 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         loop = asyncio.new_event_loop()
         workspace, task = loop.run_until_complete(_create())
         loop.close()
+        from apps.plugins.repositories import WorkspacePluginActivationRepository
+
+        plugin_ids_out = [
+            str(value)
+            for value in WorkspacePluginActivationRepository.enabled_plugin_ids(
+                workspace.id
+            )
+        ]
         return _text(
             {
                 "workspace_id": str(workspace.id),
                 "task_id": str(task.id),
                 "status": str(workspace.status),
+                "plugin_ids": plugin_ids_out,
+                "credential_sync_status": "not_required",
                 "message": "Workspace creation started. Use get_workspace to check status.",
             }
         )
     except (NotFoundError, ConflictError, ValueError) as e:
-        return _error(str(e))
+        return _text(
+            {
+                "error": str(e),
+                "code": getattr(e, "code", "validation_error"),
+                "gaps": getattr(e, "gaps", None),
+            }
+        )
 
 
 def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     """Update mutable workspace metadata, including desktop geometry."""
-    from apps.runners.sio_server import get_runner_service
-    from common.exceptions import NotFoundError, ConflictError
-
     import asyncio
     import uuid as _uuid
+
+    from apps.runners.sio_server import get_runner_service
+    from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     if not workspace_id_str:
@@ -1474,6 +1608,35 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     if error is not None:
         return error
 
+    credential_records = None
+    resolved = None
+    if "credential_ids" in args:
+        raw_ids = args.get("credential_ids")
+        if not isinstance(raw_ids, list):
+            return _error("credential_ids must be an array")
+        try:
+            ids = [_uuid.UUID(str(value)) for value in raw_ids]
+        except ValueError:
+            return _error("Invalid credential_ids UUID")
+        if not api_key.has_permission(APIKeyPermission.CREDENTIALS_READ):
+            return _error("Permission denied: credentials:read required")
+        from apps.credentials.services import CredentialSvc
+
+        try:
+            resolved = CredentialSvc().resolve_credentials(
+                ids, org_id=org_id, user=api_key.user
+            )
+            credential_records = resolved.credentials
+        except Exception as exc:
+            return _error(str(exc))
+    plugin_ids = None
+    if "plugin_ids" in args:
+        if not api_key.has_permission(APIKeyPermission.PLUGINS_WRITE):
+            return _error("Permission denied: plugins:write required")
+        try:
+            plugin_ids = [_uuid.UUID(str(value)) for value in args["plugin_ids"]]
+        except (ValueError, TypeError):
+            return _error("Invalid plugin_ids UUID")
     svc = get_runner_service()
 
     async def _update():
@@ -1485,12 +1648,20 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             qemu_disk_size_gb=args.get("qemu_disk_size_gb"),
             desktop_width=args.get("desktop_width"),
             desktop_height=args.get("desktop_height"),
+            credentials=credential_records,
+            resolved_credentials=resolved,
+            plugin_ids=plugin_ids,
+            user=api_key.user,
+            organization_id=org_id,
         )
 
     try:
         loop = asyncio.new_event_loop()
         updated = loop.run_until_complete(_update())
         loop.close()
+        from apps.runners.repositories import WorkspaceRepository
+
+        persisted = WorkspaceRepository.get_by_id(updated.id)
         return _text(
             {
                 "id": str(updated.id),
@@ -1498,17 +1669,35 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
                 "desktop_width": updated.desktop_width,
                 "desktop_height": updated.desktop_height,
                 "updated_at": updated.updated_at.isoformat(),
+                "credential_ids": [
+                    str(item.id) for item in persisted.credentials.all()
+                ],
+                "plugin_ids": [
+                    str(item.plugin_id) for item in persisted.plugin_activations.all()
+                ],
+                "credential_sync_status": getattr(
+                    updated, "credential_sync_status", "not_required"
+                ),
+                "credential_sync_detail": getattr(
+                    updated, "credential_sync_detail", None
+                ),
             }
         )
     except (NotFoundError, ConflictError, ValueError) as e:
-        return _error(str(e))
+        return _text(
+            {
+                "error": str(e),
+                "code": getattr(e, "code", "validation_error"),
+                "gaps": getattr(e, "gaps", None),
+            }
+        )
 
 
 def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError, ConflictError
-
     import asyncio
     import uuid as _uuid
+
+    from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     if not workspace_id_str:
@@ -1539,10 +1728,10 @@ def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError, ConflictError
-
     import asyncio
     import uuid as _uuid
+
+    from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     if not workspace_id_str:
@@ -1573,10 +1762,10 @@ def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError, ConflictError
-
     import asyncio
     import uuid as _uuid
+
+    from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     if not workspace_id_str:
@@ -1607,8 +1796,8 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
+    from apps.runners.sio_server import get_runner_service
 
     svc = get_runner_service()
     org_service = OrganizationService()
@@ -1627,8 +1816,8 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.runners.sio_server import get_runner_service
     from apps.organizations.services import OrganizationService
+    from apps.runners.sio_server import get_runner_service
 
     svc = get_runner_service()
     org_service = OrganizationService()
@@ -1652,10 +1841,10 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
 
 
 def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent]:
-    from common.exceptions import NotFoundError
-
     import asyncio
     import uuid as _uuid
+
+    from common.exceptions import NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     name = args.get("name")
@@ -1765,11 +1954,12 @@ def _call_create_image_definition(api_key, org_id, args: dict) -> list[TextConte
 
 
 def _call_duplicate_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
     from django.db.models import Q
+
     from apps.organizations.services import OrganizationService
     from apps.runners.models import ImageDefinition
-
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     if not definition_id_str:
@@ -1830,10 +2020,10 @@ def _call_duplicate_image_definition(api_key, org_id, args: dict) -> list[TextCo
 
 
 def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
-
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     if not definition_id_str:
@@ -1877,13 +2067,13 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
 
 
 def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
     from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
-
-    import asyncio
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     if not definition_id_str:
@@ -1924,11 +2114,11 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
 
 
 def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
     from apps.runners.sio_server import get_runner_service
-
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     if not definition_id_str:
@@ -1966,9 +2156,7 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
                 "status": build.status,
                 # Size only: the full log is served by get_build_log and
                 # would otherwise re-introduce the unbounded payload here.
-                "build_log_size": int(
-                    getattr(build, "build_log_size", 0) or 0
-                ),
+                "build_log_size": int(getattr(build, "build_log_size", 0) or 0),
                 "build_task_id": str(build.build_task_id)
                 if build.build_task_id
                 else None,
@@ -1985,12 +2173,12 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository, RunnerRepository
     from apps.runners.sio_server import get_runner_service
-
-    import asyncio
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     runner_id_str = args.get("runner_id")
@@ -2031,15 +2219,16 @@ def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
+    from django.utils import timezone
+
     from apps.organizations.services import OrganizationService
     from apps.runners.models import ImageBuildJob
     from apps.runners.repositories import ImageBuildJobRepository
     from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
-    from django.utils import timezone
-
-    import asyncio
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     runner_id_str = args.get("runner_id")
@@ -2101,13 +2290,13 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
+    import asyncio
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageBuildJobRepository
     from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
-
-    import asyncio
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     runner_id_str = args.get("runner_id")
@@ -2146,10 +2335,10 @@ def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_get_build_job_log(api_key, org_id, args: dict) -> list[TextContent]:
+    import uuid as _uuid
+
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageBuildJobRepository
-
-    import uuid as _uuid
 
     definition_id_str = args.get("definition_id")
     runner_id_str = args.get("runner_id")
@@ -2175,23 +2364,296 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
 
     svc = CredentialSvc()
     creds = svc.list_credentials(api_key.user, org_id)
+    from apps.credentials.mcp_oauth import oauth_credential_status
+
     result = [
         {
             "id": str(c.id),
             "name": c.name,
+            "scope": "personal" if c.user_id is not None else "organization",
+            "service_id": str(c.service_id),
             "service_name": c.service.name,
             "service_slug": c.service.slug,
             "credential_type": str(c.service.credential_type),
+            "env_var_name": c.service.env_var_name,
+            "target_path": c.service.target_path,
+            "created_by_id": c.created_by_id,
             "created_at": c.created_at.isoformat(),
+            "updated_at": c.updated_at.isoformat(),
+            "oauth_connected": oauth_credential_status(c)["connected"]
+            if c.service.credential_type == "mcp_oauth"
+            else False,
+            "oauth_status": oauth_credential_status(c)["status"]
+            if c.service.credential_type == "mcp_oauth"
+            else "",
+            "oauth_reconnect_required": oauth_credential_status(c)["reconnect_required"]
+            if c.service.credential_type == "mcp_oauth"
+            else False,
+            "oauth_expires_at": oauth_credential_status(c)["expires_at"].isoformat()
+            if c.service.credential_type == "mcp_oauth"
+            and oauth_credential_status(c)["expires_at"]
+            else None,
         }
         for c in creds
     ]
     return _text(result)
 
 
+def _call_list_credential_services(api_key, org_id, args: dict):
+    from apps.credentials.repositories import OrgCredentialServiceActivationRepository
+    from apps.credentials.services import CredentialServiceSvc
+    from apps.organizations.services import OrganizationService
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    active = OrgCredentialServiceActivationRepository.activated_service_ids(org_id)
+    return _text(
+        [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "slug": s.slug,
+                "description": s.description,
+                "credential_type": s.credential_type,
+                "env_var_name": s.env_var_name,
+                "target_path": s.target_path,
+                "label": s.label,
+                "organization_id": str(s.organization_id)
+                if s.organization_id
+                else None,
+                "oauth_server_url": s.oauth_server_url,
+                "is_active": s.id in active,
+            }
+            for s in CredentialServiceSvc().list_services(org_id=org_id)
+        ]
+    )
+
+
+def _call_create_org_credential_service(api_key, org_id, args: dict):
+    from apps.credentials.services import (
+        CredentialServiceSvc,
+        OrgCredentialServiceActivationSvc,
+    )
+    from apps.organizations.services import OrganizationService
+
+    org = OrganizationService()
+    org.require_membership(api_key.user, org_id)
+    if org.get_user_role(api_key.user, org_id) != "admin":
+        return _error("Admin role required")
+    try:
+        service = CredentialServiceSvc().create_service(
+            name=args.get("name", ""),
+            slug=args.get("slug", ""),
+            description=args.get("description", ""),
+            credential_type=args.get("credential_type", ""),
+            env_var_name=args.get("env_var_name", ""),
+            target_path=args.get("target_path", ""),
+            label=args.get("label", ""),
+            organization_id=org_id,
+            oauth_server_url=args.get("oauth_server_url", ""),
+        )
+        OrgCredentialServiceActivationSvc().set_activation(
+            org_id=org_id, service=service, active=True
+        )
+        return _text(
+            {
+                "id": str(service.id),
+                "name": service.name,
+                "slug": service.slug,
+                "credential_type": service.credential_type,
+                "oauth_server_url": service.oauth_server_url,
+                "is_active": True,
+            }
+        )
+    except (ValueError, Exception) as exc:
+        return _error(str(exc))
+
+
+def _call_create_credential(api_key, org_id, args: dict):
+    import uuid as _uuid
+
+    from apps.credentials.services import CredentialSvc
+
+    try:
+        service_id = _uuid.UUID(str(args.get("service_id", "")))
+        if args.get("organization_credential"):
+            from apps.organizations.services import OrganizationService
+
+            org = OrganizationService()
+            org.require_membership(api_key.user, org_id)
+            if org.get_user_role(api_key.user, org_id) != "admin":
+                return _error("Admin role required")
+            cred = CredentialSvc().create_org_credential(
+                organization_id=org_id,
+                service_id=service_id,
+                name=args.get("name"),
+                value=args.get("value"),
+                user=api_key.user,
+            )
+        else:
+            cred = CredentialSvc().create_personal_credential(
+                service_id=service_id,
+                name=args.get("name"),
+                value=args.get("value"),
+                user=api_key.user,
+                org_id=org_id,
+            )
+        return _text(
+            {
+                "id": str(cred.id),
+                "name": cred.name,
+                "service_id": str(cred.service_id),
+                "credential_type": cred.service.credential_type,
+            }
+        )
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_update_credential(api_key, org_id, args: dict):
+    import uuid as _uuid
+
+    from apps.credentials.services import CredentialSvc
+    from apps.organizations.services import OrganizationService
+
+    org = OrganizationService()
+    org.require_membership(api_key.user, org_id)
+    try:
+        credential_id = _uuid.UUID(str(args.get("credential_id", "")))
+        cred = CredentialSvc().update_credential(
+            credential_id=credential_id,
+            org_id=org_id,
+            user=api_key.user,
+            is_admin=org.get_user_role(api_key.user, org_id) == "admin",
+            name=args.get("name"),
+            value=args.get("value"),
+        )
+        return _text({"id": str(cred.id), "name": cred.name})
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_delete_credential(api_key, org_id, args: dict):
+    import uuid as _uuid
+
+    from apps.credentials.services import CredentialSvc
+    from apps.organizations.services import OrganizationService
+
+    org = OrganizationService()
+    org.require_membership(api_key.user, org_id)
+    try:
+        credential_id = _uuid.UUID(str(args.get("credential_id", "")))
+        CredentialSvc().delete_credential(
+            credential_id,
+            org_id=org_id,
+            user=api_key.user,
+            is_admin=org.get_user_role(api_key.user, org_id) == "admin",
+        )
+        return _text({"deleted": True, "credential_id": str(credential_id)})
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_connect_credential_oauth(api_key, org_id, args: dict):
+    """Return the trusted settings link for one visible MCP OAuth operation."""
+    import uuid as _uuid
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    from apps.credentials.enums import CredentialType
+    from apps.credentials.mcp_oauth import frontend_return_url
+    from apps.credentials.repositories import (
+        CredentialRepository,
+        CredentialServiceRepository,
+        OrgCredentialServiceActivationRepository,
+    )
+    from apps.organizations.services import OrganizationService
+
+    organizations = OrganizationService()
+    organizations.require_membership(api_key.user, org_id)
+    role = organizations.get_user_role(api_key.user, org_id)
+    service_id = args.get("service_id")
+    credential_id = args.get("credential_id")
+    if bool(service_id) == bool(credential_id):
+        return _error("Provide exactly one of service_id or credential_id")
+
+    try:
+        if credential_id:
+            credential = CredentialRepository.get_by_id(
+                _uuid.UUID(str(credential_id))
+            )
+            if (
+                credential is None
+                or credential.service.credential_type != CredentialType.MCP_OAUTH
+                or CredentialServiceRepository.get_visible_by_id(
+                    credential.service_id, org_id
+                )
+                is None
+            ):
+                return _error("OAuth credential not found")
+            if credential.user_id is not None:
+                if credential.user_id != api_key.user.id:
+                    return _error("OAuth credential not found")
+            elif credential.organization_id != org_id:
+                return _error("OAuth credential not found")
+            elif role != "admin":
+                return _error("Admin role required for organization credentials")
+            action = "reconnect_credential"
+            action_id = str(credential.id)
+            response_service_id = str(credential.service_id)
+        else:
+            service = CredentialServiceRepository.get_visible_by_id(
+                _uuid.UUID(str(service_id)), org_id
+            )
+            if service is None or service.credential_type != CredentialType.MCP_OAUTH:
+                return _error("OAuth service not found")
+            active_service_ids = (
+                OrgCredentialServiceActivationRepository.activated_service_ids(org_id)
+            )
+            if service.id not in active_service_ids:
+                return _error("OAuth service is inactive for this organization")
+            action = "add_credential"
+            action_id = str(service.id)
+            response_service_id = str(service.id)
+
+        parsed = urlsplit(frontend_return_url())
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["settings"] = "credentials"
+        query[action] = action_id
+        link = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), "")
+        )
+        return _text(
+            {
+                "url": link,
+                "credential_settings": True,
+                "service_id": response_service_id,
+                "credential_id": str(credential_id) if credential_id else None,
+            }
+        )
+    except (TypeError, ValueError):
+        return _error("Invalid OAuth service or credential ID")
+    except Exception as exc:
+        return _error(str(exc))
+def _call_disconnect_credential_oauth(api_key, org_id, args: dict):
+    import uuid as _uuid
+
+    from apps.credentials.services import CredentialOAuthSvc
+    from apps.organizations.services import OrganizationService
+
+    org = OrganizationService()
+    org.require_membership(api_key.user, org_id)
+    try:
+        CredentialOAuthSvc().disconnect(
+            credential_id=_uuid.UUID(str(args.get("credential_id", ""))),
+            user=api_key.user,
+            organization_id=org_id,
+        )
+        return _text({"disconnected": True})
+    except Exception as exc:
+        return _error(str(exc))
+
+
 def _plugin_payload(payload: dict) -> dict:
     """Serialize a plugin payload for MCP (metadata only, no secrets)."""
-    readiness = payload.get("credential_readiness") or {}
     return {
         "id": str(payload["id"]),
         "name": payload["name"],
@@ -2226,16 +2688,11 @@ def _plugin_payload(payload: dict) -> dict:
                 "required": bool(r["required"]),
                 "service_id": str(r["service_id"]),
                 "service_slug": r["service_slug"],
+                "service_name": r["service_name"],
+                "credential_type": r["credential_type"],
             }
             for r in payload.get("credential_requirements", [])
         ],
-        "credential_readiness": {
-            "ready": bool(readiness.get("ready", True)),
-            "missing_required_service_ids": [
-                str(sid)
-                for sid in readiness.get("missing_required_service_ids", [])
-            ],
-        },
     }
 
 
@@ -2281,9 +2738,7 @@ def _call_toggle_org_plugin_activation(
     return _text(_plugin_payload(updated))
 
 
-def _call_list_workspace_plugins(
-    api_key, org_id, args: dict
-) -> list[TextContent]:
+def _call_list_workspace_plugins(api_key, org_id, args: dict) -> list[TextContent]:
     import uuid as _uuid
 
     from apps.plugins.services import PluginService
@@ -2313,53 +2768,13 @@ def _call_list_workspace_plugins(
                     {
                         "key": g["key"],
                         "service_id": str(g["service_id"]),
+                        "service_name": g.get("service_name", ""),
+                        "credential_type": g.get("credential_type", ""),
+                        "plugin_id": str(g.get("plugin_id", p["id"])),
+                        "plugin_name": g.get("plugin_name", p["name"]),
                     }
                     for g in p.get("missing_required_credentials", [])
                 ],
-            }
-            for p in payloads
-        ]
-    )
-
-
-def _call_set_workspace_plugins(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    from apps.plugins.services import PluginService
-    from common.exceptions import ConflictError, NotFoundError
-
-    workspace_id_str = args.get("workspace_id")
-    plugin_ids = args.get("plugin_ids")
-    if not workspace_id_str or not isinstance(plugin_ids, list):
-        return _error("workspace_id and plugin_ids are required")
-    try:
-        workspace_id = _uuid.UUID(str(workspace_id_str))
-    except ValueError:
-        return _error("Invalid workspace_id UUID")
-    try:
-        desired = [_uuid.UUID(str(pid)) for pid in plugin_ids]
-    except ValueError:
-        return _error("Invalid plugin_id UUID in plugin_ids")
-    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
-    if error is not None:
-        return error
-    try:
-        payloads = PluginService().set_workspace_plugins(
-            workspace=workspace,
-            org_id=org_id,
-            user=api_key.user,
-            plugin_ids=desired,
-        )
-    except NotFoundError:
-        return _error("Plugin not found")
-    except ConflictError as exc:
-        return _error(str(exc))
-    return _text(
-        [
-            {
-                "id": str(p["id"]),
-                "workspace_enabled": bool(p["workspace_enabled"]),
-                "ready": bool(p["ready"]),
             }
             for p in payloads
         ]
@@ -2606,9 +3021,9 @@ async def _call_chatgpt_oauth_start(api_key, org_id, args: dict) -> list[TextCon
 
     from apps.harness.api import (
         CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
-        _PendingChatGPTOAuth,
         _chatgpt_oauth_lock,
         _chatgpt_oauth_pending,
+        _PendingChatGPTOAuth,
     )
     from apps.harness.providers.base import ProviderError
     from apps.harness.providers.chatgpt_oauth import start_device_flow
@@ -2667,10 +3082,7 @@ async def _call_chatgpt_oauth_status(api_key, org_id, args: dict) -> list[TextCo
                     "detail": "No pending ChatGPT OAuth flow for this organization",
                 }
             )
-        if (
-            time.monotonic() - pending.created_at
-            > CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS
-        ):
+        if time.monotonic() - pending.created_at > CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS:
             async with _chatgpt_oauth_lock:
                 _chatgpt_oauth_pending.pop(org_id, None)
             return _text({"status": "expired"})
@@ -2961,6 +3373,7 @@ async def _call_create_harness_session(
     import uuid as _uuid
 
     from asgiref.sync import sync_to_async
+
     from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
@@ -3012,6 +3425,7 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
     import uuid as _uuid
 
     from asgiref.sync import sync_to_async
+
     from common.exceptions import ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
@@ -3067,6 +3481,7 @@ async def _call_fork_harness_session(api_key, org_id, args) -> list:  # type: ig
     import uuid as _uuid
 
     from asgiref.sync import sync_to_async
+
     from common.exceptions import ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
@@ -3107,6 +3522,7 @@ async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ig
     import uuid as _uuid
 
     from asgiref.sync import sync_to_async
+
     from common.exceptions import ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
@@ -3671,9 +4087,7 @@ def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
                     "author_name/author_email are set server-side "
                     "from the API key account"
                 )
-            return None, _error(
-                f"{forbidden} is not accepted for git operations"
-            )
+            return None, _error(f"{forbidden} is not accepted for git operations")
     allowed = _GIT_MCP_ALLOWED_ARGS.get(operation, frozenset())
     for key in args:
         if key in _GIT_MCP_ENVELOPE_KEYS:
@@ -4077,8 +4491,7 @@ def _reject_temp_process(process, *, action: str) -> list[TextContent] | None:
                 "they live only for their agent session."
             )
         return _error(
-            "Temporary processes cannot be deleted by users; "
-            "stop them instead."
+            "Temporary processes cannot be deleted by users; stop them instead."
         )
     return None
 
@@ -4147,9 +4560,10 @@ async def _call_get_process(api_key, org_id, args: dict) -> list[TextContent]:
         return _error(str(exc))
     except Exception as exc:
         return _error(str(exc))
-    if str(getattr(process, "kind", "") or "") == "temp" and str(
-        getattr(process, "status", "") or ""
-    ) != "running":
+    if (
+        str(getattr(process, "kind", "") or "") == "temp"
+        and str(getattr(process, "status", "") or "") != "running"
+    ):
         return _error("WorkspaceProcess not found")
     return _text(_process_payload(process))
 
@@ -4323,11 +4737,15 @@ def _call_list_org_credential_services(
         CredentialServiceRepository,
         OrgCredentialServiceActivationRepository,
     )
+    from apps.organizations.services import OrganizationService
 
+    org_service = OrganizationService()
     try:
-        _require_org_admin(api_key.user, org_id)
-    except PermissionError as exc:
-        return _error(str(exc))
+        org_service.require_membership(api_key.user, org_id)
+    except Exception:
+        return _error("Organization membership required")
+    if org_service.get_user_role(api_key.user, org_id) != "admin":
+        return _error("Admin role required")
 
     activated_ids = OrgCredentialServiceActivationRepository.activated_service_ids(
         org_id
@@ -4342,7 +4760,12 @@ def _call_list_org_credential_services(
                 "description": service.description,
                 "credential_type": str(service.credential_type),
                 "env_var_name": service.env_var_name,
+                "target_path": service.target_path,
                 "label": service.label,
+                "organization_id": str(service.organization_id)
+                if service.organization_id
+                else None,
+                "oauth_server_url": service.oauth_server_url,
                 "is_active": service.id in activated_ids,
             }
             for service in services
@@ -4355,12 +4778,14 @@ def _call_toggle_org_credential_service_activation(
 ) -> list[TextContent]:
     from apps.credentials.repositories import CredentialServiceRepository
     from apps.credentials.services import OrgCredentialServiceActivationSvc
+    from apps.organizations.services import OrganizationService
 
     try:
-        _require_org_admin(api_key.user, org_id)
-        if not api_key.user.is_staff:
-            return _error("Only staff users can modify credential service activation")
-        service_id = _parse_uuid(args.get("service_id"), "service_id")
+        org_service = OrganizationService()
+        org_service.require_membership(api_key.user, org_id)
+        if org_service.get_user_role(api_key.user, org_id) != "admin":
+            return _error("Admin role required")
+        service_id = uuid.UUID(str(args.get("service_id", "")))
         if "active" not in args:
             raise ValueError("active is required")
         active = bool(args.get("active"))
@@ -4380,13 +4805,18 @@ def _call_toggle_org_credential_service_activation(
                 "description": service.description,
                 "credential_type": str(service.credential_type),
                 "env_var_name": service.env_var_name,
+                "target_path": service.target_path,
                 "label": service.label,
+                "organization_id": str(service.organization_id)
+                if service.organization_id
+                else None,
+                "oauth_server_url": service.oauth_server_url,
                 "is_active": active,
             }
         )
-    except PermissionError as exc:
-        return _error(str(exc))
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
+        return _error(str(exc) or "Invalid service_id")
+    except Exception as exc:
         return _error(str(exc))
 
 
@@ -4416,10 +4846,16 @@ _TOOL_HANDLERS = {
     "delete_build_job": _call_delete_build_job,
     "get_build_job_log": _call_get_build_job_log,
     "list_credentials": _call_list_credentials,
+    "list_credential_services": _call_list_credential_services,
+    "create_credential": _call_create_credential,
+    "update_credential": _call_update_credential,
+    "delete_credential": _call_delete_credential,
+    "connect_credential_oauth": _call_connect_credential_oauth,
+    "disconnect_credential_oauth": _call_disconnect_credential_oauth,
+    "create_org_credential_service": _call_create_org_credential_service,
     "list_plugins": _call_list_plugins,
     "toggle_org_plugin_activation": _call_toggle_org_plugin_activation,
     "list_workspace_plugins": _call_list_workspace_plugins,
-    "set_workspace_plugins": _call_set_workspace_plugins,
     "get_provider_config": _call_get_provider_config,
     "list_provider_models": _call_list_provider_models,
     "save_provider_config": _call_save_provider_config,
@@ -4661,6 +5097,7 @@ async def _authenticate_request(request: Request):
     ).strip() or request.headers.get("x-api-key", "")
 
     from asgiref.sync import sync_to_async
+
     from .auth import authenticate_api_key
 
     return await sync_to_async(authenticate_api_key)(token)

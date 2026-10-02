@@ -14,6 +14,7 @@ import type {
   PluginCreateIn,
   PluginCredentialRequirementIn,
   PluginCredentialServiceType,
+  CredentialService,
   PluginMcpAuthType,
   PluginMcpServerIn,
   PluginMcpTransport,
@@ -63,13 +64,8 @@ export interface PluginRequirementForm {
   reqKey: string
   description: string
   required: boolean
-  mode: 'existing' | 'new'
   serviceId: string
-  serviceName: string
   credentialType: PluginServiceTypeOption
-  envVarName: string
-  targetPath: string
-  label: string
 }
 
 export interface PluginFormModel {
@@ -80,6 +76,7 @@ export interface PluginFormModel {
   skills: PluginSkillForm[]
   mcps: PluginMcpForm[]
   requirements: PluginRequirementForm[]
+  availableServices?: CredentialService[]
 }
 
 let uidCounter = 0
@@ -133,13 +130,8 @@ export function emptyRequirementForm(): PluginRequirementForm {
     reqKey: '',
     description: '',
     required: true,
-    mode: 'existing',
     serviceId: '',
-    serviceName: '',
     credentialType: 'env',
-    envVarName: '',
-    targetPath: '',
-    label: '',
   }
 }
 
@@ -208,15 +200,9 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
       reqKey: r.key,
       description: r.description ?? '',
       required: r.required,
-      mode: 'existing' as const,
       serviceId: r.service_id,
-      serviceName: r.service_name,
       credentialType: toServiceType(r.credential_type),
-      envVarName: '',
-      targetPath: '',
-      label: '',
     })),
-
   }
 }
 
@@ -266,36 +252,33 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
   if (mcp.transport === 'stdio') {
     // Backend forbids URL for stdio; headers are validated but never
     // injected — clear both so stale values cannot hide in the payload.
-    return { ...base, command: mcp.command.trim(), args: parseArgsText(mcp.argsText), env: rowsToDict(mcp.env), url: '', headers: {} }
+    return {
+      ...base,
+      command: mcp.command.trim(),
+      args: parseArgsText(mcp.argsText),
+      env: rowsToDict(mcp.env),
+      url: '',
+      headers: {},
+    }
   }
   // Backend forbids command/args for http/sse; env is validated but never
   // injected — clear both so stale values cannot hide in the payload.
-  return { ...base, command: '', args: [], env: {}, url: mcp.url.trim(), headers: rowsToDict(mcp.headers) }
+  return {
+    ...base,
+    command: '',
+    args: [],
+    env: {},
+    url: mcp.url.trim(),
+    headers: rowsToDict(mcp.headers),
+  }
 }
 
 function requirementToIn(req: PluginRequirementForm): PluginCredentialRequirementIn {
-  if (req.mode === 'existing') {
-    return {
-      key: req.reqKey.trim(),
-      description: req.description.trim(),
-      required: req.required,
-      credential_service: { service_id: req.serviceId },
-    }
-  }
   return {
     key: req.reqKey.trim(),
     description: req.description.trim(),
     required: req.required,
-    credential_service: {
-      name: req.serviceName.trim(),
-      // Backend derives the slug from the service name.
-      slug: '',
-      description: '',
-      credential_type: req.credentialType,
-      env_var_name: req.envVarName.trim().toUpperCase(),
-      target_path: req.targetPath.trim(),
-      label: req.label.trim(),
-    },
+    service_id: req.serviceId,
   }
 }
 
@@ -393,10 +376,14 @@ export function validatePluginForm(form: PluginFormModel): string[] {
       if (!command) {
         errors.push(`${label}: command is required for stdio transport.`)
       } else if (command.length > 1024 || hasCommandMetacharacters(command)) {
-        errors.push(`${label}: command must be a single executable (no spaces or shell metacharacters like ; | & $ \` ).`)
+        errors.push(
+          `${label}: command must be a single executable (no spaces or shell metacharacters like ; | & $ \` ).`,
+        )
       }
       if (parseArgsText(mcp.argsText).some((a) => a.length > 1024 || a.includes('\x00'))) {
-        errors.push(`${label}: args must not contain null bytes and must be at most 1024 characters each.`)
+        errors.push(
+          `${label}: args must not contain null bytes and must be at most 1024 characters each.`,
+        )
       }
       if (mcp.url.trim()) errors.push(`${label}: URL must be empty for stdio transport.`)
     } else {
@@ -413,10 +400,18 @@ export function validatePluginForm(form: PluginFormModel): string[] {
       }
     }
     if (mcp.authType === 'oauth') {
-      if (mcp.transport === 'stdio') errors.push(`${label}: OAuth is only supported for HTTP transports.`)
-      const requirement = form.requirements.find((req) => req.reqKey.trim() === mcp.oauthRequirementKey.trim())
-      if (!mcp.oauthRequirementKey.trim()) errors.push(`${label}: select a required MCP OAuth credential requirement.`)
-      else if (!requirement || !requirement.required || !oauthRequirementKeys.includes(mcp.oauthRequirementKey.trim())) {
+      if (mcp.transport === 'stdio')
+        errors.push(`${label}: OAuth is only supported for HTTP transports.`)
+      const requirement = form.requirements.find(
+        (req) => req.reqKey.trim() === mcp.oauthRequirementKey.trim(),
+      )
+      if (!mcp.oauthRequirementKey.trim())
+        errors.push(`${label}: select a required MCP OAuth credential requirement.`)
+      else if (
+        !requirement ||
+        !requirement.required ||
+        !oauthRequirementKeys.includes(mcp.oauthRequirementKey.trim())
+      ) {
         errors.push(`${label}: OAuth must reference a required MCP OAuth credential service.`)
       }
       if (mcp.headers.some((row) => row.key.trim().toLowerCase() === 'authorization')) {
@@ -426,12 +421,22 @@ export function validatePluginForm(form: PluginFormModel): string[] {
       errors.push(`${label}: OAuth requirement key must be empty when authentication is disabled.`)
     }
     const activeRows = mcp.transport === 'stdio' ? mcp.env : mcp.headers
-    const mappingErrors = validateMappingRows(activeRows, label, mcp.transport === 'stdio' ? 'env' : 'headers', requirementKeys)
+    const mappingErrors = validateMappingRows(
+      activeRows,
+      label,
+      mcp.transport === 'stdio' ? 'env' : 'headers',
+      requirementKeys,
+    )
     errors.push(...mappingErrors)
     // The unused mapping still round-trips through backend validation,
     // so surface its errors too (backend never injects it at runtime).
     const inactiveRows = mcp.transport === 'stdio' ? mcp.headers : mcp.env
-    const inactiveErrors = validateMappingRows(inactiveRows, label, mcp.transport === 'stdio' ? 'headers' : 'env', requirementKeys)
+    const inactiveErrors = validateMappingRows(
+      inactiveRows,
+      label,
+      mcp.transport === 'stdio' ? 'headers' : 'env',
+      requirementKeys,
+    )
     errors.push(...inactiveErrors)
     const startup = Number(mcp.startupTimeout)
     const request = Number(mcp.requestTimeout)
@@ -445,14 +450,15 @@ export function validatePluginForm(form: PluginFormModel): string[] {
 
   const seenKeys = new Set<string>()
   const seenServices = new Set<string>()
-  const seenNewOauthNames = new Set<string>()
   form.requirements.forEach((req, i) => {
     const key = req.reqKey.trim()
     const label = key ? `Requirement "${key}"` : `Requirement #${i + 1}`
     if (!key) {
       errors.push(`${label}: key is required.`)
     } else if (key.length > 255 || !KEY_RE.test(key)) {
-      errors.push(`${label}: key must be a stable identifier (letters, digits, dashes, underscores).`)
+      errors.push(
+        `${label}: key must be a stable identifier (letters, digits, dashes, underscores).`,
+      )
     } else if (seenKeys.has(key)) {
       errors.push(`${label}: duplicate key.`)
     } else {
@@ -464,32 +470,36 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     if (req.credentialType === 'mcp_oauth' && !req.required) {
       errors.push(`${label}: MCP OAuth credential requirements must be required.`)
     }
-    if (req.mode === 'existing') {
-      if (!req.serviceId) {
-        errors.push(`${label}: select an existing credential service.`)
-      } else if (seenServices.has(req.serviceId)) {
-        errors.push(`${label}: duplicate credential service in requirements.`)
-      } else {
-        seenServices.add(req.serviceId)
-      }
+    if (!req.serviceId) {
+      errors.push(`${label}: select an existing credential service.`)
+    } else if (seenServices.has(req.serviceId)) {
+      errors.push(`${label}: duplicate credential service in requirements.`)
     } else {
-      if (!req.serviceName.trim()) errors.push(`${label}: new service name is required.`)
-      else if (!isDerivableSlug(req.serviceName)) {
-        errors.push(`${label}: new service name must contain letters or digits so an identifier can be derived.`)
+      seenServices.add(req.serviceId)
+      const service = form.availableServices?.find((entry) => entry.id === req.serviceId)
+      if (form.availableServices && !service) {
+        errors.push(`${label}: selected credential service is unavailable in this organization.`)
+      }
+      if (service && service.credential_type !== req.credentialType) {
+        errors.push(`${label}: requirement type must match the selected credential service.`)
       }
       if (req.credentialType === 'mcp_oauth') {
-        const slug = slugify(req.serviceName)
-        if (seenNewOauthNames.has(slug)) errors.push(`${label}: duplicate MCP OAuth service.`)
-        seenNewOauthNames.add(slug)
-        if (form.mcps.filter((mcp) => mcp.authType === 'oauth' && mcp.oauthRequirementKey.trim() === key).length !== 1) {
+        if (service && service.credential_type !== 'mcp_oauth') {
+          errors.push(`${label}: OAuth requirements must use an MCP OAuth service.`)
+        }
+        const matchingOAuthServers = form.mcps.filter(
+          (entry) => entry.authType === 'oauth' && entry.oauthRequirementKey.trim() === key,
+        )
+        if (matchingOAuthServers.length !== 1) {
           errors.push(`${label}: MCP OAuth service must be used by exactly one OAuth MCP server.`)
         }
-      }
-      if (req.credentialType === 'env' && !ENV_VAR_RE.test(req.envVarName.trim().toUpperCase())) {
-        errors.push(`${label}: environment variable name must look like OPENAI_API_KEY.`)
-      }
-      if (req.credentialType === 'file' && !req.targetPath.trim()) {
-        errors.push(`${label}: target path is required for file services.`)
+        for (const server of matchingOAuthServers) {
+          if (service?.oauth_server_url && server.url.trim() !== service.oauth_server_url) {
+            errors.push(
+              `${label}: OAuth MCP URL must exactly match the selected service endpoint (${service.oauth_server_url}).`,
+            )
+          }
+        }
       }
     }
   })
@@ -545,13 +555,17 @@ function validateMappingRows(
     const referenced = referencedPlaceholderKeys(row.value)
     for (const ref of referenced) {
       if (!requirementKeys.has(ref)) {
-        errors.push(`${label}: ${field} "${key}" references unknown credential "${ref}" (add a matching requirement key, e.g. ${PLACEHOLDER_EXAMPLE}).`)
+        errors.push(
+          `${label}: ${field} "${key}" references unknown credential "${ref}" (add a matching requirement key, e.g. ${PLACEHOLDER_EXAMPLE}).`,
+        )
       }
     }
     const stripped = row.value.replace(SUPPORTED_PLACEHOLDER_RE, '')
     SUPPORTED_PLACEHOLDER_RE.lastIndex = 0
     if (GENERIC_PLACEHOLDER_RE.test(stripped)) {
-      errors.push(`${label}: ${field} "${key}" contains an unsupported placeholder (only ${PLACEHOLDER_EXAMPLE} is allowed).`)
+      errors.push(
+        `${label}: ${field} "${key}" contains an unsupported placeholder (only ${PLACEHOLDER_EXAMPLE} is allowed).`,
+      )
     }
   }
   return errors

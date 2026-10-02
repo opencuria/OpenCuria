@@ -7,18 +7,16 @@ repositories encapsulate all ORM access.
 
 from __future__ import annotations
 
-import logging
 import re
 import uuid
 
+import structlog
 from django.db import transaction
-from django.db.models import Q
 from django.utils.text import slugify
-from urllib.parse import urlsplit, urlunsplit
 
 from common.exceptions import ConflictError, NotFoundError
 
-from .models import PluginTransport
+from .models import Plugin, PluginTransport
 from .repositories import (
     OrgPluginActivationRepository,
     PluginCredentialRequirementRepository,
@@ -28,7 +26,7 @@ from .repositories import (
     WorkspacePluginActivationRepository,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _KEY_RE = re.compile(r"^[a-z0-9_]+(?:[a-z0-9_-]*[a-z0-9_])?$", re.IGNORECASE)
@@ -158,34 +156,10 @@ def normalize_skill_payload(item: dict, index: int) -> dict:
 
 
 def validate_oauth_server_url(value: str) -> str:
-    """Validate and return the canonical whitespace-trimmed OAuth MCP URL."""
-    if not isinstance(value, str):
-        raise ValueError("OAuth MCP url must be a string")
-    url = value.strip()
-    if not url or any(ord(char) < 0x21 for char in url):
-        raise ValueError("OAuth MCP url must be an HTTPS URL")
-    parsed = urlsplit(url)
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.netloc
-        or not parsed.hostname
-        or "@" in parsed.netloc
-        or parsed.query
-        or parsed.fragment
-        or "?" in url
-        or "#" in url
-        or any(ord(char) < 0x21 for char in url)
-    ):
-        raise ValueError(
-            "OAuth MCP url must be an HTTPS URL without query, userinfo, or fragment"
-        )
-    try:
-        port = parsed.port
-    except ValueError:
-        raise ValueError("OAuth MCP url has an invalid port") from None
-    if port is not None and not 1 <= port <= 65535:
-        raise ValueError("OAuth MCP url has an invalid port")
-    return url
+    """Plugin-level alias to credential-owned OAuth endpoint validation."""
+    from apps.credentials.services import CredentialServiceSvc
+
+    return CredentialServiceSvc._validate_oauth_server_url(value)
 
 
 def normalize_mcp_payload(item: dict) -> dict:
@@ -297,6 +271,14 @@ def normalize_mcp_payload(item: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+class PluginSelectionError(ConflictError):
+    """Workspace plugin selection conflict with safe missing-credential details."""
+
+    def __init__(self, message: str, gaps: list[dict]) -> None:
+        super().__init__(message, code="missing_plugin_credentials")
+        self.gaps = gaps
+
+
 class PluginService:
     """Business logic for plugins and their activations."""
 
@@ -311,14 +293,7 @@ class PluginService:
     # -- Queries ------------------------------------------------------------
 
     def list_visible(self, *, org_id: uuid.UUID) -> list[dict]:
-        """Return visible plugins with components + org readiness summary.
-
-        Readiness here is org-scoped on purpose: it reports whether an
-        *org credential* exists for each required service (personal
-        credentials cannot be inspected org-wide). Workspace activation
-        paths check the workspace-attached credentials (personal or org)
-        instead and must not rely on this summary.
-        """
+        """Return visible plugin definitions and their service dependencies."""
         plugins = list(self.plugins.list_visible_to_org(org_id))
         return [self._serialize(p, org_id=org_id) for p in plugins]
 
@@ -355,7 +330,6 @@ class PluginService:
     ):
         """Create an org-owned plugin with nested components, atomically."""
         from apps.credentials.repositories import CredentialServiceRepository
-        from apps.credentials.services import CredentialServiceSvc
 
         name = validate_name(name, field="Plugin name")
         normalized_slug = normalize_slug(slug or name, field="Plugin slug")
@@ -379,10 +353,7 @@ class PluginService:
         prepared_requirements = self._prepare_requirement_inputs(
             credential_requirements or [],
             org_id=org_id,
-            credential_svc=CredentialServiceSvc(),
             service_repo=CredentialServiceRepository,
-            oauth_plugin_slug=normalized_slug,
-            allow_create_oauth=True,
         )
         self._validate_oauth_requirements(
             normalized_mcps,
@@ -403,15 +374,6 @@ class PluginService:
         )
         self.skills.replace_for_plugin(plugin, normalized_skills)
         self.mcp_servers.replace_for_plugin(plugin, normalized_mcps)
-        for item in prepared_requirements:
-            service = item["service"]
-            if service.credential_type == "mcp_oauth":
-                item["plugin_owned_service"] = True
-                service.oauth_plugin_slug = plugin.slug
-                service.oauth_requirement_key = item["key"]
-                service.save(
-                    update_fields=["oauth_plugin_slug", "oauth_requirement_key"]
-                )
         self._create_requirements(plugin, prepared_requirements)
         logger.info("Plugin created: %s (org=%s)", plugin.id, org_id)
         return self._serialize(self.plugins.get_by_id(plugin.id), org_id=org_id)
@@ -437,15 +399,12 @@ class PluginService:
         Only org-owned plugins of the caller's org may be updated; global or
         foreign plugins raise NotFoundError (404).
         """
-        from apps.credentials.models import CredentialService
         from apps.credentials.repositories import CredentialServiceRepository
-        from apps.credentials.services import CredentialServiceSvc
 
         plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
         if plugin is None or plugin.organization_id != org_id:
             raise NotFoundError("Plugin", str(plugin_id))
 
-        previous_slug = plugin.slug
         fields: dict = {}
         if name is not None:
             fields["name"] = validate_name(name, field="Plugin name")
@@ -489,70 +448,34 @@ class PluginService:
             )
             self._validate_normalized_oauth_urls(normalized_mcps)
         prepared_requirements = None
-        # Keep the reserved org-owned OAuth service bound to the plugin slug
-        # when a plugin is renamed. Generic services are unaffected.
         effective_plugin_slug = fields.get("slug", plugin.slug)
-        oauth_services = list(
-            CredentialService.objects.filter(
-                organization_id=org_id,
-                plugin_owned=True,
-                oauth_plugin_slug=previous_slug,
-                credential_type="mcp_oauth",
-            )
-        )
-        oauth_service_ids = [service.pk for service in oauth_services]
-        if effective_plugin_slug != previous_slug:
-            for service in oauth_services:
-                new_service_slug = CredentialServiceSvc.plugin_oauth_service_slug(
-                    effective_plugin_slug, service.oauth_requirement_key
-                )
-                if any(
-                    other.slug == new_service_slug
-                    for other in oauth_services
-                    if other.pk != service.pk
-                ):
-                    raise ConflictError(
-                        f"Credential service slug '{new_service_slug}' already exists in this organization"
-                    )
-                collision = CredentialService.objects.filter(
-                    organization_id=org_id, slug=new_service_slug
-                ).exclude(pk__in=oauth_service_ids).exists()
-                if collision:
-                    raise ConflictError(
-                        f"Credential service slug '{new_service_slug}' already exists in this organization"
-                    )
         if credential_requirements is not None:
             prepared_requirements = self._prepare_requirement_inputs(
                 credential_requirements,
                 org_id=org_id,
-                credential_svc=CredentialServiceSvc(),
                 service_repo=CredentialServiceRepository,
-                existing_plugin=plugin,
-                oauth_plugin_slug=effective_plugin_slug,
-                previous_oauth_plugin_slug=previous_slug,
-                allow_create_oauth=True,
             )
         effective_mcps = (
             normalized_mcps
             if normalized_mcps is not None
             else [
-            normalize_mcp_payload(
-                {
-                    "name": m.name,
-                    "slug": m.slug,
-                    "transport": m.transport,
-                    "command": m.command,
-                    "args": m.args,
-                    "cwd": m.cwd,
-                    "env": m.env,
-                    "url": m.url,
-                    "headers": m.headers,
-                    "auth_type": m.auth_type,
-                    "oauth_requirement_key": m.oauth_requirement_key,
-                    "startup_timeout_seconds": m.startup_timeout_seconds,
-                    "request_timeout_seconds": m.request_timeout_seconds,
-                }
-            )
+                normalize_mcp_payload(
+                    {
+                        "name": m.name,
+                        "slug": m.slug,
+                        "transport": m.transport,
+                        "command": m.command,
+                        "args": m.args,
+                        "cwd": m.cwd,
+                        "env": m.env,
+                        "url": m.url,
+                        "headers": m.headers,
+                        "auth_type": m.auth_type,
+                        "oauth_requirement_key": m.oauth_requirement_key,
+                        "startup_timeout_seconds": m.startup_timeout_seconds,
+                        "request_timeout_seconds": m.request_timeout_seconds,
+                    }
+                )
                 for m in self.mcp_servers.list_for_plugin(plugin.id)
             ]
         )
@@ -565,14 +488,6 @@ class PluginService:
                 for r in self.requirements.list_for_plugin(plugin.id)
             ]
         )
-        if effective_plugin_slug != previous_slug:
-            for item in effective_reqs:
-                service = item["service"]
-                if service.credential_type == "mcp_oauth":
-                    service.slug = CredentialServiceSvc.plugin_oauth_service_slug(
-                        effective_plugin_slug, item["key"]
-                    )
-                    service.oauth_plugin_slug = effective_plugin_slug
         self._validate_oauth_requirements(
             effective_mcps,
             effective_reqs,
@@ -586,62 +501,18 @@ class PluginService:
         if normalized_mcps is not None:
             self.mcp_servers.replace_for_plugin(plugin, normalized_mcps)
         if prepared_requirements is not None:
-            for item in prepared_requirements:
-                if item["service"].credential_type == "mcp_oauth":
-                    item["plugin_owned_service"] = True
-                    item["service"].oauth_plugin_slug = effective_plugin_slug
-                    item["service"].oauth_requirement_key = item["key"]
-                    update_fields = ["oauth_plugin_slug", "oauth_requirement_key"]
-                    if effective_plugin_slug != previous_slug:
-                        update_fields.append("slug")
-                    item["service"].save(update_fields=update_fields)
             self._replace_requirements(plugin, prepared_requirements)
-        elif effective_plugin_slug != previous_slug:
-            # Component lists were not supplied; persist the validated rename.
-            for service in oauth_services:
-                service.slug = CredentialServiceSvc.plugin_oauth_service_slug(
-                    effective_plugin_slug, service.oauth_requirement_key
-                )
-                service.oauth_plugin_slug = effective_plugin_slug
-                service.save(update_fields=["slug", "oauth_plugin_slug", "updated_at"])
 
         logger.info("Plugin updated: %s (org=%s)", plugin.id, org_id)
         return self._serialize(self.plugins.get_by_id(plugin.id), org_id=org_id)
 
     @transaction.atomic
     def delete_org_plugin(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID) -> None:
-        """Delete an org-owned plugin.
-
-        Exclusively-created service definitions are removed as well, but only
-        when no credentials reference them; otherwise deletion is blocked
-        with a 409 ConflictError.
-        """
-        from apps.credentials.repositories import (
-            CredentialRepository,
-            CredentialServiceRepository,
-        )
-
+        """Delete an org-owned plugin without deleting its services or credentials."""
         plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
         if plugin is None or plugin.organization_id != org_id:
             raise NotFoundError("Plugin", str(plugin_id))
-
-        owned_requirements = list(
-            self.requirements.list_for_plugin(plugin.id).filter(
-                plugin_owned_service=True
-            )
-        )
-        owned_service_ids = [r.credential_service_id for r in owned_requirements]
-        if CredentialRepository.credential_ids_for_services(owned_service_ids):
-            raise ConflictError(
-                "Plugin cannot be deleted while credentials reference "
-                "its credential services",
-                code="plugin_credentials_in_use",
-            )
-        # Delete requirements first (PROTECT on the service FK would block
-        # plugin deletion otherwise), then owned service definitions, then
-        # the plugin row itself.
         self.requirements.delete_for_plugin(plugin.id)
-        CredentialServiceRepository.delete_org_services(org_id, owned_service_ids)
         self.plugins.delete(plugin.id)
         logger.info("Plugin deleted: %s (org=%s)", plugin_id, org_id)
 
@@ -679,54 +550,108 @@ class PluginService:
 
     # -- Workspace activation -------------------------------------------------
 
-    def _oauth_requirement_connected(
+    def _workspace_required_gaps(
         self,
-        plugin,
-        requirement,
         *,
-        workspace,
-        org_id,
-        remaining_credential_ids=None,
-    ) -> bool:
-        from apps.credentials.models import Credential
+        plugin: Plugin,
+        credentials: list,
+        owner_id: int,
+        org_id: uuid.UUID,
+    ) -> list[dict]:
+        """Return required gaps after fail-closed credential ownership checks."""
+        from apps.credentials.mcp_oauth import oauth_credential_status
 
-        from apps.credentials.services import CredentialSvc
-
-        servers = list(
-            self.mcp_servers.list_for_plugin(plugin.id).filter(
-                auth_type="oauth", oauth_requirement_key=requirement.key
-            )
-        )
-        if not servers:
-            return False
-        attached_ids = workspace.credentials.values_list("id", flat=True)
-        if remaining_credential_ids is not None:
-            attached_ids = remaining_credential_ids
-        owner_id = getattr(workspace, "created_by_id", None)
-        for server in servers:
-            candidates = list(
-                Credential.objects.filter(
-                    id__in=attached_ids,
-                    service_id=requirement.credential_service_id,
-                    oauth_server_id=server.id,
-                    oauth_server_url=server.url,
-                    oauth_status="connected",
-                ).filter(
-                    Q(service__organization__isnull=True)
-                    | Q(service__organization_id=org_id)
-                ).filter(
-                    Q(user_id=owner_id) | Q(organization_id=org_id)
-                ).select_related("service", "oauth_registration")
-            )
-            try:
-                CredentialSvc()._validate_oauth_bindings(
-                    candidates, user=workspace.created_by, org_id=org_id
-                )
-            except (ConflictError, NotFoundError, AttributeError):
+        valid_by_service: dict[uuid.UUID, list] = {}
+        for credential in credentials:
+            service = credential.service
+            if service.organization_id not in {None, org_id}:
                 continue
-            if candidates:
-                return True
-        return False
+            if credential.user_id is not None:
+                if (
+                    credential.user_id != owner_id
+                    or credential.organization_id is not None
+                ):
+                    continue
+            elif credential.organization_id != org_id:
+                continue
+            valid_by_service.setdefault(credential.service_id, []).append(credential)
+
+        gaps = []
+        requirements = self.requirements.list_for_plugin(plugin.id)
+        for requirement in requirements:
+            if not requirement.required:
+                continue
+            candidates = valid_by_service.get(requirement.credential_service_id, [])
+            ready = bool(candidates)
+            if requirement.credential_service.credential_type == "mcp_oauth":
+                servers = self.mcp_servers.list_oauth_for_requirement(
+                    plugin.id, requirement.key
+                )
+                ready = bool(servers) and all(
+                    requirement.credential_service.oauth_server_url == server.url
+                    and any(
+                        candidate.oauth_server_url == server.url
+                        and oauth_credential_status(candidate)["connected"]
+                        for candidate in candidates
+                    )
+                    for server in servers
+                )
+            if not ready:
+                gaps.append(
+                    {
+                        "plugin_id": str(plugin.id),
+                        "plugin_name": plugin.name,
+                        "key": requirement.key,
+                        "service_id": str(requirement.credential_service_id),
+                        "service_name": requirement.credential_service.name,
+                        "credential_type": (
+                            requirement.credential_service.credential_type
+                        ),
+                    }
+                )
+        return gaps
+
+    def validate_workspace_plugin_selection(
+        self,
+        *,
+        plugin_ids: list[uuid.UUID],
+        credentials: list,
+        owner,
+        org_id: uuid.UUID,
+        allow_unavailable: bool = False,
+    ) -> list[dict]:
+        """Validate a complete plugin selection and return missing requirements."""
+        desired = list(dict.fromkeys(plugin_ids))
+        visible = {p.id: p for p in self.plugins.list_visible_to_org(org_id)}
+        unknown = [pid for pid in desired if pid not in visible]
+        if unknown:
+            raise NotFoundError("Plugin", ", ".join(str(pid) for pid in unknown))
+        enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
+        unavailable = [
+            pid
+            for pid in desired
+            if pid not in enabled_ids
+            or not visible[pid].enabled
+            or not visible[pid].published
+        ]
+        if unavailable and not allow_unavailable:
+            raise ConflictError(
+                "Plugins are not available for this organization: "
+                + ", ".join(str(pid) for pid in unavailable),
+                code="plugin_not_available",
+            )
+        gaps = []
+        for plugin_id in desired:
+            if plugin_id not in unavailable:
+                gaps.extend(
+                    self._workspace_required_gaps(
+                        plugin=visible[plugin_id],
+                        credentials=credentials,
+                        owner_id=owner.id,
+                        org_id=org_id,
+                    )
+                )
+        return gaps
 
     def list_workspace_plugins(self, *, workspace, org_id: uuid.UUID) -> list[dict]:
         """List org-enabled plugins with workspace state + credential gaps."""
@@ -739,42 +664,15 @@ class PluginService:
         enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
         plugins = [p for p in plugins if p.id in enabled_ids]
         ws_enabled = self.workspace_activations.enabled_plugin_ids(workspace.id)
-        attached_credentials = list(workspace.credentials.all().select_related("service"))
-        attached_service_ids = {credential.service_id for credential in attached_credentials}
-        attached_oauth_ids = {
-            credential.id
-            for credential in attached_credentials
-            if credential.service.credential_type == "mcp_oauth"
-        }
-
+        attached_credentials = self.plugins.list_workspace_credentials(workspace.id)
         result = []
         for plugin in plugins:
-            reqs = list(self.requirements.list_for_plugin(plugin.id))
-            missing = [
-                {
-                    "key": r.key,
-                    "service_id": str(r.credential_service_id),
-                    "service_slug": r.credential_service.slug,
-                }
-                for r in reqs
-                if r.required
-                and (
-                    (
-                        r.credential_service.credential_type == "mcp_oauth"
-                        and not self._oauth_requirement_connected(
-                            plugin,
-                            r,
-                            workspace=workspace,
-                            org_id=org_id,
-                            remaining_credential_ids=attached_oauth_ids,
-                        )
-                    )
-                    or (
-                        r.credential_service.credential_type != "mcp_oauth"
-                        and r.credential_service_id not in attached_service_ids
-                    )
-                )
-            ]
+            missing = self._workspace_required_gaps(
+                plugin=plugin,
+                credentials=attached_credentials,
+                owner_id=workspace.created_by_id,
+                org_id=org_id,
+            )
             result.append(
                 {
                     "id": plugin.id,
@@ -790,312 +688,53 @@ class PluginService:
             )
         return result
 
-    @transaction.atomic
-    def set_workspace_plugins(
-        self,
-        *,
-        workspace,
-        org_id: uuid.UUID,
-        user,
-        plugin_ids: list[uuid.UUID],
-    ) -> list[dict]:
-        """Replace workspace activations atomically.
-
-        Only org-enabled, visible and published plugins are accepted.
-        Required credential services must be attached to the workspace,
-        otherwise a 409 ConflictError with a machine-readable payload is
-        raised. An empty list clears all activations.
-        """
-        desired = list(dict.fromkeys(plugin_ids))
-        if not desired:
-            self.workspace_activations.replace_for_workspace(
-                workspace, [], enabled_by=user
-            )
-            return self.list_workspace_plugins(workspace=workspace, org_id=org_id)
-
-        visible = {
-            p.id: p for p in self.plugins.list_visible_to_org(org_id) if p.id in desired
-        }
-        missing_plugins = [pid for pid in desired if pid not in visible]
-        if missing_plugins:
-            raise NotFoundError(
-                "Plugin", ", ".join(str(pid) for pid in missing_plugins)
-            )
-        enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
-        not_enabled = [pid for pid in desired if pid not in enabled_ids]
-        if not_enabled:
-            raise ConflictError(
-                "Plugins are not enabled for this organization: "
-                + ", ".join(str(pid) for pid in not_enabled),
-                code="plugin_not_available",
-            )
-        not_releasable = [
-            str(pid)
-            for pid, plugin in visible.items()
-            if not (plugin.enabled and plugin.published)
-        ]
-        if not_releasable:
-            raise ConflictError(
-                "Plugins are not published: " + ", ".join(not_releasable),
-                code="plugin_not_available",
-            )
-
-        attached_credentials = list(workspace.credentials.all().select_related("service"))
-        attached_service_ids = {credential.service_id for credential in attached_credentials}
-        attached_oauth_ids = {
-            credential.id
-            for credential in attached_credentials
-            if credential.service.credential_type == "mcp_oauth"
-        }
-        gaps: list[dict] = []
-        for plugin_id in desired:
-            for req in self.requirements.list_for_plugin(plugin_id):
-                if req.required and (
-                    (
-                        req.credential_service.credential_type == "mcp_oauth"
-                        and not self._oauth_requirement_connected(
-                            visible[plugin_id],
-                            req,
-                            workspace=workspace,
-                            org_id=org_id,
-                            remaining_credential_ids=attached_oauth_ids,
-                        )
-                    )
-                    or (
-                        req.credential_service.credential_type != "mcp_oauth"
-                        and req.credential_service_id not in attached_service_ids
-                    )
-                ):
-                    gaps.append(
-                        {
-                            "plugin_id": str(plugin_id),
-                            "key": req.key,
-                            "service_id": str(req.credential_service_id),
-                        }
-                    )
-        if gaps:
-            raise ConflictError(
-                "Missing required credentials for workspace plugins: "
-                + ", ".join(
-                    f"{g['plugin_id']}:{g['key']}->{g['service_id']}" for g in gaps
-                ),
-                code="missing_plugin_credentials",
-            )
-
-        self.workspace_activations.replace_for_workspace(
-            workspace, desired, enabled_by=user
-        )
-        logger.info(
-            "Workspace plugins updated: ws=%s plugins=%s",
-            workspace.id,
-            [str(pid) for pid in desired],
-        )
-        return self.list_workspace_plugins(workspace=workspace, org_id=org_id)
-
-    # -- Credential removal guard --------------------------------------------
-
-    def validate_workspace_credential_removal(
-        self,
-        *,
-        workspace,
-        org_id: uuid.UUID,
-        remaining_service_ids: set[uuid.UUID],
-        remaining_credential_ids: set[uuid.UUID] | None = None,
-    ) -> list[dict]:
-        """Return blocking gaps if removing credentials would break plugins.
-
-        Reusable by the runner workspace-update path and the credential
-        delete path: only service IDs are inspected, never secret values.
-        Returns a list of machine-readable gap dicts (empty when removal
-        is safe).
-        """
-        ws_enabled = self.workspace_activations.enabled_plugin_ids(workspace.id)
-        if not ws_enabled:
-            return []
-        org_enabled = self.org_activations.enabled_plugin_ids(org_id)
-        effective = [pid for pid in ws_enabled if pid in org_enabled]
-        if not effective:
-            return []
-        # Only *effective definitions* gate removal: a disabled or
-        # unpublished plugin is filtered from the runtime snapshot and
-        # from the workspace list, so it must not block credential
-        # detachment either.
-        visible_effective = {
-            p.id
-            for p in self.plugins.list_visible_to_org(org_id)
-            if p.id in set(effective) and p.enabled and p.published
-        }
-        if not visible_effective:
-            return []
-        gaps: list[dict] = []
-        current_attached = list(workspace.credentials.all().select_related("service"))
-        if remaining_credential_ids is None:
-            remaining_credential_ids = {credential.id for credential in current_attached}
-        current_oauth_ids = {
-            credential.id
-            for credential in current_attached
-            if credential.service.credential_type == "mcp_oauth"
-        }
-        remaining_oauth_ids = current_oauth_ids & remaining_credential_ids
-        for plugin_id in visible_effective:
-            for req in self.requirements.list_for_plugin(plugin_id):
-                if req.required and req.credential_service.credential_type == "mcp_oauth":
-                    plugin = self.plugins.get_by_id(plugin_id)
-                    if not self._oauth_requirement_connected(
-                        plugin,
-                        req,
-                        workspace=workspace,
-                        org_id=org_id,
-                        remaining_credential_ids=current_oauth_ids,
-                    ):
-                        # A disconnected or otherwise invalid OAuth row is
-                        # already unavailable to the plugin; detaching it does
-                        # not create a new credential gap.
-                        continue
-                    still_ready = self._oauth_requirement_connected(
-                        plugin,
-                        req,
-                        workspace=workspace,
-                        org_id=org_id,
-                        remaining_credential_ids=remaining_oauth_ids,
-                    )
-                    if still_ready:
-                        continue
-                    gaps.append(
-                        {
-                            "plugin_id": str(plugin_id),
-                            "key": req.key,
-                            "service_id": str(req.credential_service_id),
-                        }
-                    )
-                    continue
-                if req.required and req.credential_service_id not in remaining_service_ids:
-                    gaps.append(
-                        {
-                            "plugin_id": str(plugin_id),
-                            "key": req.key,
-                            "service_id": str(req.credential_service_id),
-                        }
-                    )
-        return gaps
+    # -- Credential deletion guard -------------------------------------------
 
     def blocking_plugin_gaps_for_credential(
-        self,
-        credential,
-        *,
-        org_id: uuid.UUID,
+        self, credential, *, org_id: uuid.UUID
     ) -> list[dict]:
-        """Return effective-plugin gaps if *credential* were deleted.
-
-        Inspects every workspace the credential is attached to (org
-        credentials may fan out to many workspaces) and reuses
-        :meth:`validate_workspace_credential_removal` with the service
-        removed from the remaining set. Personal credentials only ever
-        affect the owner's workspaces that carry this exact row. Only
-        service IDs are inspected, never secret values.
-        """
+        """Return required selected-plugin dependencies for a credential."""
         from apps.runners.repositories import WorkspaceRepository
 
-        workspace_ids = WorkspaceRepository.list_ids_for_credential(credential.id)
-        if not workspace_ids:
-            return []
-        gaps: list[dict] = []
-        for workspace_id in workspace_ids:
+        gaps = []
+        for workspace_id in WorkspaceRepository.list_ids_for_credential(credential.id):
             workspace = WorkspaceRepository.get_by_id(workspace_id)
-            if workspace is None:
+            if workspace is None or workspace.runner.organization_id is None:
                 continue
-            # Each workspace is evaluated under its own real org
-            # (``workspace.runner.organization_id``): a personal
-            # credential may hang on workspaces of several orgs, and the
-            # request header org must never decide for a foreign org's
-            # workspace.
-            runner_org_id = getattr(
-                getattr(workspace, "runner", None), "organization_id", None
+            workspace_org_id = workspace.runner.organization_id
+            selected = self.workspace_activations.enabled_plugin_ids(workspace.id)
+            effective = selected & self.org_activations.enabled_plugin_ids(
+                workspace_org_id
             )
-            if runner_org_id is None:
-                continue
-            remaining_credentials = list(workspace.credentials.all())
-            remaining = {cred.service_id for cred in remaining_credentials if cred.id != credential.id}
-            remaining_credential_ids = {
-                cred.id for cred in remaining_credentials if cred.id != credential.id
-            }
-            for gap in self.validate_workspace_credential_removal(
-                workspace=workspace,
-                org_id=runner_org_id,
-                remaining_service_ids=remaining,
-                remaining_credential_ids=remaining_credential_ids,
-            ):
-                if gap["service_id"] == str(credential.service_id):
-                    gaps.append({**gap, "workspace_id": str(workspace_id)})
+            for plugin in self.plugins.list_visible_to_org(workspace_org_id):
+                if plugin.id not in effective or not (
+                    plugin.enabled and plugin.published
+                ):
+                    continue
+                for requirement in self.requirements.list_for_plugin(plugin.id):
+                    if (
+                        requirement.required
+                        and requirement.credential_service_id == credential.service_id
+                    ):
+                        gaps.append(
+                            {
+                                "workspace_id": str(workspace.id),
+                                "plugin_id": str(plugin.id),
+                                "plugin_name": plugin.name,
+                                "key": requirement.key,
+                                "service_id": str(requirement.credential_service_id),
+                                "service_name": requirement.credential_service.name,
+                            }
+                        )
         return gaps
 
     # -- Internal helpers ----------------------------------------------------
 
     def _serialize(self, plugin, *, org_id: uuid.UUID) -> dict:
-        """Serialize a plugin with components + org readiness summary.
-
-        ``credential_readiness`` is intentionally org-scoped: ``ready``
-        means an *org credential* exists for every required service
-        (``missing_required_service_ids`` lists org gaps). A workspace
-        may still be ready via workspace-attached personal credentials —
-        the workspace serializers check attachments directly.
-        """
-        from apps.credentials.repositories import CredentialRepository
-
+        """Serialize a plugin definition and dependency mapping."""
         skills = list(self.skills.list_for_plugin(plugin.id))
         mcps = list(self.mcp_servers.list_for_plugin(plugin.id))
         reqs = list(self.requirements.list_for_plugin(plugin.id))
-        org_enabled = self.org_activations.is_enabled(org_id, plugin.id)
-        all_required_ids = [r.credential_service_id for r in reqs if r.required]
-        non_oauth_required = [
-            r.credential_service_id
-            for r in reqs
-            if r.required and r.credential_service.credential_type != "mcp_oauth"
-        ]
-        attached_service_ids = CredentialRepository.org_service_ids_with_credentials(
-            org_id, non_oauth_required
-        )
-        oauth_requirements = [
-            req
-            for req in reqs
-            if req.required and req.credential_service.credential_type == "mcp_oauth"
-        ]
-        if oauth_requirements:
-            from apps.credentials.models import Credential
-            from apps.credentials.services import CredentialSvc
-
-            for requirement in oauth_requirements:
-                servers = self.mcp_servers.list_for_plugin(plugin.id).filter(
-                    auth_type="oauth",
-                    oauth_requirement_key=requirement.key,
-                )
-                for server in servers:
-                    candidates = list(
-                        Credential.objects.filter(
-                            organization_id=org_id,
-                            service_id=requirement.credential_service_id,
-                            oauth_server_id=server.id,
-                            oauth_server_url=server.url,
-                            oauth_status="connected",
-                        ).select_related("service", "oauth_registration", "created_by")
-                    )
-                    for credential in candidates:
-                        try:
-                            CredentialSvc()._validate_oauth_bindings(
-                                [credential], user=credential.created_by, org_id=org_id
-                            )
-                        except (ConflictError, NotFoundError):
-                            continue
-                        attached_service_ids.add(requirement.credential_service_id)
-                        break
-                    if requirement.credential_service_id in attached_service_ids:
-                        break
-        missing = [
-            req.credential_service_id
-            for req in reqs
-            if req.required
-            and req.credential_service_id not in attached_service_ids
-        ]
         return {
             "id": plugin.id,
             "name": plugin.name,
@@ -1105,7 +744,7 @@ class PluginService:
             "published": plugin.published,
             "organization_id": plugin.organization_id,
             "is_global": plugin.organization_id is None,
-            "org_enabled": org_enabled,
+            "org_enabled": self.org_activations.is_enabled(org_id, plugin.id),
             "skills": [
                 {
                     "id": s.id,
@@ -1145,15 +784,9 @@ class PluginService:
                     "service_name": r.credential_service.name,
                     "service_slug": r.credential_service.slug,
                     "credential_type": r.credential_service.credential_type,
-                    "plugin_owned_service": r.plugin_owned_service,
                 }
                 for r in reqs
             ],
-            "credential_readiness": {
-                "required_service_ids": all_required_ids,
-                "missing_required_service_ids": missing,
-                "ready": not missing,
-            },
             "created_at": plugin.created_at,
             "updated_at": plugin.updated_at,
         }
@@ -1166,7 +799,9 @@ class PluginService:
                 validate_oauth_server_url(server.get("url", ""))
 
     @staticmethod
-    def _validate_no_oauth_placeholders(servers: list[dict], requirements: list[dict]) -> None:
+    def _validate_no_oauth_placeholders(
+        servers: list[dict], requirements: list[dict]
+    ) -> None:
         oauth_keys = {
             item["key"]
             for item in requirements
@@ -1177,7 +812,8 @@ class PluginService:
                 for raw_value in mapping.values():
                     if oauth_keys.intersection(_PLACEHOLDER_RE.findall(raw_value)):
                         raise ValueError(
-                            "MCP OAuth credentials cannot be used as plugin placeholders"
+                            "MCP OAuth credentials cannot be used as "
+                            "plugin placeholders"
                         )
 
     @staticmethod
@@ -1188,56 +824,48 @@ class PluginService:
         organization_id,
         plugin_slug: str,
     ) -> None:
-        by_key = {item["key"]: item["service"] for item in requirements}
-        oauth_keys = {
-            server.get("oauth_requirement_key", "")
-            for server in servers
-            if server.get("auth_type", "none") == "oauth"
-        }
+        by_key = {item["key"]: item for item in requirements}
+        oauth_keys = set()
         for server in servers:
             if server.get("auth_type", "none") != "oauth":
                 continue
             if server.get("transport") == "stdio":
                 raise ValueError("OAuth is supported only on HTTP MCP transports")
             key = server.get("oauth_requirement_key", "")
-            service = by_key.get(key)
-            requirement = next((item for item in requirements if item["key"] == key), None)
+            item = by_key.get(key)
+            service = item.get("service") if item else None
             if (
                 service is None
                 or service.credential_type != "mcp_oauth"
-                or requirement is None
-                or not requirement.get("required", True)
+                or not item.get("required", True)
             ):
                 raise ValueError(
-                    f"OAuth server requirement '{key}' must reference an MCP OAuth service"
+                    f"OAuth server requirement '{key}' must reference a "
+                    "required MCP OAuth service"
                 )
             from apps.credentials.services import CredentialServiceSvc
 
-            validate_oauth_server_url(server.get("url", ""))
-            expected_slug = CredentialServiceSvc.plugin_oauth_service_slug(
-                plugin_slug, key
+            endpoint = CredentialServiceSvc._validate_oauth_server_url(
+                server.get("url", "")
             )
-            if service.slug != expected_slug and not (
-                service.organization_id is None
-                and service.oauth_plugin_slug == plugin_slug
-                and service.oauth_requirement_key == key
-            ):
+            if service.oauth_server_url != endpoint:
                 raise ValueError(
-                    "Each OAuth requirement needs its own reserved service slug"
+                    "OAuth server URL must exactly match the credential "
+                    "service endpoint"
                 )
             if service.organization_id not in {None, organization_id}:
-                raise ValueError("OAuth MCP services must be visible to the plugin organization")
-            if service.organization_id is None:
-                if service.oauth_plugin_slug != plugin_slug:
-                    raise ValueError("Global OAuth services are reserved for their named plugin")
-            elif not service.plugin_owned or service.oauth_plugin_slug != plugin_slug:
-                raise ValueError("Org OAuth services must be created specifically by this plugin")
-            if service.oauth_requirement_key != server.get("oauth_requirement_key", ""):
-                raise ValueError("OAuth credential service belongs to another server requirement")
+                raise ValueError(
+                    "Credential service is not visible to the plugin organization"
+                )
+            oauth_keys.add(key)
         for item in requirements:
-            service = item["service"]
-            if service.credential_type == "mcp_oauth" and item["key"] not in oauth_keys:
-                raise ValueError("MCP OAuth services may only be used by OAuth MCP servers")
+            if (
+                item["service"].credential_type == "mcp_oauth"
+                and item["key"] not in oauth_keys
+            ):
+                raise ValueError(
+                    "MCP OAuth services may only be used by OAuth MCP servers"
+                )
 
     @staticmethod
     def _assert_unique_slugs(slugs: list[str], label: str) -> None:
@@ -1252,203 +880,45 @@ class PluginService:
         raw_requirements: list[dict],
         *,
         org_id: uuid.UUID,
-        credential_svc,
         service_repo,
-        existing_plugin=None,
-        oauth_plugin_slug: str = "",
-        previous_oauth_plugin_slug: str = "",
-        allow_create_oauth: bool = False,
     ) -> list[dict]:
-        """Validate requirement inputs and resolve/create services."""
-        prepared: list[dict] = []
-        seen_keys: set[str] = set()
-        seen_services: set[uuid.UUID] = set()
+        """Validate dependencies and resolve only existing visible services."""
+        prepared, seen_keys, seen_services = [], set(), set()
         for raw in raw_requirements:
             item = dict(raw) if isinstance(raw, dict) else {}
-            # Support both service shapes (nested objects from API schemas
-            # arrive as dicts here).
-            svc_input = item.get("credential_service") or {}
-            if not isinstance(svc_input, dict):
-                raise ValueError("credential_service must be an object")
             key = normalize_requirement_key(item.get("key", ""))
             if key in seen_keys:
                 raise ConflictError(f"Duplicate credential requirement key '{key}'")
             seen_keys.add(key)
-            required = bool(item.get("required", True))
+            service_id = item.get("service_id")
+            try:
+                service_id = uuid.UUID(str(service_id or ""))
+            except ValueError:
+                raise ValueError("service_id must be a UUID") from None
+            service = service_repo.get_visible_by_id(service_id, org_id)
+            if service is None:
+                raise NotFoundError("CredentialService", str(service_id))
+            if service.id in seen_services:
+                raise ConflictError("Duplicate credential service in requirements")
+            seen_services.add(service.id)
             description = (item.get("description") or "").strip()
             if len(description) > 2000:
                 raise ValueError("Credential requirement description is too long")
-
-            service_id = svc_input.get("service_id")
-            if service_id is not None:
-                if (
-                    (svc_input.get("credential_type") or "").strip() == "mcp_oauth"
-                    and existing_plugin is None
-                ):
-                    raise ValueError(
-                        "MCP OAuth service references may only be retained on plugin update"
-                    )
-                try:
-                    service_uuid = uuid.UUID(str(service_id))
-                except ValueError:
-                    raise ValueError(
-                        "credential_service.service_id must be a UUID"
-                    ) from None
-                service = service_repo.get_visible_by_id(service_uuid, org_id)
-                if service is None:
-                    raise NotFoundError("CredentialService", str(service_id))
-                if (
-                    existing_plugin is not None
-                    and getattr(service, "organization_id", None) is not None
-                    and str(service.organization_id) != str(org_id)
-                ):
-                    raise NotFoundError("CredentialService", str(service_id))
-                plugin_owned = False
-                if service.credential_type == "mcp_oauth":
-                    expected_slug = credential_svc.plugin_oauth_service_slug(
-                        oauth_plugin_slug, key
-                    )
-                    if (
-                        not allow_create_oauth
-                        or not service.plugin_owned
-                        or service.oauth_plugin_slug
-                        not in {oauth_plugin_slug, previous_oauth_plugin_slug}
-                        or service.oauth_requirement_key != key
-                        or not existing_plugin
-                        or not self.requirements.list_for_plugin(existing_plugin.id).filter(
-                            key=key, credential_service_id=service.id
-                        ).exists()
-                    ):
-                        raise ValueError(
-                            "An OAuth credential service can only be reused by its owning plugin"
-                        )
-                    allowed_slugs = {expected_slug}
-                    if previous_oauth_plugin_slug:
-                        allowed_slugs.add(
-                            credential_svc.plugin_oauth_service_slug(
-                                previous_oauth_plugin_slug, key
-                            )
-                        )
-                    if service.slug not in allowed_slugs:
-                        raise ValueError(
-                            "OAuth service slug does not match its plugin requirement"
-                        )
-                    plugin_owned = True
-            else:
-                # Empty slugs mean "derive from the service name" (the
-                # webapp sends `slug: ''`); fall back to the requirement
-                # key only when no service name was given.
-                service_name = (svc_input.get("name") or key).strip() or key
-                service_slug = (svc_input.get("slug") or "").strip() or service_name
-                try:
-                    service_type = (svc_input.get("credential_type") or "env").strip()
-                    if service_type == "mcp_oauth":
-                        if not allow_create_oauth or not oauth_plugin_slug:
-                            raise ValueError("OAuth services can only be created by the plugin API")
-                        reserved_slug = credential_svc.plugin_oauth_service_slug(
-                            oauth_plugin_slug, key
-                        )
-                        service = credential_svc.create_plugin_oauth_service(
-                            name=service_name,
-                            slug=reserved_slug,
-                            description=(svc_input.get("description") or "").strip(),
-                            organization_id=org_id,
-                            oauth_plugin_slug=oauth_plugin_slug,
-                            oauth_requirement_key=key,
-                        )
-                    else:
-                        service = credential_svc.create_service(
-                            name=service_name,
-                            slug=service_slug,
-                            description=(svc_input.get("description") or "").strip(),
-                            credential_type=service_type,
-                            env_var_name=svc_input.get("env_var_name", ""),
-                            target_path=svc_input.get("target_path", ""),
-                            label=svc_input.get("label", ""),
-                            organization_id=org_id,
-                        )
-                except ValueError as exc:
-                    # Fresh-service slug collisions surface as 409 (the
-                    # API layer maps ConflictError), matching duplicate
-                    # plugin slugs.
-                    raise ConflictError(str(exc), code="conflict") from exc
-                plugin_owned = True
-            if service.id in seen_services:
-                if service.credential_type == "mcp_oauth":
-                    raise ValueError(
-                        "Each OAuth requirement needs its own reserved service slug"
-                    )
-                raise ConflictError("Duplicate credential service in requirements")
-            seen_services.add(service.id)
             prepared.append(
                 {
                     "key": key,
                     "description": description,
-                    "required": required,
+                    "required": bool(item.get("required", True)),
                     "service": service,
-                    "plugin_owned_service": plugin_owned
-                    or bool(getattr(service, "plugin_owned", False)),
                 }
             )
         return prepared
 
     def _create_requirements(self, plugin, prepared: list[dict]) -> None:
-        """Persist prepared requirements for a plugin."""
-        from apps.credentials.repositories import (
-            OrgCredentialServiceActivationRepository,
-        )
-
+        """Persist plugin dependencies without activating services."""
         self.requirements.bulk_create_for_plugin(plugin, prepared)
-        # Auto-activate referenced services for the plugin's org so the org
-        # can immediately use them.
-        if plugin.organization_id is not None:
-            from apps.credentials.enums import CredentialType
-            OrgCredentialServiceActivationRepository.ensure_activated(
-                plugin.organization_id,
-                [item["service"].id for item in prepared if item["service"].credential_type != CredentialType.MCP_OAUTH],
-            )
 
     def _replace_requirements(self, plugin, prepared: list[dict]) -> None:
-        """Replace requirements, pruning orphaned plugin-owned services."""
-        from apps.credentials.repositories import (
-            CredentialRepository,
-            CredentialServiceRepository,
-        )
-
-        previous = list(self.requirements.list_for_plugin(plugin.id))
-        previous_owned_ids = {
-            r.credential_service_id for r in previous if r.plugin_owned_service
-        }
-        new_service_ids = {item["service"].id for item in prepared}
+        """Replace requirement-to-service mappings without owning services."""
         self.requirements.delete_for_plugin(plugin.id)
-        # Preserve the plugin-owned marker for previously owned services
-        # that are re-referenced via ``service_id`` (fresh inputs clear
-        # the flag). Without this, a re-referenced owned service would
-        # lose its marker and later leak as an undeletable orphan.
-        for item in prepared:
-            if (
-                not item["plugin_owned_service"]
-                and item["service"].id in previous_owned_ids
-            ):
-                item["plugin_owned_service"] = True
         self._create_requirements(plugin, prepared)
-        # Prune previously owned services that are no longer referenced,
-        # unless credentials still point at them.
-        orphan_ids = list(previous_owned_ids - new_service_ids)
-        if orphan_ids:
-            blocking = CredentialRepository.credential_ids_for_services(orphan_ids)
-            if blocking:
-                raise ConflictError(
-                    "Credential requirements cannot be replaced while "
-                    "credentials reference their services",
-                    code="plugin_credentials_in_use",
-                )
-            # Never delete services still required by other plugins.
-            still_used = self.requirements.service_ids_used_by_other_org_plugins(
-                org_id=plugin.organization_id,
-                excluded_plugin_id=plugin.id,
-            )
-            deletable = [sid for sid in orphan_ids if sid not in still_used]
-            CredentialServiceRepository.delete_org_services(
-                plugin.organization_id, deletable
-            )

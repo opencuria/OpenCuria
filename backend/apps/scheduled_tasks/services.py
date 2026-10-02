@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from types import SimpleNamespace
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -699,7 +699,16 @@ class ScheduledTaskService:
         if active:
             return
         if idle_since and timezone.now() - idle_since >= timedelta(minutes=timeout):
-            await self._runner().stop_workspace(workspace_id)
+            try:
+                await self._runner().stop_workspace(workspace_id, auto_stop=True)
+            except ConflictError as exc:
+                # A chat or lifecycle operation may have won admission since
+                # the reconciliation snapshot. Treat this as a normal no-op.
+                log.info(
+                    "scheduled_task_auto_stop_skipped",
+                    workspace_id=str(workspace_id),
+                    reason=str(exc),
+                )
 
     @staticmethod
     def _validate_schedule(values: dict[str, Any]) -> tuple[str, list[int], Any, str]:

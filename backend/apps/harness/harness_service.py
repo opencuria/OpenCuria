@@ -1520,109 +1520,112 @@ class HarnessService:
         from .services import ProviderConfigService
 
         key = str(session.id)
-        model_resolver = None
-        small_model = ""
-        agent_configs: dict[str, dict[str, Any]] = {}
-        if provider is not None:
-            model_resolver = StaticModelResolver(provider).resolve
-        elif self._provider_factory is not None:
-            model_resolver = StaticModelResolver(
-                self._provider_factory(organization_id)
-            ).resolve
-        else:
-            config_service = ProviderConfigService()
-            config = None
-            try:
-                config = await sync_to_async(config_service.get_config)(organization_id)
-            except NotFoundError:
-                config = None
-            resolver = await sync_to_async(config_service.build_resolver)(
-                organization_id
-            )
-            model_resolver = resolver.resolve
-            small_model = ((config.small_model if config else "") or "").strip()
-            agent_configs = await sync_to_async(HarnessService._agent_configs_map)(
-                organization_id
-            )
-            agent_name = (session.agent_name or session.mode or "build").strip().lower()
-            row = agent_configs.get(agent_name, {})
-            agent_model = (
-                "" if row.get("inherit_model") else str(row.get("model") or "").strip()
-            )
-            agent_effort = (
-                ""
-                if row.get("inherit_model")
-                else normalize_reasoning_effort(str(row.get("effort") or ""))
-            )
-            if session.model:
-                model_default = session.model
-            else:
-                legacy_default = (
-                    (config.default_model if config else "") or ""
-                ).strip()
-                model_default = agent_model or legacy_default
-            if not model_default:
-                raise ValueError("No model configured for harness run")
-            session.model = model_default
-            legacy_effort = (config.default_effort if config else "") or ""
-            run_effort = normalize_reasoning_effort(agent_effort or legacy_effort or "")
-            if not (session.reasoning_effort or "").strip() and run_effort:
-                # Robust fallback for sessions created before effort defaults
-                # existed (or while no config existed at create time).
-                session.reasoning_effort = run_effort
-        model = session.model or "default"
-        context_length = 0
-        model_max_output_tokens = 0
-        last_step_prompt_tokens = 0
-        last_step_completion_tokens = 0
-        last_step_total_tokens = 0
-        context_length, model_max_output_tokens = await sync_to_async(
-            self._resolve_run_model_limits
-        )(organization_id, model)
-        (
-            last_step_prompt_tokens,
-            last_step_completion_tokens,
-            last_step_total_tokens,
-        ) = await sync_to_async(self._last_assistant_step_tokens)(
-            session.id, assistant.id
-        )
-        agent_s_run_config = None
-        if (session.agent_name or "").strip().lower() == "computeruse":
-            agent_s_run_config = await sync_to_async(self._resolve_agent_s_run_config)(
-                organization_id, model
-            )
-        accessor = None
-        if self._accessor_factory is not None:
-            accessor = await self._accessor_factory(str(session.workspace_id))
-        if accessor is not None:
-            history = await hydrate_user_messages(history, accessor)
-        tools = self._tools_for_session(key, session.agent_name or "build")
-        # MCP plugin runtime: snapshot + connections are prepared BEFORE
-        # the runner is constructed so any injected runner_factory sees
-        # the same fully-registered ToolRegistry (an injected factory may
-        # snapshot/copy instead of holding the live reference). Prepare
-        # runs in the sync ORM context exactly once (snapshot +
-        # credential resolution, no second ORM/decrypt round in setup).
         mcp_runtime = None
-        mcp_snapshot = None
-        mcp_enabled = accessor is not None and (
-            session.agent_name or ""
-        ).strip().lower() not in (
-            "computeruse",
-            "title",
-            "compaction",
-        )
         try:
+            # Fail closed on missing plugin credentials before constructing provider
+            # configuration or registering/calling any harness tools.
+            mcp_snapshot = None
+            agent_key = (session.agent_name or "").strip().lower()
+            if agent_key not in {"computeruse", "title", "compaction"}:
+                mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
+                    session, organization_id, None
+                )
+            model_resolver = None
+            small_model = ""
+            agent_configs: dict[str, dict[str, Any]] = {}
+            if provider is not None:
+                model_resolver = StaticModelResolver(provider).resolve
+            elif self._provider_factory is not None:
+                model_resolver = StaticModelResolver(
+                    self._provider_factory(organization_id)
+                ).resolve
+            else:
+                config_service = ProviderConfigService()
+                config = None
+                try:
+                    config = await sync_to_async(config_service.get_config)(organization_id)
+                except NotFoundError:
+                    config = None
+                resolver = await sync_to_async(config_service.build_resolver)(
+                    organization_id
+                )
+                model_resolver = resolver.resolve
+                small_model = ((config.small_model if config else "") or "").strip()
+                agent_configs = await sync_to_async(HarnessService._agent_configs_map)(
+                    organization_id
+                )
+                agent_name = (session.agent_name or session.mode or "build").strip().lower()
+                row = agent_configs.get(agent_name, {})
+                agent_model = (
+                    "" if row.get("inherit_model") else str(row.get("model") or "").strip()
+                )
+                agent_effort = (
+                    ""
+                    if row.get("inherit_model")
+                    else normalize_reasoning_effort(str(row.get("effort") or ""))
+                )
+                if session.model:
+                    model_default = session.model
+                else:
+                    legacy_default = (
+                        (config.default_model if config else "") or ""
+                    ).strip()
+                    model_default = agent_model or legacy_default
+                if not model_default:
+                    raise ValueError("No model configured for harness run")
+                session.model = model_default
+                legacy_effort = (config.default_effort if config else "") or ""
+                run_effort = normalize_reasoning_effort(agent_effort or legacy_effort or "")
+                if not (session.reasoning_effort or "").strip() and run_effort:
+                    # Robust fallback for sessions created before effort defaults
+                    # existed (or while no config existed at create time).
+                    session.reasoning_effort = run_effort
+            model = session.model or "default"
+            context_length = 0
+            model_max_output_tokens = 0
+            last_step_prompt_tokens = 0
+            last_step_completion_tokens = 0
+            last_step_total_tokens = 0
+            context_length, model_max_output_tokens = await sync_to_async(
+                self._resolve_run_model_limits
+            )(organization_id, model)
+            (
+                last_step_prompt_tokens,
+                last_step_completion_tokens,
+                last_step_total_tokens,
+            ) = await sync_to_async(self._last_assistant_step_tokens)(
+                session.id, assistant.id
+            )
+            agent_s_run_config = None
+            if (session.agent_name or "").strip().lower() == "computeruse":
+                agent_s_run_config = await sync_to_async(self._resolve_agent_s_run_config)(
+                    organization_id, model
+                )
+            accessor = None
+            if self._accessor_factory is not None:
+                accessor = await self._accessor_factory(str(session.workspace_id))
+            if accessor is not None:
+                history = await hydrate_user_messages(history, accessor)
+            tools = self._tools_for_session(key, session.agent_name or "build")
+            # MCP plugin runtime: snapshot + connections are prepared BEFORE
+            # the runner is constructed so any injected runner_factory sees
+            # the same fully-registered ToolRegistry (an injected factory may
+            # snapshot/copy instead of holding the live reference). Prepare
+            # runs in the sync ORM context exactly once (snapshot +
+            # credential resolution, no second ORM/decrypt round in setup).
+            mcp_enabled = accessor is not None and (
+                session.agent_name or ""
+            ).strip().lower() not in (
+                "computeruse",
+                "title",
+                "compaction",
+            )
             if mcp_enabled:
                 import apps.harness.mcp_client.runtime as mcp_runtime_module
 
                 mcp_runtime = mcp_runtime_module.McpRuntime()
-                # One prepared runtime per run (even when empty): prepare
-                # does the single workspace query + snapshot + decrypt
-                # round; setup reuses it without a second query.
-                mcp_snapshot = await sync_to_async(
-                    self._prepare_mcp_snapshot_for_run
-                )(session, organization_id, accessor)
+                # Reuse the already validated snapshot; setup does not repeat
+                # credential lookup/decryption.
                 await mcp_runtime.setup(
                     workspace=None,
                     organization_id=organization_id,
@@ -1704,9 +1707,7 @@ class HarnessService:
             tail = result.output or ""
             remainder = _tail_remainder(existing, tail)
             if remainder:
-                await sync_to_async(self.messages.append_content)(
-                    assistant, remainder
-                )
+                await sync_to_async(self.messages.append_content)(assistant, remainder)
                 await self._append_tail_text_part(session, assistant, remainder)
             # Message usage is accumulated per step_finish so abort still
             # keeps completed steps. Session usage is applied once here.
@@ -2191,9 +2192,7 @@ class HarnessService:
                     self.parts.model.objects.filter(id=step_part_id).first
                 )()
                 if step_part is not None:
-                    await sync_to_async(self.parts.mark_state)(
-                        step_part, "completed"
-                    )
+                    await sync_to_async(self.parts.mark_state)(step_part, "completed")
             # Close the per-step reasoning and text parts (DB-side; the
             # frontend already closes them live on step_finish). Resetting
             # the ids makes the next step start fresh parts so the final
@@ -2377,9 +2376,7 @@ class HarnessService:
                     },
                 )
                 safe_agent_meta = dict(part.display.get("agent_meta", {}))
-                safe_summary = _socket_text(
-                    part.display.get("summary", ""), limit=240
-                )
+                safe_summary = _socket_text(part.display.get("summary", ""), limit=240)
                 await self._emit_frontend(
                     FRONTEND_EVENT_PART,
                     {
@@ -2560,16 +2557,12 @@ class HarnessService:
             touched_id = str(part_id)
         return touched_id
 
-    async def _complete_stream_part(
-        self, run_ctx: dict[str, Any], slot: str
-    ) -> None:
+    async def _complete_stream_part(self, run_ctx: dict[str, Any], slot: str) -> None:
         """Complete+clear one running text/reasoning stream slot (best-effort)."""
         part_id = run_ctx.pop(slot, None)
         if part_id is None:
             return
-        part = await sync_to_async(
-            self.parts.model.objects.filter(id=part_id).first
-        )()
+        part = await sync_to_async(self.parts.model.objects.filter(id=part_id).first)()
         if part is not None:
             await sync_to_async(self.parts.mark_state)(part, "completed")
 
@@ -2718,17 +2711,15 @@ class HarnessService:
         """
         if not tool or not call_id:
             return None
-        candidate = (
-            await sync_to_async(
-                lambda: list(
-                    self.parts.model.objects.filter(
-                        message_id=assistant.id,
-                        type="tool",
-                        state="pending",
-                    ).order_by("position", "created_at", "id")
-                )
-            )()
-        )
+        candidate = await sync_to_async(
+            lambda: list(
+                self.parts.model.objects.filter(
+                    message_id=assistant.id,
+                    type="tool",
+                    state="pending",
+                ).order_by("position", "created_at", "id")
+            )
+        )()
         for row in candidate:
             meta = dict(row.meta or {})
             row_tool = str((row.input or {}).get("tool", "") or row.title or "")
@@ -2953,8 +2944,7 @@ class HarnessService:
             )
         if not user_message_id:
             user_message_id = str(
-                self._runs.get(str(session.id), {}).get("user_message_id", "")
-                or ""
+                self._runs.get(str(session.id), {}).get("user_message_id", "") or ""
             )
         payload: dict[str, Any] = {
             "workspace_id": str(session.workspace_id),
@@ -3218,9 +3208,8 @@ class HarnessService:
         resumed = child is not None
         if resumed:
             agent = (
-                (child.agent_name or agent or "general").strip().lower()
-                or "general"
-            )
+                child.agent_name or agent or "general"
+            ).strip().lower() or "general"
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
                 catalog_efforts = self._catalog_efforts_for_model(
@@ -3555,7 +3544,7 @@ def _tail_remainder(existing: str, tail: str) -> str:
     if existing.endswith(tail):
         return ""
     if tail.startswith(existing):
-        return tail[len(existing):]
+        return tail[len(existing) :]
     if existing.startswith(tail):
         return ""
     # A divergent final string is not a suffix of the streamed response.

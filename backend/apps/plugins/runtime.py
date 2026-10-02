@@ -125,6 +125,12 @@ def build_workspace_plugin_snapshot(
             )
             for skill in PluginSkillRepository.list_for_plugin(plugin.id)
         )
+        plugin_requirements = list(
+            PluginCredentialRequirementRepository.list_for_plugin(plugin.id)
+        )
+        service_by_key = {
+            req.key: req.credential_service_id for req in plugin_requirements
+        }
         servers = tuple(
             PluginMcpServerSnapshot(
                 id=server.id,
@@ -139,6 +145,7 @@ def build_workspace_plugin_snapshot(
                 headers=dict(server.headers or {}),
                 auth_type=server.auth_type,
                 oauth_requirement_key=server.oauth_requirement_key,
+                oauth_service_id=service_by_key.get(server.oauth_requirement_key),
                 startup_timeout_seconds=server.startup_timeout_seconds,
                 request_timeout_seconds=server.request_timeout_seconds,
             )
@@ -155,7 +162,7 @@ def build_workspace_plugin_snapshot(
                 service_name=req.credential_service.name,
                 credential_type=req.credential_service.credential_type,
             )
-            for req in PluginCredentialRequirementRepository.list_for_plugin(plugin.id)
+            for req in plugin_requirements
         )
         snapshots.append(
             EffectivePluginSnapshot(
@@ -324,6 +331,12 @@ def resolve_runtime_oauth_credentials(
     attached = _workspace_credentials_by_service(workspace, org_id=org_id)
     resolved: dict[uuid.UUID, uuid.UUID] = {}
     for plugin in snapshot.plugins:
+        plugin_oauth_requirements = {
+            requirement.key: requirement
+            for requirement in plugin.requirements
+            if requirement.credential_type == "mcp_oauth" and requirement.required
+        }
+        connected_keys = set()
         for server in plugin.mcp_servers:
             if server.auth_type != "oauth":
                 continue
@@ -339,19 +352,23 @@ def resolve_runtime_oauth_credentials(
             if (
                 credential is not None
                 and credential.service.credential_type == "mcp_oauth"
-                and credential.oauth_status == "connected"
-                and credential.oauth_server_id == server.id
-                and credential.oauth_server_url == server.url
             ):
-                try:
-                    from apps.credentials.services import CredentialSvc
+                from apps.credentials.mcp_oauth import oauth_credential_status
 
-                    CredentialSvc()._validate_oauth_bindings(
-                        [credential], user=workspace.created_by, org_id=org_id
-                    )
-                except Exception:
-                    continue
-                resolved[server.id] = credential.id
+                if (
+                    credential.oauth_server_url == server.url
+                    and credential.service.oauth_server_url == server.url
+                    and oauth_credential_status(credential)["connected"]
+                ):
+                    resolved[server.id] = credential.id
+                    connected_keys.add(server.oauth_requirement_key)
+        for key, requirement in plugin_oauth_requirements.items():
+            if key not in connected_keys:
+                raise PluginCredentialConfigError(
+                    f"Plugin '{plugin.slug}' requires connected OAuth credential "
+                    f"'{key}' (service '{requirement.service_slug}'); connect or "
+                    "reconnect it before running."
+                )
     return resolved
 
 

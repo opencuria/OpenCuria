@@ -105,10 +105,22 @@ class HeartbeatReconcilerMixin:
 
         dispatched: list["Task"] = []
         for workspace in workspaces:
-            if not self._should_auto_stop_workspace(workspace, now=evaluation_time):
+            # Heartbeat reconciliation may have loaded this workspace before a
+            # scheduled/manual harness run started. Refresh its busy-session
+            # annotation at the auto-stop decision boundary; manual stops keep
+            # their existing behavior in stop_workspace().
+            current_workspace = await sync_to_async(self.workspaces.get_by_id)(
+                workspace.id
+            )
+            if current_workspace is None or not self._should_auto_stop_workspace(
+                current_workspace, now=evaluation_time
+            ):
                 continue
             try:
-                task = await self.stop_workspace(workspace.id)
+                task = await self.stop_workspace(
+                    current_workspace.id,
+                    auto_stop=True,
+                )
             except (ConflictError, RunnerOfflineError, WorkspaceStateError) as exc:
                 logger.info(
                     "Skipped auto-stop for workspace %s: %s",
@@ -280,6 +292,7 @@ class HeartbeatReconcilerMixin:
                             )
                     continue
 
+                credentials_resolved = False
                 has_credentials = False
                 try:
                     from apps.credentials.services import CredentialSvc
@@ -288,13 +301,16 @@ class HeartbeatReconcilerMixin:
                     has_credentials = bool(
                         resolved.env_vars or resolved.files or resolved.ssh_keys
                     )
+                    credentials_resolved = True
                 except Exception:
                     logger.exception(
                         "Failed to resolve attached credential material for "
                         "workspace %s",
                         ws_id_str,
                     )
-                if ws.credentials_present != has_credentials:
+                if credentials_resolved and ws.credentials_present != has_credentials:
+                    # Reconcile ordinary material against the runner-acknowledged
+                    # state; OAuth remains server-side and is never injected.
                     credential_sync_ids.append(ws.id)
 
                 # Reconcile background processes with the reported list.
@@ -306,10 +322,7 @@ class HeartbeatReconcilerMixin:
                 reported_processes = runner_payload.get("processes")
                 if isinstance(reported_processes, list) and (
                     new_status == WorkspaceStatus.RUNNING
-                    or (
-                        new_status is None
-                        and ws.status == WorkspaceStatus.RUNNING
-                    )
+                    or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
                 ):
                     try:
                         _, vanished = self.reconcile_workspace_processes(
@@ -317,9 +330,7 @@ class HeartbeatReconcilerMixin:
                         )
                         self.sweep_unconfirmed_processes(ws_id_str)
                         if vanished:
-                            pending_vanished.setdefault(ws_id_str, []).extend(
-                                vanished
-                            )
+                            pending_vanished.setdefault(ws_id_str, []).extend(vanished)
                     except Exception:
                         logger.exception(
                             "Failed reconciling processes for workspace %s",
@@ -376,9 +387,7 @@ class HeartbeatReconcilerMixin:
                 workspace_uuid = uuid.UUID(str(ws_id_str))
             except (ValueError, TypeError, AttributeError):
                 continue
-            workspace = await sync_to_async(self.workspaces.get_by_id)(
-                workspace_uuid
-            )
+            workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_uuid)
             if workspace is None:
                 continue
             # Only verify while the workspace is still running and the
@@ -396,9 +405,7 @@ class HeartbeatReconcilerMixin:
                 continue
             try:
                 changed.extend(
-                    await self.reverify_vanished_processes(
-                        workspace_uuid, rows
-                    )
+                    await self.reverify_vanished_processes(workspace_uuid, rows)
                 )
             except Exception:
                 logger.exception(

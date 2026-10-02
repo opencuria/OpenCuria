@@ -73,6 +73,13 @@ class PluginRepository:
         return Plugin.objects.filter(organization_id=org_id)
 
     @staticmethod
+    def list_workspace_credentials(workspace_id: uuid.UUID):
+        """Return workspace credential metadata with service/OAuth rows loaded."""
+        from apps.credentials.repositories import CredentialRepository
+
+        return CredentialRepository.list_for_workspace(workspace_id)
+
+    @staticmethod
     def create(
         *,
         name: str,
@@ -165,6 +172,17 @@ class PluginMcpServerRepository:
         return PluginMcpServer.objects.filter(plugin_id=plugin_id).order_by("name")
 
     @staticmethod
+    def list_oauth_for_requirement(
+        plugin_id: uuid.UUID, requirement_key: str
+    ) -> QuerySet[PluginMcpServer]:
+        """Return OAuth servers mapped to one plugin requirement."""
+        return PluginMcpServer.objects.filter(
+            plugin_id=plugin_id,
+            auth_type="oauth",
+            oauth_requirement_key=requirement_key,
+        ).order_by("name")
+
+    @staticmethod
     def list_for_plugins(
         plugin_ids: list[uuid.UUID],
     ) -> QuerySet[PluginMcpServer]:
@@ -202,9 +220,7 @@ class PluginMcpServerRepository:
         }
         for item in servers:
             values = {
-                key: value
-                for key, value in item.items()
-                if key in mutable_fields
+                key: value for key, value in item.items() if key in mutable_fields
             }
             server = existing.get(item["slug"])
             if server is None:
@@ -274,7 +290,6 @@ class PluginCredentialRequirementRepository:
                 credential_service=item["service"],
                 required=item["required"],
                 description=item["description"],
-                plugin_owned_service=item["plugin_owned_service"],
             )
             for item in prepared
         ]

@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -18,6 +19,7 @@ import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.accounts.auth_backends import DjangoJWTBackend
 from apps.credentials.enums import CredentialType
@@ -34,11 +36,13 @@ from apps.credentials.models import (
     McpOAuthAuthorizationState,
     McpOAuthClientRegistration,
 )
+from apps.credentials.repositories import McpOAuthRepository
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.plugins.models import Plugin, PluginCredentialRequirement, PluginMcpServer
 from apps.plugins.services import PluginService
-from apps.runners.models import Runner, Workspace
+from apps.runners.enums import RunnerStatus
+from apps.runners.models import ImageInstance, Runner, Workspace
 from apps.runners.services import RunnerService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, hash_token
@@ -47,7 +51,9 @@ from common.utils import decrypt_value, encrypt_value, hash_token
 @pytest.fixture
 def context(db, settings):
     settings.MCP_OAUTH_CALLBACK_URL = "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "http://127.0.0.1:8080/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = (
+        "http://127.0.0.1:8080/?settings=credentials"
+    )
     user = get_user_model().objects.create_user(
         email=f"oauth-{uuid.uuid4().hex[:8]}@test.local", password="secret"
     )
@@ -64,9 +70,7 @@ def context(db, settings):
         slug=f"{plugin_slug}-oauth",
         organization=org,
         credential_type=CredentialType.MCP_OAUTH,
-        plugin_owned=True,
-        oauth_plugin_slug=plugin_slug,
-        oauth_requirement_key="mcp",
+        oauth_server_url="https://mcp.example/mcp",
     )
     server = PluginMcpServer.objects.create(
         plugin=plugin,
@@ -79,6 +83,11 @@ def context(db, settings):
     )
     PluginCredentialRequirement.objects.create(
         plugin=plugin, key="mcp", credential_service=service, required=True
+    )
+    from apps.credentials.models import OrgCredentialServiceActivation
+
+    OrgCredentialServiceActivation.objects.create(
+        organization=org, credential_service=service
     )
     runner = Runner.objects.create(
         name="runner",
@@ -98,7 +107,7 @@ def _registration(server, **kwargs):
     }
     registration, _ = McpOAuthClientRegistration.objects.get_or_create(
         server_url=server.url,
-        callback_url="http://127.0.0.1:8000/api/v1/mcp-oauth/callback/",
+        callback_url=settings.MCP_OAUTH_CALLBACK_URL,
         issuer="https://auth.example/tenant",
         defaults=defaults,
     )
@@ -106,24 +115,65 @@ def _registration(server, **kwargs):
 
 
 def _connect_url(plugin, server):
-    return f"/api/v1/mcp-oauth/{plugin.id}/mcp-servers/{server.id}/oauth/connect/"
+    service_id = plugin.credential_requirements.get(
+        key=server.oauth_requirement_key
+    ).credential_service_id
+    return f"/api/v1/credential-services/{service_id}/oauth/connect/"
 
 
 def _status_url(plugin, server):
-    return f"/api/v1/mcp-oauth/{plugin.id}/mcp-servers/{server.id}/oauth/status/"
+    return "/api/v1/credentials/"
 
 
 def _disconnect_url(plugin, server, service_id, org=False):
-    return (
-        f"/api/v1/mcp-oauth/{plugin.id}/mcp-servers/{server.id}/oauth/disconnect/"
-        f"?service_id={service_id}&organization_credential={str(org).lower()}"
-    )
+    return f"/api/v1/credentials/{service_id}/oauth/disconnect/"
 
 
 def _jwt_client(client, user):
     token = DjangoJWTBackend().generate_tokens(user).access_token
     client.defaults["HTTP_AUTHORIZATION"] = f"Bearer {token}"
     return token
+
+
+@pytest.mark.django_db(transaction=True)
+def test_consume_oauth_state_locks_only_state_row_with_nullable_credential(context):
+    """PostgreSQL can consume state when its optional credential is NULL."""
+    from django.db import connection, transaction
+
+    if connection.vendor != "postgresql":
+        pytest.skip("Regression covers PostgreSQL nullable-join row locking")
+
+    user, org, service, _, server, _ = context
+    registration = _registration(server)
+    state = McpOAuthAuthorizationState.objects.create(
+        state_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        browser_binding_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        encrypted_code_verifier=encrypt_value("verifier"),
+        user=user,
+        organization=org,
+        service=service,
+        credential=None,
+        organization_credential=False,
+        server_url=server.url,
+        resource=server.url,
+        issuer=registration.issuer,
+        registration=registration,
+        redirect_uri=settings.MCP_OAUTH_CALLBACK_URL,
+        expires_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    with transaction.atomic():
+        consumed, matched = McpOAuthRepository.consume_state_and_match_binding(
+            state_hash=state.state_hash,
+            binding_hash=state.browser_binding_hash,
+            now=timezone.now(),
+        )
+
+    assert matched is True
+    assert consumed is not None
+    assert consumed.pk == state.pk
+    consumed.refresh_from_db()
+    assert consumed.consumed_at is not None
 
 
 @pytest.mark.django_db
@@ -145,7 +195,7 @@ def test_oauth_service_crud_is_prohibited_and_resolution_filters_tokens(context)
         "expires_at": "2099-01-01T00:00:00+00:00",
         "resource": "https://mcp.example/mcp",
         "server_url": context[4].url,
-        "server_id": str(context[4].id),
+        "service_id": str(service.id),
         "registration_id": str(registration.id),
     }
     credential = Credential.objects.create(
@@ -154,7 +204,6 @@ def test_oauth_service_crud_is_prohibited_and_resolution_filters_tokens(context)
         name="OAuth",
         encrypted_value=encrypt_value(json.dumps(token_data)),
         created_by=user,
-        oauth_server_id=context[4].id,
         oauth_server_url=context[4].url,
         oauth_resource=token_data["resource"],
         oauth_registration=registration,
@@ -165,6 +214,11 @@ def test_oauth_service_crud_is_prohibited_and_resolution_filters_tokens(context)
         slug=f"ordinary-{uuid.uuid4().hex[:8]}",
         credential_type=CredentialType.ENV,
         env_var_name="ORDINARY_TOKEN",
+    )
+    from apps.credentials.models import OrgCredentialServiceActivation
+
+    OrgCredentialServiceActivation.objects.create(
+        organization=org, credential_service=ordinary_service
     )
     ordinary_credential = CredentialSvc().create_personal_credential(
         service_id=ordinary_service.id,
@@ -358,17 +412,19 @@ def test_ssrf_rejects_private_dns_and_callback_urls_are_fixed(monkeypatch, setti
     with pytest.raises(OAuthError, match="fixed valid callback"):
         mcp_oauth.callback_url()
     settings.MCP_OAUTH_CALLBACK_URL = "https://app.example/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=plugins"
-    assert mcp_oauth.frontend_return_url() == "https://app.example/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=credentials"
+    assert (
+        mcp_oauth.frontend_return_url() == "https://app.example/?settings=credentials"
+    )
     settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://attacker.example/path"
     with pytest.raises(OAuthError, match="fixed safe"):
         mcp_oauth.frontend_return_url()
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=credentials"
-    with pytest.raises(OAuthError, match="settings=plugins"):
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=plugins"
+    with pytest.raises(OAuthError, match="settings=credentials"):
         mcp_oauth.frontend_return_url()
 
     settings.MCP_OAUTH_CALLBACK_URL = "https://api.example/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://app.example/?settings=credentials"
     with pytest.raises(OAuthError, match="same hostname and scheme"):
         mcp_oauth._validate_browser_flow_origins()
 
@@ -379,7 +435,7 @@ def test_start_flow_persists_hashed_state_verifier_and_scoped_cookie(
 ):
     user, org, service, _, server, _ = context
     settings.MCP_OAUTH_CALLBACK_URL = "https://web.example/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=credentials"
     registration = _registration(server)
     monkeypatch.setattr(
         "apps.credentials.mcp_oauth._discover",
@@ -399,7 +455,6 @@ def test_start_flow_persists_hashed_state_verifier_and_scoped_cookie(
     auth_url, binding, cookie_name = start_flow(
         user=user,
         organization=org,
-        server=server,
         service=service,
         organization_credential=False,
     )
@@ -420,7 +475,7 @@ def test_start_flow_revalidates_cached_authorization_endpoint(context, monkeypat
 
     user, org, service, _, server, _ = context
     settings.MCP_OAUTH_CALLBACK_URL = "https://web.example/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=credentials"
     registration = _registration(server)
     registration.authorization_endpoint = "http://127.0.0.1/authorize"
     registration.save(update_fields=["authorization_endpoint"])
@@ -439,7 +494,6 @@ def test_start_flow_revalidates_cached_authorization_endpoint(context, monkeypat
         start_flow(
             user=user,
             organization=org,
-            server=server,
             service=service,
             organization_credential=False,
         )
@@ -452,7 +506,7 @@ def test_callback_consumes_mismatch_and_failure_and_stores_bound_token(
 ):
     user, org, service, _, server, _ = context
     settings.MCP_OAUTH_CALLBACK_URL = "https://web.example/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "https://web.example/?settings=credentials"
     registration = _registration(server)
     monkeypatch.setattr(
         "apps.credentials.mcp_oauth._discover",
@@ -469,25 +523,24 @@ def test_callback_consumes_mismatch_and_failure_and_stores_bound_token(
         "apps.credentials.mcp_oauth._validated_https_url",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
+    from apps.credentials.services import CredentialOAuthSvc
+
+    oauth = CredentialOAuthSvc()
     auth_url, binding, cookie_name = start_flow(
         user=user,
         organization=org,
-        server=server,
         service=service,
         organization_credential=False,
     )
     state = parse_qs(urlparse(auth_url).query)["state"][0]
     with pytest.raises(OAuthError):
-        from apps.credentials.mcp_oauth import complete_flow
-
-        complete_flow(raw_state=state, binding="wrong", code="code")
+        oauth.complete_authorization(raw_state=state, binding="wrong", code="code")
     with pytest.raises(OAuthError):
-        complete_flow(raw_state=state, binding=binding, code="code")
+        oauth.complete_authorization(raw_state=state, binding=binding, code="code")
 
     auth_url, binding, cookie_name = start_flow(
         user=user,
         organization=org,
-        server=server,
         service=service,
         organization_credential=False,
     )
@@ -506,9 +559,9 @@ def test_callback_consumes_mismatch_and_failure_and_stores_bound_token(
             "email_domain": "example.org",
         },
     )
-    assert complete_flow(raw_state=state, binding=binding, code="code")
+    assert oauth.complete_authorization(raw_state=state, binding=binding, code="code")
     cred = Credential.objects.get(user=user, service=service)
-    assert cred.oauth_server_id == server.id
+    assert cred.oauth_server_url == server.url
     assert cred.oauth_resource == "https://mcp.example"
     stored = json.loads(decrypt_value(cred.encrypted_value))
     assert stored["identity"] == {
@@ -521,10 +574,63 @@ def test_callback_consumes_mismatch_and_failure_and_stores_bound_token(
     }
     assert "access-secret" not in cred.encrypted_value
     assert parse_qs(urlparse(settings.MCP_OAUTH_FRONTEND_RETURN_URL).query) == {
-        "settings": ["plugins"]
+        "settings": ["credentials"]
     }
     with pytest.raises(OAuthError):
-        complete_flow(raw_state=state, binding=binding, code="code")
+        oauth.complete_authorization(raw_state=state, binding=binding, code="code")
+
+
+@pytest.mark.django_db
+def test_readiness_requires_valid_credentials_for_every_matching_server(context):
+    user, org, service, plugin, server, workspace = context
+    registration = _registration(server)
+    token_payload = {
+        "access_token": "ready-token",
+        "refresh_token": "ready-refresh",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "resource": server.url,
+        "server_url": server.url,
+        "service_id": str(service.id),
+        "registration_id": str(registration.id),
+    }
+    first = Credential.objects.create(
+        user=user,
+        service=service,
+        name="First server account",
+        encrypted_value=encrypt_value(json.dumps(token_payload)),
+        created_by=user,
+        oauth_server_url=server.url,
+        oauth_resource=server.url,
+        oauth_registration=registration,
+        oauth_status="connected",
+    )
+    workspace.credentials.add(first)
+    PluginMcpServer.objects.create(
+        plugin=plugin,
+        name="Other MCP",
+        slug="other-mcp",
+        transport="streamable_http",
+        url="https://other.example/mcp",
+        auth_type="oauth",
+        oauth_requirement_key=server.oauth_requirement_key,
+    )
+    plugin.enabled = True
+    plugin.published = True
+    plugin.save(update_fields=["enabled", "published"])
+    from apps.plugins.models import OrgPluginActivation
+
+    OrgPluginActivation.objects.create(organization=org, plugin=plugin, enabled_by=user)
+    from apps.plugins.models import OrgPluginActivation
+
+    OrgPluginActivation.objects.get_or_create(
+        organization=org, plugin=plugin, defaults={"enabled_by": user}
+    )
+    readiness = PluginService().list_workspace_plugins(
+        workspace=workspace, org_id=org.id
+    )
+    assert readiness[0]["ready"] is False
+    # A connected grant for one URL cannot satisfy a second mapped server.
+    assert readiness[0]["missing_required_credentials"]
 
 
 @pytest.mark.django_db
@@ -539,7 +645,7 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
         "expires_at": "2099-01-01T00:00:00+00:00",
         "resource": "https://mcp.example/mcp",
         "server_url": server.url,
-        "server_id": str(server.id),
+        "service_id": str(service.id),
         "registration_id": str(registration.id),
         "identity": {"workspace_id": "w1"},
     }
@@ -549,7 +655,6 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
         name="OAuth",
         encrypted_value=encrypt_value(json.dumps(data)),
         created_by=user,
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource="https://mcp.example/mcp",
         oauth_status="connected",
@@ -569,7 +674,7 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
     from apps.credentials.mcp_oauth import access_token_for_request
 
     monkeypatch.setattr("apps.credentials.mcp_oauth._post_token", refresh)
-    assert access_token_for_request(credential.id, server.id, server.url) == "old"
+    assert access_token_for_request(credential.id, service.id, server.url) == "old"
     assert not refreshes
     stored = json.loads(
         decrypt_value(Credential.objects.get(pk=credential.pk).encrypted_value)
@@ -580,7 +685,7 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
     data["expires_at"] = "2000-01-01T00:00:00+00:00"
     credential.encrypted_value = encrypt_value(json.dumps(data))
     credential.save(update_fields=["encrypted_value"])
-    assert access_token_for_request(credential.id, server.id, server.url) == "new"
+    assert access_token_for_request(credential.id, service.id, server.url) == "new"
     assert len(refreshes) == 1
     stored = json.loads(
         decrypt_value(Credential.objects.get(pk=credential.pk).encrypted_value)
@@ -588,7 +693,7 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
     assert stored["refresh_token"] == "r1"
     assert stored["identity"]["workspace_id"] == "w1"
     assert stored["identity"]["email_domain"] == "new.example"
-    assert access_token_for_request(credential.id, server.id, server.url) == "new"
+    assert access_token_for_request(credential.id, service.id, server.url) == "new"
     assert len(refreshes) == 1
     monkeypatch.setattr(
         "apps.credentials.mcp_oauth._post_token",
@@ -597,7 +702,7 @@ def test_request_auth_refreshes_each_call_rotates_and_invalid_grant_reconnects(
     stored["expires_at"] = "2000-01-01T00:00:00+00:00"
     credential.encrypted_value = encrypt_value(json.dumps(stored))
     credential.save(update_fields=["encrypted_value"])
-    assert access_token_for_request(credential.id, server.id, server.url) is None
+    assert access_token_for_request(credential.id, service.id, server.url) is None
     credential.refresh_from_db()
     assert credential.oauth_status == "reconnect_required"
     assert credential.encrypted_value == ""
@@ -623,7 +728,7 @@ def test_auth_handler_resolves_each_request_and_never_leaks_on_redirect(
         "apps.credentials.mcp_oauth.access_token_for_request",
         lambda *args: f"token-{args[0]}",
     )
-    auth = McpOAuthHTTPAuth(uuid.uuid4(), server.id, server.url)
+    auth = McpOAuthHTTPAuth(uuid.uuid4(), service.id, server.url)
 
     async def run_flow():
         request = httpx.Request("POST", server.url)
@@ -653,31 +758,16 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
     user, org, service, plugin, server, workspace = context
     settings.DEBUG = True
     settings.MCP_OAUTH_CALLBACK_URL = "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "http://127.0.0.1:8080/?settings=plugins"
-    client = Client()
-    response = client.get(
-        _status_url(plugin, server), HTTP_X_ORGANIZATION_ID=str(org.id)
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = (
+        "http://127.0.0.1:8080/?settings=credentials"
     )
+    client = Client()
+    response = client.get("/api/v1/credentials/", HTTP_X_ORGANIZATION_ID=str(org.id))
     assert response.status_code == 401
     access_token = _jwt_client(client, user)
-    response = client.get(
-        _status_url(plugin, server), HTTP_X_ORGANIZATION_ID=str(org.id)
-    )
+    response = client.get("/api/v1/credentials/", HTTP_X_ORGANIZATION_ID=str(org.id))
     assert response.status_code == 200
-    assert response.json() == {
-        "personal": {
-            "connected": False,
-            "credential_id": None,
-            "expires_at": None,
-            "reconnect_required": False,
-        },
-        "organization": {
-            "connected": False,
-            "credential_id": None,
-            "expires_at": None,
-            "reconnect_required": False,
-        },
-    }
+    assert response.json() == []
     registration = _registration(server)
     monkeypatch.setattr(
         "apps.credentials.mcp_oauth._discover",
@@ -697,7 +787,7 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
     )
     response = client.post(
         _connect_url(plugin, server),
-        data=json.dumps({"service_id": str(service.id)}),
+        data=json.dumps({"name": "OAuth"}),
         content_type="application/json",
         HTTP_AUTHORIZATION=f"Bearer {access_token}",
         HTTP_X_ORGANIZATION_ID=str(org.id),
@@ -721,7 +811,7 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
     assert callback.status_code == 302
     callback_target = callback["Location"]
     assert callback_target == (
-        "http://127.0.0.1:8080/?settings=plugins&mcp_oauth=error"
+        "http://127.0.0.1:8080/?settings=credentials&oauth_result=error"
     )
     assert "one-time-provider-code" not in callback_target
     assert "code=" not in callback_target
@@ -739,9 +829,7 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
     member_token = _jwt_client(other_client, org_user)
     response = other_client.post(
         _connect_url(plugin, server),
-        data=json.dumps(
-            {"service_id": str(service.id), "organization_credential": True}
-        ),
+        data=json.dumps({"name": "Shared OAuth", "organization_credential": True}),
         content_type="application/json",
         HTTP_AUTHORIZATION=f"Bearer {member_token}",
         HTTP_X_ORGANIZATION_ID=str(org.id),
@@ -750,10 +838,16 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
     cross_org = Organization.objects.create(
         name="Other", slug=f"cross-{uuid.uuid4().hex[:8]}"
     )
-    response = other_client.get(
-        _status_url(plugin, server),
+    Membership.objects.create(
+        user=org_user, organization=cross_org, role=MembershipRole.ADMIN
+    )
+    response = other_client.post(
+        _connect_url(plugin, server),
+        data=json.dumps({"name": "Cross org"}),
+        content_type="application/json",
         HTTP_AUTHORIZATION=f"Bearer {member_token}",
         HTTP_X_ORGANIZATION_ID=str(cross_org.id),
+        HTTP_HOST="127.0.0.1:8000",
     )
     assert response.status_code == 404
 
@@ -765,7 +859,7 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
         "expires_at": "2099-01-01T00:00:00+00:00",
         "resource": "https://mcp.example/mcp",
         "server_url": server.url,
-        "server_id": str(server.id),
+        "service_id": str(service.id),
         "registration_id": str(registration.id),
     }
     organization_credential = Credential.objects.create(
@@ -774,29 +868,29 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
         name="Shared OAuth",
         encrypted_value=encrypt_value(json.dumps(shared_token)),
         created_by=user,
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource=shared_token["resource"],
         oauth_registration=registration,
         oauth_status="connected",
     )
     member_status = other_client.get(
-        _status_url(plugin, server),
+        "/api/v1/credentials/",
         HTTP_AUTHORIZATION=f"Bearer {member_token}",
         HTTP_X_ORGANIZATION_ID=str(org.id),
     )
     assert member_status.status_code == 200
-    assert member_status.json()["organization"]["credential_id"] == str(
-        organization_credential.id
-    )
+    assert str(organization_credential.id) in {
+        item["id"] for item in member_status.json()
+    }
+    assert "shared-secret" not in member_status.content.decode()
     admin_status = client.get(
-        _status_url(plugin, server),
+        "/api/v1/credentials/",
         HTTP_AUTHORIZATION=f"Bearer {access_token}",
         HTTP_X_ORGANIZATION_ID=str(org.id),
     )
-    assert admin_status.json()["organization"]["credential_id"] == str(
-        organization_credential.id
-    )
+    assert str(organization_credential.id) in {
+        item["id"] for item in admin_status.json()
+    }
 
 
 @pytest.mark.django_db
@@ -809,7 +903,6 @@ def test_generic_delete_requires_oauth_disconnect_and_checks_ownership_first(con
         name="OAuth",
         encrypted_value="",
         created_by=user,
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource="https://mcp.example/mcp",
         oauth_registration=registration,
@@ -818,12 +911,8 @@ def test_generic_delete_requires_oauth_disconnect_and_checks_ownership_first(con
     workspace.credentials.add(credential)
     svc = CredentialSvc()
 
-    with pytest.raises(ConflictError) as error:
-        svc.delete_credential(
-            credential.id, org_id=org.id, user=user, is_admin=True
-        )
-    assert error.value.code == "oauth_flow_required"
-    assert Credential.objects.filter(pk=credential.id).exists()
+    svc.delete_credential(credential.id, org_id=org.id, user=user, is_admin=True)
+    assert not Credential.objects.filter(pk=credential.id).exists()
 
     client = Client()
     access_token = _jwt_client(client, user)
@@ -832,9 +921,7 @@ def test_generic_delete_requires_oauth_disconnect_and_checks_ownership_first(con
         HTTP_AUTHORIZATION=f"Bearer {access_token}",
         HTTP_X_ORGANIZATION_ID=str(org.id),
     )
-    assert response.status_code == 409
-    assert response.json()["code"] == "oauth_flow_required"
-    assert Credential.objects.filter(pk=credential.id).exists()
+    assert response.status_code == 404
 
     other_user = get_user_model().objects.create_user(
         email=f"other-{uuid.uuid4().hex[:8]}@test.local", password="secret"
@@ -850,7 +937,6 @@ def test_generic_delete_requires_oauth_disconnect_and_checks_ownership_first(con
         name="Shared OAuth",
         encrypted_value="",
         created_by=user,
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource="https://mcp.example/mcp",
         oauth_registration=registration,
@@ -875,7 +961,7 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
         "expires_at": "2099-01-01T00:00:00+00:00",
         "resource": "https://mcp.example/mcp",
         "server_url": server.url,
-        "server_id": str(server.id),
+        "service_id": str(service.id),
         "registration_id": str(registration.id),
     }
     credential = Credential.objects.create(
@@ -884,32 +970,34 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
         name="OAuth",
         encrypted_value=encrypt_value(json.dumps(token_data)),
         created_by=user,
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource="https://mcp.example/mcp",
         oauth_status="connected",
         oauth_registration=registration,
     )
     workspace.credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=workspace, org_id=org.id, user=user, plugin_ids=[plugin.id]
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=workspace.id,
+        user=user,
+        organization_id=org.id,
+        credentials=[credential],
+        plugin_ids=[plugin.id],
     )
     from apps.credentials.mcp_oauth import disconnect_credential
 
-    assert disconnect_credential(
-        credential.id, server_id=server.id, server_url=server.url
-    )
+    assert disconnect_credential(credential.id)
     credential.refresh_from_db()
     assert credential.encrypted_value == ""
     assert credential.oauth_status == "disconnected"
     assert workspace.credentials.filter(pk=credential.pk).exists()
-    gaps = PluginService().validate_workspace_credential_removal(
-        workspace=workspace,
-        org_id=org.id,
-        remaining_service_ids=set(),
-        remaining_credential_ids=set(),
+    gaps = PluginService().blocking_plugin_gaps_for_credential(
+        credential, org_id=org.id
     )
-    assert gaps == []
+    assert gaps
     asyncio.run(
         RunnerService().update_workspace(
             workspace.id,
@@ -917,6 +1005,9 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
             resolved_credentials=CredentialSvc().resolve_credentials(
                 [], org_id=org.id, user=user
             ),
+            plugin_ids=[],
+            user=user,
+            organization_id=org.id,
         )
     )
     assert not workspace.credentials.filter(pk=credential.pk).exists()
@@ -924,3 +1015,68 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
         workspace=workspace, org_id=org.id
     )[0]
     assert readiness["ready"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_clone_from_image_can_attach_selected_oauth_plugin(context):
+    user, org, service, plugin, server, workspace = context
+    PluginService().set_org_activation(plugin.id, org_id=org.id, user=user, active=True)
+    registration = _registration(server)
+    token_data = {
+        "access_token": "access",
+        "refresh_token": "refresh",
+        "token_type": "Bearer",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "resource": "https://mcp.example/mcp",
+        "server_url": server.url,
+        "service_id": str(service.id),
+        "registration_id": str(registration.id),
+    }
+    credential = Credential.objects.create(
+        user=user,
+        service=service,
+        name="OAuth",
+        encrypted_value=encrypt_value(json.dumps(token_data)),
+        created_by=user,
+        oauth_server_url=server.url,
+        oauth_resource="https://mcp.example/mcp",
+        oauth_status="connected",
+        oauth_registration=registration,
+    )
+    runner = workspace.runner
+    runner.status = RunnerStatus.ONLINE
+    runner.sid = "oauth-clone-sid"
+    runner.available_runtimes = ["docker"]
+    runner.save(update_fields=["status", "sid", "available_runtimes"])
+    artifact = ImageInstance.objects.create(
+        runner=runner,
+        runtime_type="docker",
+        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+        origin_workspace=workspace,
+        created_by=user,
+        name="Captured source",
+        runner_ref="captured-oauth-clone",
+        status=ImageInstance.Status.READY,
+    )
+    runner_service = RunnerService(sio_server=AsyncMock())
+    resolved = CredentialSvc().resolve_credentials(
+        [credential.id], org_id=org.id, user=user
+    )
+
+    cloned, task = asyncio.run(
+        runner_service.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="OAuth plugin clone",
+            credentials=resolved.credentials,
+            resolved_credentials=resolved,
+            user=user,
+            organization_id=org.id,
+            plugin_ids=[plugin.id],
+        )
+    )
+
+    assert task.type == "create_workspace_from_image_artifact"
+    assert list(cloned.plugin_activations.values_list("plugin_id", flat=True)) == [
+        plugin.id
+    ]
+    assert list(cloned.credentials.values_list("id", flat=True)) == [credential.id]

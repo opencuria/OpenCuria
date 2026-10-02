@@ -61,6 +61,7 @@ function runningWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     updated_at: '2026-03-29T10:00:00.000Z',
     has_active_session: false,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
@@ -91,10 +92,7 @@ describe('WorkspacePicker', () => {
   })
 
   it('emits update:modelValue when an option is clicked', async () => {
-    workspaceStore.workspaces = [
-      runningWorkspace(),
-      runningWorkspace({ id: 'ws-2', name: 'Beta' }),
-    ]
+    workspaceStore.workspaces = [runningWorkspace(), runningWorkspace({ id: 'ws-2', name: 'Beta' })]
     const wrapper = mountPicker({ modelValue: 'ws-1' })
 
     const option = wrapper

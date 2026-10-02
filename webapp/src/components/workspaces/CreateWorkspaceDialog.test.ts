@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CreateWorkspaceDialog from './CreateWorkspaceDialog.vue'
 import { RuntimeType } from '@/types'
+import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
 const routerPush = vi.fn()
 const fetchCredentials = vi.fn()
@@ -87,9 +88,8 @@ const imageStore = {
 }
 
 vi.mock('vue-router', () => ({
-  useRouter: () => ({
-    push: routerPush,
-  }),
+  useRouter: () => ({ push: routerPush }),
+  useRoute: () => ({ path: '/', query: {} }),
 }))
 
 vi.mock('@/stores/credentials', () => ({
@@ -107,6 +107,17 @@ vi.mock('@/stores/workspaces', () => ({
 vi.mock('@/stores/images', () => ({
   useImageStore: () => imageStore,
 }))
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({ user: { id: 1 }, activeOrganizationId: 'org-1', initialized: true }),
+}))
+vi.mock('@/stores/notifications', () => ({
+  useNotificationStore: () => ({
+    error: vi.fn(),
+    success: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  }),
+}))
 
 describe('CreateWorkspaceDialog', () => {
   beforeEach(() => {
@@ -120,6 +131,46 @@ describe('CreateWorkspaceDialog', () => {
     createWorkspace.mockResolvedValue(true)
   })
 
+  it('restores a create configuration into a newly mounted dialog after the credentials redirect', async () => {
+    const saved = saveWorkspaceDraft(
+      {
+        mode: 'create',
+        name: 'Restored configuration',
+        credentialIds: ['cred-1'],
+        pluginIds: ['plugin-1'],
+        repos: ['https://example.test/repo'],
+        runnerId: 'runner-1',
+        runtimeType: RuntimeType.QEMU,
+        qemuVcpus: 3,
+        qemuMemoryMb: 8192,
+        qemuDiskSizeGb: 75,
+        imageValue: 'captured:captured-image-1',
+      },
+      { userId: 1, organizationId: 'org-1' },
+      '/workspaces',
+    )
+    const wrapper = shallowMount(CreateWorkspaceDialog, { props: { resumeDraftId: saved.id } })
+    await nextTick()
+    const vm = wrapper.vm as typeof wrapper.vm & {
+      open: boolean
+      name: string
+      selectedCredentialIds: string[]
+      selectedPluginIds: string[]
+      repos: string[]
+      runnerId: string
+      qemuMemoryMb: number
+      selectedImageValue: string
+    }
+    expect(vm.open).toBe(true)
+    expect(vm.name).toBe('Restored configuration')
+    expect(vm.selectedCredentialIds).toEqual(['cred-1'])
+    expect(vm.selectedPluginIds).toEqual(['plugin-1'])
+    expect(vm.repos).toEqual(['https://example.test/repo'])
+    expect(vm.runnerId).toBe('runner-1')
+    expect(vm.qemuMemoryMb).toBe(8192)
+    expect(vm.selectedImageValue).toBe('captured:captured-image-1')
+  })
+
   it('creates a workspace from a captured image via the artifact clone flow', async () => {
     const wrapper = shallowMount(CreateWorkspaceDialog)
     const vm = wrapper.vm as typeof wrapper.vm & {
@@ -127,7 +178,7 @@ describe('CreateWorkspaceDialog', () => {
       name: string
       selectedImageValue: string
       selectedCredentialIds: string[]
-      toggleCredential: (id: string) => void
+      pluginSelectionValid: boolean
       handleSubmit: () => Promise<void>
     }
 
@@ -136,7 +187,8 @@ describe('CreateWorkspaceDialog', () => {
     vm.name = 'Captured Clone'
     vm.selectedImageValue = 'captured:captured-image-1'
     await nextTick()
-    vm.toggleCredential('cred-1')
+    vm.selectedCredentialIds = ['cred-1']
+    vm.pluginSelectionValid = true
     await nextTick()
 
     await vm.handleSubmit()
@@ -144,6 +196,7 @@ describe('CreateWorkspaceDialog', () => {
     expect(createWorkspaceFromImageArtifact).toHaveBeenCalledWith('captured-image-1', {
       name: 'Captured Clone',
       credential_ids: ['cred-1'],
+      plugin_ids: [],
     })
     expect(vm.selectedCredentialIds).toEqual(['cred-1'])
     expect(createWorkspace).not.toHaveBeenCalled()

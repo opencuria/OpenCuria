@@ -21,6 +21,7 @@ const emit = defineEmits<{
 const authStore = useAuthStore()
 
 const canEdit = computed(() => {
+  if (props.credential.credential_type === 'mcp_oauth') return false
   if (props.credential.scope === 'personal') {
     return authStore.user?.id === props.credential.created_by_id
   }

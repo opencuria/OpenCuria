@@ -31,6 +31,7 @@ const value = ref('')
 const submitting = ref(false)
 
 function credentialDescriptor(credential: Credential): string {
+  if (credential.credential_type === 'mcp_oauth') return 'Provider-managed OAuth connection'
   if (credential.credential_type === 'file') return credential.target_path
   if (credential.credential_type === 'ssh_key') return 'SSH key pair'
   return credential.env_var_name
@@ -77,49 +78,52 @@ function handleClose(): void {
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(v) => (v ? null : handleClose())"
-  >
+  <Dialog :open="open" @update:open="(v) => (v ? null : handleClose())">
     <DialogContent>
       <DialogHeader>
         <DialogTitle>Edit Credential</DialogTitle>
-        <DialogDescription>Update the credential name or replace its value.</DialogDescription>
+        <DialogDescription>{{
+          credential?.credential_type === 'mcp_oauth'
+            ? 'Rename the provider-managed connection. OAuth tokens cannot be manually edited.'
+            : 'Update the credential name or replace its value.'
+        }}</DialogDescription>
       </DialogHeader>
 
       <DialogBody>
-      <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-        <div v-if="credential">
-          <p class="text-sm text-muted-foreground mb-3">
-            {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
+        <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+          <div v-if="credential">
+            <p class="text-sm text-muted-foreground mb-3">
+              {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
+            </p>
+          </div>
+
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+            <Input v-model="name" placeholder="Credential name" />
+          </div>
+
+          <div v-if="credential?.credential_type !== 'mcp_oauth'">
+            <label class="text-sm font-medium text-foreground mb-1.5 block">New Value</label>
+            <Textarea
+              v-if="credential?.credential_type === 'file'"
+              v-model="value"
+              :rows="6"
+              placeholder="Leave empty to keep current file contents"
+            />
+            <Input
+              v-else
+              v-model="value"
+              type="password"
+              placeholder="Leave empty to keep current value"
+            />
+            <p class="text-xs text-muted-foreground mt-1">
+              Only fill this in if you want to replace the stored value.
+            </p>
+          </div>
+          <p v-else class="text-sm text-muted-foreground">
+            OAuth tokens are provider-managed and cannot be edited here.
           </p>
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-          <Input v-model="name" placeholder="Credential name" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">New Value</label>
-          <Textarea
-            v-if="credential?.credential_type === 'file'"
-            v-model="value"
-            :rows="6"
-            placeholder="Leave empty to keep current file contents"
-          />
-          <Input
-            v-else
-            v-model="value"
-            type="password"
-            placeholder="Leave empty to keep current value"
-          />
-          <p class="text-xs text-muted-foreground mt-1">
-            Only fill this in if you want to replace the stored value.
-          </p>
-        </div>
-
-      </form>
+        </form>
       </DialogBody>
 
       <DialogFooter>

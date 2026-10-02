@@ -200,6 +200,7 @@ class McpRuntime:
                         url=server.url or "",
                         headers=rendered_headers,
                         oauth_credential_id=oauth_credential_id,
+                        oauth_service_id=server.oauth_service_id,
                         startup_timeout_seconds=float(
                             server.startup_timeout_seconds or 30
                         ),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
@@ -26,6 +27,9 @@ from common.utils import generate_uuid
 
 from ...enums import TaskStatus, TaskType, WorkspaceStatus
 from ...exceptions import RunnerOfflineError
+
+if TYPE_CHECKING:
+    from ...models import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +74,7 @@ class CredentialSyncMixin:
 
     async def _dispatch_credential_inject(
         self,
-        workspace: "Workspace",
+        workspace: Workspace,
         *,
         resolved: ResolvedCredentials | None = None,
         wait: bool = False,
@@ -86,7 +90,7 @@ class CredentialSyncMixin:
                 whether credential material is present on disk.
 
         Returns:
-            ``credentials_present`` when *wait* is True, otherwise ``None``.
+            Acknowledged state when waiting, otherwise ``None``.
         """
         runner = workspace.runner
         if not runner.is_online:
@@ -133,21 +137,20 @@ class CredentialSyncMixin:
                     self._pending_credential_inject.discard(key)
                     await sync_to_async(self.tasks.fail)(task, error)
                     raise ConflictError(error)
-                # This flag describes only material that was sent to and
-                # installed by the runner; server-side OAuth IDs are excluded.
-                payload_secrets = self._resolved_credentials_payload(resolved)
-                credentials_present = bool(
-                    payload_secrets["env_vars"]
-                    or payload_secrets["files"]
-                    or payload_secrets["ssh_keys"]
-                )
-                workspace = await sync_to_async(
-                    self.workspaces.update_credentials_present
-                )(workspace, credentials_present)
+                # Only an explicit runner disk-state acknowledgement updates
+                # the flag. A successful RPC without that field is not proof.
+                acknowledged_present = response.get("credentials_present")
+                workspace = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
+                if isinstance(acknowledged_present, bool):
+                    workspace = await sync_to_async(
+                        self.workspaces.update_credentials_present
+                    )(workspace, acknowledged_present)
                 await sync_to_async(self.tasks.complete)(task)
                 self._pending_credential_inject.discard(key)
                 self._forward_workspace_status(workspace, task_id=str(task_id))
-                return credentials_present
+                if isinstance(acknowledged_present, bool):
+                    return acknowledged_present
+                return None
 
             await self._emit_to_runner(
                 runner,
@@ -163,8 +166,7 @@ class CredentialSyncMixin:
             await sync_to_async(self.tasks.fail)(task, str(exc))
             if wait:
                 raise ConflictError(
-                    "Failed to apply credentials to the running workspace: "
-                    f"{exc}"
+                    f"Failed to apply credentials to the running workspace: {exc}"
                 ) from exc
             raise
 
@@ -174,9 +176,7 @@ class CredentialSyncMixin:
         """Apply desired credentials onto running workspaces (heartbeat)."""
         for workspace_id in workspace_ids:
             try:
-                workspace = await sync_to_async(self.workspaces.get_by_id)(
-                    workspace_id
-                )
+                workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
                 if workspace is None:
                     continue
                 if workspace.status != WorkspaceStatus.RUNNING:

@@ -12,7 +12,7 @@
   Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   BookText,
   Bot,
@@ -43,6 +43,7 @@ import CapturedImagesPanel from './CapturedImagesPanel.vue'
 import RunnersPanel from './RunnersPanel.vue'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import {
+  CLOSE_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   resolveSettingsTab,
   type SettingsTabId,
@@ -52,6 +53,13 @@ const authStore = useAuthStore()
 
 const open = defineModel<boolean>('open', { default: false })
 const activeTab = defineModel<SettingsTabId>('tab', { default: 'general' })
+const settingsContext = ref<{
+  pluginId?: string
+  serviceId?: string
+  credentialId?: string
+  workspaceDraftId?: string
+  version: number
+}>({ version: 0 })
 
 const isAdmin = computed(() => authStore.isAdmin)
 
@@ -72,13 +80,11 @@ const navItems: SettingsNavItem[] = [
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'images', label: 'Captured Images', icon: Camera },
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
-  { id: 'credential-services', label: 'Credential Services', icon: Shield },
+  { id: 'credential-services', label: 'Credential Services', icon: Shield, adminOnly: true },
   { id: 'image-definitions', label: 'Image Definitions', icon: Layers },
 ]
 
-const visibleNavItems = computed(() =>
-  navItems.filter((item) => !item.adminOnly || isAdmin.value),
-)
+const visibleNavItems = computed(() => navItems.filter((item) => !item.adminOnly || isAdmin.value))
 
 const activeLabel = computed(
   () => visibleNavItems.value.find((item) => item.id === activeTab.value)?.label ?? 'Settings',
@@ -87,7 +93,8 @@ const activeLabel = computed(
 function openSheet(tab?: unknown): void {
   const next = resolveSettingsTab(tab)
   // Runners is admin-only — fall back to General.
-  activeTab.value = next === 'runners' && !isAdmin.value ? 'general' : next
+  activeTab.value =
+    (next === 'runners' || next === 'credential-services') && !isAdmin.value ? 'general' : next
   open.value = true
 }
 
@@ -95,22 +102,53 @@ function selectTab(id: SettingsTabId): void {
   activeTab.value = id
 }
 
+function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): void {
+  const version = settingsContext.value.version
+  if (kind === 'service') {
+    settingsContext.value = { version, workspaceDraftId: settingsContext.value.workspaceDraftId }
+  } else if (kind === 'credential') {
+    settingsContext.value = { version, workspaceDraftId: settingsContext.value.workspaceDraftId }
+  } else {
+    settingsContext.value = { version }
+  }
+}
+
 function handleSettingsEvent(event: Event): void {
-  const detail = (event as CustomEvent<{ tab?: unknown }>).detail
+  const detail = (
+    event as CustomEvent<{
+      tab?: unknown
+      pluginId?: string
+      serviceId?: string
+      credentialId?: string
+      workspaceDraftId?: string
+    }>
+  ).detail
+  settingsContext.value = {
+    pluginId: detail?.pluginId,
+    serviceId: detail?.serviceId,
+    credentialId: detail?.credentialId,
+    workspaceDraftId: detail?.workspaceDraftId,
+    version: settingsContext.value.version + 1,
+  }
   openSheet(detail?.tab)
 }
 
+function closeSheet(): void {
+  open.value = false
+}
 onMounted(() => {
   window.addEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
+  window.addEventListener(CLOSE_SETTINGS_EVENT, closeSheet)
 })
 
 onUnmounted(() => {
   window.removeEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
+  window.removeEventListener(CLOSE_SETTINGS_EVENT, closeSheet)
 })
 
 // If an admin has Runners open and loses the role (org switch), fall back.
 watch(isAdmin, (admin) => {
-  if (!admin && activeTab.value === 'runners') {
+  if (!admin && (activeTab.value === 'runners' || activeTab.value === 'credential-services')) {
     activeTab.value = 'general'
   }
 })
@@ -201,19 +239,36 @@ watch(isAdmin, (admin) => {
 
       <!-- Content -->
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 lg:px-6">
+        <div
+          class="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 lg:px-6"
+        >
           <h2 class="text-base font-semibold text-foreground" data-testid="settings-sheet-title">
             {{ activeLabel }}
           </h2>
         </div>
         <ScrollArea class="min-h-0 flex-1">
-          <div class="mx-auto w-full max-w-3xl p-4 lg:p-6" role="tabpanel" :aria-label="activeLabel">
+          <div
+            class="mx-auto w-full max-w-3xl p-4 lg:p-6"
+            role="tabpanel"
+            :aria-label="activeLabel"
+          >
             <WorkspacePolicyTab v-if="activeTab === 'general'" />
             <ProviderConfigTab v-else-if="activeTab === 'provider'" />
             <AgentConfigTab v-else-if="activeTab === 'agents'" />
             <SkillsPanel v-else-if="activeTab === 'skills'" />
-            <CredentialsPanel v-else-if="activeTab === 'credentials'" />
-            <PluginsPanel v-else-if="activeTab === 'plugins'" />
+            <CredentialsPanel
+              v-else-if="activeTab === 'credentials'"
+              :initial-service-id="settingsContext.serviceId"
+              :initial-credential-id="settingsContext.credentialId"
+              :workspace-draft-id="settingsContext.workspaceDraftId"
+              :context-version="settingsContext.version"
+              @context-consumed="clearCredentialsContext"
+            />
+            <PluginsPanel
+              v-else-if="activeTab === 'plugins'"
+              :initial-plugin-id="settingsContext.pluginId"
+              :context-version="settingsContext.version"
+            />
             <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
             <CapturedImagesPanel v-else-if="activeTab === 'images'" />
             <RunnersPanel v-else-if="activeTab === 'runners' && isAdmin" />

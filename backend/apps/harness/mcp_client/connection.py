@@ -438,6 +438,7 @@ class McpServerConnection:
     env: dict[str, str] = field(default_factory=dict, repr=False)
     headers: dict[str, str] = field(default_factory=dict, repr=False)
     oauth_credential_id: Any = field(default=None, repr=False)
+    oauth_service_id: Any = field(default=None, repr=False)
     startup_timeout_seconds: float = 30.0
     request_timeout_seconds: float = 60.0
     tools: list[DiscoveredMcpTool] = field(default_factory=list)
@@ -588,7 +589,9 @@ class McpServerConnection:
                 )
             from apps.credentials.mcp_oauth import McpOAuthHTTPAuth
 
-            auth = McpOAuthHTTPAuth(self.oauth_credential_id, self.server_id, self.url)
+            auth = McpOAuthHTTPAuth(
+                self.oauth_credential_id, self.oauth_service_id, self.url
+            )
         if transport == "streamable_http":
             from mcp.client.streamable_http import streamable_http_client
 
@@ -634,7 +637,7 @@ class McpServerConnection:
                     client.auth = auth
                 elif self.oauth_credential_id is not None:
                     client.auth = McpOAuthHTTPAuth(
-                        self.oauth_credential_id, self.server_id, self.url
+                        self.oauth_credential_id, self.oauth_service_id, self.url
                     )
                 return client
 

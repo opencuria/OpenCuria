@@ -4,6 +4,7 @@ Tests for RunnerService business logic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import timedelta
@@ -14,38 +15,36 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.credentials.services import (
     CredentialSvc,
     ResolvedCredentialFile,
     ResolvedCredentials,
 )
+from apps.organizations.models import Organization
 from apps.runners.enums import (
     ProcessStatus,
     RunnerStatus,
+    RuntimeType,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
     WorkspaceStatus,
 )
 from apps.runners.exceptions import (
-    RunnerNotFoundError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
-    WorkspaceStateError,
 )
-from common.exceptions import ConflictError, NotFoundError
-
 from apps.runners.models import (
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     Task,
     Workspace,
 )
-from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
+from common.exceptions import ConflictError, NotFoundError
 
 
 @pytest.fixture
@@ -612,8 +611,7 @@ class TestDesktopStateCleanup:
             )
         except SynchronousOnlyOperation:
             pytest.fail(
-                "_desktop_event_owned_by_runner called Django ORM "
-                "from an async context"
+                "_desktop_event_owned_by_runner called Django ORM from an async context"
             )
         finally:
             os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
@@ -647,9 +645,7 @@ class TestDesktopStateCleanup:
                 is False
             )
             assert (
-                await service._desktop_event_owned_by_runner(
-                    str(workspace.id), None
-                )
+                await service._desktop_event_owned_by_runner(str(workspace.id), None)
                 is False
             )
         except SynchronousOnlyOperation:
@@ -1841,6 +1837,9 @@ class TestCreateWorkspaceFromImageArtifact:
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
+        )
         credential = CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
             service_id=credential_service.id,
@@ -1863,12 +1862,76 @@ class TestCreateWorkspaceFromImageArtifact:
         assert list(workspace.credentials.values_list("id", flat=True)) == [
             credential.id
         ]
+        assert workspace.plugin_activations.count() == 0
 
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "secret-token"}
         assert payload["files"] == []
         assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_missing_plugin_credentials_roll_back_clone_workspace_and_task(
+        self, service, sio_mock, runner, user
+    ):
+        from apps.credentials.models import OrgCredentialServiceActivation
+        from apps.plugins.models import (
+            OrgPluginActivation,
+            Plugin,
+            PluginCredentialRequirement,
+        )
+        from apps.plugins.services import PluginSelectionError
+        from apps.runners.models import Task as RunnerTask
+
+        source = Workspace.objects.create(
+            runner=runner, name="clone-source", created_by=user
+        )
+        artifact = ImageInstance.objects.create(
+            runner=runner,
+            runtime_type="docker",
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source,
+            created_by=user,
+            name="artifact",
+            runner_ref="clone-atomic",
+            status=ImageInstance.Status.READY,
+        )
+        service_def = CredentialService.objects.create(
+            name="Required clone credential",
+            slug="required-clone-credential",
+            organization=runner.organization,
+            credential_type="env",
+            env_var_name="CLONE_TOKEN",
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=service_def
+        )
+        plugin = Plugin.objects.create(
+            name="Clone plugin", slug="clone-plugin", organization=runner.organization
+        )
+        OrgPluginActivation.objects.create(
+            organization=runner.organization, plugin=plugin, enabled_by=user
+        )
+        PluginCredentialRequirement.objects.create(
+            plugin=plugin, key="token", credential_service=service_def, required=True
+        )
+        workspaces_before = Workspace.objects.count()
+        tasks_before = RunnerTask.objects.count()
+
+        with pytest.raises(PluginSelectionError):
+            await service.create_workspace_from_image_artifact(
+                image_artifact_id=artifact.id,
+                name="Atomic clone",
+                credentials=[],
+                user=user,
+                organization_id=runner.organization_id,
+                plugin_ids=[plugin.id],
+            )
+
+        assert Workspace.objects.count() == workspaces_before
+        assert RunnerTask.objects.count() == tasks_before
+        sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_does_not_restore_credentials_from_artifact_metadata(
@@ -1998,14 +2061,13 @@ class TestHandleWorkspaceCreated:
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
-            credentials_present=True,
         )
 
         workspace.refresh_from_db()
         task.refresh_from_db()
         assert workspace.status == WorkspaceStatus.RUNNING
         assert workspace.active_operation is None
-        assert workspace.credentials_present is True
+        assert workspace.credentials_present is False
         assert task.status == TaskStatus.COMPLETED
 
 
@@ -2135,9 +2197,7 @@ class TestWorkspaceOperationState:
                 qemu_disk_size_gb=60,
             )
         except SynchronousOnlyOperation:
-            pytest.fail(
-                "update_workspace called Django ORM from an async context"
-            )
+            pytest.fail("update_workspace called Django ORM from an async context")
         finally:
             os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
@@ -2544,6 +2604,10 @@ class TestStartTerminal:
             credential_type="env",
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization,
+            credential_service=credential_service,
         )
         credential = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
@@ -3125,7 +3189,7 @@ class TestImageDefinitionLifecycle:
 
 @pytest.mark.django_db(transaction=True)
 class TestPersistentWorkspaceCredentials:
-    def test_created_event_persists_credentials_present(
+    def test_created_event_leaves_presence_unchanged_without_ack(
         self, service, runner, workspace
     ):
         task = Task.objects.create(
@@ -3135,6 +3199,29 @@ class TestPersistentWorkspaceCredentials:
             status=TaskStatus.IN_PROGRESS,
         )
         workspace.status = WorkspaceStatus.CREATING
+        workspace.credentials_present = True
+        workspace.save()
+
+        service.handle_workspace_created(
+            task_id=str(task.id),
+            workspace_id=str(workspace.id),
+            status="created",
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
+
+    def test_created_event_persists_runner_acknowledged_presence(
+        self, service, runner, workspace
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.CREATE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace.status = WorkspaceStatus.CREATING
+        workspace.credentials_present = False
         workspace.save()
 
         service.handle_workspace_created(
@@ -3246,6 +3333,9 @@ class TestPersistentWorkspaceCredentials:
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
+        )
         credential = CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
             service_id=credential_service.id,
@@ -3269,6 +3359,9 @@ class TestPersistentWorkspaceCredentials:
             credential_type="env",
             env_var_name=env_var,
             label=name,
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
         )
         return CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
@@ -3299,6 +3392,9 @@ class TestPersistentWorkspaceCredentials:
             target_path="~/.codex/auth.json",
             label="Codex",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization, credential_service=file_service
+        )
         file_cred = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
             service_id=file_service.id,
@@ -3311,6 +3407,9 @@ class TestPersistentWorkspaceCredentials:
             slug=f"ssh-{uuid.uuid4().hex[:6]}",
             credential_type="ssh_key",
             label="SSH",
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization, credential_service=ssh_service
         )
         ssh_cred = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
@@ -3330,6 +3429,8 @@ class TestPersistentWorkspaceCredentials:
 
         assert updated is not None
         assert updated.credentials_present is True
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
         assert set(updated.credentials.values_list("id", flat=True)) == {
             env_cred.id,
             file_cred.id,
@@ -3344,14 +3445,72 @@ class TestPersistentWorkspaceCredentials:
         sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_oauth_only_attachment_injects_empty_payload_and_false_presence(
+    async def test_successful_inject_requires_explicit_runner_disk_ack(
         self, service, sio_mock, workspace, user
     ):
-        from apps.credentials.enums import CredentialType
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token without ack",
+            env_var="NEW_TOKEN_NO_ACK",
+            value="secret",
+        )
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(return_value={"ok": True})
 
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[credential],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "pending"
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_runner_ack_overrides_selected_presence(
+        self, service, sio_mock, workspace, user
+    ):
+        existing = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Existing token",
+            env_var="EXISTING_TOKEN",
+            value="old",
+        )
+        replacement = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Replacement token",
+            env_var="REPLACEMENT_TOKEN",
+            value="new",
+        )
+        workspace.credentials.add(existing)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
         sio_mock.call = AsyncMock(
             return_value={"ok": True, "credentials_present": False}
         )
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[replacement],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credentials_present is False
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_oauth_only_attachment_does_not_require_runner_sync(
+        self, service, sio_mock, workspace, user
+    ):
+        from apps.credentials.enums import CredentialType
         from apps.credentials.models import Credential, McpOAuthClientRegistration
         from apps.plugins.models import (
             Plugin,
@@ -3360,6 +3519,9 @@ class TestPersistentWorkspaceCredentials:
         )
         from common.utils import encrypt_value
 
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
         plugin = Plugin.objects.create(
             name="OAuth only",
             slug="oauth-only",
@@ -3379,9 +3541,7 @@ class TestPersistentWorkspaceCredentials:
             slug="oauth-only-server_auth-oauth",
             credential_type=CredentialType.MCP_OAUTH,
             organization=workspace.runner.organization,
-            plugin_owned=True,
-            oauth_plugin_slug="oauth-only",
-            oauth_requirement_key="server_auth",
+            oauth_server_url=server.url,
         )
         PluginCredentialRequirement.objects.create(
             plugin=plugin,
@@ -3400,9 +3560,9 @@ class TestPersistentWorkspaceCredentials:
         token_data = {
             "access_token": "secret-access-token",
             "refresh_token": "secret-refresh-token",
-            "resource": "https://mcp.example/mcp",
+            "resource": server.url,
             "server_url": server.url,
-            "server_id": str(server.id),
+            "service_id": str(oauth_service.id),
             "registration_id": str(registration.id),
         }
         oauth_credential = Credential.objects.create(
@@ -3411,64 +3571,28 @@ class TestPersistentWorkspaceCredentials:
             name="Connected",
             encrypted_value=encrypt_value(json.dumps(token_data)),
             created_by=user,
-            oauth_server_id=server.id,
             oauth_server_url=server.url,
-            oauth_resource=token_data["resource"],
+            oauth_resource=server.url,
             oauth_registration=registration,
             oauth_status="connected",
         )
         workspace.credentials.add(oauth_credential)
-        workspace.credentials_present = True
+        # OAuth grants are backend-side only; this workspace has no ordinary
+        # credential material on disk, so selecting the grant needs no runner IO.
+        workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        resolved = CredentialSvc().resolve_workspace_credentials(workspace)
-        assert resolved.oauth_credentials == [oauth_credential.id]
-        assert resolved.env_vars == {}
-        assert resolved.files == []
-        assert resolved.ssh_keys == []
 
         updated = await service.update_workspace(
             workspace.id,
-            resolved_credentials=resolved,
+            resolved_credentials=CredentialSvc().resolve_workspace_credentials(
+                workspace
+            ),
         )
-
         assert updated.credentials_present is False
-        assert list(updated.credentials.values_list("id", flat=True)) == [
-            oauth_credential.id
-        ]
-        event, payload = sio_mock.call.await_args.args[:2]
-        assert event == "task:inject_credentials"
-        assert payload["env_vars"] == {}
-        assert payload["files"] == []
-        assert payload["ssh_keys"] == []
-        assert "oauth_credentials" not in payload
-
-        env_service = CredentialService.objects.create(
-            name="Ordinary token",
-            slug=f"ordinary-{uuid.uuid4().hex[:6]}",
-            credential_type="env",
-            env_var_name="ORDINARY_TOKEN",
-            organization=workspace.runner.organization,
-        )
-        env_credential = CredentialSvc().create_org_credential(
-            organization_id=workspace.runner.organization_id,
-            service_id=env_service.id,
-            name="Ordinary token",
-            value="ordinary-secret",
-            user=user,
-        )
-        workspace.credentials.add(env_credential)
-        combined = CredentialSvc().resolve_workspace_credentials(workspace)
-        assert set(combined.oauth_credentials) == {oauth_credential.id}
-        updated = await service.update_workspace(
-            workspace.id,
-            resolved_credentials=combined,
-        )
-        assert updated.credentials_present is True
-        _, payload = sio_mock.call.await_args.args[:2]
-        assert payload["env_vars"] == {"ORDINARY_TOKEN": "ordinary-secret"}
-        assert payload["files"] == []
-        assert payload["ssh_keys"] == []
-        assert "oauth_credentials" not in payload
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+        sio_mock.call.assert_not_awaited()
+        sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_running_remove_dispatches_empty_inject(
@@ -3495,6 +3619,8 @@ class TestPersistentWorkspaceCredentials:
 
         assert list(updated.credentials.values_list("id", flat=True)) == []
         assert updated.credentials_present is False
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
         event, payload = sio_mock.call.await_args.args[:2]
         assert event == "task:inject_credentials"
         assert payload["env_vars"] == {}
@@ -3555,11 +3681,30 @@ class TestPersistentWorkspaceCredentials:
             resolved_credentials=resolved,
         )
 
-        assert list(updated.credentials.values_list("id", flat=True)) == [
-            credential.id
-        ]
+        assert list(updated.credentials.values_list("id", flat=True)) == [credential.id]
         sio_mock.call.assert_not_awaited()
         sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_offline_qemu_resource_update_rejects_before_saving(
+        self, service, offline_runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline QEMU Workspace",
+            runtime_type=RuntimeType.QEMU,
+            status=WorkspaceStatus.RUNNING,
+            qemu_vcpus=1,
+            qemu_memory_mb=1024,
+            qemu_disk_size_gb=20,
+            created_by=user,
+        )
+
+        with pytest.raises(RunnerOfflineError):
+            await service.update_workspace(workspace.id, qemu_vcpus=2)
+
+        workspace.refresh_from_db()
+        assert workspace.qemu_vcpus == 1
 
     @pytest.mark.asyncio
     async def test_offline_running_change_rejects_without_m2m_update(
@@ -3580,14 +3725,200 @@ class TestPersistentWorkspaceCredentials:
         )
         resolved = CredentialSvc()._build_resolved_credentials([credential])
 
-        with pytest.raises(RunnerOfflineError):
-            await service.update_workspace(
-                workspace.id,
-                resolved_credentials=resolved,
-            )
-
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[credential],
+            resolved_credentials=resolved,
+            user=workspace.created_by,
+            organization_id=offline_runner.organization_id,
+        )
+        assert updated.credential_sync_status == "pending"
         workspace.refresh_from_db()
-        assert list(workspace.credentials.values_list("id", flat=True)) == []
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_offline_removal_keeps_acknowledged_presence_pending(
+        self, service, offline_runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline removal",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            credentials_present=True,
+        )
+        credential = self._org_env_credential(
+            offline_runner,
+            user,
+            name="Offline existing token",
+            env_var="OFFLINE_TOKEN",
+            value="secret",
+        )
+        workspace.credentials.add(credential)
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[],
+            user=user,
+            organization_id=offline_runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "pending"
+        workspace.refresh_from_db()
+        assert workspace.credentials.count() == 0
+        assert workspace.credentials_present is True
+
+    @pytest.mark.asyncio
+    async def test_failed_addition_preserves_acknowledged_presence(
+        self, service, sio_mock, workspace, user
+    ):
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token",
+            env_var="NEW_TOKEN",
+            value="secret",
+        )
+        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[credential],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.django_db(transaction=True)
+    def test_failed_removal_preserves_presence_for_next_heartbeat(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Existing token",
+            env_var="EXISTING_TOKEN",
+            value="secret",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+        updated = asyncio.run(
+            service.update_workspace(
+                workspace.id,
+                credentials=[],
+                user=user,
+                organization_id=workspace.runner.organization_id,
+            )
+        )
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert workspace.credentials.count() == 0
+        assert workspace.credentials_present is True
+
+        sync_ids = service.handle_heartbeat(
+            runner=workspace.runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                    "runtime_type": "docker",
+                }
+            ],
+        )
+        assert workspace.id in sync_ids
+        sio_mock.emit = AsyncMock()
+        asyncio.run(service.dispatch_credential_reconcile(sync_ids))
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
+        task = (
+            Task.objects.filter(workspace=workspace, type=TaskType.INJECT_CREDENTIALS)
+            .order_by("-created_at")
+            .first()
+        )
+        service.handle_credentials_injected(
+            task_id=str(task.id),
+            workspace_id=str(workspace.id),
+            credentials_present=False,
+            runner_id=str(workspace.runner_id),
+        )
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_failed_addition_does_not_claim_material_installed(
+        self, service, sio_mock, workspace, user
+    ):
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token",
+            env_var="NEW_TOKEN",
+            value="secret",
+        )
+        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[credential],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_same_credential_selection_retries_failed_disk_install(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Retry token",
+            env_var="RETRY_TOKEN",
+            value="retry-secret",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        resolved = CredentialSvc()._build_resolved_credentials([credential])
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credentials=[credential],
+            resolved_credentials=resolved,
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credentials_present is True
+        assert updated.credential_sync_status == "synced"
+        sio_mock.call.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_name_only_same_credentials_skips_inject(
@@ -3719,9 +4050,7 @@ class TestChunkedFileTransferOwnership:
         await service.handle_files_result(
             "files:content_chunk", payload, runner_id=str(workspace.runner_id)
         )
-        emit.assert_awaited_once_with(
-            "files:content_chunk", payload, str(workspace.id)
-        )
+        emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
 
     @pytest.mark.asyncio
     async def test_download_chunk_forwards_for_owning_runner(
@@ -4018,9 +4347,7 @@ class TestChunkedFileTransferOwnership:
         await service.handle_files_result(
             "files:content_chunk", exact, runner_id=str(workspace.runner_id)
         )
-        emit.assert_awaited_once_with(
-            "files:content_chunk", exact, str(workspace.id)
-        )
+        emit.assert_awaited_once_with("files:content_chunk", exact, str(workspace.id))
 
         emit.reset_mock()
         over = dict(exact, request_id="over-cap", content="A" * (256 * 1024 + 1))
@@ -4067,9 +4394,7 @@ class TestChunkedFileTransferOwnership:
         await service.handle_files_result(
             "files:content_chunk", payload, runner_id=str(workspace.runner_id)
         )
-        emit.assert_awaited_once_with(
-            "files:content_chunk", payload, str(workspace.id)
-        )
+        emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
 
     @pytest.mark.asyncio
     async def test_content_chunk_missing_workspace_id_dropped(

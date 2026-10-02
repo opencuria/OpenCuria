@@ -69,7 +69,7 @@ describe('SettingsSheetHost', () => {
     const ctx = await mountHost()
     try {
       expect(ctx.events).toHaveLength(1)
-      expect(ctx.events[0]).toEqual({ tab: 'provider' })
+      expect(ctx.events[0]).toMatchObject({ tab: 'provider' })
       expect(replaceMock).toHaveBeenCalledWith({ path: '/', query: {} })
     } finally {
       ctx.cleanup()
@@ -94,6 +94,45 @@ describe('SettingsSheetHost', () => {
     }
   })
 
+  it('forwards plugin detail deep links while keeping the plugin query', async () => {
+    setQuery({ settings: 'plugins', plugin: 'plug-1' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events).toHaveLength(1)
+      expect(ctx.events[0]).toMatchObject({ tab: 'plugins', pluginId: 'plug-1' })
+      expect(replaceMock).toHaveBeenCalledWith({ path: '/', query: { plugin: 'plug-1' } })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
+  it('forwards the opaque workspace draft ID to credentials without including draft data in the URL', async () => {
+    setQuery({ settings: 'credentials', add_credential: 'svc-1', workspace_draft: 'opaque-id' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events[0]).toMatchObject({
+        tab: 'credentials',
+        serviceId: 'svc-1',
+        workspaceDraftId: 'opaque-id',
+      })
+      expect(replaceMock).toHaveBeenCalledWith({ path: '/', query: {} })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
+  it('forwards reconnect credential context and consumes it only once', async () => {
+    setQuery({ settings: 'credentials', reconnect_credential: 'cred-1' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events).toHaveLength(1)
+      expect(ctx.events[0]).toMatchObject({ tab: 'credentials', credentialId: 'cred-1' })
+      expect(replaceMock).toHaveBeenCalledWith({ path: '/', query: {} })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
   it('opens the sheet again when the same ?settings= value navigates anew after stripping', async () => {
     setQuery({ settings: 'provider' })
     const ctx = await mountHost()
@@ -109,7 +148,7 @@ describe('SettingsSheetHost', () => {
       setQuery({ settings: 'provider' })
       await flush()
       expect(ctx.events).toHaveLength(2)
-      expect(ctx.events[1]).toEqual({ tab: 'provider' })
+      expect(ctx.events[1]).toMatchObject({ tab: 'provider' })
       expect(replaceMock).toHaveBeenCalledTimes(2)
       expect(replaceMock).toHaveBeenLastCalledWith({ path: '/', query: {} })
     } finally {
@@ -117,14 +156,42 @@ describe('SettingsSheetHost', () => {
     }
   })
 
-  it('opens Plugins from the OAuth return and preserves its result while stripping settings', async () => {
-    setQuery({ settings: 'plugins', mcp_oauth: 'connected' })
+  it('opens credentials from a service deep link and preserves action context while stripping consumed query', async () => {
+    setQuery({ settings: 'credentials', add_credential: 'svc-1' })
     const ctx = await mountHost()
     try {
-      expect(ctx.events).toEqual([{ tab: 'plugins' }])
+      expect(ctx.events).toHaveLength(1)
+      expect(ctx.events[0]).toMatchObject({ tab: 'credentials', serviceId: 'svc-1' })
+      expect(replaceMock).toHaveBeenCalledWith({ path: '/', query: {} })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
+  it('opens credentials after an OAuth callback with no settings query', async () => {
+    setQuery({ oauth_result: 'connected', credential_id: 'cred-1' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events).toHaveLength(1)
+      expect(ctx.events[0]).toMatchObject({ tab: 'credentials' })
       expect(replaceMock).toHaveBeenCalledWith({
         path: '/',
-        query: { mcp_oauth: 'connected' },
+        query: { oauth_result: 'connected', credential_id: 'cred-1' },
+      })
+    } finally {
+      ctx.cleanup()
+    }
+  })
+
+  it('strips OAuth callback result exactly through CredentialsPanel, not by the settings host', async () => {
+    setQuery({ settings: 'credentials', oauth_result: 'connected', credential_id: 'cred-1' })
+    const ctx = await mountHost()
+    try {
+      expect(ctx.events).toHaveLength(1)
+      expect(ctx.events[0]).toMatchObject({ tab: 'credentials' })
+      expect(replaceMock).toHaveBeenCalledWith({
+        path: '/',
+        query: { oauth_result: 'connected', credential_id: 'cred-1' },
       })
     } finally {
       ctx.cleanup()

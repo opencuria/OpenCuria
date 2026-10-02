@@ -9,10 +9,8 @@ staff) or org-owned. Plugins carry relational components:
   ``command`` is a single executable; ``args`` are never joined into a
   shell string. ``env``/``headers`` values may contain credential
   placeholders of the form ``{{credential.KEY}}``.
-- ``PluginCredentialRequirement`` -- plugin-wide credential requirements
-  referencing a ``CredentialService``. The referenced service may be a
-  global service or an org-owned service created exclusively for this
-  plugin (``plugin_owned_service`` marker).
+- ``PluginCredentialRequirement`` -- plugin dependency on an independently
+  managed ``CredentialService``.
 
 Activations:
 
@@ -186,12 +184,7 @@ class PluginMcpServer(models.Model):
 
 
 class PluginCredentialRequirement(models.Model):
-    """A plugin-wide credential requirement.
-
-    ``plugin_owned_service`` marks services created exclusively for this
-    plugin through the plugin API. Such definitions may only be deleted
-    together with the plugin (and only when no credentials reference them).
-    """
+    """A plugin dependency on an independently managed credential service."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     plugin = models.ForeignKey(
@@ -210,13 +203,6 @@ class PluginCredentialRequirement(models.Model):
     )
     required = models.BooleanField(default=True)
     description = models.TextField(blank=True, default="")
-    plugin_owned_service = models.BooleanField(
-        default=False,
-        help_text=(
-            "True when the referenced service was created exclusively for "
-            "this plugin via the plugin API."
-        ),
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

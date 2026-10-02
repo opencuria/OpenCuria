@@ -39,9 +39,9 @@ async function handleDelete(): Promise<void> {
   if (!props.credential) return
 
   deleting.value = true
-  await credentialStore.deleteCredential(props.credential.id)
+  const deleted = await credentialStore.deleteCredential(props.credential.id)
   deleting.value = false
-  handleClose()
+  if (deleted) handleClose()
 }
 
 function handleClose(): void {
@@ -61,18 +61,21 @@ function handleClose(): void {
       </DialogHeader>
 
       <DialogBody>
-      <div class="flex flex-col gap-4">
-        <div v-if="credential" class="p-4 rounded-[var(--radius-md)] bg-destructive/10 border border-destructive/30">
-          <p class="text-sm text-foreground">
-            Are you sure you want to delete <strong>{{ credential.name }}</strong>?
-          </p>
-          <p class="text-xs text-muted-foreground mt-1">
-            Workspaces that were created with this credential are not affected,
-            but new workspaces will no longer be able to use it.
-          </p>
+        <div class="flex flex-col gap-4">
+          <div
+            v-if="credential"
+            class="p-4 rounded-[var(--radius-md)] bg-destructive/10 border border-destructive/30"
+          >
+            <p class="text-sm text-foreground">
+              Are you sure you want to delete <strong>{{ credential.name }}</strong
+              >?
+            </p>
+            <p class="text-xs text-muted-foreground mt-1">
+              Deletion may be blocked while a workspace or required plugin depends on this
+              credential. OAuth disconnect does not remove those references.
+            </p>
+          </div>
         </div>
-
-      </div>
       </DialogBody>
 
       <DialogFooter>

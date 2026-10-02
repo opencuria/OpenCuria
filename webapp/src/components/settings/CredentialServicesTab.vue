@@ -1,11 +1,10 @@
-<!--
-  CredentialServicesTab — catalog of credential services and per-org activation.
--->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { get, post } from '@/services/api'
-import { slugify } from '@/lib/pluginForms'
+import { Plus, Key, X } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
+import { useCredentialStore } from '@/stores/credentials'
+import * as credentialsApi from '@/services/credentials.api'
+import { slugify } from '@/lib/pluginForms'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -30,170 +29,142 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Plus, Key, X } from '@lucide/vue'
-
-interface CredentialServiceWithActivation {
-  id: string
-  name: string
-  slug: string
-  description: string
-  credential_type: string
-  env_var_name: string
-  target_path: string
-  label: string
-  is_active: boolean
-}
-
-interface CredentialServiceCreateIn {
-  name: string
-  slug?: string
-  description?: string
-  credential_type: 'env' | 'file' | 'ssh_key'
-  env_var_name?: string
-  target_path?: string
-  label?: string
-}
+import type { CredentialService, CredentialServiceCreateIn } from '@/types'
 
 const authStore = useAuthStore()
+const credentialStore = useCredentialStore()
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
-
-const credentialServices = ref<CredentialServiceWithActivation[]>([])
+const services = ref<CredentialService[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 const toggleLoading = ref<string | null>(null)
-
-const showCreateServiceModal = ref(false)
-const createServiceLoading = ref(false)
+const showCreate = ref(false)
+const creating = ref(false)
 const serviceName = ref('')
-const serviceDescription = ref('')
-const serviceCredentialType = ref<'env' | 'file' | 'ssh_key'>('env')
-const serviceEnvVarName = ref('')
-const serviceTargetPath = ref('')
-const serviceLabel = ref('')
+const description = ref('')
+const type = ref<CredentialServiceCreateIn['credential_type']>('env')
+const envVarName = ref('')
+const targetPath = ref('')
+const oauthServerUrl = ref('')
+const label = ref('')
+let servicesRequestId = 0
 
-const credentialTypeOptions = [
+const typeOptions = [
   { value: 'env', label: 'Environment Variable' },
   { value: 'file', label: 'Credential File' },
   { value: 'ssh_key', label: 'SSH Key Pair' },
-]
-
-const isCreateServiceValid = computed(() => {
-  if (!serviceName.value.trim()) return false
-  // The backend derives the slug from the name; a name like `!!!`
-  // would yield an empty slug and fail server-side (400).
-  if (!slugify(serviceName.value)) return false
-  if (serviceCredentialType.value === 'env') {
-    return !!serviceEnvVarName.value.trim().match(/^[A-Z_][A-Z0-9_]*$/)
-  }
-  if (serviceCredentialType.value === 'file') {
-    return serviceTargetPath.value.trim().length > 0
+  { value: 'mcp_oauth', label: 'MCP OAuth' },
+] as const
+const valid = computed(() => {
+  if (!serviceName.value.trim() || !slugify(serviceName.value)) return false
+  if (type.value === 'env') return /^[A-Z_][A-Z0-9_]*$/.test(envVarName.value.trim().toUpperCase())
+  if (type.value === 'file') return !!targetPath.value.trim()
+  if (type.value === 'mcp_oauth') {
+    try {
+      const url = new URL(oauthServerUrl.value)
+      return (
+        url.protocol === 'https:' &&
+        !!url.hostname &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      )
+    } catch {
+      return false
+    }
   }
   return true
 })
-
-function typeLabel(type: string): string {
-  if (type === 'ssh_key') return 'SSH Key'
-  if (type === 'file') return 'File'
-  if (type === 'env') return 'ENV'
-  return type
+function typeLabel(value: string): string {
+  return typeOptions.find((item) => item.value === value)?.label ?? value
 }
-
-async function loadData(): Promise<void> {
+function ownership(service: CredentialService): string {
+  return service.organization_id ? 'Organization-owned' : 'Global'
+}
+async function load(): Promise<void> {
+  const organizationId = activeOrganizationId.value
+  const requestId = ++servicesRequestId
   loading.value = true
   error.value = null
   try {
-    if (!activeOrganizationId.value) {
-      throw new Error('No active organization selected')
-    }
-    credentialServices.value = await get<CredentialServiceWithActivation[]>(
-      '/org-credential-services/',
-    )
-  } catch (e: unknown) {
-    error.value = (e as Error).message || 'Failed to load settings'
+    if (!activeOrganizationId.value)
+      throw new Error('Select an organization to manage credential services.')
+    const [organizationServices, catalogServices] = await Promise.all([
+      credentialsApi.listOrganizationCredentialServices(),
+      credentialsApi.listCredentialServices(),
+    ])
+    if (requestId !== servicesRequestId || activeOrganizationId.value !== organizationId) return
+    services.value = organizationServices
+    credentialStore.services = catalogServices
+    credentialStore.servicesLoaded = true
+    credentialStore.servicesError = null
+  } catch (e) {
+    if (requestId !== servicesRequestId || activeOrganizationId.value !== organizationId) return
+    credentialStore.servicesLoaded = true
+    credentialStore.servicesError =
+      e instanceof Error ? e.message : 'Failed to load credential services'
+    error.value = credentialStore.servicesError
   } finally {
-    loading.value = false
+    if (requestId === servicesRequestId) loading.value = false
   }
 }
-
-onMounted(() => {
-  void loadData()
-})
-
-watch(activeOrganizationId, () => {
-  void loadData()
-})
-
-async function toggleCredentialServiceActivation(
-  svc: CredentialServiceWithActivation,
-): Promise<void> {
-  toggleLoading.value = svc.id
+onMounted(() => void load())
+watch(activeOrganizationId, () => void load())
+async function toggle(service: CredentialService): Promise<void> {
+  toggleLoading.value = service.id
   try {
-    const updated = await post<CredentialServiceWithActivation>(
-      `/org-credential-services/${svc.id}/activation/`,
-      { active: !svc.is_active },
+    const updated = await credentialsApi.toggleOrganizationCredentialService(
+      service.id,
+      !service.is_active,
     )
-    const idx = credentialServices.value.findIndex((s) => s.id === svc.id)
-    if (idx !== -1) credentialServices.value[idx] = updated
-  } catch {
-    error.value = 'Failed to toggle credential service activation'
+    const index = services.value.findIndex((item) => item.id === service.id)
+    if (index !== -1) services.value[index] = updated
+    await load()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to toggle service activation'
   } finally {
     toggleLoading.value = null
   }
 }
-
-function openCreateCredentialService(): void {
-  resetCreateServiceForm()
-  showCreateServiceModal.value = true
+function setCreateOpen(value: boolean): void {
+  showCreate.value = value
+  if (!value && !creating.value) reset()
 }
 
-function resetCreateServiceForm(): void {
+function reset(): void {
   serviceName.value = ''
-  serviceDescription.value = ''
-  serviceCredentialType.value = 'env'
-  serviceEnvVarName.value = ''
-  serviceTargetPath.value = ''
-  serviceLabel.value = ''
+  description.value = ''
+  type.value = 'env'
+  envVarName.value = ''
+  targetPath.value = ''
+  oauthServerUrl.value = ''
+  label.value = ''
 }
-
-function closeCreateCredentialService(force = false): void {
-  if (createServiceLoading.value && !force) return
-  showCreateServiceModal.value = false
-  resetCreateServiceForm()
-}
-
-async function createCredentialService(): Promise<void> {
-  if (!isCreateServiceValid.value || createServiceLoading.value) return
-
-  createServiceLoading.value = true
+async function create(): Promise<void> {
+  if (!valid.value || creating.value) return
+  creating.value = true
   error.value = null
-  const payload: CredentialServiceCreateIn = {
+  const data: CredentialServiceCreateIn = {
     name: serviceName.value.trim(),
-    // The backend derives the slug from the name.
     slug: '',
-    description: serviceDescription.value.trim(),
-    credential_type: serviceCredentialType.value,
-    env_var_name:
-      serviceCredentialType.value === 'env'
-        ? serviceEnvVarName.value.trim().toUpperCase()
-        : undefined,
-    target_path:
-      serviceCredentialType.value === 'file' ? serviceTargetPath.value.trim() : undefined,
-    label: serviceLabel.value.trim(),
+    description: description.value.trim(),
+    credential_type: type.value,
+    label: label.value.trim(),
+    ...(type.value === 'env' ? { env_var_name: envVarName.value.trim().toUpperCase() } : {}),
+    ...(type.value === 'file' ? { target_path: targetPath.value.trim() } : {}),
+    ...(type.value === 'mcp_oauth' ? { oauth_server_url: oauthServerUrl.value.trim() } : {}),
   }
-
   try {
-    const created = await post<CredentialServiceWithActivation>(
-      '/org-credential-services/',
-      payload,
-    )
-    credentialServices.value = [...credentialServices.value, created].sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )
-    closeCreateCredentialService(true)
+    const created = await credentialsApi.createOrganizationCredentialService(data)
+    services.value = [...services.value, created].sort((a, b) => a.name.localeCompare(b.name))
+    await load()
+    showCreate.value = false
+    reset()
   } catch (e) {
-    error.value = (e as Error).message || 'Failed to create credential service'
+    error.value = e instanceof Error ? e.message : 'Failed to create service'
   } finally {
-    createServiceLoading.value = false
+    creating.value = false
   }
 }
 </script>
@@ -202,175 +173,145 @@ async function createCredentialService(): Promise<void> {
   <div class="space-y-6">
     <div
       v-if="error"
-      class="flex items-center justify-between rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      class="flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      role="alert"
     >
-      <span>{{ error }}</span>
-      <Button size="icon-sm" variant="ghost" @click="error = null">
-        <X />
-      </Button>
+      <span>{{ error }}</span
+      ><Button size="icon-sm" variant="ghost" aria-label="Dismiss error" @click="error = null"
+        ><X
+      /></Button>
     </div>
-
-    <div v-if="loading" class="flex justify-center py-12">
-      <LoadingSpinner :size="24" />
-    </div>
-
+    <div v-if="loading" class="flex justify-center py-12"><LoadingSpinner :size="24" /></div>
     <SettingsSection
       v-else
-      description="Control which credential services are available to members of this organization."
+      description="Manage organization credential services. Activation controls availability for new credentials; it is independent of plugin activation."
     >
-      <template #actions>
-        <Button size="sm" @click="openCreateCredentialService">
-          <Plus />
-          New Service
-        </Button>
-      </template>
-
-      <div
-        v-if="credentialServices.length === 0"
-        class="overflow-hidden rounded-lg border border-border bg-card"
+      <template #actions
+        ><Button size="sm" data-testid="service-create" @click="showCreate = true"
+          ><Plus /> New Service</Button
+        ></template
       >
+      <div v-if="!services.length" class="overflow-hidden rounded-lg border border-border bg-card">
         <EmptyState
           :icon="Key"
           title="No credential services"
-          description="Define a service so members can store matching credentials for workspaces."
+          description="Create an organization service or activate a global service."
         />
       </div>
-
       <div
         v-else
         class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
       >
-        <SettingsRow
-          v-for="svc in credentialServices"
-          :key="svc.id"
-          :icon-class="svc.is_active ? 'bg-success/10 text-success' : undefined"
-        >
-          <template #icon>
-            <Key :size="16" />
-          </template>
+        <SettingsRow v-for="service in services" :key="service.id">
+          <template #icon><Key :size="16" /></template>
           <div class="min-w-0 space-y-1">
             <div class="flex flex-wrap items-center gap-2">
-              <span class="text-sm font-medium text-foreground">{{ svc.name }}</span>
-              <span class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
-                {{ typeLabel(svc.credential_type) }}
-              </span>
+              <span class="text-sm font-medium">{{ service.name }}</span
+              ><span class="rounded bg-muted px-1.5 py-0.5 text-xs">{{
+                typeLabel(service.credential_type)
+              }}</span
+              ><span class="rounded border px-1.5 py-0.5 text-xs">{{ ownership(service) }}</span
+              ><span class="rounded border px-1.5 py-0.5 text-xs">{{
+                service.is_active ? 'Active' : 'Inactive'
+              }}</span>
             </div>
-            <p v-if="svc.description" class="text-sm text-muted-foreground">
-              {{ svc.description }}
+            <p v-if="service.description" class="text-sm text-muted-foreground">
+              {{ service.description }}
             </p>
-            <p v-if="svc.env_var_name" class="font-mono text-xs text-muted-foreground">
-              {{ svc.env_var_name }}
+            <p
+              v-if="service.oauth_server_url"
+              class="break-all font-mono text-xs text-muted-foreground"
+            >
+              {{ service.oauth_server_url }}
             </p>
-            <p v-if="svc.target_path" class="font-mono text-xs text-muted-foreground break-all">
-              {{ svc.target_path }}
+            <p class="text-xs text-muted-foreground">
+              {{
+                service.organization_id
+                  ? `Owned by organization ${service.organization_id}`
+                  : 'OpenCuria global service'
+              }}
             </p>
           </div>
-          <template #actions>
-            <div class="flex items-center gap-2">
-              <span class="text-xs text-muted-foreground">
-                {{ svc.is_active ? 'Active' : 'Inactive' }}
-              </span>
-              <Switch
-                :model-value="svc.is_active"
-                :disabled="toggleLoading === svc.id"
-                :aria-label="svc.is_active ? 'Deactivate service' : 'Activate service'"
-                @update:model-value="toggleCredentialServiceActivation(svc)"
-              />
-            </div>
-          </template>
+          <template #actions
+            ><Switch
+              :model-value="service.is_active"
+              :disabled="toggleLoading === service.id"
+              :aria-label="`${service.is_active ? 'Deactivate' : 'Activate'} ${service.name}`"
+              :data-testid="`service-toggle-${service.id}`"
+              @update:model-value="toggle(service)"
+          /></template>
         </SettingsRow>
       </div>
     </SettingsSection>
-
-    <Dialog
-      :open="showCreateServiceModal"
-      @update:open="(v) => (v ? (showCreateServiceModal = true) : closeCreateCredentialService())"
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Create Credential Service</DialogTitle>
-          <DialogDescription>
-            Define a new credential service your organization can use in credentials and workspaces.
-          </DialogDescription>
-        </DialogHeader>
-
-        <DialogBody>
-        <form id="create-credential-service-form" class="space-y-4" @submit.prevent="createCredentialService">
-          <div class="space-y-2">
-            <Label for="service-name">Name</Label>
-            <Input id="service-name" v-model="serviceName" placeholder="GitHub Enterprise" />
-          </div>
-
-          <div class="space-y-2">
-            <Label>Credential Type</Label>
-            <Select v-model="serviceCredentialType">
-              <SelectTrigger>
-                <SelectValue placeholder="Select credential type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="option in credentialTypeOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div v-if="serviceCredentialType === 'env'" class="space-y-2">
-            <Label for="service-env">Environment Variable Name</Label>
-            <Input id="service-env" v-model="serviceEnvVarName" placeholder="GITHUB_TOKEN" />
-            <p class="text-xs text-muted-foreground">
-              Must be uppercase snake case, e.g. <code>OPENAI_API_KEY</code>.
-            </p>
-          </div>
-
-          <div v-else-if="serviceCredentialType === 'file'" class="space-y-2">
-            <Label for="service-path">Target Path</Label>
-            <Input id="service-path" v-model="serviceTargetPath" placeholder="~/.codex/auth.json" />
-            <p class="text-xs text-muted-foreground">
-              Supports absolute paths, <code>~/...</code>, <code>${HOME}/...</code>, and relative
-              paths resolved against HOME.
-            </p>
-          </div>
-
-          <div class="space-y-2">
-            <Label for="service-label">Label</Label>
-            <Input id="service-label" v-model="serviceLabel" placeholder="Personal Access Token" />
-            <p class="text-xs text-muted-foreground">
-              Optional helper label shown in credential forms.
-            </p>
-          </div>
-
-          <div class="space-y-2">
-            <Label for="service-description">Description</Label>
-            <Input
-              id="service-description"
-              v-model="serviceDescription"
-              placeholder="Used for repository access and API integrations."
-            />
-          </div>
-
-        </form>
-        </DialogBody>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            type="button"
-            :disabled="createServiceLoading"
-            @click="closeCreateCredentialService"
-          >
-            Cancel
-          </Button>
-          <Button type="submit" form="create-credential-service-form" :disabled="!isCreateServiceValid || createServiceLoading">
-            <LoadingSpinner v-if="createServiceLoading" :size="12" />
-            <Plus v-else />
-            Create Service
-          </Button>
-        </DialogFooter>
+    <Dialog :open="showCreate" @update:open="setCreateOpen">
+      <DialogContent
+        ><DialogHeader
+          ><DialogTitle>Create Organization Credential Service</DialogTitle
+          ><DialogDescription
+            >Creates an organization-owned service (not a global catalog entry). Deactivation later
+            only gates new credentials.</DialogDescription
+          ></DialogHeader
+        >
+        <DialogBody
+          ><form id="create-service-form" class="space-y-4" @submit.prevent="create">
+            <div class="space-y-2">
+              <Label for="service-name">Name</Label
+              ><Input id="service-name" v-model="serviceName" placeholder="GitHub Enterprise" />
+            </div>
+            <div class="space-y-2">
+              <Label>Credential Type</Label
+              ><Select v-model="type"
+                ><SelectTrigger><SelectValue /></SelectTrigger
+                ><SelectContent
+                  ><SelectItem
+                    v-for="option in typeOptions"
+                    :key="option.value"
+                    :value="option.value"
+                    >{{ option.label }}</SelectItem
+                  ></SelectContent
+                ></Select
+              >
+            </div>
+            <div v-if="type === 'env'" class="space-y-2">
+              <Label for="service-env">Environment variable name</Label
+              ><Input id="service-env" v-model="envVarName" placeholder="GITHUB_TOKEN" />
+            </div>
+            <div v-else-if="type === 'file'" class="space-y-2">
+              <Label for="service-path">Target path</Label
+              ><Input id="service-path" v-model="targetPath" placeholder="~/.config/auth.json" />
+            </div>
+            <div v-else-if="type === 'mcp_oauth'" class="space-y-2">
+              <Label for="service-oauth-url">OAuth MCP server endpoint</Label
+              ><Input
+                id="service-oauth-url"
+                v-model="oauthServerUrl"
+                type="url"
+                placeholder="https://mcp.example.com/mcp"
+              />
+              <p class="text-xs text-muted-foreground">
+                Fixed HTTPS endpoint without credentials, query, or fragment. OAuth requirements
+                must match this exact endpoint.
+              </p>
+            </div>
+            <div class="space-y-2">
+              <Label for="service-label">Label (optional)</Label
+              ><Input id="service-label" v-model="label" placeholder="API token" />
+            </div>
+            <div class="space-y-2">
+              <Label for="service-description">Description</Label
+              ><Input
+                id="service-description"
+                v-model="description"
+                placeholder="Used for repository access and API integrations."
+              />
+            </div></form
+        ></DialogBody>
+        <DialogFooter
+          ><Button variant="outline" :disabled="creating" @click="showCreate = false">Cancel</Button
+          ><Button type="submit" form="create-service-form" :disabled="!valid || creating">{{
+            creating ? 'Creating…' : 'Create Service'
+          }}</Button></DialogFooter
+        >
       </DialogContent>
     </Dialog>
   </div>

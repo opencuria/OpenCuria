@@ -2,12 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useWorkspaceStore } from './workspaces'
-import {
-  WorkspaceOperation,
-  WorkspaceStatus,
-  RuntimeType,
-  type Workspace,
-} from '@/types'
+import { WorkspaceOperation, WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { toast } from 'vue-sonner'
 
@@ -28,8 +23,6 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     getWorkspace: vi.fn(),
   }
 })
-
-
 
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
@@ -58,6 +51,7 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: overrides.has_active_session ?? false,
     runner_online: overrides.runner_online ?? true,
     credential_ids: overrides.credential_ids ?? [],
+    plugin_ids: overrides.plugin_ids ?? [],
     credentials_present: overrides.credentials_present ?? false,
   }
 }
@@ -75,7 +69,9 @@ describe('workspace transition state', () => {
     let resolveFirst!: (value: Workspace) => void
     vi.mocked(workspacesApi.getWorkspace).mockImplementation((id) =>
       id === 'workspace-1'
-        ? new Promise((resolve) => { resolveFirst = resolve })
+        ? new Promise((resolve) => {
+            resolveFirst = resolve
+          })
         : Promise.resolve(second as never),
     )
     const a = store.fetchWorkspaceDetail('workspace-1')
@@ -147,7 +143,9 @@ describe('workspace credential updates', () => {
       updated_at: '2026-03-29T11:00:00.000Z',
       active_operation: null,
       credential_ids: ['cred-1'],
+      plugin_ids: [],
       credentials_present: true,
+      credential_sync_status: 'synced',
       qemu_vcpus: null,
       qemu_memory_mb: null,
       qemu_disk_size_gb: null,
@@ -171,6 +169,43 @@ describe('workspace credential updates', () => {
     )
   })
 
+  it('sends plugin IDs in one workspace patch and warns when runner synchronization is pending', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ plugin_ids: [] })]
+    vi.mocked(workspacesApi.updateWorkspace).mockResolvedValue({
+      id: 'workspace-1',
+      name: 'Workspace',
+      updated_at: '2026-03-29T11:00:00.000Z',
+      active_operation: null,
+      credential_ids: ['cred-1'],
+      plugin_ids: ['plugin-1'],
+      credentials_present: false,
+      credential_sync_status: 'pending',
+      credential_sync_detail: 'Runner is offline.',
+      qemu_vcpus: null,
+      qemu_memory_mb: null,
+      qemu_disk_size_gb: null,
+      desktop_width: 1920,
+      desktop_height: 1080,
+    })
+    const success = await store.updateWorkspace('workspace-1', {
+      credential_ids: ['cred-1'],
+      plugin_ids: ['plugin-1'],
+    })
+    expect(success).toBe(true)
+    expect(workspacesApi.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(workspacesApi.updateWorkspace).toHaveBeenCalledWith('workspace-1', {
+      credential_ids: ['cred-1'],
+      plugin_ids: ['plugin-1'],
+    })
+    expect(store.workspaces[0]?.plugin_ids).toEqual(['plugin-1'])
+    expect(toast.warning).toHaveBeenCalledWith(
+      'Workspace configuration saved',
+      expect.objectContaining({ description: 'Runner is offline.' }),
+    )
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
   it('toasts a deferred apply when credentials change on a stopped workspace', async () => {
     const store = useWorkspaceStore()
     store.workspaces = [
@@ -186,7 +221,9 @@ describe('workspace credential updates', () => {
       updated_at: '2026-03-29T11:00:00.000Z',
       active_operation: null,
       credential_ids: [],
+      plugin_ids: [],
       credentials_present: false,
+      credential_sync_status: 'not_required',
       qemu_vcpus: null,
       qemu_memory_mb: null,
       qemu_disk_size_gb: null,

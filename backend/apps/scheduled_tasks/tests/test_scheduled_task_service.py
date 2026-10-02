@@ -18,6 +18,7 @@ class FakeRepository:
         self.skipped = []
         self.busy = False
         self.status = "running"
+        self.autostop_settings = None
 
     def due(self, now):
         return self.rows
@@ -69,7 +70,7 @@ class FakeRepository:
         return []
 
     def workspace_autostop_settings(self, workspace_id):
-        return None
+        return self.autostop_settings
 
     def create_run(self, task, scheduled_for):
         return SimpleNamespace(
@@ -84,6 +85,35 @@ class FakeRepository:
 
     def lock_workspace_for_launch(self, workspace_id):
         return self.status, self.busy
+
+
+@pytest.mark.asyncio
+async def test_auto_stop_reconciles_via_runner_auto_stop_guard_and_ignores_conflict():
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid.uuid4()
+    repo = FakeRepository()
+    repo.autostop_settings = (
+        "running",
+        False,
+        5,
+        now - timedelta(minutes=10),
+    )
+    repo.has_busy_harness_session = lambda _workspace_id: False
+
+    class FakeRunner:
+        def __init__(self):
+            self.calls = []
+
+        async def stop_workspace(self, workspace_id, *, auto_stop=False):
+            self.calls.append((workspace_id, auto_stop))
+            raise ConflictError("workspace became busy")
+
+    runner = FakeRunner()
+    service = ScheduledTaskService(repository=repo, runner=runner)
+
+    await service._maybe_stop_workspace(workspace_id)
+
+    assert runner.calls == [(workspace_id, True)]
 
 
 @pytest.mark.asyncio

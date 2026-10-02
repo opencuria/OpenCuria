@@ -1,0 +1,3 @@
+test-results/focused-*
+test-results/focused-db/
+playwright-report-focused/

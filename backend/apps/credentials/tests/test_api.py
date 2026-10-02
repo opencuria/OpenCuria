@@ -87,7 +87,9 @@ def test_admin_can_create_org_credential_service(client: Client):
 @pytest.mark.django_db
 def test_admin_can_create_file_org_credential_service(client: Client):
     user_model = get_user_model()
-    admin = user_model.objects.create_user(email="file-admin@org.test", password="secret")
+    admin = user_model.objects.create_user(
+        email="file-admin@org.test", password="secret"
+    )
     admin.is_staff = True
     admin.save(update_fields=["is_staff"])
     org = Organization.objects.create(name="Files", slug="files-org")
@@ -153,9 +155,11 @@ def test_member_cannot_create_org_credential_service(client: Client):
 
 
 @pytest.mark.django_db
-def test_non_staff_admin_cannot_create_org_credential_service(client: Client):
+def test_non_staff_admin_can_create_org_credential_service(client: Client):
     user_model = get_user_model()
-    admin = user_model.objects.create_user(email="admin-nonstaff@org.test", password="secret")
+    admin = user_model.objects.create_user(
+        email="admin-nonstaff@org.test", password="secret"
+    )
     org = Organization.objects.create(name="Gamma", slug="gamma")
     Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
     token = _create_api_key(
@@ -176,14 +180,17 @@ def test_non_staff_admin_cannot_create_org_credential_service(client: Client):
         **_auth_headers(token, str(org.id)),
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Only staff users can create credential services"
+    assert response.status_code == 201
+    assert response.json()["organization_id"] == str(org.id)
+    assert response.json()["is_active"] is True
 
 
 @pytest.mark.django_db
-def test_non_staff_admin_cannot_toggle_org_credential_service_activation(client: Client):
+def test_non_staff_admin_can_toggle_org_credential_service_activation(client: Client):
     user_model = get_user_model()
-    admin = user_model.objects.create_user(email="toggle-admin@org.test", password="secret")
+    admin = user_model.objects.create_user(
+        email="toggle-admin@org.test", password="secret"
+    )
     org = Organization.objects.create(name="Delta", slug="delta")
     Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
     token = _create_api_key(
@@ -204,5 +211,5 @@ def test_non_staff_admin_cannot_toggle_org_credential_service_activation(client:
         **_auth_headers(token, str(org.id)),
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Only staff users can modify credential service activation"
+    assert response.status_code == 200
+    assert response.json()["is_active"] is True

@@ -6,6 +6,13 @@ NOTION_PLUGIN_ID = uuid.UUID("1d672e4d-0bf0-4db9-8e71-7d98a82b2b17")
 NOTION_SERVICE_ID = uuid.UUID("3293653a-257a-4f20-92fb-7d363c7c765f")
 
 
+def flush_deferred_constraints(apps, schema_editor):
+    """Finish PostgreSQL FK trigger events before deferred index DDL."""
+    if schema_editor.connection.vendor == "postgresql":
+        with schema_editor.connection.cursor() as cursor:
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+
 def seed_notion(apps, schema_editor):
     plugin_model = apps.get_model("plugins", "Plugin")
     server_model = apps.get_model("plugins", "PluginMcpServer")
@@ -101,4 +108,8 @@ class Migration(migrations.Migration):
             field=models.SlugField(blank=True, default="", max_length=255),
         ),
         migrations.RunPython(seed_notion, migrations.RunPython.noop),
+        migrations.RunPython(
+            flush_deferred_constraints,
+            migrations.RunPython.noop,
+        ),
     ]

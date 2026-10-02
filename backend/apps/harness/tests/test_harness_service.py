@@ -236,12 +236,14 @@ async def test_manual_chat_can_start_while_scheduled_run_is_active(
         (manual_session.id, False),
     ]
 
+    # Both turns are concurrently active above. Finish deterministically to
+    # avoid unrelated simultaneous-write locks in SQLite's shared-memory DB.
+    scheduled_background = service._tasks[str(scheduled_session.id)]
+    manual_background = service._tasks[str(manual_session.id)]
     scheduled_gate.set()
+    await scheduled_background
     manual_gate.set()
-    await asyncio.gather(
-        service._tasks[str(scheduled_session.id)],
-        service._tasks[str(manual_session.id)],
-    )
+    await manual_background
 
 
 @pytest.mark.django_db(transaction=True)
@@ -311,6 +313,101 @@ async def test_scheduled_admission_error_returns_session_to_idle(
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[-1].finish == "error"
     assert "Run admission failed" in messages[-1].error
+
+
+@pytest.mark.parametrize("credential_type", ["mcp_oauth", "env"])
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_plugin_credential_failure_finishes_run(
+    harness_workspace, credential_type, monkeypatch
+) -> None:
+    """Live requirements fail closed and release the scheduled run ledger."""
+    from datetime import time, timedelta
+
+    from django.utils import timezone
+
+    from apps.credentials.models import CredentialService
+    from apps.plugins.models import (
+        OrgPluginActivation,
+        Plugin,
+        PluginCredentialRequirement,
+        PluginMcpServer,
+        WorkspacePluginActivation,
+    )
+    from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
+    from apps.scheduled_tasks.repositories import ScheduledTaskRepository
+    from apps.scheduled_tasks.services import ScheduledTaskService
+
+    org = harness_workspace.runner.organization
+    task = ScheduledTask.objects.create(
+        organization=org,
+        owner=harness_workspace.created_by,
+        workspace=harness_workspace,
+        name="Credential failure",
+        prompt="Check workspace",
+        model="fake-model",
+        local_time=time(9),
+        timezone_name="UTC",
+        next_run_at=timezone.now() + timedelta(days=1),
+    )
+    ledger = ScheduledTaskRepository.create_manual_run(task, timezone.now())
+    # Change the live workspace after the occurrence snapshot was captured.
+    oauth = credential_type == "mcp_oauth"
+    credential_service = CredentialService.objects.create(
+        organization=org,
+        name="Required account",
+        slug=f"required-{uuid.uuid4().hex}",
+        credential_type=credential_type,
+        env_var_name="" if oauth else "PLUGIN_TOKEN",
+        oauth_server_url="https://mcp.example.com/mcp" if oauth else "",
+    )
+    plugin = Plugin.objects.create(
+        organization=org, name="Required plugin", slug="required-plugin"
+    )
+    PluginCredentialRequirement.objects.create(
+        plugin=plugin, key="account", credential_service=credential_service
+    )
+    PluginMcpServer.objects.create(
+        plugin=plugin,
+        name="Tools",
+        slug="tools",
+        transport="streamable_http" if oauth else "stdio",
+        url="https://mcp.example.com/mcp" if oauth else "",
+        command="" if oauth else "tools",
+        env={} if oauth else {"TOKEN": "{{credential.account}}"},
+        auth_type="oauth" if oauth else "none",
+        oauth_requirement_key="account" if oauth else "",
+    )
+    OrgPluginActivation.objects.create(organization=org, plugin=plugin)
+    WorkspacePluginActivation.objects.create(workspace=harness_workspace, plugin=plugin)
+    provider_calls = []
+
+    def forbidden_provider(_organization_id):
+        provider_calls.append("called")
+        raise AssertionError("Plugin validation must precede provider construction")
+
+    service, _, events = _service()
+    service._provider_factory = forbidden_provider
+    monkeypatch.setattr(service, "_generate_title", lambda **kw: asyncio.sleep(0))
+    scheduler = ScheduledTaskService(harness=service)
+    run = await scheduler._create_and_start_run(task, ledger, service)
+    background = service._tasks.get(str(run.session_id))
+    if background is not None:
+        await background
+    await scheduler.reconcile_runs()
+
+    run.refresh_from_db()
+    run.session.refresh_from_db()
+    run.assistant_message.refresh_from_db()
+    assert run.status == ScheduledTaskRun.Status.ERROR
+    assert run.assistant_message.finish == "error"
+    assert run.assistant_message.completed_at is not None
+    assert "required" in run.error.lower()
+    assert run.session.status == "idle"
+    assert not service.is_running(run.session_id)
+    assert str(run.session_id) not in service._runs
+    assert provider_calls == []
+    statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
+    assert statuses[-1]["status"] == "idle"
 
 
 @pytest.mark.django_db(transaction=True)

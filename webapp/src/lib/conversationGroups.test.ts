@@ -60,6 +60,7 @@ function workspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: false,
     runner_online: true,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
@@ -91,14 +92,42 @@ describe('formatTimeAgo', () => {
 describe('extractActiveConversations', () => {
   it('puts busy sessions ahead of unread and caps at 5', () => {
     const conversations = [
-      conversation({ session_id: 'unread-old', unread: true, last_message_at: new Date(NOW - 60_000).toISOString() }),
-      conversation({ session_id: 'busy-new', status: 'busy', last_message_at: new Date(NOW - 10_000).toISOString() }),
-      conversation({ session_id: 'busy-old', status: 'busy', last_message_at: new Date(NOW - 20_000).toISOString() }),
-      conversation({ session_id: 'unread-new', unread: true, last_message_at: new Date(NOW).toISOString() }),
+      conversation({
+        session_id: 'unread-old',
+        unread: true,
+        last_message_at: new Date(NOW - 60_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'busy-new',
+        status: 'busy',
+        last_message_at: new Date(NOW - 10_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'busy-old',
+        status: 'busy',
+        last_message_at: new Date(NOW - 20_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'unread-new',
+        unread: true,
+        last_message_at: new Date(NOW).toISOString(),
+      }),
       conversation({ session_id: 'idle', unread: false, status: 'idle' }),
-      conversation({ session_id: 'unread-3', unread: true, last_message_at: new Date(NOW - 30_000).toISOString() }),
-      conversation({ session_id: 'unread-4', unread: true, last_message_at: new Date(NOW - 40_000).toISOString() }),
-      conversation({ session_id: 'unread-5', unread: true, last_message_at: new Date(NOW - 50_000).toISOString() }),
+      conversation({
+        session_id: 'unread-3',
+        unread: true,
+        last_message_at: new Date(NOW - 30_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'unread-4',
+        unread: true,
+        last_message_at: new Date(NOW - 40_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'unread-5',
+        unread: true,
+        last_message_at: new Date(NOW - 50_000).toISOString(),
+      }),
     ]
 
     const active = extractActiveConversations(conversations, 5)
@@ -161,7 +190,9 @@ describe('groupConversationsByTime', () => {
       NOW,
     )
 
-    expect(groups.map((group) => [group.key, group.conversations.map((row) => row.session_id)])).toEqual([
+    expect(
+      groups.map((group) => [group.key, group.conversations.map((row) => row.session_id)]),
+    ).toEqual([
       ['today', ['today']],
       ['yesterday', ['yesterday']],
       ['last7days', ['week']],

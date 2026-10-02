@@ -26,14 +26,12 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from .schemas import (
     PluginActivationIn,
     PluginCreateIn,
-    PluginCredentialReadinessOut,
     PluginCredentialRequirementOut,
     PluginMcpServerOut,
     PluginOut,
     PluginSkillOut,
     PluginUpdateIn,
     WorkspacePluginOut,
-    WorkspacePluginsUpdateIn,
 )
 from .services import PluginService
 
@@ -100,11 +98,6 @@ def _plugin_to_out(payload: dict) -> PluginOut:
             PluginCredentialRequirementOut(**r)
             for r in payload["credential_requirements"]
         ],
-        credential_readiness=PluginCredentialReadinessOut(
-            **payload["credential_readiness"]
-        )
-        if payload.get("credential_readiness")
-        else None,
         created_at=payload["created_at"],
         updated_at=payload["updated_at"],
     )
@@ -357,42 +350,6 @@ def list_workspace_plugins(request: HttpRequest, workspace_id: uuid.UUID):
         return 200, [_workspace_plugin_to_out(p) for p in payloads]
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_plugin_router.put(
-    "/{workspace_id}/plugins/",
-    response={
-        200: list[WorkspacePluginOut],
-        400: ErrorOut,
-        403: ErrorOut,
-        404: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Replace workspace plugin activations",
-)
-def update_workspace_plugins(
-    request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspacePluginsUpdateIn
-):
-    """Replace workspace activations atomically (any member may manage own ws)."""
-    if not check_api_key_permission(request, APIKeyPermission.PLUGINS_WRITE):
-        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
-    _get_org_service().require_membership(request.user, org_id)
-    try:
-        workspace = _get_owned_workspace(request, org_id, workspace_id)
-        payloads = _get_plugin_service().set_workspace_plugins(
-            workspace=workspace,
-            org_id=org_id,
-            user=request.user,
-            plugin_ids=payload.plugin_ids,
-        )
-        return 200, [_workspace_plugin_to_out(p) for p in payloads]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
 
 
 # ===========================================================================

@@ -16,6 +16,7 @@ class CredentialServiceAdmin(admin.ModelAdmin):
         "credential_type",
         "env_var_name",
         "target_path",
+        "oauth_server_url",
         "created_at",
     ]
     list_filter = ["credential_type", "organization"]
@@ -30,6 +31,7 @@ class CredentialServiceAdmin(admin.ModelAdmin):
         "env_var_name",
         "target_path",
         "label",
+        "oauth_server_url",
     ]
 
 
@@ -50,5 +52,9 @@ class CredentialAdmin(admin.ModelAdmin):
 class OrgCredentialServiceActivationAdmin(admin.ModelAdmin):
     list_display = ["id", "organization", "credential_service", "created_at"]
     list_filter = ["organization", "credential_service"]
-    search_fields = ["organization__name", "credential_service__name", "credential_service__slug"]
+    search_fields = [
+        "organization__name",
+        "credential_service__name",
+        "credential_service__slug",
+    ]
     readonly_fields = ["id", "created_at"]

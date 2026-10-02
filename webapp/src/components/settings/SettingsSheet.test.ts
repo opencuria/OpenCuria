@@ -88,7 +88,6 @@ vi.mock('@/stores/plugins', () => ({
     deletePlugin: vi.fn(),
     toggleActivation: vi.fn(),
     fetchWorkspacePlugins: vi.fn(),
-    setWorkspacePlugins: vi.fn(),
     resyncWorkspacePlugins: vi.fn(),
   }),
 }))
@@ -232,10 +231,11 @@ describe('SettingsSheet', () => {
     }
   })
 
-  it('hides the runners nav item for non-admins but keeps plugins visible', () => {
+  it('hides admin-only services and runners tabs for members while keeping plugins visible', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
     expect(wrapper.find('[data-testid="settings-nav-runners"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="settings-nav-credential-services"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="settings-nav-general"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="settings-nav-plugins"]').exists()).toBe(true)
     authMock.isAdmin = true

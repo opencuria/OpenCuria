@@ -404,7 +404,10 @@ class HarnessSessionRepository:
             # including on SQLite where select_for_update() is unavailable.
             workspace_query = Workspace.objects.filter(id=session.workspace_id)
             if scheduled:
-                workspace_query = workspace_query.filter(status="running")
+                workspace_query = workspace_query.filter(
+                    status="running",
+                    active_operation__isnull=True,
+                )
             reserved_workspace = workspace_query.update(updated_at=F("updated_at"))
             if not reserved_workspace:
                 return False
