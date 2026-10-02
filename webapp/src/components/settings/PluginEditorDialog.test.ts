@@ -21,6 +21,8 @@ vi.mock('@/stores/plugins', () => ({
 vi.mock('@/stores/credentials', () => ({
   useCredentialStore: () => ({
     credentials: [],
+    servicesLoaded: true,
+    servicesError: null,
     services: [
       {
         id: 'svc-1',
@@ -31,6 +33,22 @@ vi.mock('@/stores/credentials', () => ({
         env_var_name: 'PLAYWRIGHT_TOKEN',
         target_path: '',
         label: '',
+        organization_id: 'org-1',
+        oauth_server_url: '',
+        is_active: true,
+      },
+      {
+        id: 'oauth-service',
+        name: 'Notion OAuth',
+        slug: 'notion-oauth',
+        description: '',
+        credential_type: 'mcp_oauth',
+        env_var_name: '',
+        target_path: '',
+        label: '',
+        organization_id: 'org-1',
+        oauth_server_url: 'https://mcp.notion.com/mcp',
+        is_active: true,
       },
     ],
     loading: false,
@@ -47,7 +65,6 @@ vi.mock('@/services/plugins.api', () => ({
   deletePlugin: vi.fn(),
   togglePluginActivation: vi.fn(),
   listWorkspacePlugins: vi.fn(async () => []),
-  updateWorkspacePlugins: vi.fn(),
 }))
 
 const dialogStubs = {
@@ -83,14 +100,8 @@ function makePlugin(): Plugin {
         service_name: 'Playwright Auth',
         service_slug: 'playwright-auth',
         credential_type: 'env',
-        plugin_owned_service: true,
       },
     ],
-    credential_readiness: {
-      required_service_ids: ['svc-1'],
-      missing_required_service_ids: [],
-      ready: true,
-    },
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
   }
@@ -160,7 +171,9 @@ describe('PluginEditorDialog', () => {
         credential_requirements: [
           expect.objectContaining({
             key: 'api_key',
-            credential_service: { service_id: 'svc-1' },
+            description: '',
+            required: true,
+            service_id: 'svc-1',
           }),
         ],
       }),
@@ -177,7 +190,9 @@ describe('PluginEditorDialog', () => {
 
     await wrapper.find('[data-testid="plugin-name"]').setValue('Demo')
     await flushPromises()
-    expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeUndefined()
+    expect(
+      wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled'),
+    ).toBeUndefined()
 
     await wrapper.find('#plugin-editor-form').trigger('submit')
     await flushPromises()
@@ -192,13 +207,17 @@ describe('PluginEditorDialog', () => {
     await wrapper.find('[data-testid="plugin-add-mcp"]').trigger('click')
     const mcp = wrapper.find('[data-testid="plugin-mcp-0"]')
     await mcp.find('input').setValue('Notion')
-    const { emptyPluginForm, emptyMcpForm, formToCreateIn, validatePluginForm } = await import('@/lib/pluginForms')
+    const { emptyPluginForm, emptyMcpForm, formToCreateIn, validatePluginForm } =
+      await import('@/lib/pluginForms')
     const form = emptyPluginForm()
     form.name = 'Notion'
     form.requirements.push({
-      uid: 'r', reqKey: 'notion_oauth', description: '', required: true, mode: 'new',
-      serviceId: '', serviceName: 'Notion OAuth', credentialType: 'mcp_oauth',
-      envVarName: '', targetPath: '', label: '',
+      uid: 'r',
+      reqKey: 'notion_oauth',
+      description: '',
+      required: true,
+      serviceId: 'oauth-service',
+      credentialType: 'mcp_oauth',
     })
     const server = emptyMcpForm()
     server.name = 'Notion'
@@ -208,8 +227,48 @@ describe('PluginEditorDialog', () => {
     server.oauthRequirementKey = 'notion_oauth'
     form.mcps.push(server)
     expect(validatePluginForm(form)).toEqual([])
-    expect(formToCreateIn(form).mcp_servers?.[0]).toMatchObject({ auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' })
-    expect(formToCreateIn(form).credential_requirements?.[0]?.credential_service.credential_type).toBe('mcp_oauth')
+    expect(formToCreateIn(form).mcp_servers?.[0]).toMatchObject({
+      auth_type: 'oauth',
+      oauth_requirement_key: 'notion_oauth',
+    })
+    expect(formToCreateIn(form).credential_requirements?.[0]?.service_id).toBe('oauth-service')
+  })
+
+  it('rejects mismatched OAuth endpoint and requires an existing OAuth service', async () => {
+    const { emptyPluginForm, emptyMcpForm, validatePluginForm } = await import('@/lib/pluginForms')
+    const form = emptyPluginForm()
+    form.name = 'Notion'
+    form.requirements.push({
+      uid: 'req',
+      reqKey: 'notion',
+      description: '',
+      required: true,
+      serviceId: 'oauth-service',
+      credentialType: 'mcp_oauth',
+    })
+    const server = emptyMcpForm()
+    server.name = 'Notion MCP'
+    server.transport = 'streamable_http'
+    server.url = 'https://different.notion.test/mcp'
+    server.authType = 'oauth'
+    server.oauthRequirementKey = 'notion'
+    form.mcps.push(server)
+    form.availableServices = [
+      {
+        id: 'oauth-service',
+        name: 'Notion OAuth',
+        slug: 'notion-oauth',
+        description: '',
+        credential_type: 'mcp_oauth',
+        env_var_name: '',
+        target_path: '',
+        label: '',
+        organization_id: 'org-1',
+        oauth_server_url: 'https://mcp.notion.com/mcp',
+        is_active: true,
+      },
+    ]
+    expect(validatePluginForm(form).some((error) => error.includes('exactly match'))).toBe(true)
   })
 
   it('exposes transport switching that clears stale fields (unit-level)', async () => {

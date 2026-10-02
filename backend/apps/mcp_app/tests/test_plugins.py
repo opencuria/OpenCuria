@@ -10,12 +10,12 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
+from apps.credentials.models import CredentialService
 from apps.mcp_app.server import (
     _TOOL_HANDLERS,
     _TOOL_PERMISSIONS,
     _TOOLS,
     _call_list_workspace_plugins,
-    _call_set_workspace_plugins,
     _call_toggle_org_plugin_activation,
     _plugin_payload,
 )
@@ -52,9 +52,7 @@ def _setup():
         slug=f"plug-mcp-{uuid.uuid4().hex[:8]}",
     )
     Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-    Membership.objects.create(
-        user=member, organization=org, role=MembershipRole.MEMBER
-    )
+    Membership.objects.create(user=member, organization=org, role=MembershipRole.MEMBER)
     runner = Runner.objects.create(
         name="plug-mcp-runner",
         api_token_hash=hash_token(f"plug-mcp-{uuid.uuid4().hex}"),
@@ -77,22 +75,17 @@ def test_plugin_tools_registered_with_expected_permissions() -> None:
         "list_plugins",
         "toggle_org_plugin_activation",
         "list_workspace_plugins",
-        "set_workspace_plugins",
     }
     assert _TOOL_PERMISSIONS["list_plugins"] == APIKeyPermission.PLUGINS_READ
     assert (
         _TOOL_PERMISSIONS["toggle_org_plugin_activation"]
         == APIKeyPermission.PLUGINS_WRITE
     )
-    assert (
-        _TOOL_PERMISSIONS["list_workspace_plugins"] == APIKeyPermission.PLUGINS_READ
-    )
-    assert _TOOL_PERMISSIONS["set_workspace_plugins"] == APIKeyPermission.PLUGINS_WRITE
+    assert _TOOL_PERMISSIONS["list_workspace_plugins"] == APIKeyPermission.PLUGINS_READ
     for name in (
         "list_plugins",
         "toggle_org_plugin_activation",
         "list_workspace_plugins",
-        "set_workspace_plugins",
     ):
         assert name in _TOOL_HANDLERS
     for tool in _TOOLS:
@@ -137,11 +130,15 @@ def test_plugin_payload_carries_no_secrets() -> None:
             {
                 "key": "api_key",
                 "required": True,
-                "credential_service": {
-                    "name": "Payload Service",
-                    "credential_type": "env",
-                    "env_var_name": "PAYLOAD_TOKEN",
-                },
+                "service_id": str(
+                    CredentialService.objects.create(
+                        name="Payload Service",
+                        slug=f"payload-{uuid.uuid4().hex[:8]}",
+                        organization=ctx["org"],
+                        credential_type="env",
+                        env_var_name="PAYLOAD_TOKEN",
+                    ).id
+                ),
             }
         ],
     )
@@ -157,6 +154,8 @@ def test_plugin_payload_carries_no_secrets() -> None:
         "required",
         "service_id",
         "service_slug",
+        "service_name",
+        "credential_type",
     }
 
 
@@ -219,19 +218,9 @@ def test_mcp_workspace_plugin_flow_is_owner_scoped() -> None:
         )
     )
     assert any(p["id"] == plugin_id for p in listed)
-    updated = json.loads(
-        _text(
-            _call_set_workspace_plugins(
-                member_key,
-                ctx["org"].id,
-                {
-                    "workspace_id": str(ctx["workspace"].id),
-                    "plugin_ids": [plugin_id],
-                },
-            )
-        )
-    )
-    assert any(p["id"] == plugin_id and p["workspace_enabled"] for p in updated)
+    # Workspace plugin mutation is unified with workspace create/update.
+    assert "set_workspace_plugins" not in _TOOL_HANDLERS
+    assert ctx["workspace"].plugin_activations.count() == 0
 
     # A stranger (no workspace ownership) gets an error, not the data.
     stranger_model = get_user_model()

@@ -129,6 +129,7 @@ class WorkspaceOut(Schema):
     has_active_session: bool = False
     runner_online: bool = False
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
     base_image_name: str | None = None
 
@@ -140,6 +141,7 @@ class WorkspaceCreateIn(Schema):
     repos: list[str] = []
     runtime_type: str = "docker"
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     runner_id: uuid.UUID | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
@@ -164,6 +166,7 @@ class WorkspaceUpdateIn(Schema):
 
     name: str | None = None
     credential_ids: list[uuid.UUID] | None = None
+    plugin_ids: list[uuid.UUID] | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -193,7 +196,10 @@ class WorkspaceUpdateOut(Schema):
     updated_at: datetime
     active_operation: str | None = None
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
+    credential_sync_status: str = "not_required"
+    credential_sync_detail: str | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -207,6 +213,7 @@ class WorkspaceCreateOut(Schema):
     workspace_id: uuid.UUID
     task_id: uuid.UUID
     status: str
+    plugin_ids: list[uuid.UUID] = []
 
 
 # ---------------------------------------------------------------------------
@@ -335,10 +342,13 @@ class ProcessOut(Schema):
 
 
 class ErrorOut(Schema):
-    """Standard error response."""
+    """Standard error response with optional safe dependency-gap details."""
 
     detail: str
     code: str = "error"
+    # For missing_plugin_credentials: plugin_id, plugin_name, key, service_id,
+    # service_name, credential_type. Contains metadata only; never secret data.
+    gaps: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +404,7 @@ class WorkspaceFromImageArtifactIn(Schema):
 
     name: str = ""
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
 
 
 class WorkspaceFromImageArtifactOut(Schema):
@@ -402,6 +413,7 @@ class WorkspaceFromImageArtifactOut(Schema):
     workspace_id: uuid.UUID
     task_id: uuid.UUID
     status: str
+    plugin_ids: list[uuid.UUID] = []
 
 
 class ImageDefinitionBuildSummaryOut(Schema):
@@ -761,7 +773,9 @@ class GitOperationIn(Schema):
             return None
         return _validate_file_paths(value)
 
-    @field_validator("branch", "target", "new_branch", "old_branch", "start_point", "local_name")
+    @field_validator(
+        "branch", "target", "new_branch", "old_branch", "start_point", "local_name"
+    )
     @classmethod
     def _check_branch(cls, value: str | None) -> str | None:
         if value is None:
@@ -820,7 +834,7 @@ class GitOperationIn(Schema):
         return cleaned
 
     @model_validator(mode="after")
-    def _check_operation_fields(self) -> "GitOperationIn":
+    def _check_operation_fields(self) -> GitOperationIn:
         """Require the fields each operation needs (fail fast, 422)."""
         op = self.operation
         needs_repo = op not in {"list_repos"}
@@ -848,9 +862,16 @@ class GitOperationIn(Schema):
             raise ValueError("branch is required for merge_into_current")
         if op == "merge_current_into" and not (self.target or "").strip():
             raise ValueError("target is required for merge_current_into")
-        if op == "pull" and (self.branch or "").strip() and not (self.remote or "").strip():
+        if (
+            op == "pull"
+            and (self.branch or "").strip()
+            and not (self.remote or "").strip()
+        ):
             raise ValueError("remote is required when branch is set for pull")
-        if op in {"stash_apply", "stash_pop", "stash_drop"} and not (self.stash or "").strip():
+        if (
+            op in {"stash_apply", "stash_pop", "stash_drop"}
+            and not (self.stash or "").strip()
+        ):
             raise ValueError(f"stash is required for {op}")
         if op == "stash_branch":
             if not (self.stash or "").strip():

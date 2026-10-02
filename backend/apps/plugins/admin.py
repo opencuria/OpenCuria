@@ -33,14 +33,7 @@ class PluginMcpServerInline(admin.TabularInline):
 class PluginCredentialRequirementInline(admin.TabularInline):
     model = PluginCredentialRequirement
     extra = 0
-    fields = [
-        "key",
-        "credential_service",
-        "required",
-        "plugin_owned_service",
-        "description",
-    ]
-    readonly_fields = ["plugin_owned_service"]
+    fields = ["key", "credential_service", "required", "description"]
 
 
 @admin.register(Plugin)

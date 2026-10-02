@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import ChatSidebar from './ChatSidebar.vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import SettingsSheetHost from '@/components/settings/SettingsSheetHost.vue'
+import WorkspaceDraftResumeHost from '@/components/workspaces/WorkspaceDraftResumeHost.vue'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Separator } from '@/components/ui/separator'
 import { useAttentionTabTitle } from '@/composables/useAttentionTabTitle'
@@ -49,5 +50,6 @@ const isFullBleed = computed(
     </SidebarInset>
     <!-- Globales Settings-Sheet (Schritt 5): einmal hosten, überall öffnen. -->
     <SettingsSheetHost />
+    <WorkspaceDraftResumeHost />
   </SidebarProvider>
 </template>

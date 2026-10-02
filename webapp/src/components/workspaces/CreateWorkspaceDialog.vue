@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { onMounted, computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import WorkspacePluginCredentialSelection from './WorkspacePluginCredentialSelection.vue'
+import { useAuthStore } from '@/stores/auth'
+import { useNotificationStore } from '@/stores/notifications'
+import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/lib/workspaceDraft'
+import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -23,13 +28,11 @@ import {
 } from '@/components/ui/select'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { useCredentialStore } from '@/stores/credentials'
 import { useImageStore } from '@/stores/images'
 import { RuntimeType } from '@/types'
 import { filterRunnersByRuntime, runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { isDefinitionSelectableForWorkspace } from '@/components/images/imageDefinitionLifecycle'
-import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
-import { X, Check, Key, Camera } from '@lucide/vue'
+import { X, Camera } from '@lucide/vue'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
 type SelectableImageKind = 'definition' | 'captured'
@@ -45,18 +48,31 @@ interface SelectableImageOption {
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
-const credentialStore = useCredentialStore()
 const imageStore = useImageStore()
+const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
+const notifications = useNotificationStore()
 
+const props = withDefaults(defineProps<{ resumeDraftId?: string; hideTrigger?: boolean }>(), {
+  hideTrigger: false,
+})
 const emit = defineEmits<{
   created: [workspaceId: string | null]
+  draftError: [message: string]
+  handoff: []
 }>()
 
 const open = defineModel<boolean>('open', { default: false })
 const activeTab = ref<'basic' | 'advanced'>('basic')
 const name = ref('')
 const selectedCredentialIds = ref<string[]>([])
+const selectedPluginIds = ref<string[]>([])
+const pluginSelectionValid = ref(false)
+const draftError = ref<string | null>(null)
+const restoringDraftId = ref<string | null>(null)
+let preserveDraftOnClose = false
+let resetTimer: ReturnType<typeof setTimeout> | undefined
 const runnerId = ref('')
 const runtimeType = ref<string>(RuntimeType.QEMU)
 const qemuVcpus = ref(2)
@@ -69,19 +85,59 @@ const submitting = ref(false)
 // Image-based creation
 const selectedImageValue = ref('')
 
+function identity() {
+  return { userId: authStore.user?.id ?? '', organizationId: authStore.activeOrganizationId ?? '' }
+}
+const restorationPending = ref(false)
+function restoreDraft(id: string): void {
+  if (!authStore.initialized || !authStore.user || !authStore.activeOrganizationId) return
+  const result = readWorkspaceDraft(id, identity())
+  if (result.status !== 'ok' || result.draft.fields.mode !== 'create') {
+    draftError.value = `Workspace draft could not be restored (${result.status}). Start a new configuration.`
+    return
+  }
+  const fields = result.draft.fields
+  restorationPending.value = true
+  restoringDraftId.value = id
+  name.value = fields.name
+  selectedCredentialIds.value = [...fields.credentialIds]
+  selectedPluginIds.value = [...fields.pluginIds]
+  repos.value = [...(fields.repos ?? [])]
+  runnerId.value = fields.runnerId ?? ''
+  runtimeType.value = fields.runtimeType ?? RuntimeType.QEMU
+  qemuVcpus.value = fields.qemuVcpus ?? 2
+  qemuMemoryMb.value = fields.qemuMemoryMb ?? 4096
+  qemuDiskSizeGb.value = fields.qemuDiskSizeGb ?? 50
+  selectedImageValue.value =
+    fields.imageValue ?? (fields.imageArtifactId ? `captured:${fields.imageArtifactId}` : '')
+  open.value = true
+}
+watch(
+  [
+    () => props.resumeDraftId,
+    () => authStore.initialized,
+    () => authStore.user?.id,
+    () => authStore.activeOrganizationId,
+  ],
+  ([id, initialized, userId, organizationId]) => {
+    if (id && initialized && userId !== undefined && organizationId) restoreDraft(id)
+  },
+  { immediate: true },
+)
+
 const imageOptions = computed(() => {
   const definitionOptions: SelectableImageOption[] = []
   for (const definition of imageStore.imageDefinitions) {
     if (!isDefinitionSelectableForWorkspace(definition)) continue
-    const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || [])
-      .filter((build) => {
+    const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || []).filter(
+      (build) => {
         if (build.status !== 'active' || !build.image_artifact_id) return false
         return runnerStore.onlineRunners.some(
           (runner) =>
-            runner.id === build.runner_id &&
-            runnerSupportsRuntime(runner, definition.runtime_type),
+            runner.id === build.runner_id && runnerSupportsRuntime(runner, definition.runtime_type),
         )
-      })
+      },
+    )
 
     if (!activeBuilds.length) continue
 
@@ -95,24 +151,23 @@ const imageOptions = computed(() => {
   }
 
   const capturedOptions: SelectableImageOption[] = imageStore.images
-    .filter(
-      (artifact) => {
-        const sourceRunner = artifact.source_runner_id
-          ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
-          : null
-        return (
+    .filter((artifact) => {
+      const sourceRunner = artifact.source_runner_id
+        ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
+        : null
+      return (
         artifact.artifact_kind === 'captured' &&
         artifact.status === 'ready' &&
         artifact.source_runner_online === true &&
         runnerSupportsRuntime(sourceRunner, artifact.runtime_type || RuntimeType.QEMU)
-        )
-      },
-    )
+      )
+    })
     .map((artifact) => ({
       value: `captured:${artifact.id}`,
       kind: 'captured',
       label: `○ ${artifact.name} [${(artifact.runtime_type || 'qemu').toString()}]`,
-      runtimeType: artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
+      runtimeType:
+        artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
       imageArtifact: artifact,
     }))
 
@@ -168,11 +223,8 @@ const compatibleRunnerOptions = computed(() => {
     const runner = runnerStore.runners.find(
       (entry) => entry.id === option.imageArtifact?.source_runner_id,
     )
-    if (
-      !runner ||
-      runner.status !== 'online' ||
-      !runnerSupportsRuntime(runner, option.runtimeType)
-    ) return []
+    if (!runner || runner.status !== 'online' || !runnerSupportsRuntime(runner, option.runtimeType))
+      return []
     return [{ value: runner.id, label: runner.name || runner.id.slice(0, 8) }]
   }
 
@@ -187,27 +239,32 @@ const selectedRunnerBuild = computed(() => {
   return (option.runnerBuilds || []).find((build) => build.runner_id === selectedRunnerId) ?? null
 })
 
-const selectedDefinitionArtifactId = computed<string | null>(() =>
-  selectedRunnerBuild.value?.image_artifact_id || null,
+const selectedDefinitionArtifactId = computed<string | null>(
+  () => selectedRunnerBuild.value?.image_artifact_id || null,
 )
 
 watch(selectedImageOption, (option, previousOption) => {
-  if (option) {
-    runtimeType.value = option.runtimeType
-  }
-  if (previousOption) {
+  if (option && !restorationPending.value) runtimeType.value = option.runtimeType
+  if (!restorationPending.value && previousOption && previousOption.value !== option?.value) {
     selectedCredentialIds.value = []
+    selectedPluginIds.value = []
   }
 })
 
-watch(compatibleRunnerOptions, (runnerOptions) => {
-  const compatibleRunnerIds = runnerOptions.map((entry) => entry.value)
-  if (!compatibleRunnerIds.length) {
-    runnerId.value = ''
-  } else if (!compatibleRunnerIds.includes(runnerId.value)) {
-    runnerId.value = compatibleRunnerIds[0] || ''
-  }
-}, { immediate: true })
+watch(
+  compatibleRunnerOptions,
+  (runnerOptions) => {
+    const compatibleRunnerIds = runnerOptions.map((entry) => entry.value)
+    if (!compatibleRunnerIds.length) {
+      if (!restorationPending.value) runnerId.value = ''
+      return
+    } else if (!compatibleRunnerIds.includes(runnerId.value)) {
+      if (restorationPending.value) return
+      runnerId.value = compatibleRunnerIds[0] || ''
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   [() => open.value, imageOptions],
@@ -223,25 +280,29 @@ watch(
     )
     const nextDefault = firstSelectable ?? fallbackSelectable
     if (!nextDefault) {
-      selectedImageValue.value = ''
+      if (!restoringDraftId.value) selectedImageValue.value = ''
       return
     }
-    if (!selectedImageValue.value) {
+    if (!selectedImageValue.value && !restoringDraftId.value) {
       selectedImageValue.value = nextDefault.value
     }
   },
   { immediate: true },
 )
 
+onUnmounted(() => {
+  if (resetTimer) clearTimeout(resetTimer)
+})
+
 onMounted(async () => {
   if (!runnerStore.runners.length) {
     await runnerStore.fetchRunners()
   }
-  await credentialStore.fetchCredentials()
-  await Promise.all([
-    imageStore.fetchImages(),
-    imageStore.fetchImageDefinitionsWithBuilds(),
-  ])
+  await Promise.all([imageStore.fetchImages(), imageStore.fetchImageDefinitionsWithBuilds()])
+  if (props.resumeDraftId) {
+    await nextTick()
+    restorationPending.value = false
+  }
 })
 
 const effectiveQemuRunner = computed(() => {
@@ -256,12 +317,10 @@ const advancedRunnerOptions = computed(() => {
     return compatibleRunnerOptions.value
   }
 
-  return filterRunnersByRuntime(runnerStore.onlineRunners, runtimeType.value).map(
-    (runner) => ({
-      value: runner.id,
-      label: runner.name || runner.id.slice(0, 8),
-    }),
-  )
+  return filterRunnersByRuntime(runnerStore.onlineRunners, runtimeType.value).map((runner) => ({
+    value: runner.id,
+    label: runner.name || runner.id.slice(0, 8),
+  }))
 })
 
 const qemuLimits = computed(() => {
@@ -292,45 +351,40 @@ const qemuLimits = computed(() => {
   }
 })
 
-watch([() => open.value, runtimeType, runnerId, selectedImageValue], () => {
-  if (!open.value || runtimeType.value !== RuntimeType.QEMU || isCapturedClone.value) return
+watch(
+  [() => open.value, runtimeType, runnerId, selectedImageValue],
+  () => {
+    if (!open.value || runtimeType.value !== RuntimeType.QEMU || isCapturedClone.value) return
 
-  const limits = qemuLimits.value
-  const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
-    if (Number.isNaN(value)) return fallback
-    if (value < min || value > max) return fallback
-    return value
-  }
+    const limits = qemuLimits.value
+    const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
+      if (Number.isNaN(value)) return fallback
+      if (value < min || value > max) return fallback
+      return value
+    }
 
-  qemuVcpus.value = clampOrDefault(
-    qemuVcpus.value,
-    limits.minVcpus,
-    limits.maxVcpus,
-    limits.defaultVcpus,
-  )
-  qemuMemoryMb.value = clampOrDefault(
-    qemuMemoryMb.value,
-    limits.minMemoryMb,
-    limits.maxMemoryMb,
-    limits.defaultMemoryMb,
-  )
-  qemuDiskSizeGb.value = clampOrDefault(
-    qemuDiskSizeGb.value,
-    limits.minDiskSizeGb,
-    limits.maxDiskSizeGb,
-    limits.defaultDiskSizeGb,
-  )
-}, { immediate: true })
-
-function toggleCredential(id: string): void {
-  const credential = credentialStore.credentials.find((entry) => entry.id === id)
-  if (!credential) return
-  selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
-    selectedCredentialIds.value,
-    credential,
-    credentialStore.credentials,
-  )
-}
+    if (restorationPending.value) return
+    qemuVcpus.value = clampOrDefault(
+      qemuVcpus.value,
+      limits.minVcpus,
+      limits.maxVcpus,
+      limits.defaultVcpus,
+    )
+    qemuMemoryMb.value = clampOrDefault(
+      qemuMemoryMb.value,
+      limits.minMemoryMb,
+      limits.maxMemoryMb,
+      limits.defaultMemoryMb,
+    )
+    qemuDiskSizeGb.value = clampOrDefault(
+      qemuDiskSizeGb.value,
+      limits.minDiskSizeGb,
+      limits.maxDiskSizeGb,
+      limits.defaultDiskSizeGb,
+    )
+  },
+  { immediate: true },
+)
 
 function addRepo(): void {
   const trimmed = repoInput.value.trim()
@@ -352,7 +406,7 @@ function handleRepoKeydown(e: KeyboardEvent): void {
 }
 
 async function handleSubmit(): Promise<void> {
-  if (!name.value.trim()) return
+  if (!name.value.trim() || !pluginSelectionValid.value) return
   const selectedOption = selectedImageOption.value
   if (!selectedOption) return
 
@@ -366,6 +420,7 @@ async function handleSubmit(): Promise<void> {
       {
         name: name.value.trim(),
         credential_ids: selectedCredentialIds.value,
+        plugin_ids: selectedPluginIds.value,
       },
     )
     success = !!workspaceId
@@ -388,6 +443,7 @@ async function handleSubmit(): Promise<void> {
       name: name.value.trim(),
       repos: repos.value,
       credential_ids: selectedCredentialIds.value,
+      plugin_ids: selectedPluginIds.value,
       runner_id: runnerId.value || null,
       image_id: resolvedImageId,
       ...(runtimeType.value === RuntimeType.QEMU
@@ -407,6 +463,8 @@ async function handleSubmit(): Promise<void> {
   submitting.value = false
 
   if (success) {
+    if (restoringDraftId.value) removeWorkspaceDraft(restoringDraftId.value)
+    restoringDraftId.value = null
     handleClose()
     emit('created', createdWorkspaceId)
   }
@@ -414,10 +472,16 @@ async function handleSubmit(): Promise<void> {
 
 function handleClose(): void {
   open.value = false
-  setTimeout(() => {
+  if (resetTimer) clearTimeout(resetTimer)
+  if (!preserveDraftOnClose && restoringDraftId.value) removeWorkspaceDraft(restoringDraftId.value)
+  if (!preserveDraftOnClose) restoringDraftId.value = null
+  preserveDraftOnClose = false
+  resetTimer = setTimeout(() => {
+    if (open.value) return
     activeTab.value = 'basic'
     name.value = ''
     selectedCredentialIds.value = []
+    selectedPluginIds.value = []
     runnerId.value = ''
     runtimeType.value = RuntimeType.QEMU
     qemuVcpus.value = 2
@@ -426,33 +490,88 @@ function handleClose(): void {
     repoInput.value = ''
     repos.value = []
     selectedImageValue.value = ''
+    draftError.value = null
+    resetTimer = undefined
   }, 200)
 }
+watch(open, (isOpen) => {
+  if (isOpen && resetTimer) {
+    clearTimeout(resetTimer)
+    resetTimer = undefined
+  }
+})
 
-async function navigateToCredentials(): Promise<void> {
+async function navigateToCredentials(serviceId?: string, reconnectId?: string): Promise<void> {
+  addRepo()
+  const fields: WorkspaceDraftFields = {
+    mode: 'create',
+    name: name.value,
+    credentialIds: [...selectedCredentialIds.value],
+    pluginIds: [...selectedPluginIds.value],
+    repos: [...repos.value],
+    runnerId: runnerId.value,
+    runtimeType: runtimeType.value as 'docker' | 'qemu',
+    qemuVcpus: qemuVcpus.value,
+    qemuMemoryMb: qemuMemoryMb.value,
+    qemuDiskSizeGb: qemuDiskSizeGb.value,
+    imageValue: selectedImageValue.value,
+    imageArtifactId: selectedImageOption.value?.imageArtifact?.id,
+  }
+  const result = saveWorkspaceDraft(
+    fields,
+    identity(),
+    route.path === '/workspaces' || /^\/workspaces\/[\w-]+$/.test(route.path)
+      ? (route.path as '/workspaces' | `/workspaces/${string}`)
+      : '/',
+  )
+  if (result.error) {
+    draftError.value = result.error
+    emit('draftError', result.error)
+    notifications.error('Draft not saved', result.error)
+    return
+  }
+  restoringDraftId.value = result.id
+  preserveDraftOnClose = true
+  emit('handoff')
   handleClose()
-  // Settings-Routen sind Redirects aufs Sheet (Schritt 6): Deep-Link nutzen.
-  await router.push({ path: '/', query: { settings: 'credentials' } })
+  restoringDraftId.value = null
+  await router.push({
+    path: '/',
+    query: {
+      settings: 'credentials',
+      ...(serviceId ? { add_credential: serviceId } : {}),
+      ...(reconnectId ? { reconnect_credential: reconnectId } : {}),
+      workspace_draft: result.id,
+    },
+  })
 }
 
+const resourceSelectionValid = computed(() => {
+  if (isCapturedClone.value || runtimeType.value !== RuntimeType.QEMU) return true
+  const limits = qemuLimits.value
+  return (
+    qemuVcpus.value >= limits.minVcpus &&
+    qemuVcpus.value <= limits.maxVcpus &&
+    qemuMemoryMb.value >= limits.minMemoryMb &&
+    qemuMemoryMb.value <= limits.maxMemoryMb &&
+    qemuDiskSizeGb.value >= limits.minDiskSizeGb &&
+    qemuDiskSizeGb.value <= limits.maxDiskSizeGb
+  )
+})
 const isValid = computed(
   () =>
     name.value.trim().length > 0 &&
     !!selectedImageOption.value &&
+    pluginSelectionValid.value &&
+    resourceSelectionValid.value &&
     (selectedImageOption.value.kind === 'captured' || !!selectedDefinitionArtifactId.value),
 )
-
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(v) => (v ? (open = true) : handleClose())"
-  >
-    <DialogTrigger as-child>
-      <slot>
-        <Button @click="open = true">Create Workspace</Button>
-      </slot>
+  <Dialog :open="open" @update:open="(v) => (v ? (open = true) : handleClose())">
+    <DialogTrigger v-if="!hideTrigger" as-child>
+      <slot><Button @click="open = true">Create Workspace</Button></slot>
     </DialogTrigger>
 
     <DialogContent class="sm:max-w-lg">
@@ -464,204 +583,249 @@ const isValid = computed(
       </DialogHeader>
 
       <DialogBody>
-      <form id="create-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-      <div class="rounded-md border border-border bg-muted/50 p-1">
-        <div class="grid grid-cols-2 gap-1">
-          <Button type="button" size="sm" :variant="activeTab === 'basic' ? 'secondary' : 'ghost'" @click="activeTab = 'basic'">
-            Basic
-          </Button>
-          <Button type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
-            Advanced settings
-          </Button>
-        </div>
-      </div>
-
-      <p v-if="activeTab === 'basic'" class="text-xs text-muted-foreground -mt-1">
-        In most cases you can create directly from this tab. Advanced settings are optional.
-      </p>
-
-      <!-- Workspace name -->
-      <div>
-        <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-        <Input
-          v-model="name"
-          placeholder="My workspace"
-        />
-      </div>
-
-      <!-- Image selection -->
-      <div>
-        <label class="text-sm font-medium text-foreground mb-1.5 block">
-          Select image
-          <span class="text-muted-foreground font-normal">(required)</span>
-        </label>
-        <Select v-model="selectedImageValue">
-          <SelectTrigger>
-            <SelectValue placeholder="Select image" />
-          </SelectTrigger>
-          <SelectContent>
-            <template v-for="opt in imageOptions" :key="opt.value">
-              <SelectLabel v-if="opt.value.startsWith('__group_')">{{ opt.label }}</SelectLabel>
-              <SelectItem v-else :value="opt.value">{{ opt.label }}</SelectItem>
-            </template>
-          </SelectContent>
-        </Select>
-        <p v-if="!selectedImageOption" class="text-xs text-destructive mt-1">
-          No active organization or captured images are available.
-        </p>
-        <p v-if="isFromImage" class="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-          <Camera :size="12" />
-          Runtime is locked by the selected image. An image selection is required to create a workspace.
-        </p>
-      </div>
-
-      <div>
-        <label class="text-sm font-medium text-foreground mb-1.5 block">Credentials <span class="text-muted-foreground font-normal">(optional)</span></label>
-        <div v-if="credentialStore.credentials.length" class="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
-          <button
-            v-for="cred in credentialStore.credentials"
-            :key="cred.id"
-            type="button"
-            class="flex items-center gap-2 px-3 py-2 rounded-sm border text-left text-sm transition-colors cursor-pointer"
-            :class="selectedCredentialIds.includes(cred.id)
-              ? 'border-primary bg-primary/5 text-foreground'
-              : 'border-border bg-background text-muted-foreground hover:bg-muted'"
-            @click="toggleCredential(cred.id)"
-          >
-            <div
-              class="flex items-center justify-center w-4 h-4 rounded-sm border"
-              :class="selectedCredentialIds.includes(cred.id)
-                ? 'border-primary bg-primary text-primary-foreground'
-                : 'border-border'"
-            >
-              <Check v-if="selectedCredentialIds.includes(cred.id)" :size="10" />
+        <form id="create-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+          <div class="rounded-md border border-border bg-muted/50 p-1">
+            <div class="grid grid-cols-2 gap-1">
+              <Button
+                type="button"
+                size="sm"
+                :variant="activeTab === 'basic' ? 'secondary' : 'ghost'"
+                @click="activeTab = 'basic'"
+              >
+                Basic
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'"
+                @click="activeTab = 'advanced'"
+              >
+                Advanced settings
+              </Button>
             </div>
-            <span class="flex-1 truncate">{{ cred.name }}</span>
-            <span v-if="cred.credential_type === 'ssh_key'" class="inline-flex items-center gap-1 text-xs text-muted-foreground">
-              <Key :size="10" />
-              SSH Key
-            </span>
-            <span v-else-if="cred.target_path" class="text-xs text-muted-foreground">{{ cred.target_path }}</span>
-            <span v-else-if="cred.env_var_name" class="text-xs text-muted-foreground">{{ cred.env_var_name }}</span>
-          </button>
-        </div>
-        <p v-else class="text-xs text-muted-foreground">
-          No credentials available.
-          <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
-          first.
-        </p>
-      </div>
+          </div>
 
-      <div v-if="!isCapturedClone">
-        <label class="text-sm font-medium text-foreground mb-1.5 block">Repositories <span class="text-muted-foreground font-normal">(optional)</span></label>
-        <div class="flex gap-2">
-          <Input
-            v-model="repoInput"
-            placeholder="https://github.com/owner/repo"
-            class="flex-1"
-            @keydown="handleRepoKeydown"
-          />
-          <Button type="button" variant="outline" @click="addRepo">Add</Button>
-        </div>
-        <div v-if="repos.length" class="flex flex-wrap gap-2 mt-2">
-          <span
-            v-for="(repo, i) in repos"
-            :key="repo"
-            class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-sm bg-muted text-foreground"
-          >
-            {{ repo.split('/').slice(-1)[0] || repo }}
-            <button
-              type="button"
-              class="text-muted-foreground hover:text-foreground cursor-pointer"
-              @click="removeRepo(i)"
-            >
-              <X :size="12" />
-            </button>
-          </span>
-        </div>
-      </div>
+          <p v-if="activeTab === 'basic'" class="text-xs text-muted-foreground -mt-1">
+            In most cases you can create directly from this tab. Advanced settings are optional.
+          </p>
 
-      <div v-if="activeTab === 'advanced'">
-        <div v-if="isCapturedClone" class="rounded-md border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
-          Captured image clones keep runner, runtime and resources from the image. Advanced options are disabled.
-        </div>
+          <!-- Workspace name -->
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+            <Input v-model="name" placeholder="My workspace" />
+          </div>
 
-        <div v-else class="space-y-4">
-          <div class="rounded-md border border-border bg-muted/50 p-3">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Runner</label>
-            <Select
-              v-model="runnerId"
-              :disabled="advancedRunnerOptions.length <= 1"
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select runner" />
+          <!-- Image selection -->
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">
+              Select image
+              <span class="text-muted-foreground font-normal">(required)</span>
+            </label>
+            <Select v-model="selectedImageValue">
+              <SelectTrigger data-testid="create-image-select">
+                <SelectValue placeholder="Select image" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem
-                  v-for="opt in advancedRunnerOptions"
-                  :key="opt.value"
-                  :value="opt.value"
-                >
-                  {{ opt.label }}
-                </SelectItem>
+                <template v-for="opt in imageOptions" :key="opt.value">
+                  <SelectLabel v-if="opt.value.startsWith('__group_')">{{ opt.label }}</SelectLabel>
+                  <SelectItem v-else :value="opt.value">{{ opt.label }}</SelectItem>
+                </template>
               </SelectContent>
             </Select>
-            <p class="text-xs text-muted-foreground mt-1">
-              {{ isFromImage
-                ? 'Only runners that have the selected image and support its runtime are available.'
-                : 'Only online runners that support the selected runtime are available.' }}
+            <p v-if="!selectedImageOption" class="text-xs text-destructive mt-1">
+              No active organization or captured images are available.
+            </p>
+            <p
+              v-if="isFromImage && !isCapturedClone"
+              class="text-xs text-muted-foreground mt-1 flex items-center gap-1"
+            >
+              <Camera :size="12" />
+              Runtime is locked by the selected image. An image selection is required to create a
+              workspace.
             </p>
           </div>
 
-          <div v-if="runtimeType === RuntimeType.QEMU" class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
-            <p class="text-sm font-medium text-foreground">QEMU resources</p>
+          <WorkspacePluginCredentialSelection
+            v-model:plugin-ids="selectedPluginIds"
+            v-model:credential-ids="selectedCredentialIds"
+            :active="open"
+            @validity-change="pluginSelectionValid = $event"
+            @add-credential="navigateToCredentials"
+            @reconnect-credential="(id) => navigateToCredentials(undefined, id)"
+          />
+          <p v-if="draftError" class="text-xs text-destructive" role="alert">{{ draftError }}</p>
+          <p v-if="!resourceSelectionValid" class="text-xs text-destructive" role="alert">
+            The restored QEMU resource values are outside this runner's limits. Adjust them before
+            saving.
+          </p>
 
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
-              <input v-model.number="qemuVcpus" type="range" class="w-full accent-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-              <input v-model.number="qemuVcpus" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-              <div class="flex justify-between text-xs text-muted-foreground mt-1">
-                <span>{{ qemuLimits.minVcpus }}</span>
-                <span>{{ qemuLimits.maxVcpus }}</span>
-              </div>
+          <div v-if="!isCapturedClone">
+            <label class="text-sm font-medium text-foreground mb-1.5 block"
+              >Repositories <span class="text-muted-foreground font-normal">(optional)</span></label
+            >
+            <div class="flex gap-2">
+              <Input
+                v-model="repoInput"
+                placeholder="https://github.com/owner/repo"
+                class="flex-1"
+                @keydown="handleRepoKeydown"
+              />
+              <Button type="button" variant="outline" @click="addRepo">Add</Button>
+            </div>
+            <div v-if="repos.length" class="flex flex-wrap gap-2 mt-2">
+              <span
+                v-for="(repo, i) in repos"
+                :key="repo"
+                class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-sm bg-muted text-foreground"
+              >
+                {{ repo.split('/').slice(-1)[0] || repo }}
+                <button
+                  type="button"
+                  class="text-muted-foreground hover:text-foreground cursor-pointer"
+                  @click="removeRepo(i)"
+                >
+                  <X :size="12" />
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <div v-if="activeTab === 'advanced'">
+            <div
+              v-if="isCapturedClone"
+              class="rounded-md border border-border bg-muted/50 p-3 text-sm text-muted-foreground"
+            >
+              Captured image clones keep runner, runtime and resources from the image. Advanced
+              options are disabled.
             </div>
 
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
-              <input v-model.number="qemuMemoryMb" type="range" class="w-full accent-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-              <input v-model.number="qemuMemoryMb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-              <div class="flex justify-between text-xs text-muted-foreground mt-1">
-                <span>{{ qemuLimits.minMemoryMb }}</span>
-                <span>{{ qemuLimits.maxMemoryMb }}</span>
+            <div v-else class="space-y-4">
+              <div class="rounded-md border border-border bg-muted/50 p-3">
+                <label class="text-sm font-medium text-foreground mb-1.5 block">Runner</label>
+                <Select v-model="runnerId" :disabled="advancedRunnerOptions.length <= 1">
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select runner" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      v-for="opt in advancedRunnerOptions"
+                      :key="opt.value"
+                      :value="opt.value"
+                    >
+                      {{ opt.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground mt-1">
+                  {{
+                    isFromImage
+                      ? 'Only runners that have the selected image and support its runtime are available.'
+                      : 'Only online runners that support the selected runtime are available.'
+                  }}
+                </p>
               </div>
-            </div>
 
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">Storage (GiB)</label>
-              <input v-model.number="qemuDiskSizeGb" type="range" class="w-full accent-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-              <input v-model.number="qemuDiskSizeGb" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-              <div class="flex justify-between text-xs text-muted-foreground mt-1">
-                <span>{{ qemuLimits.minDiskSizeGb }}</span>
-                <span>{{ qemuLimits.maxDiskSizeGb }}</span>
+              <div
+                v-if="runtimeType === RuntimeType.QEMU"
+                class="space-y-3 rounded-md border border-border bg-muted/50 p-3"
+              >
+                <p class="text-sm font-medium text-foreground">QEMU resources</p>
+
+                <div>
+                  <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
+                  <input
+                    v-model.number="qemuVcpus"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minVcpus"
+                    :max="qemuLimits.maxVcpus"
+                    step="1"
+                  />
+                  <input
+                    v-model.number="qemuVcpus"
+                    type="number"
+                    class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                    :min="qemuLimits.minVcpus"
+                    :max="qemuLimits.maxVcpus"
+                    step="1"
+                  />
+                  <div class="flex justify-between text-xs text-muted-foreground mt-1">
+                    <span>{{ qemuLimits.minVcpus }}</span>
+                    <span>{{ qemuLimits.maxVcpus }}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="text-sm font-medium text-muted-foreground mb-1 block"
+                    >RAM (MiB)</label
+                  >
+                  <input
+                    v-model.number="qemuMemoryMb"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minMemoryMb"
+                    :max="qemuLimits.maxMemoryMb"
+                    step="256"
+                  />
+                  <input
+                    v-model.number="qemuMemoryMb"
+                    type="number"
+                    class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                    :min="qemuLimits.minMemoryMb"
+                    :max="qemuLimits.maxMemoryMb"
+                    step="256"
+                  />
+                  <div class="flex justify-between text-xs text-muted-foreground mt-1">
+                    <span>{{ qemuLimits.minMemoryMb }}</span>
+                    <span>{{ qemuLimits.maxMemoryMb }}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="text-sm font-medium text-muted-foreground mb-1 block"
+                    >Storage (GiB)</label
+                  >
+                  <input
+                    v-model.number="qemuDiskSizeGb"
+                    type="range"
+                    class="w-full accent-primary"
+                    :min="qemuLimits.minDiskSizeGb"
+                    :max="qemuLimits.maxDiskSizeGb"
+                    step="1"
+                  />
+                  <input
+                    v-model.number="qemuDiskSizeGb"
+                    type="number"
+                    class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                    :min="qemuLimits.minDiskSizeGb"
+                    :max="qemuLimits.maxDiskSizeGb"
+                    step="1"
+                  />
+                  <div class="flex justify-between text-xs text-muted-foreground mt-1">
+                    <span>{{ qemuLimits.minDiskSizeGb }}</span>
+                    <span>{{ qemuLimits.maxDiskSizeGb }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </div>
+        </form>
+      </DialogBody>
 
-    </form>
-    </DialogBody>
-
-    <DialogFooter>
-      <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-      <Button type="submit" form="create-workspace-form" :disabled="!isValid || submitting">
-        {{
-          submitting
-            ? (selectedImageOption?.kind === 'captured' ? 'Cloning…' : 'Creating…')
-            : (selectedImageOption?.kind === 'captured' ? 'Clone from Image' : 'Create')
-        }}
-      </Button>
-    </DialogFooter>
+      <DialogFooter>
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="create-workspace-form" :disabled="!isValid || submitting">
+          {{
+            submitting
+              ? selectedImageOption?.kind === 'captured'
+                ? 'Cloning…'
+                : 'Creating…'
+              : selectedImageOption?.kind === 'captured'
+                ? 'Clone from Image'
+                : 'Create'
+          }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

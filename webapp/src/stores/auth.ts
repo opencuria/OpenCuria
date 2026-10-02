@@ -13,6 +13,7 @@ import * as authApi from '@/services/auth.api'
 import * as orgApi from '@/services/organizations.api'
 import { ApiRequestError } from '@/services/api'
 import { useNotificationStore } from './notifications'
+import { clearWorkspaceDrafts } from '@/lib/workspaceDraft'
 
 const ACCESS_TOKEN_KEY = 'kern_access_token'
 const REFRESH_TOKEN_KEY = 'kern_refresh_token'
@@ -48,8 +49,8 @@ export const useAuthStore = defineStore('auth', () => {
   // --- Getters ---
   const isAuthenticated = computed(() => !!accessToken.value)
 
-  const activeOrganization = computed(() =>
-    organizations.value.find((o) => o.id === activeOrganizationId.value) ?? null,
+  const activeOrganization = computed(
+    () => organizations.value.find((o) => o.id === activeOrganizationId.value) ?? null,
   )
 
   const isAdmin = computed(() => activeOrganization.value?.role === 'admin')
@@ -79,6 +80,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function _clearAuth(): void {
+    clearWorkspaceDrafts()
     accessToken.value = null
     refreshToken.value = null
     _saveProfile(null, [])
@@ -163,6 +165,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function fetchMe(): Promise<void> {
     try {
       const data = await authApi.getMe()
+      if (user.value && user.value.id !== data.id) clearWorkspaceDrafts()
       const nextUser: User = {
         id: data.id,
         email: data.email,
@@ -206,6 +209,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function setActiveOrganization(orgId: string): void {
+    if (activeOrganizationId.value && activeOrganizationId.value !== orgId) clearWorkspaceDrafts()
     activeOrganizationId.value = orgId
     localStorage.setItem(ACTIVE_ORG_KEY, orgId)
   }
@@ -214,13 +218,16 @@ export const useAuthStore = defineStore('auth', () => {
     const notifications = useNotificationStore()
     try {
       const org = await orgApi.createOrganization({ name })
-      const nextOrganizations = [...organizations.value, {
-        id: org.id,
-        name: org.name,
-        slug: org.slug,
-        role: org.role,
-        created_at: org.created_at,
-      }]
+      const nextOrganizations = [
+        ...organizations.value,
+        {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          role: org.role,
+          created_at: org.created_at,
+        },
+      ]
       _saveProfile(user.value, nextOrganizations)
       setActiveOrganization(org.id)
       notifications.success('Organization created', `"${org.name}" is ready.`)

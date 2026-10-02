@@ -25,7 +25,7 @@ from common.utils import decrypt_value
 def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_result(
     settings, monkeypatch
 ):
-    frontend = "http://127.0.0.1:8080/?settings=plugins"
+    frontend = "http://127.0.0.1:8080/?settings=credentials"
     callback_url = "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
     settings.DEBUG = True
     settings.MCP_OAUTH_CALLBACK_URL = callback_url
@@ -50,9 +50,12 @@ def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_re
         slug="oauth-callback-service",
         organization=organization,
         credential_type=CredentialType.MCP_OAUTH,
-        plugin_owned=True,
-        oauth_plugin_slug=plugin.slug,
-        oauth_requirement_key="mcp",
+        oauth_server_url="https://mcp.example/mcp",
+    )
+    from apps.credentials.models import OrgCredentialServiceActivation
+
+    OrgCredentialServiceActivation.objects.create(
+        organization=organization, credential_service=service
     )
     server = PluginMcpServer.objects.create(
         plugin=plugin,
@@ -116,8 +119,8 @@ def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_re
     client = Client()
     token = DjangoJWTBackend().generate_tokens(user).access_token
     response = client.post(
-        f"/api/v1/mcp-oauth/{plugin.id}/mcp-servers/{server.id}/oauth/connect/",
-        data=json.dumps({"service_id": str(service.id)}),
+        f"/api/v1/credential-services/{service.id}/oauth/connect/",
+        data=json.dumps({"name": "OAuth"}),
         content_type="application/json",
         HTTP_AUTHORIZATION=f"Bearer {token}",
         HTTP_X_ORGANIZATION_ID=str(organization.id),
@@ -146,10 +149,16 @@ def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_re
     )
     assert callback_response.status_code == 302
     assert len(token_exchange_calls) == 1
-    assert callback_response["Location"] == frontend + "&mcp_oauth=connected"
+    assert callback_response["Location"].startswith(
+        frontend + "&oauth_result=connected&credential_id="
+    )
     target = urlparse(callback_response["Location"])
     target_params = parse_qs(target.query)
-    assert target_params == {"settings": ["plugins"], "mcp_oauth": ["connected"]}
+    assert target_params["settings"] == ["credentials"]
+    assert target_params["oauth_result"] == ["connected"]
+    assert target_params["credential_id"] == [
+        str(Credential.objects.get(user=user, service=service).id)
+    ]
     assert "provider-secret-code" not in callback_response["Location"]
     assert "code" not in target_params
     assert "state" not in target_params
@@ -167,6 +176,8 @@ def test_cross_site_or_hostname_browser_flow_mismatch_is_explicit(settings):
 
     settings.DEBUG = True
     settings.MCP_OAUTH_CALLBACK_URL = "http://localhost:8000/api/v1/mcp-oauth/callback/"
-    settings.MCP_OAUTH_FRONTEND_RETURN_URL = "http://127.0.0.1:8080/?settings=plugins"
+    settings.MCP_OAUTH_FRONTEND_RETURN_URL = (
+        "http://127.0.0.1:8080/?settings=credentials"
+    )
     with pytest.raises(OAuthError, match="same hostname and scheme"):
         _validate_browser_flow_origins()

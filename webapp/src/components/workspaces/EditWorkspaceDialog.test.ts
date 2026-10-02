@@ -1,663 +1,227 @@
 import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount, shallowMount } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace, type WorkspacePlugin } from '@/types'
+import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
-const routerPush = vi.fn()
-const fetchCredentials = vi.fn()
-const fetchRunners = vi.fn()
-const updateWorkspace = vi.fn()
-const fetchWorkspacePlugins = vi.fn()
-const setWorkspacePlugins = vi.fn()
-const resyncWorkspacePlugins = vi.fn()
-const fetchPlugins = vi.fn()
-const fetchMcpOAuthStatus = vi.fn()
-const mcpOAuthStatuses: Record<string, { personal: { connected: boolean; credential_id: string | null; reconnect_required: boolean }; organization: { connected: boolean; credential_id: string | null; reconnect_required: boolean } }> = {}
-
-const credentialStore = {
-  credentials: [
-    {
-      id: 'cred-1',
-      name: 'GitHub Token',
-      scope: 'personal',
-      service_id: 'service-github',
-      service_name: 'GitHub',
-      service_slug: 'github',
-      credential_type: 'env',
-      env_var_name: 'GITHUB_TOKEN',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-    {
-      id: 'cred-2',
-      name: 'GitHub Token (Org)',
-      scope: 'organization',
-      service_id: 'service-github',
-      service_name: 'GitHub',
-      service_slug: 'github',
-      credential_type: 'env',
-      env_var_name: 'GITHUB_TOKEN',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-  ],
-  fetchCredentials,
-}
-
-const regularCredentials = [...credentialStore.credentials]
-
-const runnerStore = {
-  runners: [
-    {
-      id: 'runner-1',
-      name: 'Runner',
-      status: 'online',
-      available_runtimes: ['docker', 'qemu'],
-      organization_id: 'org-1',
-      connected_at: null,
-      disconnected_at: null,
-      qemu_min_vcpus: 1,
-      qemu_max_vcpus: 8,
-      qemu_default_vcpus: 2,
-      qemu_min_memory_mb: 1024,
-      qemu_max_memory_mb: 16384,
-      qemu_default_memory_mb: 4096,
-      qemu_min_disk_size_gb: 20,
-      qemu_max_disk_size_gb: 200,
-      qemu_default_disk_size_gb: 50,
-      qemu_max_active_vcpus: null,
-      qemu_max_active_memory_mb: null,
-      qemu_max_active_disk_size_gb: null,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-  ],
-  fetchRunners,
-  runnerById: (id: string) => runnerStore.runners.find((runner) => runner.id === id),
-}
-
-const fetchWorkspaceDetail = vi.fn(async (_id: string) => {})
-
-const workspaceStore = {
-  updateWorkspace,
-  fetchWorkspaceDetail,
-}
-
-function makeWorkspacePlugin(overrides: Partial<WorkspacePlugin> = {}): WorkspacePlugin {
-  return {
-    id: 'plugin-1',
-    name: 'Playwright',
-    slug: 'playwright',
-    description: 'Browser automation',
-    organization_id: null,
-    is_global: true,
-    workspace_enabled: false,
-    missing_required_credentials: [
-      { key: 'api_key', service_id: 'service-github', service_slug: 'github' },
-    ],
-    ready: false,
-    ...overrides,
-  }
-}
-
-const pluginStore = {
-  plugins: [] as Array<{
-    id: string
-    credential_requirements: Array<{ required: boolean; service_id: string; key?: string; credential_type?: string; service_name?: string; service_slug?: string }>
-    mcp_servers?: Array<{ auth_type?: string; oauth_requirement_key?: string; id: string }>
-  }>,
-  mcpOAuthLoading: {} as Record<string, boolean>,
-  mcpOAuthStatuses,
-  fetchMcpOAuthStatus,
-  getMcpOAuthStatus: (pluginId: string, serverId: string) => mcpOAuthStatuses[`${pluginId}:${serverId}`],
-  workspacePlugins: {} as Record<string, WorkspacePlugin[]>,
-  workspacePluginsLoading: {} as Record<string, boolean>,
-  workspacePluginsError: {} as Record<string, string | null>,
-  fetchWorkspacePlugins,
-  setWorkspacePlugins,
-  resyncWorkspacePlugins,
-  fetchPlugins,
-}
-
-vi.mock('vue-router', () => ({
-  useRouter: () => ({
-    push: routerPush,
-  }),
-}))
-
-vi.mock('@/stores/credentials', () => ({
-  useCredentialStore: () => credentialStore,
-}))
-
-vi.mock('@/stores/workspaces', () => ({
-  useWorkspaceStore: () => workspaceStore,
-}))
-
-vi.mock('@/stores/runners', () => ({
-  useRunnerStore: () => runnerStore,
-}))
-
-const notificationStoreMock = vi.hoisted(() => ({
+const mocks = vi.hoisted(() => ({
+  routerPush: vi.fn(),
+  fetchCredentials: vi.fn(),
+  fetchRunners: vi.fn(),
+  updateWorkspace: vi.fn(),
+  fetchWorkspaceDetail: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
-  info: vi.fn(),
+  auth: { user: { id: 1 }, activeOrganizationId: 'org-1', initialized: true },
+  runner: null as Record<string, unknown> | null,
 }))
-
-vi.mock('@/stores/plugins', () => ({
-  usePluginStore: () => pluginStore,
+vi.mock('vue-router', () => ({ useRouter: () => ({ push: mocks.routerPush }) }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => mocks.auth }))
+vi.mock('@/stores/credentials', () => ({
+  useCredentialStore: () => ({
+    credentials: [],
+    error: null,
+    loading: false,
+    fetchCredentials: mocks.fetchCredentials,
+    servicesLoaded: true,
+    fetchServices: vi.fn(),
+  }),
 }))
-
-vi.mock('vue-sonner', () => ({
-  toast: {
-    success: vi.fn(),
-    error: vi.fn(),
-    warning: vi.fn(),
-    info: vi.fn(),
-  },
+vi.mock('@/stores/workspaces', () => ({
+  useWorkspaceStore: () => ({
+    updateWorkspace: mocks.updateWorkspace,
+    fetchWorkspaceDetail: mocks.fetchWorkspaceDetail,
+  }),
 }))
-
+vi.mock('@/stores/runners', () => ({
+  useRunnerStore: () => ({
+    runners: [],
+    runnerById: () => mocks.runner,
+    fetchRunners: mocks.fetchRunners,
+  }),
+}))
 vi.mock('@/stores/notifications', () => ({
-  useNotificationStore: () => notificationStoreMock,
+  useNotificationStore: () => ({
+    success: mocks.success,
+    error: mocks.error,
+    warning: mocks.warning,
+  }),
+}))
+vi.mock('@/stores/plugins', () => ({
+  usePluginStore: () => ({
+    plugins: [],
+    loading: false,
+    error: null,
+    loadedOrgId: 'org-1',
+    clear: vi.fn(),
+    reload: vi.fn(async () => undefined),
+  }),
+}))
+vi.mock('vue-sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
+const selectionStub = {
+  template: '<div data-testid="selection" />',
+  props: ['pluginIds', 'credentialIds'],
+}
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
-    id: overrides.id ?? 'workspace-1',
-    runner_id: overrides.runner_id ?? 'runner-1',
-    status: overrides.status ?? WorkspaceStatus.RUNNING,
-    active_operation: overrides.active_operation ?? null,
-    name: overrides.name ?? 'Workspace',
-    runtime_type: overrides.runtime_type ?? RuntimeType.QEMU,
-    qemu_vcpus: overrides.qemu_vcpus ?? null,
-    qemu_memory_mb: overrides.qemu_memory_mb ?? null,
-    qemu_disk_size_gb: overrides.qemu_disk_size_gb ?? null,
-    desktop_width: overrides.desktop_width ?? 1920,
-    desktop_height: overrides.desktop_height ?? 1080,
-    created_by_id: overrides.created_by_id ?? 1,
-    last_activity_at: overrides.last_activity_at ?? '2026-04-01T10:00:00.000Z',
-    auto_stop_timeout_minutes: overrides.auto_stop_timeout_minutes ?? null,
-    auto_stop_at: overrides.auto_stop_at ?? null,
-    delete_requested_at: overrides.delete_requested_at ?? null,
-    delete_started_at: overrides.delete_started_at ?? null,
-    delete_confirmed_at: overrides.delete_confirmed_at ?? null,
-    delete_last_error: overrides.delete_last_error ?? '',
-    delete_attempt_count: overrides.delete_attempt_count ?? 0,
-    created_at: overrides.created_at ?? '2026-04-01T10:00:00.000Z',
-    updated_at: overrides.updated_at ?? '2026-04-01T10:00:00.000Z',
-    has_active_session: overrides.has_active_session ?? false,
-    runner_online: overrides.runner_online ?? true,
-    credential_ids: overrides.credential_ids ?? ['cred-1'],
-    credentials_present: overrides.credentials_present ?? false,
+    id: 'workspace-1',
+    runner_id: 'runner-1',
+    status: WorkspaceStatus.RUNNING,
+    active_operation: null,
+    name: 'Workspace',
+    runtime_type: RuntimeType.QEMU,
+    qemu_vcpus: null,
+    qemu_memory_mb: null,
+    qemu_disk_size_gb: null,
+    desktop_width: 1920,
+    desktop_height: 1080,
+    created_by_id: 1,
+    last_activity_at: '2026-01-01',
+    auto_stop_timeout_minutes: null,
+    auto_stop_at: null,
+    delete_requested_at: null,
+    delete_started_at: null,
+    delete_confirmed_at: null,
+    delete_last_error: '',
+    delete_attempt_count: 0,
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
+    has_active_session: false,
+    runner_online: true,
+    credential_ids: ['cred-1'],
+    plugin_ids: ['plugin-1'],
+    credentials_present: true,
+    ...overrides,
   }
 }
-
-type Vm = {
-  handleOpen: () => Promise<void>
-  handleSubmit: () => Promise<void>
-  toggleCredential: (id: string) => void
-  togglePlugin: (id: string) => void
-  name: string
-  qemuMemoryMb: number
-  desktopWidth: number
-  desktopHeight: number
-  selectedCredentialIds: string[]
-  selectedPluginIds: string[]
-  open: boolean
-}
-
-function vmOf(wrapper: ReturnType<typeof shallowMount>): Vm {
-  return wrapper.vm as unknown as Vm
-}
-
-const dialogStubs = {
-  Dialog: { template: '<div><slot /></div>', props: ['open'] },
-  DialogContent: { template: '<div><slot /></div>' },
-  DialogHeader: { template: '<div><slot /></div>' },
-  DialogTitle: { template: '<div><slot /></div>' },
-  DialogDescription: { template: '<div><slot /></div>' },
-  DialogBody: { template: '<div><slot /></div>' },
-  DialogFooter: { template: '<div><slot /></div>' },
-  DialogTrigger: { template: '<div><slot /></div>' },
-}
-
-function mountDialog(workspace: Workspace) {
+function mountDialog(workspace = makeWorkspace(), resumeDraftId?: string) {
   setActivePinia(createPinia())
-  return mount(EditWorkspaceDialog, {
-    props: { workspace },
-    global: { stubs: dialogStubs },
+  const wrapper = mount(EditWorkspaceDialog, {
+    props: { workspace, resumeDraftId },
+    global: {
+      stubs: {
+        WorkspacePluginCredentialSelection: selectionStub,
+        Dialog: { template: '<div><slot /></div>' },
+        DialogContent: { template: '<div><slot /></div>' },
+        DialogHeader: { template: '<div><slot /></div>' },
+        DialogTitle: { template: '<div><slot /></div>' },
+        DialogDescription: { template: '<div><slot /></div>' },
+        DialogBody: { template: '<div><slot /></div>' },
+        DialogFooter: { template: '<div><slot /></div>' },
+        DialogTrigger: { template: '<div><slot /></div>' },
+      },
+    },
   })
+  const vm = wrapper.vm as unknown as {
+    handleOpen: () => Promise<void>
+    handleSubmit: () => Promise<void>
+    name: string
+    selectedPluginIds: string[]
+    selectedCredentialIds: string[]
+    qemuMemoryMb: number
+    desktopWidth: number
+    desktopHeight: number
+    open: boolean
+    pluginSelectionValid: boolean
+  }
+  return { wrapper, vm }
 }
+beforeEach(() => {
+  vi.clearAllMocks()
+  mocks.fetchCredentials.mockResolvedValue(undefined)
+  mocks.fetchRunners.mockResolvedValue(undefined)
+  mocks.fetchWorkspaceDetail.mockResolvedValue(undefined)
+  mocks.updateWorkspace.mockResolvedValue(true)
+  mocks.runner = {
+    qemu_default_vcpus: 2,
+    qemu_default_memory_mb: 4096,
+    qemu_default_disk_size_gb: 50,
+    qemu_min_vcpus: 1,
+    qemu_max_vcpus: 8,
+    qemu_min_memory_mb: 1024,
+    qemu_max_memory_mb: 16384,
+    qemu_min_disk_size_gb: 20,
+    qemu_max_disk_size_gb: 200,
+  }
+})
 
-function mountShallowDialog(workspace: Workspace) {
-  setActivePinia(createPinia())
-  return shallowMount(EditWorkspaceDialog, {
-    props: { workspace },
-  })
-}
-
-describe('EditWorkspaceDialog', () => {
-  beforeEach(() => {
-    routerPush.mockReset()
-    fetchCredentials.mockReset()
-    fetchRunners.mockReset()
-    fetchWorkspacePlugins.mockReset()
-    setWorkspacePlugins.mockReset()
-    resyncWorkspacePlugins.mockReset()
-    fetchPlugins.mockReset()
-    updateWorkspace.mockReset()
-    updateWorkspace.mockResolvedValue(true)
-    fetchWorkspaceDetail.mockReset()
-    fetchWorkspaceDetail.mockResolvedValue(undefined)
-    pluginStore.plugins = []
-    credentialStore.credentials = [...regularCredentials]
-    pluginStore.mcpOAuthLoading = {}
-    Object.keys(mcpOAuthStatuses).forEach((key) => delete mcpOAuthStatuses[key])
-    pluginStore.workspacePlugins = {}
-    pluginStore.workspacePluginsLoading = {}
-    pluginStore.workspacePluginsError = {}
-  })
-
-  it('omits unchanged QEMU resources when saving non-resource edits', async () => {
-    pluginStore.workspacePlugins = { 'workspace-1': [] }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).name = 'Renamed workspace'
+describe('EditWorkspaceDialog single-patch workspace configuration', () => {
+  it('restores persisted plugin IDs and sends one final PATCH containing credentials, plugins and resource fields', async () => {
+    const { vm } = mountDialog()
+    await vm.handleOpen()
+    expect(vm.selectedPluginIds).toEqual(['plugin-1'])
+    vm.pluginSelectionValid = true
+    vm.name = 'Renamed'
+    vm.selectedPluginIds = ['plugin-1', 'plugin-2']
+    vm.selectedCredentialIds = ['cred-2']
+    vm.qemuMemoryMb = 8192
+    vm.desktopWidth = 1280
+    vm.desktopHeight = 720
     await nextTick()
-
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Renamed workspace',
-      credential_ids: ['cred-1'],
-    })
-    expect(setWorkspacePlugins).not.toHaveBeenCalled()
-  })
-
-  it('includes only the QEMU resource fields that changed', async () => {
-    pluginStore.workspacePlugins = { 'workspace-1': [] }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).qemuMemoryMb = 8192
-    await nextTick()
-
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Workspace',
-      credential_ids: ['cred-1'],
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(mocks.updateWorkspace).toHaveBeenCalledWith('workspace-1', {
+      name: 'Renamed',
+      credential_ids: ['cred-2'],
+      plugin_ids: ['plugin-1', 'plugin-2'],
       qemu_memory_mb: 8192,
-    })
-  })
-
-  it('replaces the selected credential when another credential from the same service is chosen', async () => {
-    pluginStore.workspacePlugins = { 'workspace-1': [] }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).toggleCredential('cred-2')
-
-    expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-2'])
-  })
-
-  it('includes changed desktop size when saving', async () => {
-    pluginStore.workspacePlugins = { 'workspace-1': [] }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).desktopWidth = 1280
-    vmOf(wrapper).desktopHeight = 720
-    await nextTick()
-
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Workspace',
-      credential_ids: ['cred-1'],
       desktop_width: 1280,
       desktop_height: 720,
     })
+    expect(vm.open).toBe(false)
   })
 
-  it('loads credentials and workspace plugins on open and preselects enabled plugins', async () => {
-    pluginStore.workspacePlugins = {
-      'workspace-1': [makeWorkspacePlugin({ workspace_enabled: true })],
-    }
-    const wrapper = mountDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-
-    expect(fetchCredentials).toHaveBeenCalled()
-    expect(fetchWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
-    expect(vmOf(wrapper).selectedPluginIds).toEqual(['plugin-1'])
-    expect(wrapper.find('[data-testid="workspace-plugin-plugin-1"]').exists()).toBe(true)
-  })
-
-  it('blocks save when a selected plugin misses credentials until attach', async () => {
-    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin()] }
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-
-    expect(wrapper.find('[data-testid="workspace-plugin-missing-plugin-1"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
-
-    await vmOf(wrapper).handleSubmit()
-    expect(updateWorkspace).not.toHaveBeenCalled()
-    expect(setWorkspacePlugins).not.toHaveBeenCalled()
-
-    // Attaching a matching credential clears the gate.
-    await wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]').trigger('click')
-    await nextTick()
-    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(false)
-
-    updateWorkspace.mockResolvedValue(true)
-    setWorkspacePlugins.mockResolvedValue([makeWorkspacePlugin({ workspace_enabled: true })])
-    await vmOf(wrapper).handleSubmit()
-    expect(updateWorkspace).toHaveBeenCalled()
-    expect(setWorkspacePlugins).toHaveBeenCalledWith('workspace-1', ['plugin-1'])
-  })
-
-  it('offers a connected OAuth credential for explicit workspace attachment', async () => {
-    credentialStore.credentials = []
-    pluginStore.plugins = [{
-      id: 'plugin-1',
-      credential_requirements: [{
-        required: true, service_id: 'oauth-service', key: 'notion_oauth',
-        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
-      }],
-      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
-    }]
-    mcpOAuthStatuses['plugin-1:server-1'] = {
-      personal: { connected: true, credential_id: 'oauth-credential', reconnect_required: false },
-      organization: { connected: false, credential_id: null, reconnect_required: false },
-    }
-    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin({ missing_required_credentials: [
-      { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
-    ] })] }
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-
-    const attach = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-oauth-credential"]')
-    expect(attach.exists()).toBe(true)
-    await attach.trigger('click')
-    await nextTick()
-    expect(vmOf(wrapper).selectedCredentialIds).toContain('oauth-credential')
-    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(false)
-  })
-
-  it('deduplicates an OAuth credential returned by both the API and OAuth status', async () => {
-    const oauthApiCredential = {
-      id: 'oauth-credential',
-      name: 'OAuth from credentials API',
-      scope: 'personal' as const,
-      service_id: 'oauth-service',
-      service_name: 'Notion OAuth',
-      service_slug: 'notion-oauth',
-      credential_type: 'mcp_oauth',
-      env_var_name: '',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    }
-    credentialStore.credentials = [oauthApiCredential]
-    pluginStore.plugins = [{
-      id: 'plugin-1',
-      credential_requirements: [{
-        required: true, service_id: 'oauth-service', key: 'notion_oauth',
-        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
-      }],
-      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
-    }]
-    mcpOAuthStatuses['plugin-1:server-1'] = {
-      personal: { connected: true, credential_id: 'oauth-credential', reconnect_required: false },
-      organization: { connected: false, credential_id: null, reconnect_required: false },
-    }
-    pluginStore.workspacePlugins = { 'workspace-1': [] }
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
-    await vmOf(wrapper).handleOpen()
-
-    expect(wrapper.findAll('[data-testid="workspace-credential-oauth-credential"]')).toHaveLength(1)
-    expect(wrapper.find('[data-testid="workspace-credential-oauth-credential"]').text()).toContain(
-      'OAuth from credentials API',
-    )
-  })
-
-  it('does not treat an attached-but-disconnected OAuth credential as ready', async () => {
-    credentialStore.credentials = []
-    pluginStore.plugins = [{
-      id: 'plugin-1',
-      credential_requirements: [{
-        required: true, service_id: 'oauth-service', key: 'notion_oauth',
-        credential_type: 'mcp_oauth', service_name: 'Notion OAuth', service_slug: 'notion-oauth',
-      }],
-      mcp_servers: [{ id: 'server-1', auth_type: 'oauth', oauth_requirement_key: 'notion_oauth' }],
-    }]
-    mcpOAuthStatuses['plugin-1:server-1'] = {
-      personal: { connected: false, credential_id: 'oauth-credential', reconnect_required: true },
-      organization: { connected: false, credential_id: null, reconnect_required: false },
-    }
-    pluginStore.workspacePlugins = { 'workspace-1': [makeWorkspacePlugin({ missing_required_credentials: [
-      { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
-    ] })] }
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: ['oauth-credential'] }))
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-oauth-credential"]').exists()).toBe(false)
-  })
-
-  it('keeps disconnected OAuth gaps visible when only the workspace plugin list is available', async () => {
-    credentialStore.credentials = [{
-      id: 'oauth-credential',
-      name: 'Notion OAuth',
-      scope: 'personal',
-      service_id: 'oauth-service',
-      service_name: 'Notion OAuth',
-      service_slug: 'notion-oauth',
-      credential_type: 'mcp_oauth',
-      env_var_name: '',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    }]
-    pluginStore.plugins = []
-    pluginStore.workspacePlugins = {
-      'workspace-1': [makeWorkspacePlugin({
-        missing_required_credentials: [
-          { key: 'notion_oauth', service_id: 'oauth-service', service_slug: 'notion-oauth' },
-        ],
-      })],
-    }
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: ['oauth-credential'] }))
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-
-    expect(wrapper.find('[data-testid="workspace-plugin-missing-plugin-1"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="workspace-plugins-blocked"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('No connected account is available')
-  })
-
-  it('saves deactivation → credential patch → final activation in order', async () => {
-    const calls: string[] = []
-    setWorkspacePlugins.mockImplementation(async (_id: string, ids: string[]) => {
-      calls.push(`plugins:${ids.join(',')}`)
-      return []
-    })
-    updateWorkspace.mockImplementation(async () => {
-      calls.push('workspace')
-      return true
-    })
-    pluginStore.workspacePlugins = {
-      'workspace-1': [
-        makeWorkspacePlugin({
-          workspace_enabled: true,
-          missing_required_credentials: [],
-          ready: true,
-        }),
-      ],
-    }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    // Deselect the only enabled plugin.
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-    await vmOf(wrapper).handleSubmit()
-
-    expect(calls).toEqual(['plugins:', 'workspace', 'plugins:'])
-    expect(updateWorkspace).toHaveBeenCalledWith(
-      'workspace-1',
-      expect.objectContaining({ credential_ids: ['cred-1'] }),
-      expect.objectContaining({ notify: false }),
-    )
-    expect(vmOf(wrapper).open).toBe(false)
-  })
-
-  it('keeps the dialog open and resyncs when a step fails', async () => {
-    setWorkspacePlugins.mockResolvedValue(null)
-    pluginStore.workspacePlugins = {
-      'workspace-1': [
-        makeWorkspacePlugin({
-          workspace_enabled: true,
-          missing_required_credentials: [],
-          ready: true,
-        }),
-      ],
-    }
-    const wrapper = mountShallowDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).not.toHaveBeenCalled()
-    expect(resyncWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
-    expect(vmOf(wrapper).open).toBe(true)
-  })
-
-  it('attach is idempotent: an attached credential shows Attached and stays selected', async () => {
-    pluginStore.workspacePlugins = {
-      'workspace-1': [makeWorkspacePlugin({ workspace_enabled: false })],
-    }
-    pluginStore.plugins = []
-    const wrapper = mountDialog(makeWorkspace({ credential_ids: [] }))
-
-    await vmOf(wrapper).handleOpen()
-    await nextTick()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-    credentialStore.credentials = [
+  it('restores edit fields and selected references after a new component is mounted', async () => {
+    sessionStorage.clear()
+    const saved = saveWorkspaceDraft(
       {
-        id: 'cred-1', name: 'GitHub Token', scope: 'personal', service_id: 'service-github',
-        service_name: 'GitHub', service_slug: 'github', credential_type: 'env', env_var_name: 'GITHUB_TOKEN',
-        target_path: '', has_public_key: false, created_by_id: 1,
-        created_at: '2026-04-01T10:00:00.000Z', updated_at: '2026-04-01T10:00:00.000Z',
+        mode: 'edit',
+        workspaceId: 'workspace-1',
+        name: 'Restored edit',
+        credentialIds: ['cred-2'],
+        pluginIds: ['plugin-2'],
+        qemuVcpus: 4,
+        qemuMemoryMb: 8192,
+        qemuDiskSizeGb: 60,
+        desktopWidth: 1600,
+        desktopHeight: 900,
       },
-    ]
+      { userId: 1, organizationId: 'org-1' },
+      '/workspaces/workspace-1',
+    )
+    const { vm } = mountDialog(makeWorkspace(), saved.id)
     await nextTick()
-
-    // Gap offers Attach for the missing credential…
-    const attach = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]')
-    expect(attach.exists()).toBe(true)
-    expect(attach.text()).toContain('Attach')
-    await attach.trigger('click')
-    await nextTick()
-    expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
-
-    // …and once attached the button is disabled/idempotent (no detach).
-    const attached = wrapper.find('[data-testid="workspace-plugin-attach-plugin-1-cred-1"]')
-    if (attached.exists()) {
-      expect(attached.attributes('disabled')).toBeDefined()
-      await attached.trigger('click')
-      expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
-    } else {
-      // Gap resolved via catalog requirements: still selected.
-      expect(vmOf(wrapper).selectedCredentialIds).toEqual(['cred-1'])
-    }
+    expect(vm.open).toBe(true)
+    expect(vm.name).toBe('Restored edit')
+    expect(vm.selectedCredentialIds).toEqual(['cred-2'])
+    expect(vm.selectedPluginIds).toEqual(['plugin-2'])
+    expect(vm.qemuMemoryMb).toBe(8192)
+    expect(vm.desktopWidth).toBe(1600)
   })
 
-  it('disables plugin toggles but still saves workspace fields when the plugin list fails to load', async () => {
-    pluginStore.workspacePlugins = {}
-    pluginStore.workspacePluginsError = { 'workspace-1': 'boom' }
-    const wrapper = mountDialog(makeWorkspace())
-
-    await vmOf(wrapper).handleOpen()
-    expect(wrapper.find('[data-testid="workspace-plugins-error"]').text()).toContain(
-      'Plugin changes are disabled',
-    )
-    expect(wrapper.find('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeUndefined()
-
-    vmOf(wrapper).name = 'Renamed'
-    await nextTick()
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith(
-      'workspace-1',
-      expect.objectContaining({ name: 'Renamed' }),
-    )
-    expect(setWorkspacePlugins).not.toHaveBeenCalled()
+  it('submits no patch while shared selector has unsatisfied required dependencies', async () => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = false
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeDefined()
   })
 
-  it('warns (no success toast) when the workspace patch succeeds but final activation fails', async () => {
-    updateWorkspace.mockResolvedValue(true)
-    fetchWorkspaceDetail.mockResolvedValue(undefined)
-    notificationStoreMock.warning.mockClear()
-    notificationStoreMock.success.mockClear()
-    setWorkspacePlugins.mockResolvedValue(null)
-    pluginStore.workspacePlugins = {
-      'workspace-1': [
-        makeWorkspacePlugin({
-          workspace_enabled: false,
-          missing_required_credentials: [],
-          ready: true,
-        }),
-      ],
-    }
-    pluginStore.plugins = [
-      {
-        id: 'plugin-1',
-        credential_requirements: [],
-      },
-    ]
-    const wrapper = mountShallowDialog(makeWorkspace({ credential_ids: ['cred-1'] }))
-
-    await vmOf(wrapper).handleOpen()
-    vmOf(wrapper).togglePlugin('plugin-1')
-    await nextTick()
-    await vmOf(wrapper).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith(
-      'workspace-1',
-      expect.anything(),
-      expect.objectContaining({ notify: false }),
-    )
-    expect(notificationStoreMock.warning).toHaveBeenCalledWith('Partially saved', expect.any(String))
-    expect(notificationStoreMock.success).not.toHaveBeenCalledWith('Workspace updated', expect.anything())
-    expect(vmOf(wrapper).open).toBe(true)
-    expect(fetchWorkspaceDetail).toHaveBeenCalledWith('workspace-1')
-    expect(resyncWorkspacePlugins).toHaveBeenCalledWith('workspace-1')
+  it('keeps the edit dialog open when the single backend update fails', async () => {
+    mocks.updateWorkspace.mockResolvedValue(false)
+    const { vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    vm.name = 'Failed update'
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(vm.open).toBe(true)
   })
 })

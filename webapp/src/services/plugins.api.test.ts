@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { getPlugin, listPlugins, createPlugin, updatePlugin, deletePlugin, togglePluginActivation, listWorkspacePlugins, updateWorkspacePlugins } from './plugins.api'
+import {
+  getPlugin,
+  listPlugins,
+  createPlugin,
+  updatePlugin,
+  deletePlugin,
+  togglePluginActivation,
+  listWorkspacePlugins,
+} from './plugins.api'
 import * as api from './api'
 
 describe('plugins api', () => {
@@ -35,17 +43,5 @@ describe('plugins api', () => {
     await expect(togglePluginActivation('p-1', true)).resolves.toEqual({ id: 'p-1' })
     expect(toggleSpy).toHaveBeenCalledWith('/plugins/p-1/activation/', { active: true })
     toggleSpy.mockRestore()
-  })
-
-  it('lists and replaces workspace plugin activations', async () => {
-    const getSpy = vi.spyOn(api, 'get').mockResolvedValue([])
-    await expect(listWorkspacePlugins('ws-1')).resolves.toEqual([])
-    expect(getSpy).toHaveBeenCalledWith('/workspaces/ws-1/plugins/')
-    getSpy.mockRestore()
-
-    const putSpy = vi.spyOn(api, 'put').mockResolvedValue([])
-    await expect(updateWorkspacePlugins('ws-1', { plugin_ids: ['p-1'] })).resolves.toEqual([])
-    expect(putSpy).toHaveBeenCalledWith('/workspaces/ws-1/plugins/', { plugin_ids: ['p-1'] })
-    putSpy.mockRestore()
   })
 })

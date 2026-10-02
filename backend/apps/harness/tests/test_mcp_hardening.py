@@ -1010,7 +1010,7 @@ def test_foreign_credential_attach_ignored(db, caplog):
 
     from django.contrib.auth import get_user_model
 
-    from apps.credentials.services import CredentialSvc
+    from apps.credentials.services import CredentialServiceSvc, CredentialSvc
     from apps.organizations.models import Membership, MembershipRole, Organization
     from apps.plugins import runtime as plugin_runtime
     from apps.plugins.models import Plugin
@@ -1047,11 +1047,20 @@ def test_foreign_credential_attach_ignored(db, caplog):
             {
                 "key": "api_key",
                 "required": True,
-                "credential_service": {
-                    "name": "S",
-                    "credential_type": "env",
-                    "env_var_name": "S_TOKEN",
-                },
+                "service_id": str(
+                    CredentialServiceSvc()
+                    .create_service(
+                        name="S",
+                        slug=f"s-{_uuid.uuid4().hex[:8]}",
+                        description="",
+                        credential_type="env",
+                        env_var_name="S_TOKEN",
+                        target_path="",
+                        label="",
+                        organization_id=org.id,
+                    )
+                    .id
+                ),
             }
         ],
     )
@@ -1072,6 +1081,11 @@ def test_foreign_credential_attach_ignored(db, caplog):
         target_path="",
         label="",
         organization_id=other.id,
+    )
+    from apps.credentials.models import OrgCredentialServiceActivation
+
+    OrgCredentialServiceActivation.objects.create(
+        organization=other, credential_service=foreign_svc
     )
     foreign = CredentialSvc().create_org_credential(
         organization_id=other.id,
@@ -1224,7 +1238,9 @@ async def test_stdio_open_uses_configured_startup_budget():
     conn_module.ClientSession = lambda *a, **k: session  # type: ignore[assignment]
 
     class RecordingAccessor(_ProcAccessor):
-        async def open_process(self, command, workdir="/workspace", env=None, timeout=None):
+        async def open_process(
+            self, command, workdir="/workspace", env=None, timeout=None
+        ):
             self.timeout = timeout
             return await super().open_process(command, workdir, env, timeout)
 

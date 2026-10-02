@@ -99,6 +99,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  credentials: RequestCredentials = 'same-origin',
 ): Promise<T> {
   const url = `${getApiBaseUrl()}${path}`
 
@@ -111,6 +112,7 @@ async function request<T>(
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials,
   })
 
   // On 401, try refreshing the token and retry once.
@@ -128,6 +130,7 @@ async function request<T>(
         method,
         headers: retryHeaders,
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        credentials,
       })
     }
 
@@ -157,9 +160,7 @@ async function request<T>(
           ? payload.message
           : 'Unknown error'
     const code =
-      typeof payload.code === 'string' && payload.code.length > 0
-        ? payload.code
-        : 'error'
+      typeof payload.code === 'string' && payload.code.length > 0 ? payload.code : 'error'
     throw new ApiRequestError(res.status, detail, code, data)
   }
 
@@ -174,12 +175,16 @@ export function get<T>(path: string): Promise<T> {
   return request<T>('GET', path)
 }
 
-export function post<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>('POST', path, body)
+export function post<T>(
+  path: string,
+  body?: unknown,
+  credentials?: RequestCredentials,
+): Promise<T> {
+  return request<T>('POST', path, body, credentials)
 }
 
-export function del<T>(path: string): Promise<T> {
-  return request<T>('DELETE', path)
+export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {
+  return request<T>('DELETE', path, undefined, credentials)
 }
 
 export function patch<T>(path: string, body?: unknown): Promise<T> {

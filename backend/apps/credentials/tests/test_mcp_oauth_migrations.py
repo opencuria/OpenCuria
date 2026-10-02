@@ -1,7 +1,8 @@
-"""Regression tests for repairing databases from earlier MCP OAuth iterations."""
+"""Forward OAuth migration safety and grant preservation tests."""
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -14,249 +15,304 @@ BACKEND_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _manage(db_path: Path, *args: str) -> None:
-    env = {**os.environ, "SQLITE_PATH": str(db_path)}
     subprocess.run(
         [sys.executable, "manage.py", *args],
         cwd=BACKEND_ROOT,
-        env=env,
+        env={**os.environ, "SQLITE_PATH": str(db_path)},
         check=True,
         capture_output=True,
         text=True,
     )
 
 
-def _legacy_oauth_rows(db_path: Path, *, shared_service: bool = False) -> None:
-    env = {**os.environ, "SQLITE_PATH": str(db_path), "SHARED_SERVICE": str(shared_service)}
-    script = """
-import os
+def _seed_legacy_grants(
+    db_path: Path,
+    *,
+    multiple_endpoints: bool,
+    ambiguous_requirement: bool = False,
+    mismatch_service: bool = False,
+    long_slug: bool = False,
+) -> dict:
+    script = r"""
+import json
 import uuid
 from datetime import timedelta
-from django.contrib.auth import get_user_model
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
 from django.utils import timezone
-from apps.credentials.models import (
-    Credential,
-    CredentialService,
-    McpOAuthAuthorizationState,
-    McpOAuthClientRegistration,
-)
-from apps.organizations.models import Organization
-from apps.plugins.models import Plugin, PluginCredentialRequirement
-
-user = get_user_model().objects.create_user(
-    email=f'legacy-{uuid.uuid4().hex}@test.local', password='x'
-)
-org = Organization.objects.create(
-    name='Legacy', slug=f'legacy-{uuid.uuid4().hex}'
-)
-service = CredentialService.objects.get(slug='notion-notion_oauth-oauth')
-if os.environ['SHARED_SERVICE'] == 'True':
-    CredentialService.objects.filter(pk=service.pk).update(slug='mcp-oauth')
-    service.refresh_from_db()
-registration = McpOAuthClientRegistration.objects.create(
-    server_url='https://mcp.notion.com/mcp',
-    callback_url='https://api.test/callback',
-    issuer=f'https://auth.notion.com/{uuid.uuid4().hex}',
-    client_id='legacy-client',
-    authorization_endpoint='https://auth.notion.com/authorize',
-    token_endpoint='https://auth.notion.com/token',
-)
-notion = Plugin.objects.get(slug='notion', organization__isnull=True)
-requirement = PluginCredentialRequirement.objects.get(plugin=notion, key='notion_oauth')
-notion_server = notion.mcp_servers.get(slug='notion')
-requirement.credential_service = service
-requirement.save(update_fields=['credential_service'])
-if os.environ['SHARED_SERVICE'] == 'True':
-    from apps.plugins.models import Plugin
-    from apps.credentials.models import CredentialService
-    playwright = Plugin.objects.get(slug='playwright', organization__isnull=True)
-    PluginCredentialRequirement.objects.create(
-        plugin=playwright,
-        key='shared-oauth',
-        credential_service=service,
-        required=True,
-        plugin_owned_service=False,
-    )
-McpOAuthAuthorizationState.objects.create(
-    state_hash='a' * 64,
-    browser_binding_hash='b' * 64,
-    encrypted_code_verifier='encrypted',
-    user=user,
-    organization=org,
-    service=service,
-    server_id=notion_server.id,
-    requirement_key='notion_oauth',
-    server_url=notion_server.url,
-    resource='https://resource.notion.com',
-    issuer='',
-    registration=registration,
-    redirect_uri='https://api.test/callback',
-    expires_at=timezone.now() + timedelta(minutes=5),
-)
-Credential.objects.create(
-    user=user,
-    service=service,
-    name='Legacy Notion authorization',
-    encrypted_value='encrypted-token',
-    created_by=user,
-    oauth_server_id=notion_server.id,
-    oauth_server_url=notion_server.url,
-    oauth_resource='https://resource.notion.com',
-    oauth_registration=registration,
-    oauth_status='connected',
-)
+from common.utils import encrypt_value
+executor = MigrationExecutor(connection)
+state = executor.loader.project_state([
+    ("credentials", "0007_forward_repair_mcp_oauth_registration_auth_method"),
+    ("plugins", "0007_repair_notion_mcp_oauth"),
+])
+apps = state.apps
+User = apps.get_model("accounts", "User")
+Org = apps.get_model("organizations", "Organization")
+Runner = apps.get_model("runners", "Runner")
+Workspace = apps.get_model("runners", "Workspace")
+Service = apps.get_model("credentials", "CredentialService")
+Credential = apps.get_model("credentials", "Credential")
+Registration = apps.get_model("credentials", "McpOAuthClientRegistration")
+State = apps.get_model("credentials", "McpOAuthAuthorizationState")
+Plugin = apps.get_model("plugins", "Plugin")
+Server = apps.get_model("plugins", "PluginMcpServer")
+Requirement = apps.get_model("plugins", "PluginCredentialRequirement")
+Membership = apps.get_model("organizations", "Membership")
+user = User.objects.create(email=f'migration-{uuid.uuid4().hex}@test.local', password='x')
+org = Org.objects.create(name='Migration org', slug=f'migration-{uuid.uuid4().hex}')
+Membership.objects.create(user_id=user.id, organization_id=org.id, role='admin')
+runner = Runner.objects.create(name='migration runner', organization_id=org.id, api_token_hash='migration-token')
+workspace = Workspace.objects.create(runner_id=runner.id, name='linked workspace', created_by_id=user.id)
+if not MULTIPLE:
+    service = Service.objects.get(slug='notion-notion_oauth-oauth')
+    if LONG_SLUG:
+        service.slug = 'x' * 255
+        service.save(update_fields=['slug'])
+    plugin = Plugin.objects.get(slug='notion', organization__isnull=True)
+    server = Server.objects.get(plugin_id=plugin.id, slug='notion')
+    requirement = Requirement.objects.get(plugin_id=plugin.id, key='notion_oauth')
+    registration = Registration.objects.create(server_url=server.url, callback_url='https://api.example/callback',
+        issuer='https://auth.example/tenant', client_id='legacy-client', authorization_endpoint='https://auth.example/authorize',
+        token_endpoint='https://auth.example/token', registration_endpoint='https://auth.example/register', token_endpoint_auth_method='none')
+    payload={'access_token':'legacy-access','refresh_token':'legacy-refresh','token_type':'Bearer',
+        'expires_at':'2099-01-01T00:00:00+00:00','server_id':str(server.id),'server_url':server.url,
+        'resource':server.url,'registration_id':str(registration.id),'identity':{'workspace_id':'w1'}}
+    credential=Credential.objects.create(user_id=user.id,service_id=service.id,name='legacy account',
+        encrypted_value=encrypt_value(json.dumps(payload)),created_by_id=user.id,oauth_server_id=server.id,
+        oauth_server_url=server.url,oauth_resource=server.url,oauth_registration_id=registration.id,oauth_status='connected')
+    workspace.credentials.add(credential)
+    State.objects.create(state_hash='a'*64,browser_binding_hash='b'*64,encrypted_code_verifier=encrypt_value('verifier'),
+        user_id=user.id,organization_id=org.id,service_id=service.id,server_id=server.id,requirement_key=requirement.key,
+        server_url=server.url,resource=server.url,issuer=registration.issuer,registration_id=registration.id,
+        organization_credential=False,redirect_uri='https://api.example/callback',expires_at=timezone.now()+timedelta(minutes=5))
+    print(json.dumps({'records':[],'service':str(service.id),'workspace':str(workspace.id)}))
+else:
+    service=Service.objects.create(name='Shared MCP',slug=('x'*255 if LONG_SLUG else 'shared-mcp'),organization_id=org.id,
+        credential_type='mcp_oauth',plugin_owned=True,oauth_plugin_slug='',oauth_requirement_key='')
+    records=[]
+    keys=['shared_auth','shared_auth'] if AMBIGUOUS else ['first_auth','second_auth']
+    shared_plugin = None
+    shared_requirement = None
+    for index,(slug,endpoint,key) in enumerate([('first','https://one.example/mcp',keys[0]),('second','https://two.example/mcp',keys[1])]):
+        if AMBIGUOUS:
+            plugin = shared_plugin or Plugin.objects.create(name='ambiguous',slug='ambiguous',organization_id=org.id,enabled=True,published=True,created_by_id=user.id)
+            shared_plugin = plugin
+            requirement = shared_requirement or Requirement.objects.create(plugin_id=plugin.id,key=key,credential_service_id=service.id,required=True)
+            shared_requirement = requirement
+        else:
+            plugin=Plugin.objects.create(name=slug,slug=slug,organization_id=org.id,enabled=True,published=True,created_by_id=user.id)
+            requirement=Requirement.objects.create(plugin_id=plugin.id,key=key,credential_service_id=service.id,required=True)
+        server=Server.objects.create(plugin_id=plugin.id,name=slug,slug=slug,transport='streamable_http',url=endpoint,auth_type='oauth',oauth_requirement_key=key)
+        registration=Registration.objects.create(server_url=endpoint,callback_url='https://api.example/callback',issuer=f'https://auth.example/{slug}',
+            client_id=f'client-{slug}',authorization_endpoint=f'https://auth.example/{slug}/authorize',token_endpoint=f'https://auth.example/{slug}/token',
+            registration_endpoint=f'https://auth.example/{slug}/register',token_endpoint_auth_method='none')
+        payload={'access_token':f'access-{slug}','refresh_token':f'refresh-{slug}','token_type':'Bearer',
+            'expires_at':'2099-01-01T00:00:00+00:00','server_id':str(server.id),'server_url':endpoint,'resource':endpoint,'registration_id':str(registration.id)}
+        grant_service=service
+        if MISMATCH and index==0:
+            grant_service=Service.objects.create(name='Unrelated',slug='unrelated-mcp',organization_id=org.id,credential_type='mcp_oauth',plugin_owned=True,oauth_plugin_slug='foreign',oauth_requirement_key='foreign_auth')
+        credential=Credential.objects.create(user_id=user.id,service_id=grant_service.id,name=slug,encrypted_value=encrypt_value(json.dumps(payload)),
+            created_by_id=user.id,oauth_server_id=server.id,oauth_server_url=endpoint,oauth_resource=endpoint,oauth_registration_id=registration.id,oauth_status='connected')
+        workspace.credentials.add(credential)
+        records.append((str(credential.id),str(server.id),endpoint,str(requirement.id),str(grant_service.id)))
+    print(json.dumps({'records':records,'service':str(service.id),'workspace':str(workspace.id)}))
 """
+    script = (
+        script.replace("MULTIPLE", repr(multiple_endpoints))
+        .replace("AMBIGUOUS", repr(ambiguous_requirement))
+        .replace("MISMATCH", repr(mismatch_service))
+        .replace("LONG_SLUG", repr(long_slug))
+    )
     result = subprocess.run(
         [sys.executable, "manage.py", "shell", "-c", script],
         cwd=BACKEND_ROOT,
-        env=env,
+        env={**os.environ, "SQLITE_PATH": str(db_path)},
+        check=False,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    line = next(
+        line for line in reversed(result.stdout.splitlines()) if line.startswith("{")
+    )
+    return json.loads(line)
 
 
-def _remove_legacy_columns(db_path: Path, *, shared_service: bool = False) -> None:
-    """Simulate the old physical schema while leaving migration records intact."""
-    remove = {
-        "credentials_service": {
-            "plugin_owned",
-            "oauth_plugin_slug",
-            "oauth_requirement_key",
-        },
-        "credentials_credential": {"oauth_server_id"},
-        "credentials_mcp_oauth_registration": {"token_endpoint_auth_method"},
-        "credentials_mcp_oauth_state": {"requirement_key", "resource", "issuer"},
-    }
-    with sqlite3.connect(db_path) as connection:
-        for table, columns in remove.items():
-            indexes = connection.execute(f'PRAGMA index_list("{table}")').fetchall()
-            for index in indexes:
-                index_name = index[1]
-                indexed_columns = {
-                    item[2]
-                    for item in connection.execute(
-                        f'PRAGMA index_info("{index_name}")'
-                    ).fetchall()
-                }
-                if indexed_columns & columns:
-                    connection.execute(f'DROP INDEX "{index_name}"')
-            for column in columns:
-                connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+@pytest.mark.parametrize("multiple_endpoints", [False, True])
+def test_forward_migration_preserves_grants_and_splits_shared_endpoints(
+    tmp_path, multiple_endpoints
+):
+    db_path = tmp_path / "oauth.sqlite3"
+    _manage(db_path, "migrate", "plugins", "0007_repair_notion_mcp_oauth", "--noinput")
+    seed_info = _seed_legacy_grants(db_path, multiple_endpoints=multiple_endpoints)
+    _manage(db_path, "migrate", "--noinput")
+    _manage(db_path, "migrate", "--noinput")
 
-        # Earlier 0005 revisions had not created the personal/org binding
-        # partial indexes either.
-        for index_name in (
-            "unique_personal_mcp_oauth_binding",
-            "unique_org_mcp_oauth_binding",
-        ):
-            connection.execute(f'DROP INDEX IF EXISTS "{index_name}"')
+    script = (
+        r"""
+import json
+from apps.credentials.models import Credential, CredentialService, McpOAuthAuthorizationState
+from apps.plugins.models import PluginCredentialRequirement
+from apps.runners.models import Workspace
+from common.utils import decrypt_value
 
-        # Recreate the Notion row as the legacy shared OAuth catalog service.
-        connection.execute(
-            "UPDATE credentials_service SET slug = 'mcp-oauth' "
-            "WHERE slug = 'notion-notion_oauth-oauth'"
+if MULTIPLE:
+    records = RECORDS
+    output=[]
+    for credential_id, server_id, endpoint, requirement_id, original_service_id in records:
+        credential=Credential.objects.get(pk=credential_id)
+        data=json.loads(decrypt_value(credential.encrypted_value))
+        req=PluginCredentialRequirement.objects.get(pk=requirement_id)
+        output.append({'credential_id':str(credential.id), 'service_id':str(credential.service_id),
+            'endpoint':credential.service.oauth_server_url, 'saved_endpoint':credential.oauth_server_url,
+            'token_service_id':data.get('service_id'), 'server_id_present':'server_id' in data, 'original_service':ORIGINAL_SERVICE_ID,
+            'token':data.get('access_token'), 'requirement_service':str(req.credential_service_id),
+            'workspace_linked':Workspace.objects.filter(pk=WORKSPACE_ID, credentials=credential).exists(), 'original_service':original_service_id})
+    print(json.dumps(output))
+else:
+    credential=Credential.objects.get(name='legacy account')
+    data=json.loads(decrypt_value(credential.encrypted_value))
+    service=CredentialService.objects.get(pk=credential.service_id)
+    print(json.dumps({'id':str(credential.id), 'service':str(service.id), 'slug':service.slug,
+        'endpoint':service.oauth_server_url, 'saved_endpoint':credential.oauth_server_url,
+        'token_service_id':data.get('service_id'), 'server_id_present':'server_id' in data, 'original_service':ORIGINAL_SERVICE_ID,
+        'token':data.get('access_token'), 'workspace_linked':Workspace.objects.filter(
+            pk=WORKSPACE_ID, credentials=credential).exists(),
+        'invalidated':McpOAuthAuthorizationState.objects.filter(consumed_at__isnull=False).exists()}))
+""".replace("MULTIPLE", repr(multiple_endpoints))
+        .replace("RECORDS", repr(seed_info["records"]))
+        .replace("WORKSPACE_ID", repr(seed_info["workspace"]))
+        .replace("ORIGINAL_SERVICE_ID", repr(seed_info["service"]))
+    )
+    result = subprocess.run(
+        [sys.executable, "manage.py", "shell", "-c", script],
+        cwd=BACKEND_ROOT,
+        env={**os.environ, "SQLITE_PATH": str(db_path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    line = next(
+        line
+        for line in reversed(result.stdout.splitlines())
+        if line.startswith("{") or line.startswith("[")
+    )
+    data = json.loads(line)
+    if multiple_endpoints:
+        assert len(data) == 2
+        assert {item["token"] for item in data} == {"access-first", "access-second"}
+        assert len({item["service_id"] for item in data}) == 2
+        assert all(item["service_id"] == item["requirement_service"] for item in data)
+        assert all(item["token_service_id"] == item["service_id"] for item in data)
+        assert sum(item["service_id"] == item["original_service"] for item in data) == 1
+        assert all(
+            not item["server_id_present"] and item["workspace_linked"] for item in data
         )
+    else:
+        assert data["endpoint"] == "https://mcp.notion.com/mcp"
+        assert data["saved_endpoint"] == data["endpoint"]
+        assert data["slug"] == "notion-oauth"
+        assert data["token"] == "legacy-access"
+        assert data["token_service_id"] == data["service"]
+        assert not data["server_id_present"]
+        assert data["workspace_linked"] and data["invalidated"]
 
 
 @pytest.mark.parametrize(
-    ("legacy", "shared_service"),
-    [(False, False), (True, False), (True, True)],
-    ids=["fresh-schema", "legacy-schema", "shared-legacy-service"],
+    ("ambiguous_requirement", "mismatch_service", "long_slug"),
+    [(True, False, False), (False, True, False), (False, False, True)],
 )
-def test_oauth_repair_migrations_are_safe_and_idempotent(
-    tmp_path, legacy, shared_service
+def test_forward_migration_fails_closed_for_ambiguous_requirement(
+    tmp_path, ambiguous_requirement, mismatch_service, long_slug
 ):
-    db_path = tmp_path / "oauth.sqlite3"
-    _manage(db_path, "migrate", "plugins", "0006_mcp_oauth", "--noinput")
-
-    if legacy:
-        _legacy_oauth_rows(db_path, shared_service=shared_service)
-        _remove_legacy_columns(db_path)
-
+    db_path = tmp_path / "oauth-safety.sqlite3"
+    _manage(db_path, "migrate", "plugins", "0007_repair_notion_mcp_oauth", "--noinput")
+    seed = _seed_legacy_grants(
+        db_path,
+        multiple_endpoints=True,
+        ambiguous_requirement=ambiguous_requirement,
+        mismatch_service=mismatch_service,
+        long_slug=long_slug,
+    )
     _manage(db_path, "migrate", "--noinput")
-    # Applying migrations a second time must not change/fail on a healthy schema.
+    rows = _migrated_shared_grants(db_path, seed["records"])
+    if ambiguous_requirement:
+        assert all(
+            row["status"] == "reconnect_required" and not row["token"] for row in rows
+        )
+        assert len({row["requirement_service"] for row in rows}) == 1
+        assert all(row["service_url"] == "" for row in rows)
+    elif mismatch_service:
+        mismatched = next(
+            row for row in rows if row["original_service"] != seed["service"]
+        )
+        assert mismatched["status"] == "reconnect_required"
+        assert not mismatched["token"]
+        assert mismatched["service"] == mismatched["original_service"]
+    else:
+        assert all(row["slug_length"] <= 255 for row in rows)
+        assert len({row["service"] for row in rows}) == 2
+
+
+def test_forward_migration_never_adopts_unrelated_service_credential(tmp_path):
+    db_path = tmp_path / "oauth-mismatch.sqlite3"
+    _manage(db_path, "migrate", "plugins", "0007_repair_notion_mcp_oauth", "--noinput")
+    seed = _seed_legacy_grants(db_path, multiple_endpoints=True, mismatch_service=True)
     _manage(db_path, "migrate", "--noinput")
+    rows = _migrated_shared_grants(db_path, seed["records"])
+    mismatched = next(row for row in rows if row["original_service"] != seed["service"])
+    assert mismatched["status"] == "reconnect_required"
+    assert not mismatched["token"]
+    assert mismatched["service"] == mismatched["original_service"]
 
-    with sqlite3.connect(db_path) as connection:
-        for table, expected in {
-            "credentials_service": {
-                "plugin_owned",
-                "oauth_plugin_slug",
-                "oauth_requirement_key",
-            },
-            "credentials_credential": {"oauth_server_id"},
-            "credentials_mcp_oauth_state": {
-                "requirement_key",
-                "resource",
-                "issuer",
-            },
-            "credentials_mcp_oauth_registration": {
-                "token_endpoint_auth_method",
-            },
-        }.items():
-            columns = {
-                row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')
-            }
-            assert expected <= columns
 
-        indexes = {
-            row[1]
-            for row in connection.execute('PRAGMA index_list("credentials_credential")')
-        }
-        assert "unique_personal_mcp_oauth_binding" in indexes
-        assert "unique_org_mcp_oauth_binding" in indexes
+def test_forward_migration_split_keeps_long_slugs_within_field_limit(tmp_path):
+    db_path = tmp_path / "oauth-long-slug.sqlite3"
+    _manage(db_path, "migrate", "plugins", "0007_repair_notion_mcp_oauth", "--noinput")
+    seed = _seed_legacy_grants(db_path, multiple_endpoints=True, long_slug=True)
+    _manage(db_path, "migrate", "--noinput")
+    rows = _migrated_shared_grants(db_path, seed["records"])
+    assert all(row["slug_length"] <= 255 for row in rows)
+    assert len({row["service"] for row in rows}) == 2
 
-        notion_service = connection.execute(
-            "SELECT id, slug, plugin_owned, oauth_plugin_slug, oauth_requirement_key "
-            "FROM credentials_service WHERE slug = ?",
-            ("notion-notion_oauth-oauth",),
-        ).fetchone()
-        assert notion_service is not None
-        assert notion_service[2:] == (1, "notion", "notion_oauth")
-        requirement_service = connection.execute(
-            "SELECT credential_service_id FROM plugins_credential_requirement "
-            "WHERE key = 'notion_oauth'"
-        ).fetchone()
-        assert requirement_service == (notion_service[0],)
 
-        if shared_service:
-            other_requirement = connection.execute(
-                "SELECT credential_service_id FROM plugins_credential_requirement "
-                "WHERE key = 'shared-oauth'"
-            ).fetchone()
-            assert other_requirement is not None
-            assert other_requirement[0] != notion_service[0]
-
-        if legacy:
-            repaired_state = connection.execute(
-                "SELECT s.requirement_key, s.resource, s.issuer, r.issuer "
-                "FROM credentials_mcp_oauth_state s "
-                "JOIN credentials_mcp_oauth_registration r "
-                "ON r.id = s.registration_id"
-            ).fetchone()
-            assert repaired_state is not None
-            assert repaired_state == (
-                "notion_oauth",
-                "https://mcp.notion.com/mcp",
-                repaired_state[3],
-                repaired_state[3],
-            )
-            registration_auth_method = connection.execute(
-                "SELECT token_endpoint_auth_method "
-                "FROM credentials_mcp_oauth_registration"
-            ).fetchone()
-            assert registration_auth_method == ("none",)
-
-            migrated_credential = connection.execute(
-                "SELECT c.service_id, c.oauth_server_id, c.encrypted_value, "
-                "c.oauth_registration_id "
-                "FROM credentials_credential c"
-            ).fetchone()
-            assert migrated_credential is not None
-            assert migrated_credential[0] == notion_service[0]
-            assert migrated_credential[1] is not None
-            assert migrated_credential[2] == "encrypted-token"
-            assert migrated_credential[3] is not None
+def _migrated_shared_grants(db_path: Path, records: list) -> list[dict]:
+    script = r"""
+import json
+from apps.credentials.models import Credential
+from apps.plugins.models import PluginCredentialRequirement
+from common.utils import decrypt_value
+rows=[]
+for cid, sid, endpoint, rid, original_service_id in RECORDS:
+    credential=Credential.objects.get(pk=cid)
+    try:
+        token=json.loads(decrypt_value(credential.encrypted_value)) if credential.encrypted_value else {}
+    except Exception:
+        token={}
+    requirement=PluginCredentialRequirement.objects.get(pk=rid)
+    rows.append({"service":str(credential.service_id), "original_service":original_service_id,
+        "status":credential.oauth_status, "token":token.get("access_token", ""),
+        "token_service":token.get("service_id"), "server_id_present":"server_id" in token,
+        "requirement_service":str(requirement.credential_service_id),
+        "slug_length":len(credential.service.slug), "service_url":credential.service.oauth_server_url})
+print(json.dumps(rows))
+""".replace("RECORDS", repr(records))
+    result = subprocess.run(
+        [sys.executable, "manage.py", "shell", "-c", script],
+        cwd=BACKEND_ROOT,
+        env={**os.environ, "SQLITE_PATH": str(db_path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(
+        next(
+            line
+            for line in reversed(result.stdout.splitlines())
+            if line.startswith("[")
+        )
+    )
 
 
 def test_forward_repair_adds_missing_registration_auth_method(tmp_path):

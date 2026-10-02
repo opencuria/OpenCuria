@@ -11,6 +11,7 @@ import secrets
 import socket
 import ssl
 import time
+import uuid
 from datetime import timedelta
 from urllib.parse import quote_plus, urlencode, urlparse
 
@@ -21,10 +22,10 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from apps.credentials.enums import CredentialType
 from common.utils import decrypt_value, encrypt_value
 
-from .models import Credential, McpOAuthAuthorizationState, McpOAuthClientRegistration
+from .models import Credential
+from .repositories import McpOAuthRepository
 
 STATE_TTL = timedelta(minutes=10)
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
@@ -64,9 +65,7 @@ def _public_addresses(host: str, port: int) -> tuple[str, ...]:
 def _validated_https_url(
     url: str, *, oauth_server_url: bool = False
 ) -> tuple[str, tuple[str, ...]]:
-    if not isinstance(url, str) or not url or any(
-        ord(char) < 0x21 for char in url
-    ):
+    if not isinstance(url, str) or not url or any(ord(char) < 0x21 for char in url):
         raise OAuthError("OAuth endpoint URL is invalid")
     parsed = urlparse(url)
     if (
@@ -335,10 +334,12 @@ def _validate_resource_metadata_endpoint(server_url: str, endpoint: str) -> None
 def _discover(server_url: str):
     if not isinstance(server_url, str) or not server_url:
         raise OAuthError("OAuth MCP server URL is invalid")
-    try:
-        from apps.plugins.services import validate_oauth_server_url
+    from apps.credentials.services import CredentialServiceSvc
 
-        normalized_server_url = validate_oauth_server_url(server_url)
+    try:
+        normalized_server_url = CredentialServiceSvc._validate_oauth_server_url(
+            server_url
+        )
     except ValueError:
         raise OAuthError("OAuth MCP server URL must be a valid HTTPS URL") from None
     if normalized_server_url != server_url:
@@ -412,9 +413,7 @@ def _discover(server_url: str):
 
 def _registration(server_url, callback, protected, metadata):
     issuer = metadata["issuer"]
-    existing = McpOAuthClientRegistration.objects.filter(
-        server_url=server_url, callback_url=callback, issuer=issuer
-    ).first()
+    existing = McpOAuthRepository.registration(server_url, callback, issuer)
     if existing:
         return existing
     endpoint = metadata.get("registration_endpoint")
@@ -457,21 +456,32 @@ def _registration(server_url, callback, protected, metadata):
         method != "none" and (not isinstance(secret, str) or not secret)
     ):
         raise OAuthError("OAuth client registration credentials are invalid")
-    registration, _ = McpOAuthClientRegistration.objects.get_or_create(
+    return McpOAuthRepository.save_registration(
         server_url=server_url,
         callback_url=callback,
         issuer=issuer,
-        defaults={
-            "client_id": client_id,
-            "encrypted_client_secret": encrypt_value(secret) if secret else "",
-            "authorization_endpoint": metadata["authorization_endpoint"],
-            "token_endpoint": metadata["token_endpoint"],
-            "registration_endpoint": endpoint,
-            "token_endpoint_auth_method": method,
-            "scopes_supported": metadata.get("scopes_supported", []),
-        },
+        client_id=client_id,
+        encrypted_client_secret=encrypt_value(secret) if secret else "",
+        authorization_endpoint=metadata["authorization_endpoint"],
+        token_endpoint=metadata["token_endpoint"],
+        registration_endpoint=endpoint,
+        token_endpoint_auth_method=method,
+        scopes_supported=metadata.get("scopes_supported", []),
     )
-    return registration
+
+
+def validate_browser_request_origin(*, request_scheme: str, request_host: str) -> None:
+    """Require the browser API request to share configured callback origin."""
+    callback = urlparse(callback_url())
+    host = urlparse(f"//{request_host}")
+    if (
+        request_scheme != callback.scheme
+        or (host.hostname or "").lower() != (callback.hostname or "").lower()
+    ):
+        raise OAuthError(
+            "OAuth browser API requests must use the configured callback "
+            "hostname and scheme"
+        )
 
 
 def callback_url():
@@ -508,13 +518,13 @@ def frontend_return_url():
         )
         or parsed.username
         or parsed.password
-        or parsed.query != "settings=plugins"
+        or parsed.query != "settings=credentials"
         or parsed.fragment
         or parsed.path != "/"
     ):
         raise OAuthError(
             "MCP_OAUTH_FRONTEND_RETURN_URL must be a fixed safe "
-            "'/?settings=plugins' URL"
+            "'/?settings=credentials' URL"
         )
     return value
 
@@ -537,30 +547,56 @@ def _validate_browser_flow_origins() -> str:
     return callback_url_value
 
 
-def state_cookie_name(state):
+def state_cookie_name(state: str) -> str:
     return "mcp_oauth_" + hashlib.sha256(state.encode()).hexdigest()[:24]
 
 
-def start_flow(*, user, organization, server, service, organization_credential):
-    if (
-        service.credential_type != CredentialType.MCP_OAUTH
-        or server.transport == "stdio"
-        or server.auth_type != "oauth"
-    ):
-        raise OAuthError("OAuth is not configured for this MCP server")
-    if service.organization_id not in {None, organization.id}:
-        raise OAuthError("OAuth service is not available to this organization")
-    if (
-        service.oauth_plugin_slug != server.plugin.slug
-        or service.oauth_requirement_key != server.oauth_requirement_key
-    ):
-        raise OAuthError("OAuth service is not bound to this MCP plugin")
+def start_flow(
+    *,
+    user,
+    organization,
+    service,
+    organization_credential: bool,
+    credential=None,
+    credential_name: str = "",
+) -> tuple[str, str, str]:
+    """Discover provider metadata and persist a pending service-bound state."""
+    from apps.credentials.services import CredentialServiceSvc
+
+    if service.credential_type != "mcp_oauth":
+        raise OAuthError("Credential service does not support OAuth")
+    try:
+        endpoint = CredentialServiceSvc._validate_oauth_server_url(
+            service.oauth_server_url
+        )
+    except ValueError:
+        raise OAuthError("OAuth service endpoint is invalid") from None
+    if endpoint != service.oauth_server_url:
+        raise OAuthError("OAuth service endpoint is not normalized")
     callback = _validate_browser_flow_origins()
-    protected, metadata, resource = _discover(server.url)
-    registration = _registration(server.url, callback, protected, metadata)
-    # Validate even persisted registrations before constructing the browser
-    # redirect; cached metadata must not bypass HTTPS/public-host validation.
-    _validated_https_url(registration.authorization_endpoint)
+    protected, metadata, resource = _discover(endpoint)
+    registration = _registration(endpoint, callback, protected, metadata)
+    if (
+        not isinstance(registration.authorization_endpoint, str)
+        or not isinstance(registration.token_endpoint, str)
+        or not _safe_registration_url(registration.authorization_endpoint)
+        or not _safe_registration_url(registration.token_endpoint)
+    ):
+        raise OAuthError("OAuth registration endpoint must use valid HTTPS")
+    if not _registration_metadata_safe(
+        registration,
+        expected_url=endpoint,
+        expected_issuer=metadata["issuer"],
+        expected_callback=callback,
+    ):
+        raise OAuthError("OAuth registration metadata is invalid")
+    try:
+        _validated_https_url(registration.authorization_endpoint)
+        _validated_https_url(registration.token_endpoint)
+        if registration.registration_endpoint:
+            _validated_https_url(registration.registration_endpoint)
+    except OAuthError:
+        raise OAuthError("OAuth registration endpoint must use valid HTTPS") from None
     state, binding, verifier = (
         secrets.token_urlsafe(32),
         secrets.token_urlsafe(32),
@@ -580,16 +616,21 @@ def start_flow(*, user, organization, server, service, organization_credential):
             ):
                 raise OAuthError("MCP OAuth scopes_supported metadata is invalid")
             scope = _validated_scope(" ".join(advertised))
-    McpOAuthAuthorizationState.objects.create(
+    McpOAuthRepository.create_state(
         state_hash=hashlib.sha256(state.encode()).hexdigest(),
         browser_binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
         encrypted_code_verifier=encrypt_value(verifier),
         user=user,
         organization=organization,
         service=service,
-        server_id=server.id,
-        requirement_key=server.oauth_requirement_key,
-        server_url=server.url,
+        credential=credential,
+        credential_name=(credential_name or "").strip()[:255],
+        credential_server_url_snapshot=(
+            credential.oauth_server_url if credential else ""
+        ),
+        reconnect_existing=credential is not None,
+        registration_fingerprint=_registration_fingerprint(registration),
+        server_url=endpoint,
         resource=resource,
         issuer=metadata["issuer"],
         registration=registration,
@@ -609,42 +650,34 @@ def start_flow(*, user, organization, server, service, organization_credential):
     }
     if scope:
         params["scope"] = scope
-    auth_url = (
+    authorization_url = (
         registration.authorization_endpoint
         + ("&" if "?" in registration.authorization_endpoint else "?")
         + urlencode(params)
     )
-    return auth_url, binding, state_cookie_name(state)
+    return authorization_url, binding, state_cookie_name(state)
 
 
-def _consume_callback_state(raw_state, binding):
-    if not raw_state or not binding:
+def _consume_callback_state(raw_state: str, binding: str):
+    """Consume state once and accept only the supplied matching cookie hash."""
+    if (
+        not isinstance(raw_state, str)
+        or not raw_state
+        or not isinstance(binding, str)
+        or not binding
+    ):
         raise OAuthError("OAuth state is invalid or expired")
-    now = timezone.now()
-    with transaction.atomic():
-        row = (
-            McpOAuthAuthorizationState.objects.select_for_update()
-            .select_related("user", "organization", "service", "registration")
-            .filter(
-                state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
-                consumed_at__isnull=True,
-                expires_at__gt=now,
-            )
-            .first()
-        )
-        if row is None:
-            raise OAuthError("OAuth state is invalid or expired")
-        row.consumed_at = now
-        row.save(update_fields=["consumed_at"])
-        matches = secrets.compare_digest(
-            row.browser_binding_hash, hashlib.sha256(binding.encode()).hexdigest()
-        )
-    if not matches:
+    row, matches = McpOAuthRepository.consume_state_and_match_binding(
+        state_hash=hashlib.sha256(raw_state.encode()).hexdigest(),
+        binding_hash=hashlib.sha256(binding.encode()).hexdigest(),
+        now=timezone.now(),
+    )
+    if row is None or not matches:
         raise OAuthError("OAuth state is invalid or expired")
     return row
 
 
-def _token_auth(registration, secret):
+def _token_auth(registration, secret: str) -> tuple[tuple[str, str] | None, str]:
     if registration.token_endpoint_auth_method == "none":
         return None, ""
     if registration.token_endpoint_auth_method == "client_secret_basic" and secret:
@@ -654,35 +687,115 @@ def _token_auth(registration, secret):
     raise OAuthError("OAuth client credentials are unavailable")
 
 
-def _validate_current_server(row):
-    from apps.plugins.models import PluginMcpServer
+def _registration_metadata_safe(
+    registration,
+    *,
+    expected_url: str,
+    expected_issuer: str | None = None,
+    expected_callback: str | None = None,
+) -> bool:
+    """Validate persisted provider endpoints and token authentication metadata."""
+    try:
+        method = registration.token_endpoint_auth_method
+        secret = registration.encrypted_client_secret
+        return bool(
+            registration.server_url == expected_url
+            and (
+                expected_callback is None
+                or registration.callback_url == expected_callback
+            )
+            and isinstance(registration.issuer, str)
+            and (expected_issuer is None or registration.issuer == expected_issuer)
+            and _safe_registration_url(registration.issuer)
+            and _safe_registration_url(registration.authorization_endpoint)
+            and _safe_registration_url(registration.token_endpoint)
+            and (
+                not registration.registration_endpoint
+                or _safe_registration_url(registration.registration_endpoint)
+            )
+            and isinstance(registration.client_id, str)
+            and registration.client_id
+            and method in {"none", "client_secret_basic", "client_secret_post"}
+            and isinstance(secret, str)
+            and (
+                (method == "none" and not secret) or (method != "none" and bool(secret))
+            )
+            and isinstance(registration.scopes_supported, list)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
 
-    return PluginMcpServer.objects.filter(
-        id=row.server_id,
-        url=row.server_url,
-        auth_type="oauth",
-        oauth_requirement_key=row.requirement_key,
-        plugin__slug=row.service.oauth_plugin_slug,
-        plugin__credential_requirements__key=row.requirement_key,
-        plugin__credential_requirements__credential_service_id=row.service_id,
-        plugin__credential_requirements__required=True,
-    ).exists()
+
+def _safe_registration_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+        return bool(
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.netloc
+            and not parsed.username
+            and not parsed.password
+            and "@" not in parsed.netloc
+            and not parsed.query
+            and not parsed.fragment
+            and (port is None or 1 <= port <= 65535)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
-def _store_token(row, token):
-    if not _validate_current_server(row):
-        raise OAuthError("MCP server changed during OAuth authorization")
-    if "scope" in token:
-        if not isinstance(token["scope"], str):
-            raise OAuthError("OAuth token scope is invalid")
-        token = {**token, "scope": _validated_scope(token["scope"])}
+def _registration_fingerprint(registration) -> str:
+    """Hash security-sensitive registration metadata for callback integrity."""
+    values = [
+        registration.server_url,
+        registration.issuer,
+        registration.client_id,
+        registration.authorization_endpoint,
+        registration.token_endpoint,
+        registration.registration_endpoint,
+        registration.token_endpoint_auth_method,
+        registration.encrypted_client_secret,
+    ]
+    return hashlib.sha256("\0".join(values).encode()).hexdigest()
+
+
+_TOKEN_IDENTITY_FIELDS = (
+    "id_token",
+    "account_id",
+    "user_id",
+    "workspace_id",
+    "workspace_name",
+    "email_domain",
+)
+
+
+def _validated_token_scope(token: dict, fallback: str = "") -> str:
+    """Return a bounded scope from token response or the prior grant."""
+    if "scope" not in token:
+        return fallback
+    if not isinstance(token["scope"], str):
+        raise OAuthError("OAuth token scope is invalid")
+    return _validated_scope(token["scope"])
+
+
+def _validated_token_fields(
+    token: dict,
+    *,
+    default_refresh: str = "",
+    default_scope: str = "",
+) -> tuple[str, str, int | None, str]:
+    """Validate common bearer-token fields used by callback and refresh."""
+    if not isinstance(token, dict) or token.get("error"):
+        raise OAuthError("OAuth token response is invalid")
+    access = token.get("access_token")
+    refresh = token.get("refresh_token", default_refresh)
     if (
-        not isinstance(token.get("access_token"), str)
-        or not token["access_token"]
+        not isinstance(access, str)
+        or not access
+        or not isinstance(refresh, str)
         or str(token.get("token_type", "Bearer")).lower() != "bearer"
     ):
-        raise OAuthError("OAuth token response is invalid")
-    if "refresh_token" in token and not isinstance(token["refresh_token"], str):
         raise OAuthError("OAuth token response is invalid")
     try:
         lifetime = (
@@ -690,310 +803,191 @@ def _store_token(row, token):
         )
     except (TypeError, ValueError):
         raise OAuthError("OAuth token lifetime is invalid") from None
-    data = {
-        "access_token": token["access_token"],
-        "refresh_token": token.get("refresh_token", ""),
-        "token_type": "Bearer",
-        "expires_at": (timezone.now() + timedelta(seconds=max(1, lifetime))).isoformat()
+    return access, refresh, lifetime, _validated_token_scope(token, default_scope)
+
+
+def _token_expiry(lifetime: int | None) -> str:
+    """Return a normalized expiry timestamp or an empty unknown expiry."""
+    return (
+        (timezone.now() + timedelta(seconds=max(1, lifetime))).isoformat()
         if lifetime is not None
-        else "",
-        "scope": token.get("scope", row.scope),
-        "resource": row.resource,
-        "server_url": row.server_url,
-        "server_id": str(row.server_id),
-        "registration_id": str(row.registration_id),
-        "identity": {
-            key: token[key]
-            for key in (
-                "id_token",
-                "account_id",
-                "user_id",
-                "workspace_id",
-                "workspace_name",
-                "email_domain",
-            )
-            if key in token
-        },
-    }
-    with transaction.atomic():
-        owner = (
-            {"organization_id": row.organization_id}
-            if row.organization_credential
-            else {"user_id": row.user_id}
-        )
-        credential, _ = Credential.objects.get_or_create(
-            service=row.service,
-            oauth_server_id=row.server_id,
-            **owner,
-            defaults={
-                "user": None if row.organization_credential else row.user,
-                "organization": row.organization
-                if row.organization_credential
-                else None,
-                "name": f"{row.service.name} OAuth",
-                "created_by": row.user,
-                "oauth_server_url": row.server_url,
-                "oauth_resource": row.resource,
-                "oauth_registration": row.registration,
-                "oauth_status": "connected",
-                "encrypted_value": encrypt_value(json.dumps(data)),
-            },
-        )
-        # The owner/server uniqueness constraint plus Django's race-safe
-        # get_or_create protects parallel independent OAuth flows. Lock the
-        # canonical row while replacing rotating tokens.
-        credential = Credential.objects.select_for_update().get(pk=credential.pk)
-        credential.oauth_server_url = row.server_url
-        credential.oauth_resource = row.resource
-        credential.oauth_registration = row.registration
-        credential.oauth_status = "connected"
-        credential.encrypted_value = encrypt_value(json.dumps(data))
-        credential.save(
-            update_fields=[
-                "oauth_server_url",
-                "oauth_resource",
-                "oauth_registration",
-                "oauth_status",
-                "encrypted_value",
-                "updated_at",
-            ]
-        )
-
-
-def complete_flow(*, raw_state, binding, code="", error=""):
-    row = _consume_callback_state(raw_state, binding)
-    if error:
-        raise OAuthError("Authorization was denied")
-    if not code or len(code) > 8192 or not _validate_current_server(row):
-        raise OAuthError("OAuth callback is invalid or MCP server changed")
-    if (
-        row.registration.issuer != row.issuer
-        or row.registration.server_url != row.server_url
-    ):
-        raise OAuthError("OAuth issuer or MCP server changed during authorization")
-    registration = row.registration
-    secret = (
-        decrypt_value(registration.encrypted_client_secret)
-        if registration.encrypted_client_secret
         else ""
     )
-    auth, post_secret = _token_auth(registration, secret)
-    token = _post_token(
-        registration.token_endpoint,
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": row.redirect_uri,
-            "client_id": registration.client_id,
-            "code_verifier": decrypt_value(row.encrypted_code_verifier),
-            "resource": row.resource,
-        },
-        auth=auth,
-        post_client_secret=post_secret,
+
+
+def _store_authorization_grant(state, token: dict) -> uuid.UUID:
+    """Validate a callback token and atomically store its service-bound grant."""
+    access, refresh, lifetime, scope = _validated_token_fields(
+        token, default_scope=state.scope
     )
-    if token.get("error"):
-        raise OAuthError("OAuth token exchange failed")
-    _store_token(row, token)
-    return True
-
-
-def _mark_reconnect(credential_id):
-    Credential.objects.filter(
-        pk=credential_id, service__credential_type=CredentialType.MCP_OAUTH
-    ).update(oauth_status="reconnect_required", encrypted_value="")
-
-
-def access_token_for_request(credential_id, server_id, server_url):
-    with transaction.atomic():
-        credential = (
-            Credential.objects.select_for_update()
-            .select_related("service", "oauth_registration")
-            .filter(
-                pk=credential_id,
-                service__credential_type=CredentialType.MCP_OAUTH,
-                oauth_status="connected",
-                oauth_server_id=server_id,
-                oauth_server_url=server_url,
-            )
-            .first()
+    payload = {
+        "access_token": access,
+        "refresh_token": refresh,
+        "token_type": "Bearer",
+        "expires_at": _token_expiry(lifetime),
+        "scope": scope or state.scope,
+        "service_id": str(state.service_id),
+        "server_url": state.server_url,
+        "resource": state.resource,
+        "registration_id": str(state.registration_id),
+        "identity": {
+            key: token[key]
+            for key in _TOKEN_IDENTITY_FIELDS
+            if key in token and isinstance(token[key], str)
+        },
+    }
+    try:
+        return McpOAuthRepository.persist_authorization_grant(
+            state=state, encrypted_value=encrypt_value(json.dumps(payload))
         )
-        if credential is None:
-            return None
-        try:
-            data = json.loads(decrypt_value(credential.encrypted_value))
-        except Exception:
-            credential.oauth_status = "reconnect_required"
-            credential.encrypted_value = ""
-            credential.save(
-                update_fields=["oauth_status", "encrypted_value", "updated_at"]
-            )
-            return None
-        if (
-            data.get("server_id") != str(server_id)
-            or data.get("server_url") != server_url
-            or data.get("resource") != credential.oauth_resource
-            or data.get("registration_id") != str(credential.oauth_registration_id)
+    except ValueError as exc:
+        from common.exceptions import AuthenticationError
+
+        raise AuthenticationError(str(exc)) from None
+
+
+def _mark_reconnect(credential_id: uuid.UUID) -> None:
+    McpOAuthRepository.update_oauth(
+        credential_id, oauth_status="reconnect_required", encrypted_value=""
+    )
+
+
+def oauth_credential_status(credential: Credential) -> dict:
+    """Return validated nonsecret OAuth metadata for API and readiness consumers."""
+    from .repositories import McpOAuthRepository
+
+    current = getattr(credential, "oauth_status", "") or "disconnected"
+    result = {
+        "connected": False,
+        "status": current,
+        "reconnect_required": current == "reconnect_required",
+        "expires_at": None,
+    }
+    if (
+        current != "connected"
+        or not isinstance(credential.encrypted_value, str)
+        or not credential.encrypted_value
+    ):
+        return result
+    grant = McpOAuthRepository.grant_metadata(credential)
+    if grant is None:
+        result.update(status="reconnect_required", reconnect_required=True)
+        return result
+    expiry = grant.pop("_expires_at", None)
+    result.update(
+        connected=True, status="connected", reconnect_required=False, expires_at=expiry
+    )
+    return result
+
+
+def access_token_for_request(
+    credential_id: uuid.UUID, service_id: uuid.UUID, server_url: str
+) -> str | None:
+    """Resolve a validated bearer token and refresh atomically when needed."""
+    from .repositories import McpOAuthRepository
+
+    with transaction.atomic():
+        credential = McpOAuthRepository.get_credential(credential_id, lock=True)
+        if credential is None or (
+            credential.service_id != service_id
+            or credential.oauth_status != "connected"
+            or credential.oauth_server_url != server_url
+            or credential.service.oauth_server_url != server_url
         ):
-            credential.oauth_status = "reconnect_required"
-            credential.encrypted_value = ""
-            credential.save(
-                update_fields=["oauth_status", "encrypted_value", "updated_at"]
+            return None
+        grant = McpOAuthRepository.grant_metadata(credential, expected_url=server_url)
+        if grant is None:
+            McpOAuthRepository.update_locked_grant(
+                credential, oauth_status="reconnect_required", encrypted_value=""
             )
             return None
-        if not _runtime_server_is_current(credential, server_id, server_url):
-            credential.oauth_status = "reconnect_required"
-            credential.encrypted_value = ""
-            credential.save(
-                update_fields=["oauth_status", "encrypted_value", "updated_at"]
+        expiry = grant.pop("_expires_at", None)
+        access = grant["access_token"]
+        if expiry is None or expiry > timezone.now() + timedelta(seconds=60):
+            return access
+        refresh = grant["refresh_token"]
+        if not refresh:
+            McpOAuthRepository.update_locked_grant(
+                credential, oauth_status="reconnect_required", encrypted_value=""
             )
             return None
-        expiry_text = data.get("expires_at") or ""
+        registration = credential.oauth_registration
+        secret = (
+            decrypt_value(registration.encrypted_client_secret)
+            if registration.encrypted_client_secret
+            else ""
+        )
+        auth, post_secret = _token_auth(registration, secret)
         try:
-            expiry = (
-                timezone.datetime.fromisoformat(expiry_text) if expiry_text else None
+            token = _post_token(
+                registration.token_endpoint,
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": registration.client_id,
+                    "resource": credential.oauth_resource,
+                },
+                auth=auth,
+                post_client_secret=post_secret,
             )
-        except ValueError:
-            credential.oauth_status = "reconnect_required"
-            credential.encrypted_value = ""
-            credential.save(
-                update_fields=["oauth_status", "encrypted_value", "updated_at"]
+        except OAuthError:
+            return None
+        if isinstance(token, dict) and token.get("error") == "invalid_grant":
+            McpOAuthRepository.update_locked_grant(
+                credential, oauth_status="reconnect_required", encrypted_value=""
             )
             return None
-        if expiry is not None and expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.get_current_timezone())
-        if expiry is not None and expiry <= timezone.now() + timedelta(seconds=60):
-            refresh = data.get("refresh_token")
-            if not refresh:
-                credential.oauth_status = "reconnect_required"
-                credential.encrypted_value = ""
-                credential.save(
-                    update_fields=["oauth_status", "encrypted_value", "updated_at"]
-                )
-                return None
-            registration = credential.oauth_registration
-            secret = (
-                decrypt_value(registration.encrypted_client_secret)
-                if registration.encrypted_client_secret
-                else ""
+        try:
+            new_access, new_refresh, lifetime, scope = _validated_token_fields(
+                token,
+                default_refresh=refresh,
+                default_scope=str(grant.get("scope", "")),
             )
-            auth, post_secret = _token_auth(registration, secret)
-            try:
-                token = _post_token(
-                    registration.token_endpoint,
-                    {
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh,
-                        "client_id": registration.client_id,
-                        "resource": credential.oauth_resource,
-                    },
-                    auth=auth,
-                    post_client_secret=post_secret,
-                )
-            except OAuthError:
-                return None
-            if token.get("error") == "invalid_grant":
-                credential.oauth_status = "reconnect_required"
-                credential.encrypted_value = ""
-                credential.save(
-                    update_fields=["oauth_status", "encrypted_value", "updated_at"]
-                )
-                return None
-            if token.get("error"):
-                return None
-            access = token.get("access_token")
-            rotated_refresh = token.get("refresh_token", refresh)
-            if (
-                not isinstance(access, str)
-                or not access
-                or str(token.get("token_type", "Bearer")).lower() != "bearer"
-                or not isinstance(rotated_refresh, str)
-            ):
-                return None
-            try:
-                lifetime = (
-                    int(token["expires_in"])
-                    if token.get("expires_in") is not None
-                    else None
-                )
-            except (TypeError, ValueError):
-                return None
-            if "scope" in token:
-                if not isinstance(token["scope"], str):
-                    return None
-                try:
-                    token_scope = _validated_scope(token["scope"])
-                except OAuthError:
-                    return None
-            else:
-                token_scope = data.get("scope", "")
-            identity = dict(data.get("identity") or {})
-            identity.update(
-                {
-                    k: token[k]
-                    for k in (
-                        "id_token",
-                        "account_id",
-                        "user_id",
-                        "workspace_id",
-                        "workspace_name",
-                        "email_domain",
-                    )
-                    if k in token
-                }
-            )
-            data.update(
-                {
-                    "access_token": access,
-                    "refresh_token": rotated_refresh,
-                    "token_type": "Bearer",
-                    "expires_at": (
-                        timezone.now() + timedelta(seconds=max(1, lifetime))
-                    ).isoformat()
-                    if lifetime is not None
-                    else "",
-                    "scope": token_scope,
-                    "identity": identity,
-                }
-            )
-            credential.encrypted_value = encrypt_value(json.dumps(data))
-            credential.save(update_fields=["encrypted_value", "updated_at"])
-        access = data.get("access_token")
-        return access if isinstance(access, str) and access else None
+        except OAuthError:
+            return None
+        identity = dict(grant.get("identity", {}))
+        identity.pop("_expires_at", None)
+        identity.update(
+            {
+                key: token[key]
+                for key in _TOKEN_IDENTITY_FIELDS
+                if isinstance(token, dict)
+                and key in token
+                and isinstance(token[key], str)
+            }
+        )
+        updated = {key: value for key, value in grant.items() if key != "_expires_at"}
+        updated.update(
+            {
+                "access_token": new_access,
+                "refresh_token": new_refresh,
+                "token_type": "Bearer",
+                "expires_at": _token_expiry(lifetime),
+                "scope": scope,
+                "identity": identity,
+            }
+        )
+        McpOAuthRepository.update_locked_grant(
+            credential, encrypted_value=encrypt_value(json.dumps(updated))
+        )
+        return new_access
 
 
-def _runtime_server_is_current(credential, server_id, server_url):
-    from apps.plugins.models import PluginMcpServer
-
-    return PluginMcpServer.objects.filter(
-        id=server_id,
-        url=server_url,
-        auth_type="oauth",
-        oauth_requirement_key=credential.service.oauth_requirement_key,
-        plugin__slug=credential.service.oauth_plugin_slug,
-        plugin__credential_requirements__key=credential.service.oauth_requirement_key,
-        plugin__credential_requirements__credential_service_id=credential.service_id,
-        plugin__credential_requirements__required=True,
-    ).exists()
-
-
-def disconnect_credential(credential_id, *, server_id, server_url):
+def disconnect_credential(credential_id: uuid.UUID) -> bool:
     return bool(
-        Credential.objects.filter(
-            pk=credential_id,
-            service__credential_type=CredentialType.MCP_OAUTH,
-            oauth_server_id=server_id,
-            oauth_server_url=server_url,
-        ).update(oauth_status="disconnected", encrypted_value="")
+        McpOAuthRepository.update_oauth(
+            credential_id, oauth_status="disconnected", encrypted_value=""
+        )
     )
 
 
 class McpOAuthHTTPAuth(httpx.Auth):
     requires_response_body = True
 
-    def __init__(self, credential_id, server_id, server_url):
-        self.credential_id, self.server_id, self.server_url = (
+    def __init__(self, credential_id, service_id, server_url):
+        self.credential_id, self.service_id, self.server_url = (
             credential_id,
-            server_id,
+            service_id,
             server_url,
         )
         parsed = urlparse(server_url)
@@ -1016,7 +1010,7 @@ class McpOAuthHTTPAuth(httpx.Auth):
         try:
             token = await sync_to_async(
                 access_token_for_request, thread_sensitive=True
-            )(self.credential_id, self.server_id, self.server_url)
+            )(self.credential_id, self.service_id, self.server_url)
         except Exception:
             raise McpOAuthUnauthorizedError(
                 "MCP OAuth credential lookup failed"

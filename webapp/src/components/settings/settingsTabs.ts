@@ -6,8 +6,9 @@
  * without pulling the whole sheet into its bundle.
  */
 
-/** Window event that opens the Settings sheet. Detail: `{ tab?: string }`. */
+/** Window event that opens Settings with context IDs (never a workspace form payload). */
 export const OPEN_SETTINGS_EVENT = 'opencuria:open-settings'
+export const CLOSE_SETTINGS_EVENT = 'opencuria:close-settings'
 
 /** Query param on `/` that opens the sheet via deep-link (`/?settings=<tab>`). */
 export const SETTINGS_QUERY_PARAM = 'settings'

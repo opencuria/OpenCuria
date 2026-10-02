@@ -22,6 +22,10 @@ function makeCredential(overrides: Partial<Credential> = {}): Credential {
     created_by_id: overrides.created_by_id ?? 1,
     created_at: overrides.created_at ?? '2026-04-18T00:00:00.000Z',
     updated_at: overrides.updated_at ?? '2026-04-18T00:00:00.000Z',
+    oauth_connected: overrides.oauth_connected ?? false,
+    oauth_status: overrides.oauth_status ?? '',
+    oauth_reconnect_required: overrides.oauth_reconnect_required ?? false,
+    oauth_expires_at: overrides.oauth_expires_at ?? null,
   }
 }
 
@@ -51,9 +55,7 @@ describe('workspaceCredentialSelection', () => {
     const credentials = [makeCredential({ id: 'cred-1' })]
     const selected = credentials[0]!
 
-    expect(
-      toggleWorkspaceCredentialSelection(['cred-1'], selected, credentials),
-    ).toEqual([])
+    expect(toggleWorkspaceCredentialSelection(['cred-1'], selected, credentials)).toEqual([])
   })
 
   it('groups credentials by service and tracks the active selection', () => {

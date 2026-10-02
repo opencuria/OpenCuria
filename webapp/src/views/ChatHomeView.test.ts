@@ -5,10 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatHomeView from './ChatHomeView.vue'
 import { WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
-import {
-  clearComposerTransition,
-  isComposerTransitionPending,
-} from '@/lib/composerTransition'
+import { clearComposerTransition, isComposerTransitionPending } from '@/lib/composerTransition'
 import { subscribeToWorkspace } from '@/services/socket'
 
 const workspaceStore = {
@@ -92,8 +89,7 @@ vi.mock('@/lib/providerCatalog', () => ({
 }))
 
 vi.mock('@/lib/recentModels', async () => {
-  const actual =
-    await vi.importActual<typeof import('@/lib/recentModels')>('@/lib/recentModels')
+  const actual = await vi.importActual<typeof import('@/lib/recentModels')>('@/lib/recentModels')
   return {
     ...actual,
     loadRecentModels: () => Promise.resolve([]),
@@ -133,6 +129,7 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: false,
     runner_online: true,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
@@ -220,10 +217,7 @@ describe('ChatHomeView', () => {
   })
 
   it('prefers the last selected workspace from localStorage', async () => {
-    workspaceStore.workspaces = [
-      makeWorkspace(),
-      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
-    ]
+    workspaceStore.workspaces = [makeWorkspace(), makeWorkspace({ id: 'ws-2', name: 'Beta' })]
     localStorage.setItem('opencuria:last-workspace', 'ws-2')
 
     const { wrapper } = await mountHome()

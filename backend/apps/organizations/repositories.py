@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import uuid
 
-from django.conf import settings
 from django.db.models import QuerySet
 
 from .models import Membership, MembershipRole, Organization
-
 
 # ---------------------------------------------------------------------------
 # Organization Repository
@@ -64,6 +62,18 @@ class OrganizationRepository:
 
 class MembershipRepository:
     """Data access for Membership records."""
+
+    @staticmethod
+    def get_for_user_and_org(
+        user_id: int, org_id: uuid.UUID, *, lock: bool = False
+    ) -> Membership | None:
+        """Fetch a user's membership and related identity by durable IDs."""
+        query = Membership.objects.filter(
+            user_id=user_id, organization_id=org_id
+        ).select_related("user", "organization")
+        if lock:
+            query = query.select_for_update()
+        return query.first()
 
     @staticmethod
     def get(user, organization: Organization) -> Membership | None:

@@ -68,27 +68,13 @@ class PluginMcpServerOut(Schema):
     oauth_requirement_key: str = ""
 
 
-class PluginCredentialServiceIn(Schema):
-    """Define (or reference) a credential service for a plugin requirement."""
-
-    slug: str = ""
-    name: str = ""
-    description: str = ""
-    credential_type: str = "env"
-    env_var_name: str = ""
-    target_path: str = ""
-    label: str = ""
-    # When set, reference an existing visible service instead of creating one.
-    service_id: uuid.UUID | None = None
-
-
 class PluginCredentialRequirementIn(Schema):
-    """Nested credential requirement for plugin create/replace."""
+    """Declare a plugin dependency on an existing visible credential service."""
 
     key: str
     description: str = ""
     required: bool = True
-    credential_service: PluginCredentialServiceIn
+    service_id: uuid.UUID
 
 
 class PluginCredentialRequirementOut(Schema):
@@ -102,7 +88,6 @@ class PluginCredentialRequirementOut(Schema):
     service_name: str
     service_slug: str
     credential_type: str
-    plugin_owned_service: bool
 
 
 # --- Plugin inputs / outputs ---
@@ -134,14 +119,6 @@ class PluginUpdateIn(Schema):
     credential_requirements: list[PluginCredentialRequirementIn] | None = None
 
 
-class PluginCredentialReadinessOut(Schema):
-    """Credential readiness summary for the active org (no secret values)."""
-
-    required_service_ids: list[uuid.UUID] = []
-    missing_required_service_ids: list[uuid.UUID] = []
-    ready: bool = True
-
-
 class PluginOut(Schema):
     """A plugin with nested components and org activation state."""
 
@@ -157,7 +134,6 @@ class PluginOut(Schema):
     skills: list[PluginSkillOut] = []
     mcp_servers: list[PluginMcpServerOut] = []
     credential_requirements: list[PluginCredentialRequirementOut] = []
-    credential_readiness: PluginCredentialReadinessOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -180,9 +156,3 @@ class WorkspacePluginOut(Schema):
     workspace_enabled: bool = False
     missing_required_credentials: list[dict] = []
     ready: bool = True
-
-
-class WorkspacePluginsUpdateIn(Schema):
-    """Replace workspace plugin activations atomically."""
-
-    plugin_ids: list[uuid.UUID] = []

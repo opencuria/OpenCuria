@@ -210,34 +210,40 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     let flight = workspaceListFlights.get(key)
     if (!flight) {
       const generation = ++workspaceListGeneration
-      flight = workspacesApi.listWorkspaces(runnerId).then((result) => {
-        const latestContext = requestContext()
-        if (generation === workspaceListGeneration && latestContext === context) {
-          const previousStatuses = new Map(
-            workspaces.value.map((workspace) => [workspace.id, workspace.status]),
-          )
-          const previousWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
-          workspaces.value = result
-          const currentWorkspaceIds = new Set(result.map((workspace) => workspace.id))
-          for (const workspace of result) {
-            reconcilePendingWorkspaceOperation(
-              workspace.id,
-              workspace.status,
-              previousStatuses.get(workspace.id),
+      flight = workspacesApi
+        .listWorkspaces(runnerId)
+        .then((result) => {
+          const latestContext = requestContext()
+          if (generation === workspaceListGeneration && latestContext === context) {
+            const previousStatuses = new Map(
+              workspaces.value.map((workspace) => [workspace.id, workspace.status]),
             )
-          }
-          for (const workspaceId of previousWorkspaceIds) {
-            const pending = pendingWorkspaceOperations.value[workspaceId]
-            if (pending?.operation === 'remove' && !currentWorkspaceIds.has(workspaceId)) {
-              notifications.success('Workspace removed', 'The workspace was removed successfully.')
-              clearPendingWorkspaceOperation(workspaceId)
+            const previousWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
+            workspaces.value = result
+            const currentWorkspaceIds = new Set(result.map((workspace) => workspace.id))
+            for (const workspace of result) {
+              reconcilePendingWorkspaceOperation(
+                workspace.id,
+                workspace.status,
+                previousStatuses.get(workspace.id),
+              )
+            }
+            for (const workspaceId of previousWorkspaceIds) {
+              const pending = pendingWorkspaceOperations.value[workspaceId]
+              if (pending?.operation === 'remove' && !currentWorkspaceIds.has(workspaceId)) {
+                notifications.success(
+                  'Workspace removed',
+                  'The workspace was removed successfully.',
+                )
+                clearPendingWorkspaceOperation(workspaceId)
+              }
             }
           }
-        }
-        return result
-      }).finally(() => {
-        if (workspaceListFlights.get(key) === flight) workspaceListFlights.delete(key)
-      })
+          return result
+        })
+        .finally(() => {
+          if (workspaceListFlights.get(key) === flight) workspaceListFlights.delete(key)
+        })
       workspaceListFlights.set(key, flight)
     }
     const generation = workspaceListGeneration
@@ -251,7 +257,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         error.value = e instanceof Error ? e.message : 'Failed to load workspaces'
       }
     } finally {
-      if (context === requestContext() && generation === workspaceListGeneration && activeListRequestKey === key) {
+      if (
+        context === requestContext() &&
+        generation === workspaceListGeneration &&
+        activeListRequestKey === key
+      ) {
         loading.value = false
         activeListRequestKey = null
       }
@@ -270,18 +280,21 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     let flight = workspaceDetailFlights.get(key)
     if (!flight) {
       const generation = workspaceDetailGeneration
-      flight = workspacesApi.getWorkspace(id).then((fresh) => {
-        if (
-          generation === workspaceDetailGeneration &&
-          requestedDetailId === id &&
-          context === requestContext()
-        ) {
-          activeWorkspace.value = fresh
-        }
-        return fresh
-      }).finally(() => {
-        if (workspaceDetailFlights.get(key) === flight) workspaceDetailFlights.delete(key)
-      })
+      flight = workspacesApi
+        .getWorkspace(id)
+        .then((fresh) => {
+          if (
+            generation === workspaceDetailGeneration &&
+            requestedDetailId === id &&
+            context === requestContext()
+          ) {
+            activeWorkspace.value = fresh
+          }
+          return fresh
+        })
+        .finally(() => {
+          if (workspaceDetailFlights.get(key) === flight) workspaceDetailFlights.delete(key)
+        })
       workspaceDetailFlights.set(key, flight)
     }
     activeDetailRequestKey = key
@@ -294,7 +307,11 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         error.value = e instanceof Error ? e.message : 'Failed to load workspace'
       }
     } finally {
-      if (requestedDetailId === id && context === requestContext() && activeDetailRequestKey === key) {
+      if (
+        requestedDetailId === id &&
+        context === requestContext() &&
+        activeDetailRequestKey === key
+      ) {
         loading.value = false
         activeDetailRequestKey = null
       }
@@ -323,7 +340,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       updated_at: string
       active_operation: WorkspaceOperation | null
       credential_ids: string[]
+      plugin_ids: string[]
       credentials_present: boolean
+      credential_sync_status: 'synced' | 'pending' | 'failed' | 'not_required'
+      credential_sync_detail?: string | null
       qemu_vcpus: number | null
       qemu_memory_mb: number | null
       qemu_disk_size_gb: number | null
@@ -337,6 +357,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ws.updated_at = updated.updated_at
       ws.active_operation = updated.active_operation
       ws.credential_ids = updated.credential_ids
+      ws.plugin_ids = updated.plugin_ids
       ws.credentials_present = updated.credentials_present
       ws.qemu_vcpus = updated.qemu_vcpus
       ws.qemu_memory_mb = updated.qemu_memory_mb
@@ -350,6 +371,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       activeWorkspace.value.updated_at = updated.updated_at
       activeWorkspace.value.active_operation = updated.active_operation
       activeWorkspace.value.credential_ids = updated.credential_ids
+      activeWorkspace.value.plugin_ids = updated.plugin_ids
       activeWorkspace.value.credentials_present = updated.credentials_present
       activeWorkspace.value.qemu_vcpus = updated.qemu_vcpus
       activeWorkspace.value.qemu_memory_mb = updated.qemu_memory_mb
@@ -377,9 +399,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       const payload: WorkspaceUpdateIn = {
         ...(data.name !== undefined ? { name: data.name.trim() } : {}),
         ...(data.credential_ids !== undefined ? { credential_ids: data.credential_ids } : {}),
+        ...(data.plugin_ids !== undefined ? { plugin_ids: data.plugin_ids } : {}),
         ...(data.qemu_vcpus !== undefined ? { qemu_vcpus: data.qemu_vcpus } : {}),
         ...(data.qemu_memory_mb !== undefined ? { qemu_memory_mb: data.qemu_memory_mb } : {}),
-        ...(data.qemu_disk_size_gb !== undefined ? { qemu_disk_size_gb: data.qemu_disk_size_gb } : {}),
+        ...(data.qemu_disk_size_gb !== undefined
+          ? { qemu_disk_size_gb: data.qemu_disk_size_gb }
+          : {}),
         ...(data.desktop_width !== undefined ? { desktop_width: data.desktop_width } : {}),
         ...(data.desktop_height !== undefined ? { desktop_height: data.desktop_height } : {}),
       }
@@ -387,8 +412,20 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       const updated = await workspacesApi.updateWorkspace(id, payload)
       applyWorkspaceUpdate(id, updated)
       if (opts.notify !== false) {
-        if (updated.active_operation === WorkspaceOperation.RESTARTING) {
-          notifications.info('Workspace restarting', `${getWorkspaceName(id)} is restarting to apply the new resources.`)
+        if (
+          updated.credential_sync_status === 'pending' ||
+          updated.credential_sync_status === 'failed'
+        ) {
+          notifications.warning(
+            'Workspace configuration saved',
+            updated.credential_sync_detail ||
+              'The workspace configuration was saved, but runner credential synchronization is pending.',
+          )
+        } else if (updated.active_operation === WorkspaceOperation.RESTARTING) {
+          notifications.info(
+            'Workspace restarting',
+            `${getWorkspaceName(id)} is restarting to apply the new resources.`,
+          )
         } else if (data.credential_ids !== undefined) {
           const ws = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
           if (ws?.status === WorkspaceStatus.RUNNING) {
@@ -430,7 +467,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   async function stopWorkspace(id: string): Promise<void> {
     const notifications = useNotificationStore()
     if (isWorkspaceTransitioning(id)) {
-      notifications.info('Action already running', 'Please wait until the current workspace action finishes.')
+      notifications.info(
+        'Action already running',
+        'Please wait until the current workspace action finishes.',
+      )
       return
     }
     try {
@@ -446,7 +486,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   async function resumeWorkspace(id: string): Promise<void> {
     const notifications = useNotificationStore()
     if (isWorkspaceTransitioning(id)) {
-      notifications.info('Action already running', 'Please wait until the current workspace action finishes.')
+      notifications.info(
+        'Action already running',
+        'Please wait until the current workspace action finishes.',
+      )
       return
     }
     try {
@@ -462,7 +505,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   async function removeWorkspace(id: string): Promise<void> {
     const notifications = useNotificationStore()
     if (isWorkspaceTransitioning(id)) {
-      notifications.info('Action already running', 'Please wait until the current workspace action finishes.')
+      notifications.info(
+        'Action already running',
+        'Please wait until the current workspace action finishes.',
+      )
       return
     }
     try {
@@ -474,7 +520,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       notifications.error('Removal failed', e instanceof Error ? e.message : 'Unknown error')
     }
   }
-
 
   // --- Image capture actions ---
 
@@ -512,7 +557,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const imageStore = useImageStore()
     try {
       await workspacesApi.deleteWorkspaceImageArtifact(workspaceId, imageArtifactId)
-      imageArtifacts.value = imageArtifacts.value.filter((artifact) => artifact.id !== imageArtifactId)
+      imageArtifacts.value = imageArtifacts.value.filter(
+        (artifact) => artifact.id !== imageArtifactId,
+      )
       await imageStore.fetchImages()
       notifications.success('Image deleted', 'The image was removed.')
       return true
@@ -555,9 +602,9 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   ): void {
     // Update in list
     const ws = workspaces.value.find((w) => w.id === workspaceId)
-    const previousStatus = ws?.status ?? (activeWorkspace.value?.id === workspaceId
-      ? activeWorkspace.value.status
-      : undefined)
+    const previousStatus =
+      ws?.status ??
+      (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value.status : undefined)
     if (ws) {
       ws.status = status
       if (credentialsPresent !== undefined) {

@@ -1,111 +1,89 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { reactive } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-
 import PluginsPanel from './PluginsPanel.vue'
 import type { Plugin } from '@/types'
 
 const routerPush = vi.fn()
-
+const routerReplace = vi.fn(async () => undefined)
+const routeState = reactive({ path: '/', query: {} as Record<string, unknown> })
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: routerPush, replace: vi.fn(async () => {}) }),
-  useRoute: () => ({ path: '/', query: {} }),
+  useRouter: () => ({ push: routerPush, replace: routerReplace }),
+  useRoute: () => routeState,
 }))
-
-vi.mock('vue-sonner', () => ({
-  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
-}))
-
-const pluginStoreMock = vi.hoisted(() => ({
+const pluginStore = vi.hoisted(() => ({
   plugins: [] as Plugin[],
   globalPlugins: [] as Plugin[],
   orgPlugins: [] as Plugin[],
   loading: false,
   error: null as string | null,
+  loadedOrgId: 'org-1' as string | null,
   togglingIds: [] as string[],
-  togglingId: null as string | null,
   reload: vi.fn(),
   toggleActivation: vi.fn(),
   deletePlugin: vi.fn(),
 }))
-
-vi.mock('@/stores/plugins', () => ({
-  usePluginStore: () => pluginStoreMock,
-}))
-
+vi.mock('@/stores/plugins', () => ({ usePluginStore: () => pluginStore }))
+const auth = vi.hoisted(() => ({ isAdmin: false, activeOrganizationId: 'org-1' }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => auth }))
 vi.mock('@/stores/credentials', () => ({
-  useCredentialStore: () => ({
-    credentials: [],
-    services: [],
-    loading: false,
-    error: null,
-    fetchCredentials: vi.fn(),
-    fetchServices: vi.fn(),
-  }),
+  useCredentialStore: () => ({ services: [], fetchServices: vi.fn() }),
+}))
+vi.mock('vue-sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
-const authMock = vi.hoisted(() => ({
-  isAdmin: false,
-  activeOrganizationId: 'org-1',
-}))
-
-vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => authMock,
-}))
-
-vi.mock('@/services/plugins.api', () => ({
-  listPlugins: vi.fn(async () => []),
-  createPlugin: vi.fn(),
-  updatePlugin: vi.fn(),
-  deletePlugin: vi.fn(),
-  togglePluginActivation: vi.fn(),
-  listWorkspacePlugins: vi.fn(async () => []),
-  updateWorkspacePlugins: vi.fn(),
-}))
-
-function makePlugin(overrides: Partial<Plugin> = {}): Plugin {
+function plugin(overrides: Partial<Plugin> = {}): Plugin {
   return {
-    id: 'plugin-1',
-    name: 'Playwright',
-    slug: 'playwright',
-    description: 'Browser automation',
+    id: 'p-1',
+    name: 'Notion tools',
+    slug: 'notion-tools',
+    description: 'Connect Notion to your workspace.',
     enabled: true,
     published: true,
     organization_id: null,
     is_global: true,
-    org_enabled: false,
-    skills: [{ id: 's-1', name: 'Basics', slug: 'basics', body: 'x', position: 0 }],
+    org_enabled: true,
+    skills: [
+      { id: 's-1', name: 'Search', slug: 'search', body: '# Search\nSafe text', position: 0 },
+    ],
     mcp_servers: [
       {
         id: 'm-1',
-        name: 'Runner',
-        slug: 'runner',
-        transport: 'stdio',
-        command: 'npx',
-        args: ['-y'],
+        name: 'Notion MCP',
+        slug: 'notion-mcp',
+        transport: 'streamable_http',
+        command: '',
+        args: [],
         cwd: '/workspace',
         env: {},
-        url: '',
+        url: 'https://mcp.notion.test/mcp',
         headers: {},
         startup_timeout_seconds: 30,
         request_timeout_seconds: 60,
-        auth_type: 'none',
-        oauth_requirement_key: '',
+        auth_type: 'oauth',
+        oauth_requirement_key: 'notion',
       },
     ],
-    credential_requirements: [],
-    credential_readiness: {
-      required_service_ids: [],
-      missing_required_service_ids: [],
-      ready: true,
-    },
-    created_at: '2026-01-01T00:00:00.000Z',
-    updated_at: '2026-01-01T00:00:00.000Z',
+    credential_requirements: [
+      {
+        id: 'r-1',
+        key: 'notion',
+        description: 'Authorize a Notion account.',
+        required: true,
+        service_id: 'svc-1',
+        service_name: 'Notion OAuth',
+        service_slug: 'notion-oauth',
+        credential_type: 'mcp_oauth',
+      },
+    ],
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
     ...overrides,
   }
 }
-
-function mountPanel() {
+function mountPanel(): ReturnType<typeof mount> {
   setActivePinia(createPinia())
   return mount(PluginsPanel, {
     global: {
@@ -117,143 +95,103 @@ function mountPanel() {
         DialogTitle: { template: '<div><slot /></div>' },
         DialogDescription: { template: '<div><slot /></div>' },
         DialogFooter: { template: '<div><slot /></div>' },
-        ScrollArea: { template: '<div><slot /></div>' },
       },
     },
   })
 }
-
-describe('PluginsPanel', () => {
+describe('PluginsPanel overview and details', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    authMock.isAdmin = false
-    pluginStoreMock.loading = false
-    pluginStoreMock.error = null
-    pluginStoreMock.togglingIds = []
-    pluginStoreMock.togglingId = null
-    pluginStoreMock.plugins = []
-    pluginStoreMock.globalPlugins = []
-    pluginStoreMock.orgPlugins = []
+    auth.isAdmin = false
+    pluginStore.plugins = []
+    pluginStore.globalPlugins = []
+    pluginStore.orgPlugins = []
+    pluginStore.loading = false
+    pluginStore.loadedOrgId = 'org-1'
+    pluginStore.error = null
+    routeState.path = '/'
+    routeState.query = {}
   })
-
-  it('member view shows catalog without mutations', async () => {
-    const plugin = makePlugin()
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
+  it('keeps a plugin query deep link selected while the catalog is empty during an org reload', async () => {
+    routeState.query = { plugin: 'p-1' }
+    pluginStore.plugins = []
+    pluginStore.loading = true
+    pluginStore.loadedOrgId = null
     const wrapper = mountPanel()
     await flushPromises()
-    expect(wrapper.text()).toContain('Playwright')
-    expect(wrapper.text()).toContain('OpenCuria')
-    expect(wrapper.find('[data-testid="plugin-create"]').exists()).toBe(false)
-    expect(wrapper.find(`[data-testid="plugin-toggle-${plugin.id}"]`).exists()).toBe(false)
+    expect((wrapper.vm as unknown as { selectedId: string | null }).selectedId).toBe('p-1')
+    expect(wrapper.find('[data-testid="plugins-error"]').exists()).toBe(false)
   })
 
-  it('admin sees toggles/create and can toggle activation', async () => {
-    authMock.isAdmin = true
-    const plugin = makePlugin()
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    pluginStoreMock.toggleActivation.mockResolvedValue(true)
+  it('shows an unavailable detail state for a requested plugin ID instead of falling back to the list', async () => {
+    routeState.query = { plugin: 'missing-plugin' }
+    pluginStore.loadedOrgId = 'org-1'
+    pluginStore.loading = false
     const wrapper = mountPanel()
     await flushPromises()
-    expect(wrapper.find('[data-testid="plugin-create"]').exists()).toBe(true)
-    const toggle = wrapper.find(`[data-testid="plugin-toggle-${plugin.id}"]`)
-    expect(toggle.exists()).toBe(true)
-    await toggle.trigger('click')
-    expect(pluginStoreMock.toggleActivation).toHaveBeenCalledWith(plugin.id, true)
+    expect(wrapper.find('[data-testid="plugin-detail-unavailable"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="plugin-back"]').trigger('click')
+    expect(routerReplace).toHaveBeenCalledWith({ path: '/', query: {} })
   })
 
-  it('shows setup-needed readiness with a manage-credentials action', async () => {
-    const plugin = makePlugin({
-      credential_readiness: {
-        required_service_ids: ['svc-1'],
-        missing_required_service_ids: ['svc-1'],
-        ready: false,
-      },
+  it('shows active availability and correctly pluralized compact catalog counts', async () => {
+    const p = plugin()
+    pluginStore.plugins = [p]
+    pluginStore.globalPlugins = [p]
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="plugin-open-p-1"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Notion tools')
+    expect(wrapper.text()).toContain('Active')
+    expect(wrapper.text()).toContain('1 skill')
+    expect(wrapper.text()).toContain('1 MCP server')
+    expect(wrapper.text()).toContain('1 service')
+    expect(wrapper.text()).not.toContain('OAuth connections')
+    expect(wrapper.text()).not.toContain('Org credentials')
+    expect(wrapper.find('[data-testid="plugin-toggle-p-1"]').exists()).toBe(false)
+    await wrapper.find('[data-testid="plugin-open-p-1"]').trigger('click')
+    expect(wrapper.find('[data-testid="plugin-detail"]').exists()).toBe(true)
+    expect(routerReplace).toHaveBeenCalledWith({ path: '/', query: { plugin: 'p-1' } })
+  })
+  it('details expand skill as safe text, show static server and service dependency with deep link', async () => {
+    const p = plugin()
+    pluginStore.plugins = [p]
+    const wrapper = mountPanel()
+    await wrapper.find('[data-testid="plugin-open-p-1"]').trigger('click')
+    expect(wrapper.text()).toContain('Authorize a Notion account.')
+    expect(wrapper.text()).toContain('https://mcp.notion.test/mcp')
+    expect(wrapper.text()).toContain('Streamable HTTP')
+    expect(wrapper.text()).toContain('OAuth')
+    expect(wrapper.text()).not.toContain('mcp_oauth')
+    expect(wrapper.find('[data-testid="plugin-add-credential-svc-1"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="plugin-add-credential-svc-1"]').trigger('click')
+    expect(routerPush).toHaveBeenCalledWith({
+      path: '/',
+      query: { settings: 'credentials', add_credential: 'svc-1' },
     })
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    const wrapper = mountPanel()
-    await flushPromises()
-    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).text()).toContain(
-      'Org credentials missing',
-    )
-    await wrapper.find(`[data-testid="plugin-manage-credentials-${plugin.id}"]`).trigger('click')
-    expect(routerPush).toHaveBeenCalledWith({ path: '/', query: { settings: 'credentials' } })
+    await wrapper.find('button[aria-expanded="false"]').trigger('click')
+    expect(wrapper.find('pre').text()).toContain('# Search')
+    expect(wrapper.find('pre').element.innerHTML).not.toContain('<h1>')
   })
-
-  it('disables the activation switch for unpublished plugins', async () => {
-    authMock.isAdmin = true
-    const plugin = makePlugin({ enabled: false })
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    const wrapper = mountPanel()
-    await flushPromises()
-    const toggle = wrapper.find(`[data-testid="plugin-toggle-${plugin.id}"]`)
-    expect(toggle.attributes('disabled')).toBeDefined()
-  })
-
-  it('keeps the switch enabled for org-active plugins even when unpublished (disable always allowed)', async () => {
-    authMock.isAdmin = true
-    const plugin = makePlugin({ enabled: false, org_enabled: true })
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    const wrapper = mountPanel()
-    await flushPromises()
-    const toggle = wrapper.find(`[data-testid="plugin-toggle-${plugin.id}"]`)
-    expect(toggle.attributes('disabled')).toBeUndefined()
-  })
-
-  it('does not present workspace-managed OAuth as missing organization credentials', async () => {
-    const plugin = makePlugin({
-      credential_requirements: [
-        {
-          id: 'req-oauth',
-          key: 'oauth',
-          description: '',
-          required: true,
-          service_id: 'svc-oauth',
-          service_name: 'OAuth account',
-          service_slug: 'oauth',
-          credential_type: 'mcp_oauth',
-          plugin_owned_service: true,
-        },
-      ],
-      credential_readiness: {
-        required_service_ids: ['svc-oauth'],
-        missing_required_service_ids: ['svc-oauth'],
-        ready: false,
-      },
+  it('only admins see org activation and org-plugin edit/delete inside details', async () => {
+    const orgPlugin = plugin({
+      id: 'org-plugin',
+      name: 'Local',
+      is_global: false,
+      organization_id: 'org-1',
     })
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    const wrapper = mountPanel()
-    await flushPromises()
-    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).text()).toContain(
-      'OAuth managed per workspace',
-    )
-    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).classes()).not.toContain(
-      'bg-destructive',
-    )
-    expect(wrapper.text()).not.toContain('Manage organization credentials')
-    expect(wrapper.text()).toContain('manage their connections in this plugin’s OAuth settings.')
-  })
-
-  it('labels org credential readiness explicitly', async () => {
-    const plugin = makePlugin({
-      credential_readiness: {
-        required_service_ids: ['svc-1'],
-        missing_required_service_ids: ['svc-1'],
-        ready: false,
-      },
-    })
-    pluginStoreMock.plugins = [plugin]
-    pluginStoreMock.globalPlugins = [plugin]
-    const wrapper = mountPanel()
-    await flushPromises()
-    expect(wrapper.find(`[data-testid="plugin-readiness-${plugin.id}"]`).text()).toContain(
-      'Org credentials missing',
-    )
-    expect(wrapper.text()).toContain('Manage organization credentials')
+    pluginStore.plugins = [orgPlugin]
+    pluginStore.orgPlugins = [orgPlugin]
+    let wrapper = mountPanel()
+    await wrapper.find('[data-testid="plugin-open-org-plugin"]').trigger('click')
+    expect(wrapper.find('[data-testid="plugin-toggle-org-plugin"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="plugin-edit-detail"]').exists()).toBe(false)
+    wrapper.unmount()
+    auth.isAdmin = true
+    wrapper = mountPanel()
+    await wrapper.find('[data-testid="plugin-open-org-plugin"]').trigger('click')
+    expect(wrapper.find('[data-testid="plugin-toggle-org-plugin"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="plugin-edit-detail"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="plugin-delete-detail"]').exists()).toBe(true)
   })
 })

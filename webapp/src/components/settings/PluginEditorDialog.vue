@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/select'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { useCredentialStore } from '@/stores/credentials'
+import { useAuthStore } from '@/stores/auth'
 import { usePluginStore } from '@/stores/plugins'
 import type { Plugin } from '@/types'
 import {
@@ -57,6 +58,8 @@ const open = defineModel<boolean>('open', { default: false })
 
 const pluginStore = usePluginStore()
 const credentialStore = useCredentialStore()
+const authStore = useAuthStore()
+const servicesError = ref<string | null>(null)
 
 const form: PluginFormModel = reactive(emptyPluginForm())
 const submitting = ref(false)
@@ -74,15 +77,19 @@ const transportOptions: Array<{ value: PluginMcpTransportOption; label: string }
   { value: 'sse', label: 'sse (URL)' },
 ]
 
-const serviceTypeOptions: Array<{ value: PluginServiceTypeOption; label: string }> = [
-  { value: 'env', label: 'Environment Variable' },
-  { value: 'file', label: 'Credential File' },
-  { value: 'ssh_key', label: 'SSH Key Pair' },
-  { value: 'mcp_oauth', label: 'MCP OAuth (managed connection)' },
-]
-
-const validationErrors = computed(() => validatePluginForm(form))
-const canSubmit = computed(() => validationErrors.value.length === 0 && !submitting.value)
+const validationErrors = computed(() =>
+  validatePluginForm({
+    ...form,
+    availableServices: credentialStore.servicesLoaded ? credentialStore.services : undefined,
+  }),
+)
+const canSubmit = computed(
+  () =>
+    validationErrors.value.length === 0 &&
+    credentialStore.servicesLoaded &&
+    !credentialStore.servicesError &&
+    !submitting.value,
+)
 
 function resetForm(): void {
   const fresh = props.plugin ? pluginToForm(props.plugin) : emptyPluginForm()
@@ -105,23 +112,51 @@ watch(
   ([isOpen]) => {
     if (isOpen) {
       resetForm()
-      if (!credentialStore.services.length) {
-        void credentialStore.fetchServices()
-      }
+      void loadCredentialServices()
     }
   },
   { immediate: true },
 )
 
+async function loadCredentialServices(): Promise<void> {
+  if (credentialStore.servicesLoaded || !authStore.activeOrganizationId) return
+  servicesError.value = null
+  await credentialStore.fetchServices()
+  if (credentialStore.servicesError) servicesError.value = credentialStore.servicesError
+}
+
+function syncMcpOAuthRequirement(mcpUid: string, requirementKey: string): void {
+  const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
+  if (!mcp) return
+  mcp.oauthRequirementKey = requirementKey
+  const requirement = form.requirements.find((entry) => entry.reqKey === requirementKey)
+  const service = credentialStore.services.find((entry) => entry.id === requirement?.serviceId)
+  if (service?.credential_type === 'mcp_oauth') mcp.url = service.oauth_server_url
+}
+
 function syncRequirementService(reqUid: string, serviceId: string): void {
   const req = form.requirements.find((r) => r.uid === reqUid)
   if (!req) return
   req.serviceId = serviceId
-  const svc = credentialStore.services.find((s) => s.id === serviceId)
+  const svc = credentialStore.services.find(
+    (s) =>
+      s.id === serviceId &&
+      (s.organization_id === null || s.organization_id === authStore.activeOrganizationId),
+  )
   if (svc) {
-    req.serviceName = svc.name
-    if (!req.reqKey.trim()) {
-      req.reqKey = slugify(svc.name).replace(/-/g, '_')
+    req.credentialType = svc.credential_type as PluginServiceTypeOption
+    if (!req.reqKey.trim()) req.reqKey = slugify(svc.name).replace(/-/g, '_')
+    if (svc.credential_type === 'mcp_oauth') {
+      let matchingServers = form.mcps.filter((item) => item.oauthRequirementKey === req.reqKey)
+      const oauthRequirements = form.requirements.filter(
+        (item) => item.credentialType === 'mcp_oauth',
+      )
+      const oauthServers = form.mcps.filter((item) => item.authType === 'oauth')
+      if (!matchingServers.length && oauthRequirements.length === 1 && oauthServers.length === 1) {
+        matchingServers = oauthServers
+        matchingServers[0]!.oauthRequirementKey = req.reqKey
+      }
+      for (const server of matchingServers) server.url = svc.oauth_server_url
     }
   }
 }
@@ -132,6 +167,32 @@ function syncRequirementService(reqUid: string, serviceId: string): void {
  * forbids URL; http/sse forbid command/args, env/headers follow the
  * active transport).
  */
+function addSkill(): void {
+  form.skills.push(emptySkillForm())
+  expandedSkill.value = form.skills[form.skills.length - 1]!.uid
+}
+
+function addMcp(): void {
+  form.mcps.push(emptyMcpForm())
+  expandedMcp.value = form.mcps[form.mcps.length - 1]!.uid
+}
+
+function addRequirement(): void {
+  form.requirements.push(emptyRequirementForm())
+  expandedReq.value = form.requirements[form.requirements.length - 1]!.uid
+}
+
+function syncMcpTransport(mcpUid: string, value: unknown): void {
+  setMcpTransport(mcpUid, String(value) as PluginMcpTransportOption)
+}
+
+function setMcpAuthentication(mcpUid: string, value: unknown): void {
+  const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
+  if (!mcp) return
+  mcp.authType = String(value) === 'oauth' ? 'oauth' : 'none'
+  if (mcp.authType === 'none') mcp.oauthRequirementKey = ''
+}
+
 function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): void {
   const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
   if (!mcp || mcp.transport === transport) return
@@ -149,7 +210,11 @@ function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): v
 }
 
 async function handleSubmit(): Promise<void> {
-  const errors = validatePluginForm(form)
+  if (!credentialStore.servicesLoaded || credentialStore.servicesError) return
+  const errors = validatePluginForm({
+    ...form,
+    availableServices: credentialStore.services,
+  })
   if (errors.length > 0) return
   submitting.value = true
   serverError.value = null
@@ -179,7 +244,11 @@ async function handleSubmit(): Promise<void> {
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
         <DialogDescription id="plugin-editor-description">
-          {{ isEdit ? 'Update metadata, skills, MCP servers, and credential requirements.' : 'Create an organization plugin with skills, MCP servers, and credential requirements.' }}
+          {{
+            isEdit
+              ? 'Update metadata, skills, MCP servers, and credential requirements.'
+              : 'Create an organization plugin with skills, MCP servers, and credential requirements.'
+          }}
         </DialogDescription>
       </DialogHeader>
 
@@ -191,6 +260,17 @@ async function handleSubmit(): Promise<void> {
             data-testid="plugin-editor-error"
           >
             {{ serverError }}
+          </div>
+          <div
+            v-if="servicesError"
+            role="alert"
+            class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            data-testid="plugin-services-error"
+          >
+            {{ servicesError }}
+            <Button type="button" size="sm" variant="outline" @click="loadCredentialServices"
+              >Retry</Button
+            >
           </div>
 
           <!-- Metadata -->
@@ -218,13 +298,27 @@ async function handleSubmit(): Promise<void> {
               />
             </div>
             <div class="grid gap-3 sm:grid-cols-2">
-              <div class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <div
+                class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+              >
                 <Label for="plugin-published" class="cursor-pointer font-normal">Published</Label>
-                <Switch id="plugin-published" v-model="form.published" data-testid="plugin-published" :disabled="submitting" />
+                <Switch
+                  id="plugin-published"
+                  v-model="form.published"
+                  data-testid="plugin-published"
+                  :disabled="submitting"
+                />
               </div>
-              <div class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <div
+                class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+              >
                 <Label for="plugin-enabled" class="cursor-pointer font-normal">Enabled</Label>
-                <Switch id="plugin-enabled" v-model="form.enabled" data-testid="plugin-enabled" :disabled="submitting" />
+                <Switch
+                  id="plugin-enabled"
+                  v-model="form.enabled"
+                  data-testid="plugin-enabled"
+                  :disabled="submitting"
+                />
               </div>
             </div>
           </section>
@@ -232,19 +326,26 @@ async function handleSubmit(): Promise<void> {
           <!-- Skills -->
           <section class="space-y-3" aria-label="Skills">
             <div class="flex items-center justify-between gap-3">
-              <h3 class="text-sm font-semibold text-foreground">Skills ({{ form.skills.length }})</h3>
+              <h3 class="text-sm font-semibold text-foreground">
+                Skills ({{ form.skills.length }})
+              </h3>
               <Button
                 size="sm"
                 variant="outline"
                 type="button"
                 data-testid="plugin-add-skill"
-                @click="form.skills.push(emptySkillForm()); expandedSkill = form.skills[form.skills.length - 1]!.uid"
+                @click="addSkill"
               >
                 <Plus /> Add skill
               </Button>
             </div>
-            <p class="text-xs text-muted-foreground">Markdown fragments injected into harness prompts, in list order.</p>
-            <div v-if="!form.skills.length" class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+            <p class="text-xs text-muted-foreground">
+              Markdown fragments injected into harness prompts, in list order.
+            </p>
+            <div
+              v-if="!form.skills.length"
+              class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+            >
               No skills yet.
             </div>
             <div
@@ -276,11 +377,22 @@ async function handleSubmit(): Promise<void> {
               <div v-if="expandedSkill === skill.uid || expandedSkill === null" class="space-y-3">
                 <div class="space-y-2">
                   <Label :for="`skill-name-${skill.uid}`">Name</Label>
-                  <Input :id="`skill-name-${skill.uid}`" v-model="skill.name" placeholder="Playwright basics" :disabled="submitting" />
+                  <Input
+                    :id="`skill-name-${skill.uid}`"
+                    v-model="skill.name"
+                    placeholder="Playwright basics"
+                    :disabled="submitting"
+                  />
                 </div>
                 <div class="space-y-2">
                   <Label :for="`skill-body-${skill.uid}`">Body (Markdown)</Label>
-                  <Textarea :id="`skill-body-${skill.uid}`" v-model="skill.body" :rows="5" placeholder="Use the browser tool to…" :disabled="submitting" />
+                  <Textarea
+                    :id="`skill-body-${skill.uid}`"
+                    v-model="skill.body"
+                    :rows="5"
+                    placeholder="Use the browser tool to…"
+                    :disabled="submitting"
+                  />
                 </div>
               </div>
             </div>
@@ -289,13 +401,15 @@ async function handleSubmit(): Promise<void> {
           <!-- MCP servers -->
           <section class="space-y-3" aria-label="MCP servers">
             <div class="flex items-center justify-between gap-3">
-              <h3 class="text-sm font-semibold text-foreground">MCP servers ({{ form.mcps.length }})</h3>
+              <h3 class="text-sm font-semibold text-foreground">
+                MCP servers ({{ form.mcps.length }})
+              </h3>
               <Button
                 size="sm"
                 variant="outline"
                 type="button"
                 data-testid="plugin-add-mcp"
-                @click="form.mcps.push(emptyMcpForm()); expandedMcp = form.mcps[form.mcps.length - 1]!.uid"
+                @click="addMcp"
               >
                 <Plus /> Add MCP server
               </Button>
@@ -304,7 +418,10 @@ async function handleSubmit(): Promise<void> {
               Runs inside the workspace; localhost means the workspace. stdio uses a single
               executable command with one argument per line (no shell).
             </p>
-            <div v-if="!form.mcps.length" class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+            <div
+              v-if="!form.mcps.length"
+              class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+            >
               No MCP servers yet.
             </div>
             <div
@@ -336,16 +453,28 @@ async function handleSubmit(): Promise<void> {
               <div v-if="expandedMcp === mcp.uid || expandedMcp === null" class="space-y-3">
                 <div class="space-y-2">
                   <Label :for="`mcp-name-${mcp.uid}`">Name</Label>
-                  <Input :id="`mcp-name-${mcp.uid}`" v-model="mcp.name" placeholder="Playwright" :disabled="submitting" />
+                  <Input
+                    :id="`mcp-name-${mcp.uid}`"
+                    v-model="mcp.name"
+                    placeholder="Playwright"
+                    :disabled="submitting"
+                  />
                 </div>
                 <div class="space-y-2">
                   <Label>Transport</Label>
-                  <Select :model-value="mcp.transport" @update:model-value="(v) => setMcpTransport(mcp.uid, String(v) as PluginMcpTransportOption)">
+                  <Select
+                    :model-value="mcp.transport"
+                    @update:model-value="syncMcpTransport(mcp.uid, $event)"
+                  >
                     <SelectTrigger :data-testid="`plugin-mcp-transport-${index}`">
                       <SelectValue placeholder="Select transport" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem v-for="opt in transportOptions" :key="opt.value" :value="opt.value">
+                      <SelectItem
+                        v-for="opt in transportOptions"
+                        :key="opt.value"
+                        :value="opt.value"
+                      >
                         {{ opt.label }}
                       </SelectItem>
                     </SelectContent>
@@ -353,7 +482,10 @@ async function handleSubmit(): Promise<void> {
                 </div>
                 <div v-if="mcp.transport !== 'stdio'" class="space-y-2">
                   <Label>Authentication</Label>
-                  <Select :model-value="mcp.authType" @update:model-value="(value) => { mcp.authType = String(value) === 'oauth' ? 'oauth' : 'none'; if (mcp.authType === 'none') mcp.oauthRequirementKey = '' }">
+                  <Select
+                    :model-value="mcp.authType"
+                    @update:model-value="setMcpAuthentication(mcp.uid, $event)"
+                  >
                     <SelectTrigger :data-testid="`plugin-mcp-auth-${index}`">
                       <SelectValue placeholder="Select authentication" />
                     </SelectTrigger>
@@ -364,13 +496,18 @@ async function handleSubmit(): Promise<void> {
                   </Select>
                   <div v-if="mcp.authType === 'oauth'" class="space-y-2">
                     <Label>Required OAuth credential</Label>
-                    <Select v-model="mcp.oauthRequirementKey">
+                    <Select
+                      :model-value="mcp.oauthRequirementKey"
+                      @update:model-value="syncMcpOAuthRequirement(mcp.uid, String($event))"
+                    >
                       <SelectTrigger :data-testid="`plugin-mcp-oauth-requirement-${index}`">
                         <SelectValue placeholder="Select an MCP OAuth requirement" />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem
-                          v-for="req in form.requirements.filter((entry) => entry.required && entry.credentialType === 'mcp_oauth')"
+                          v-for="req in form.requirements.filter(
+                            (entry) => entry.required && entry.credentialType === 'mcp_oauth',
+                          )"
                           :key="req.uid"
                           :value="req.reqKey"
                         >
@@ -378,68 +515,166 @@ async function handleSubmit(): Promise<void> {
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-xs text-muted-foreground">Create a required mcp_oauth credential requirement below. Provider tokens are managed by the OAuth flow and never entered here.</p>
+                    <p class="text-xs text-muted-foreground">
+                      Select a required MCP OAuth requirement backed by an existing active or
+                      inactive OAuth service. The MCP endpoint must exactly match the service.
+                    </p>
                   </div>
                 </div>
                 <div v-if="mcp.transport === 'stdio'" class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">
                     <Label :for="`mcp-command-${mcp.uid}`">Command</Label>
-                    <Input :id="`mcp-command-${mcp.uid}`" v-model="mcp.command" placeholder="npx" :disabled="submitting" />
-                    <p class="text-xs text-muted-foreground">Single executable, no shell metacharacters or inline arguments.</p>
+                    <Input
+                      :id="`mcp-command-${mcp.uid}`"
+                      v-model="mcp.command"
+                      placeholder="npx"
+                      :disabled="submitting"
+                    />
+                    <p class="text-xs text-muted-foreground">
+                      Single executable, no shell metacharacters or inline arguments.
+                    </p>
                   </div>
                   <div class="space-y-2">
                     <Label :for="`mcp-cwd-${mcp.uid}`">Working directory</Label>
-                    <Input :id="`mcp-cwd-${mcp.uid}`" v-model="mcp.cwd" placeholder="/workspace" :disabled="submitting" />
+                    <Input
+                      :id="`mcp-cwd-${mcp.uid}`"
+                      v-model="mcp.cwd"
+                      placeholder="/workspace"
+                      :disabled="submitting"
+                    />
                   </div>
                   <div class="space-y-2 sm:col-span-2">
                     <Label :for="`mcp-args-${mcp.uid}`">Arguments (one per line)</Label>
-                    <Textarea :id="`mcp-args-${mcp.uid}`" v-model="mcp.argsText" :rows="3" placeholder="-y&#10;@playwright/mcp@latest" :disabled="submitting" />
+                    <Textarea
+                      :id="`mcp-args-${mcp.uid}`"
+                      v-model="mcp.argsText"
+                      :rows="3"
+                      placeholder="-y&#10;@playwright/mcp@latest"
+                      :disabled="submitting"
+                    />
                   </div>
                 </div>
                 <div v-else class="space-y-2">
                   <Label :for="`mcp-url-${mcp.uid}`">URL</Label>
-                  <Input :id="`mcp-url-${mcp.uid}`" v-model="mcp.url" type="url" placeholder="https://mcp.example.com/mcp" :disabled="submitting" />
+                  <Input
+                    :id="`mcp-url-${mcp.uid}`"
+                    v-model="mcp.url"
+                    type="url"
+                    placeholder="https://mcp.example.com/mcp"
+                    :disabled="submitting"
+                  />
                 </div>
                 <div class="space-y-2">
                   <div class="flex items-center justify-between">
                     <Label>Environment — stdio only (injected into the process)</Label>
-                    <Button size="sm" variant="ghost" type="button" @click="mcp.env.push(emptyKeyValueRow())">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      type="button"
+                      @click="mcp.env.push(emptyKeyValueRow())"
+                    >
                       <Plus /> Add row
                     </Button>
                   </div>
-                  <div v-for="(row, rowIndex) in mcp.env" :key="row.uid" class="grid grid-cols-[1fr_1fr_auto] gap-2">
-                    <Input v-model="row.key" placeholder="KEY" :aria-label="`env key ${rowIndex + 1}`" :disabled="submitting" />
-                    <Input v-model="row.value" :placeholder="`value or ${PLACEHOLDER_EXAMPLE}`" :aria-label="`env value ${rowIndex + 1}`" :disabled="submitting" />
-                    <Button size="icon-sm" variant="ghost" type="button" :aria-label="`Remove env row ${rowIndex + 1}`" @click="mcp.env.splice(rowIndex, 1)">
+                  <div
+                    v-for="(row, rowIndex) in mcp.env"
+                    :key="row.uid"
+                    class="grid grid-cols-[1fr_1fr_auto] gap-2"
+                  >
+                    <Input
+                      v-model="row.key"
+                      placeholder="KEY"
+                      :aria-label="`env key ${rowIndex + 1}`"
+                      :disabled="submitting"
+                    />
+                    <Input
+                      v-model="row.value"
+                      :placeholder="`value or ${PLACEHOLDER_EXAMPLE}`"
+                      :aria-label="`env value ${rowIndex + 1}`"
+                      :disabled="submitting"
+                    />
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      type="button"
+                      :aria-label="`Remove env row ${rowIndex + 1}`"
+                      @click="mcp.env.splice(rowIndex, 1)"
+                    >
                       <X />
                     </Button>
                   </div>
-                  <p class="text-xs text-muted-foreground">No secret values here — reference requirement keys as &#123;&#123;credential.KEY&#125;&#125;, e.g. {{ PLACEHOLDER_EXAMPLE }}. Only used for stdio; cleared automatically for http/sse.</p>
+                  <p class="text-xs text-muted-foreground">
+                    No secret values here — reference requirement keys as
+                    &#123;&#123;credential.KEY&#125;&#125;, e.g. {{ PLACEHOLDER_EXAMPLE }}. Only
+                    used for stdio; cleared automatically for http/sse.
+                  </p>
                 </div>
                 <div v-if="mcp.transport !== 'stdio'" class="space-y-2">
                   <div class="flex items-center justify-between">
                     <Label>Headers — http/sse only (sent with requests)</Label>
-                    <Button size="sm" variant="ghost" type="button" @click="mcp.headers.push(emptyKeyValueRow())">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      type="button"
+                      @click="mcp.headers.push(emptyKeyValueRow())"
+                    >
                       <Plus /> Add row
                     </Button>
                   </div>
-                  <div v-for="(row, rowIndex) in mcp.headers" :key="row.uid" class="grid grid-cols-[1fr_1fr_auto] gap-2">
-                    <Input v-model="row.key" placeholder="Authorization" :aria-label="`header key ${rowIndex + 1}`" :disabled="submitting" />
-                    <Input v-model="row.value" :placeholder="`Bearer token or ${PLACEHOLDER_EXAMPLE}`" :aria-label="`header value ${rowIndex + 1}`" :disabled="submitting" />
-                    <Button size="icon-sm" variant="ghost" type="button" :aria-label="`Remove header row ${rowIndex + 1}`" @click="mcp.headers.splice(rowIndex, 1)">
+                  <div
+                    v-for="(row, rowIndex) in mcp.headers"
+                    :key="row.uid"
+                    class="grid grid-cols-[1fr_1fr_auto] gap-2"
+                  >
+                    <Input
+                      v-model="row.key"
+                      placeholder="Authorization"
+                      :aria-label="`header key ${rowIndex + 1}`"
+                      :disabled="submitting"
+                    />
+                    <Input
+                      v-model="row.value"
+                      :placeholder="`Bearer token or ${PLACEHOLDER_EXAMPLE}`"
+                      :aria-label="`header value ${rowIndex + 1}`"
+                      :disabled="submitting"
+                    />
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      type="button"
+                      :aria-label="`Remove header row ${rowIndex + 1}`"
+                      @click="mcp.headers.splice(rowIndex, 1)"
+                    >
                       <X />
                     </Button>
                   </div>
-                  <p class="text-xs text-muted-foreground">Reference requirement keys as &#123;&#123;credential.KEY&#125;&#125;, e.g. {{ PLACEHOLDER_EXAMPLE }}.</p>
+                  <p class="text-xs text-muted-foreground">
+                    Reference requirement keys as &#123;&#123;credential.KEY&#125;&#125;, e.g.
+                    {{ PLACEHOLDER_EXAMPLE }}.
+                  </p>
                 </div>
                 <div class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">
                     <Label :for="`mcp-startup-${mcp.uid}`">Startup timeout (s)</Label>
-                    <Input :id="`mcp-startup-${mcp.uid}`" v-model.number="mcp.startupTimeout" type="number" min="1" max="600" :disabled="submitting" />
+                    <Input
+                      :id="`mcp-startup-${mcp.uid}`"
+                      v-model.number="mcp.startupTimeout"
+                      type="number"
+                      min="1"
+                      max="600"
+                      :disabled="submitting"
+                    />
                   </div>
                   <div class="space-y-2">
                     <Label :for="`mcp-request-${mcp.uid}`">Request timeout (s)</Label>
-                    <Input :id="`mcp-request-${mcp.uid}`" v-model.number="mcp.requestTimeout" type="number" min="1" max="600" :disabled="submitting" />
+                    <Input
+                      :id="`mcp-request-${mcp.uid}`"
+                      v-model.number="mcp.requestTimeout"
+                      type="number"
+                      min="1"
+                      max="600"
+                      :disabled="submitting"
+                    />
                   </div>
                 </div>
               </div>
@@ -449,23 +684,29 @@ async function handleSubmit(): Promise<void> {
           <!-- Credential requirements -->
           <section class="space-y-3" aria-label="Credential requirements">
             <div class="flex items-center justify-between gap-3">
-              <h3 class="text-sm font-semibold text-foreground">Credential requirements ({{ form.requirements.length }})</h3>
+              <h3 class="text-sm font-semibold text-foreground">
+                Credential requirements ({{ form.requirements.length }})
+              </h3>
               <Button
                 size="sm"
                 variant="outline"
                 type="button"
                 data-testid="plugin-add-requirement"
-                @click="form.requirements.push(emptyRequirementForm()); expandedReq = form.requirements[form.requirements.length - 1]!.uid"
+                @click="addRequirement"
               >
                 <Plus /> Add requirement
               </Button>
             </div>
             <p class="text-xs text-muted-foreground">
-              Reference an existing credential service, or define a new org service for this
-              plugin. Workspaces must attach a matching credential before enabling the plugin.
-              Use the requirement key in env/headers as &#123;&#123;credential.KEY&#125;&#125;, e.g. {{ PLACEHOLDER_EXAMPLE }}.
+              Select an existing credential service. Create organization services in Settings →
+              Credential Services first. OAuth MCP endpoint must exactly match its service endpoint.
+              Use the requirement key in env/headers as &#123;&#123;credential.KEY&#125;&#125;, e.g.
+              {{ PLACEHOLDER_EXAMPLE }}.
             </p>
-            <div v-if="!form.requirements.length" class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+            <div
+              v-if="!form.requirements.length"
+              class="rounded-md border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+            >
               No credential requirements.
             </div>
             <div
@@ -498,91 +739,78 @@ async function handleSubmit(): Promise<void> {
                 <div class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">
                     <Label :for="`req-key-${req.uid}`">Key</Label>
-                    <Input :id="`req-key-${req.uid}`" v-model="req.reqKey" placeholder="api_key" :disabled="submitting" />
+                    <Input
+                      :id="`req-key-${req.uid}`"
+                      v-model="req.reqKey"
+                      placeholder="api_key"
+                      :disabled="submitting"
+                    />
                   </div>
-                  <div class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                    <Label :for="`req-required-${req.uid}`" class="cursor-pointer font-normal">Required</Label>
-                    <Switch :id="`req-required-${req.uid}`" v-model="req.required" :disabled="submitting" />
+                  <div
+                    class="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+                  >
+                    <Label :for="`req-required-${req.uid}`" class="cursor-pointer font-normal"
+                      >Required</Label
+                    >
+                    <Switch
+                      :id="`req-required-${req.uid}`"
+                      v-model="req.required"
+                      :disabled="submitting"
+                    />
                   </div>
                 </div>
                 <div class="space-y-2">
                   <Label :for="`req-desc-${req.uid}`">Description</Label>
-                  <Input :id="`req-desc-${req.uid}`" v-model="req.description" placeholder="Used for API access" :disabled="submitting" />
+                  <Input
+                    :id="`req-desc-${req.uid}`"
+                    v-model="req.description"
+                    placeholder="Used for API access"
+                    :disabled="submitting"
+                  />
                 </div>
-                <div v-if="req.credentialType === 'mcp_oauth' && req.serviceId" class="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
-                  Plugin-owned OAuth service · managed by the plugin OAuth flow.
-                </div>
-                <div v-else class="space-y-2">
-                  <Label>Service source</Label>
-                  <Select v-model="req.mode">
-                    <SelectTrigger :data-testid="`plugin-requirement-mode-${index}`">
-                      <SelectValue placeholder="Select source" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="existing">Existing service</SelectItem>
-                      <SelectItem value="new">New service</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div v-if="req.credentialType === 'mcp_oauth' && req.serviceId" class="space-y-2">
-                  <Label>OAuth service</Label>
-                  <Input :model-value="req.serviceName" readonly />
-                  <p class="text-xs text-muted-foreground">This existing OAuth service is reserved for this plugin.</p>
-                </div>
-                <div v-else-if="req.mode === 'existing'" class="space-y-2">
+                <div class="space-y-2">
                   <Label>Credential service</Label>
-                  <Select :model-value="req.serviceId" @update:model-value="(v) => syncRequirementService(req.uid, String(v))">
-                    <SelectTrigger :data-testid="`plugin-requirement-service-${index}`">
-                      <SelectValue placeholder="Select a service" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem v-for="svc in credentialStore.services" :key="svc.id" :value="svc.id">
-                        {{ svc.name }}
-                      </SelectItem>
-                    </SelectContent>
+                  <Select
+                    :model-value="req.serviceId"
+                    @update:model-value="(value) => syncRequirementService(req.uid, String(value))"
+                  >
+                    <SelectTrigger :data-testid="`plugin-requirement-service-${index}`"
+                      ><SelectValue placeholder="Select an existing service"
+                    /></SelectTrigger>
+                    <SelectContent
+                      ><SelectItem
+                        v-for="service in credentialStore.services.filter(
+                          (item) =>
+                            item.organization_id === null ||
+                            item.organization_id === authStore.activeOrganizationId,
+                        )"
+                        :key="service.id"
+                        :value="service.id"
+                        >{{ service.name }} · {{ service.credential_type
+                        }}{{ service.is_active ? '' : ' (inactive)' }}</SelectItem
+                      ></SelectContent
+                    >
                   </Select>
-                </div>
-                <div v-else-if="req.credentialType === 'mcp_oauth'" class="space-y-2 sm:col-span-2">
-                  <Label :for="`req-svc-name-${req.uid}`">OAuth service name</Label>
-                  <Input :id="`req-svc-name-${req.uid}`" v-model="req.serviceName" placeholder="Notion OAuth" :disabled="submitting" />
-                  <p class="text-xs text-muted-foreground">Tokens are managed by the provider connection, never entered here.</p>
-                </div>
-                <div v-else class="grid gap-3 sm:grid-cols-2">
-                  <div class="space-y-2">
-                    <Label :for="`req-svc-name-${req.uid}`">Service name</Label>
-                    <Input :id="`req-svc-name-${req.uid}`" v-model="req.serviceName" placeholder="Playwright Auth" :disabled="submitting" />
-                  </div>
-                  <div class="space-y-2">
-                    <Label>Type</Label>
-                    <Select v-model="req.credentialType">
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select type" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="opt in serviceTypeOptions" :key="opt.value" :value="opt.value">
-                          {{ opt.label }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div v-if="req.credentialType === 'env'" class="space-y-2">
-                    <Label :for="`req-env-${req.uid}`">Environment variable</Label>
-                    <Input :id="`req-env-${req.uid}`" v-model="req.envVarName" placeholder="PLAYWRIGHT_TOKEN" :disabled="submitting" />
-                  </div>
-                  <div v-if="req.credentialType === 'file'" class="space-y-2">
-                    <Label :for="`req-path-${req.uid}`">Target path</Label>
-                    <Input :id="`req-path-${req.uid}`" v-model="req.targetPath" placeholder="~/.config/auth.json" :disabled="submitting" />
-                  </div>
-                  <div class="space-y-2 sm:col-span-2">
-                    <Label :for="`req-label-${req.uid}`">Label (optional)</Label>
-                    <Input :id="`req-label-${req.uid}`" v-model="req.label" placeholder="API token" :disabled="submitting" />
-                  </div>
+                  <p
+                    v-if="req.credentialType === 'mcp_oauth' && req.serviceId"
+                    class="break-all text-xs text-muted-foreground"
+                  >
+                    Fixed OAuth endpoint:
+                    {{
+                      credentialStore.services.find((service) => service.id === req.serviceId)
+                        ?.oauth_server_url
+                    }}. Match the MCP URL exactly.
+                  </p>
                 </div>
               </div>
             </div>
           </section>
 
-          <div v-if="validationErrors.length" class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive" data-testid="plugin-editor-validation">
+          <div
+            v-if="validationErrors.length"
+            class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            data-testid="plugin-editor-validation"
+          >
             <ul class="list-disc space-y-0.5 pl-5">
               <li v-for="err in validationErrors" :key="err">{{ err }}</li>
             </ul>

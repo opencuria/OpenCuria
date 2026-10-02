@@ -395,6 +395,7 @@ def test_clone_captured_image_while_origin_deleting(client: Client, monkeypatch)
     assert "workspace_id" in body
     assert "task_id" in body
     assert "pending deletion" not in response.content.decode().lower()
+    assert body["plugin_ids"] == []
 
 
 @pytest.mark.django_db

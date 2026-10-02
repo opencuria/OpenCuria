@@ -1,23 +1,17 @@
-<!--
-  PluginsPanel — org-visible plugin catalog (global + org-owned).
-
-  All members can see catalog/status; only admins see mutations
-  (create/edit/delete/activation toggles). Backend enforces roles.
--->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Pencil, Plus, Puzzle, Trash2 } from '@lucide/vue'
+import { ArrowLeft, Pencil, Plus, Puzzle, Trash2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
-import SettingsRow from './SettingsRow.vue'
 import PluginEditorDialog from './PluginEditorDialog.vue'
-import PluginOAuthConnections from './PluginOAuthConnections.vue'
-import { useNotificationStore } from '@/stores/notifications'
+import { usePluginStore } from '@/stores/plugins'
+import { useAuthStore } from '@/stores/auth'
+import type { Plugin } from '@/types'
 import {
   Dialog,
   DialogContent,
@@ -26,189 +20,139 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useAuthStore } from '@/stores/auth'
-import { usePluginStore } from '@/stores/plugins'
-import { useCredentialStore } from '@/stores/credentials'
-import type { Plugin } from '@/types'
 
-const authStore = useAuthStore()
+const props = defineProps<{ initialPluginId?: string; contextVersion?: number }>()
 const pluginStore = usePluginStore()
-const credentialStore = useCredentialStore()
+const authStore = useAuthStore()
 const router = useRouter()
 const route = useRoute()
-const notifications = useNotificationStore()
-
 const isAdmin = computed(() => authStore.isAdmin)
-const activeOrgId = computed(() => authStore.activeOrganizationId)
-
+const selectedId = ref<string | null>(
+  props.initialPluginId ?? (typeof route.query.plugin === 'string' ? route.query.plugin : null),
+)
+const selectedPlugin = computed(
+  () => pluginStore.plugins.find((plugin) => plugin.id === selectedId.value) ?? null,
+)
+const detailUnavailable = computed(
+  () =>
+    selectedId.value !== null &&
+    !pluginStore.loading &&
+    pluginStore.loadedOrgId === authStore.activeOrganizationId &&
+    !selectedPlugin.value,
+)
 const editorOpen = ref(false)
 const editingPlugin = ref<Plugin | null>(null)
 const deletingPlugin = ref<Plugin | null>(null)
 const deleting = ref(false)
-
-function missingOAuthServiceIds(plugin: Plugin): Set<string> {
-  const missing = new Set(plugin.credential_readiness?.missing_required_service_ids ?? [])
-  return new Set(
-    plugin.credential_requirements
-      .filter((requirement) => requirement.credential_type === 'mcp_oauth' && missing.has(requirement.service_id))
-      .map((requirement) => requirement.service_id),
-  )
-}
-
-function hasMissingOrganizationCredentials(plugin: Plugin): boolean {
-  const readiness = plugin.credential_readiness
-  if (!readiness || readiness.ready) return false
-  const oauthServiceIds = new Set(
-    plugin.credential_requirements
-      .filter((requirement) => requirement.credential_type === 'mcp_oauth')
-      .map((requirement) => requirement.service_id),
-  )
-  return readiness.missing_required_service_ids.some((serviceId) => !oauthServiceIds.has(serviceId))
-}
-
-function readinessOkay(plugin: Plugin): boolean {
-  return Boolean(
-    plugin.credential_readiness?.ready ||
-      (missingOAuthServiceIds(plugin).size > 0 && !hasMissingOrganizationCredentials(plugin)),
-  )
-}
-
-function readinessLabel(plugin: Plugin): string {
-  const readiness = plugin.credential_readiness
-  if (!readiness) return 'Unknown'
-  if (readiness.ready) return 'Org credentials ready'
-  if (missingOAuthServiceIds(plugin).size && !hasMissingOrganizationCredentials(plugin)) {
-    return 'OAuth managed per workspace'
-  }
-  return 'Org credentials missing'
-}
-
-function readinessHint(plugin: Plugin): string {
-  if (plugin.credential_readiness?.ready) {
-    return 'Organization credentials are configured for this plugin.'
-  }
-  if (missingOAuthServiceIds(plugin).size) {
-    const organizationMissing = hasMissingOrganizationCredentials(plugin)
-    return organizationMissing
-      ? 'OAuth accounts are managed separately and attached to workspaces; other organization credentials are also missing.'
-      : 'OAuth accounts are managed separately and attached to each workspace; manage their connections in this plugin’s OAuth settings.'
-  }
-  return 'Organization credentials missing for this plugin.'
-}
-
-function activationDisabled(plugin: Plugin): boolean {
-  if (plugin.org_enabled) return false
-  return !plugin.enabled || !plugin.published
-}
+const expandedSkills = ref<string[]>([])
 
 watch(
-  activeOrgId,
+  () => authStore.activeOrganizationId,
   () => {
+    // Keep the requested detail while its new-organization catalog is loading.
     void pluginStore.reload()
   },
   { immediate: true },
 )
-
 watch(
-  () => route.query.mcp_oauth,
-  (result) => {
-    if (result !== 'connected' && result !== 'error') return
-    if (result === 'connected') {
-      notifications.success(
-        'OAuth connected',
-        'Your MCP account is connected. Attach its credential to each workspace that needs it.',
-      )
-    } else {
-      notifications.error(
-        'OAuth connection failed',
-        'The provider connection was not completed. You can try again from this plugin.',
-      )
-    }
-    void pluginStore.reload().then(async () => {
-      await credentialStore.fetchCredentials()
-      await Promise.all(
-        (pluginStore.plugins ?? []).flatMap((plugin) =>
-          (plugin.mcp_servers ?? [])
-            .filter((server) => server.auth_type === 'oauth')
-            .map((server) => pluginStore.fetchMcpOAuthStatus(plugin.id, server.id)),
-        ),
-      )
-    })
-    const query = { ...route.query }
-    delete query.mcp_oauth
-    void router.replace({ path: route.path, query }).catch(() => undefined)
+  () => route.query.plugin,
+  (id) => {
+    if (typeof id === 'string') selectedId.value = id
+    else if (selectedId.value && !props.initialPluginId) selectedId.value = null
   },
-  { immediate: true },
 )
-
 watch(
-  () =>
-    (pluginStore.plugins ?? [])
-      .map(
-        (plugin) =>
-          `${plugin.id}:${(plugin.mcp_servers ?? [])
-            .filter((server) => server.auth_type === 'oauth')
-            .map((server) => server.id)
-            .join(',')}`,
-      )
-      .join('|'),
-  () => {
-    for (const plugin of pluginStore.plugins ?? []) {
-      for (const server of (plugin.mcp_servers ?? []).filter(
-        (entry) => entry.auth_type === 'oauth',
-      )) {
-        const key = `${plugin.id}:${server.id}`
-        if (
-          !pluginStore.getMcpOAuthStatus(plugin.id, server.id) &&
-          !pluginStore.mcpOAuthLoading[key]
-        ) {
-          void pluginStore.fetchMcpOAuthStatus(plugin.id, server.id)
-        }
-      }
+  () => [props.initialPluginId, props.contextVersion] as const,
+  ([id]) => {
+    if (id) {
+      selectedId.value = id
+      if (route.query.plugin !== id)
+        void router
+          .replace({ path: route.path, query: { ...route.query, plugin: id } })
+          .catch(() => undefined)
     }
   },
-  { immediate: true },
 )
-
-defineExpose({ activationDisabled, readinessLabel, readinessHint })
-
-function openCreate(): void {
-  editingPlugin.value = null
-  editorOpen.value = true
+function openPlugin(plugin: Plugin): void {
+  selectedId.value = plugin.id
+  expandedSkills.value = []
+  void router
+    .replace({ path: route.path, query: { ...route.query, plugin: plugin.id } })
+    .catch(() => undefined)
 }
-
+function backToList(): void {
+  selectedId.value = null
+  const query = { ...route.query }
+  delete query.plugin
+  void router.replace({ path: route.path, query }).catch(() => undefined)
+}
+function addCredential(serviceId: string): void {
+  void router.push({ path: '/', query: { settings: 'credentials', add_credential: serviceId } })
+}
 function openEdit(plugin: Plugin): void {
   editingPlugin.value = plugin
+  editorOpen.value = true
+}
+function createPlugin(): void {
+  editingPlugin.value = null
   editorOpen.value = true
 }
 
 async function handleToggle(plugin: Plugin, active: boolean): Promise<void> {
   await pluginStore.toggleActivation(plugin.id, active)
 }
-
 async function handleDelete(): Promise<void> {
   if (!deletingPlugin.value) return
   deleting.value = true
   const ok = await pluginStore.deletePlugin(deletingPlugin.value.id)
   deleting.value = false
-  if (ok) deletingPlugin.value = null
+  if (ok) {
+    selectedId.value = null
+    deletingPlugin.value = null
+  }
+}
+function toggleSkill(id: string): void {
+  expandedSkills.value = expandedSkills.value.includes(id)
+    ? expandedSkills.value.filter((entry) => entry !== id)
+    : [...expandedSkills.value, id]
+}
+function mcpEndpoint(server: Plugin['mcp_servers'][number]): string {
+  return server.transport === 'stdio'
+    ? [server.command, ...server.args].filter(Boolean).join(' ')
+    : server.url
 }
 
-async function manageCredentials(): Promise<void> {
-  await router.push({ path: '/', query: { settings: 'credentials' } })
+function availabilityLabel(plugin: Plugin): string {
+  if (!plugin.enabled || !plugin.published) return 'Unpublished'
+  return plugin.org_enabled ? 'Active' : 'Inactive'
+}
+
+function transportLabel(transport: string): string {
+  return transport === 'streamable_http'
+    ? 'Streamable HTTP'
+    : transport === 'stdio'
+      ? 'STDIO'
+      : transport.toUpperCase()
+}
+
+function credentialTypeLabel(type: string): string {
+  return type === 'mcp_oauth' ? 'OAuth' : type.toUpperCase()
 }
 </script>
 
 <template>
   <div class="space-y-6">
     <SettingsSection
-      description="Reusable skill + MCP bundles. Explicit opt-in: enable a plugin for this organization, then attach it to workspaces."
+      :description="
+        selectedPlugin
+          ? 'Plugin capabilities and credential dependencies.'
+          : 'Browse reusable skills and MCP server bundles available to this organization.'
+      "
     >
-      <template v-if="isAdmin" #actions>
-        <Button size="sm" data-testid="plugin-create" @click="openCreate">
-          <Plus />
-          New Plugin
-        </Button>
+      <template v-if="isAdmin && !selectedPlugin" #actions>
+        <Button size="sm" data-testid="plugin-create" @click="createPlugin"
+          ><Plus /> New Plugin</Button
+        >
       </template>
 
       <div
@@ -217,7 +161,6 @@ async function manageCredentials(): Promise<void> {
       >
         <LoadingSpinner :size="24" />
       </div>
-
       <div
         v-else-if="pluginStore.error"
         class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
@@ -225,7 +168,180 @@ async function manageCredentials(): Promise<void> {
       >
         {{ pluginStore.error }}
       </div>
+      <div v-else-if="selectedPlugin" class="space-y-6" data-testid="plugin-detail">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="flex min-w-0 items-start gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              aria-label="Back to plugins"
+              data-testid="plugin-back"
+              @click="backToList"
+              ><ArrowLeft /> Back</Button
+            >
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 class="text-lg font-semibold">{{ selectedPlugin.name }}</h2>
+                <Badge variant="secondary">{{
+                  selectedPlugin.is_global ? 'Global' : 'Organization'
+                }}</Badge>
+              </div>
+              <p class="whitespace-pre-wrap text-sm text-muted-foreground">
+                {{ selectedPlugin.description || 'No description provided.' }}
+              </p>
+            </div>
+          </div>
+          <div v-if="isAdmin" class="flex items-center gap-2">
+            <span class="text-xs text-muted-foreground">{{
+              selectedPlugin.org_enabled ? 'Active for organization' : 'Inactive for organization'
+            }}</span>
+            <Switch
+              :model-value="selectedPlugin.org_enabled"
+              :disabled="
+                (!selectedPlugin.org_enabled &&
+                  (!selectedPlugin.enabled || !selectedPlugin.published)) ||
+                pluginStore.togglingIds.includes(selectedPlugin.id)
+              "
+              :aria-label="
+                selectedPlugin.org_enabled
+                  ? `Disable ${selectedPlugin.name}`
+                  : `Enable ${selectedPlugin.name}`
+              "
+              :data-testid="`plugin-toggle-${selectedPlugin.id}`"
+              @update:model-value="(value) => handleToggle(selectedPlugin!, Boolean(value))"
+            />
+            <template v-if="!selectedPlugin.is_global">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="plugin-edit-detail"
+                @click="openEdit(selectedPlugin!)"
+                ><Pencil /> Edit</Button
+              >
+              <Button
+                variant="destructive"
+                size="sm"
+                data-testid="plugin-delete-detail"
+                @click="deletingPlugin = selectedPlugin"
+                ><Trash2 /> Delete</Button
+              >
+            </template>
+          </div>
+        </div>
+        <p
+          v-if="!selectedPlugin.enabled || !selectedPlugin.published"
+          class="text-xs text-muted-foreground"
+        >
+          This plugin is not currently published for workspace use.
+        </p>
 
+        <section aria-label="Skills" class="space-y-2">
+          <h3 class="text-sm font-semibold">Skills ({{ selectedPlugin.skills.length }})</h3>
+          <div
+            v-if="!selectedPlugin.skills.length"
+            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+          >
+            No skills.
+          </div>
+          <div
+            v-for="skill in [...selectedPlugin.skills].sort((a, b) => a.position - b.position)"
+            :key="skill.id"
+            class="rounded-md border border-border"
+          >
+            <button
+              type="button"
+              class="flex w-full items-center justify-between gap-3 p-3 text-left text-sm font-medium"
+              :aria-expanded="expandedSkills.includes(skill.id)"
+              @click="toggleSkill(skill.id)"
+            >
+              <span>{{ skill.name }}</span
+              ><span class="text-xs text-muted-foreground">{{
+                expandedSkills.includes(skill.id) ? 'Hide' : 'Show'
+              }}</span>
+            </button>
+            <pre
+              v-if="expandedSkills.includes(skill.id)"
+              class="whitespace-pre-wrap break-words border-t border-border px-3 py-3 font-sans text-sm text-muted-foreground"
+              >{{ skill.body }}</pre
+            >
+          </div>
+        </section>
+
+        <section aria-label="MCP servers" class="space-y-2">
+          <h3 class="text-sm font-semibold">
+            MCP servers ({{ selectedPlugin.mcp_servers.length }})
+          </h3>
+          <div
+            v-if="!selectedPlugin.mcp_servers.length"
+            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+          >
+            No MCP servers.
+          </div>
+          <div
+            v-for="server in selectedPlugin.mcp_servers"
+            :key="server.id"
+            class="rounded-md border border-border p-3"
+          >
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium">{{ server.name }}</span
+              ><Badge variant="outline">{{ transportLabel(server.transport) }}</Badge
+              ><Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
+            </div>
+            <p class="mt-1 break-all font-mono text-xs text-muted-foreground">
+              {{ mcpEndpoint(server) }}
+            </p>
+          </div>
+        </section>
+
+        <section aria-label="Credential services" class="space-y-2">
+          <h3 class="text-sm font-semibold">
+            Credential services ({{ selectedPlugin.credential_requirements.length }})
+          </h3>
+          <div
+            v-if="!selectedPlugin.credential_requirements.length"
+            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+          >
+            No credential services required.
+          </div>
+          <div
+            v-for="requirement in selectedPlugin.credential_requirements"
+            :key="requirement.id"
+            class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
+          >
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-medium">{{ requirement.service_name }}</span
+                ><Badge variant="outline">{{ credentialTypeLabel(requirement.credential_type) }}</Badge
+                ><Badge :variant="requirement.required ? 'secondary' : 'outline'">{{
+                  requirement.required ? 'Required' : 'Optional'
+                }}</Badge>
+              </div>
+              <p v-if="requirement.description" class="text-sm text-muted-foreground">
+                {{ requirement.description }}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              :data-testid="`plugin-add-credential-${requirement.service_id}`"
+              @click="addCredential(requirement.service_id)"
+              >Add Credential</Button
+            >
+          </div>
+        </section>
+      </div>
+      <div
+        v-else-if="detailUnavailable"
+        class="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-4"
+        data-testid="plugin-detail-unavailable"
+      >
+        <p class="text-sm text-destructive">
+          This plugin is unavailable in the current organization or no longer exists.
+        </p>
+        <Button variant="outline" size="sm" data-testid="plugin-back" @click="backToList"
+          ><ArrowLeft /> Back to plugins</Button
+        >
+      </div>
       <div
         v-else-if="!pluginStore.plugins.length"
         class="overflow-hidden rounded-lg border border-border bg-card"
@@ -233,222 +349,59 @@ async function manageCredentials(): Promise<void> {
         <EmptyState
           :icon="Puzzle"
           title="No plugins yet"
-          description="Global plugins appear here automatically; admins can create organization plugins."
+          description="Plugins available to this organization will appear here."
         />
       </div>
-
-      <div v-else class="space-y-6">
-        <section v-if="pluginStore.globalPlugins.length" aria-label="Global plugins">
-          <h3 class="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            OpenCuria ({{ pluginStore.globalPlugins.length }})
-          </h3>
-          <div
-            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
-          >
-            <SettingsRow v-for="plugin in pluginStore.globalPlugins" :key="plugin.id">
-              <template #icon>
-                <Puzzle :size="16" />
-              </template>
-              <div class="min-w-0 space-y-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-sm font-medium text-foreground">{{ plugin.name }}</span>
-                  <Badge variant="secondary">Global</Badge>
-                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline"
-                    >Unpublished</Badge
-                  >
-                  <Badge v-else-if="plugin.org_enabled" variant="default">Active</Badge>
-                  <Badge v-else variant="outline">Inactive</Badge>
-                  <Badge
-                    :variant="readinessOkay(plugin) ? 'secondary' : 'destructive'"
-                    :data-testid="`plugin-readiness-${plugin.id}`"
-                  >
-                    {{ readinessLabel(plugin) }}
-                  </Badge>
-                </div>
-                <p v-if="plugin.description" class="text-sm text-muted-foreground line-clamp-2">
-                  {{ plugin.description }}
-                </p>
-                <p class="text-xs text-muted-foreground">
-                  {{ plugin.skills.length }} skill{{ plugin.skills.length === 1 ? '' : 's' }} ·
-                  {{ plugin.mcp_servers.length }} MCP server{{
-                    plugin.mcp_servers.length === 1 ? '' : 's'
-                  }}
-                </p>
-                <PluginOAuthConnections
-                  v-for="server in plugin.mcp_servers.filter(
-                    (entry) => entry.auth_type === 'oauth',
-                  )"
-                  :key="server.id"
-                  :plugin="plugin"
-                  :server="server"
-                />
-                <p
-                  v-if="!plugin.credential_readiness?.ready"
-                  class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
-                >
-                  <span>{{ readinessHint(plugin) }}</span>
-                  <button
-                    v-if="hasMissingOrganizationCredentials(plugin)"
-                    type="button"
-                    class="underline"
-                    :data-testid="`plugin-manage-credentials-${plugin.id}`"
-                    @click="manageCredentials"
-                  >
-                    Manage organization credentials
-                  </button>
-                </p>
-              </div>
-              <template v-if="isAdmin" #actions>
-                <div class="flex items-center gap-2">
-                  <Switch
-                    :model-value="plugin.org_enabled"
-                    :disabled="
-                      activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)
-                    "
-                    :aria-label="
-                      plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`
-                    "
-                    :data-testid="`plugin-toggle-${plugin.id}`"
-                    @update:model-value="(v) => handleToggle(plugin, Boolean(v))"
-                  />
-                </div>
-              </template>
-            </SettingsRow>
+      <div v-else class="grid gap-2 sm:grid-cols-2" data-testid="plugin-catalog">
+        <button
+          v-for="plugin in pluginStore.plugins"
+          :key="plugin.id"
+          type="button"
+          class="group flex min-h-28 flex-col items-start gap-2 rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          :data-testid="`plugin-open-${plugin.id}`"
+          @click="openPlugin(plugin)"
+        >
+          <div class="flex w-full items-center justify-between gap-2">
+            <span class="flex min-w-0 items-center gap-2 text-sm font-semibold"
+              ><Puzzle :size="16" class="shrink-0 text-muted-foreground" /><span class="truncate">{{
+                plugin.name
+              }}</span></span
+            ><Badge variant="outline">{{ plugin.is_global ? 'Global' : 'Organization' }}</Badge>
           </div>
-        </section>
-
-        <section v-if="pluginStore.orgPlugins.length || isAdmin" aria-label="Organization plugins">
-          <h3 class="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            Organization ({{ pluginStore.orgPlugins.length }})
-          </h3>
-          <div
-            v-if="!pluginStore.orgPlugins.length"
-            class="overflow-hidden rounded-lg border border-dashed border-border bg-card px-4 py-6 text-center text-sm text-muted-foreground"
-          >
-            No organization plugins yet.
+          <p class="line-clamp-2 text-sm text-muted-foreground">
+            {{ plugin.description || 'No description provided.' }}
+          </p>
+          <div class="mt-auto flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <Badge :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ availabilityLabel(plugin) }}</Badge>
+            <span>{{ plugin.skills.length }} {{ plugin.skills.length === 1 ? 'skill' : 'skills' }} ·</span>
+            <span>{{ plugin.mcp_servers.length }} {{ plugin.mcp_servers.length === 1 ? 'MCP server' : 'MCP servers' }} ·</span>
+            <span>{{ plugin.credential_requirements.length }} {{ plugin.credential_requirements.length === 1 ? 'service' : 'services' }}</span>
           </div>
-          <div
-            v-else
-            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
-          >
-            <SettingsRow v-for="plugin in pluginStore.orgPlugins" :key="plugin.id">
-              <template #icon>
-                <Puzzle :size="16" />
-              </template>
-              <div class="min-w-0 space-y-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="text-sm font-medium text-foreground">{{ plugin.name }}</span>
-                  <Badge variant="secondary">Organization</Badge>
-                  <Badge v-if="!plugin.enabled || !plugin.published" variant="outline"
-                    >Unpublished</Badge
-                  >
-                  <Badge v-else-if="plugin.org_enabled" variant="default">Active</Badge>
-                  <Badge v-else variant="outline">Inactive</Badge>
-                  <Badge
-                    :variant="readinessOkay(plugin) ? 'secondary' : 'destructive'"
-                    :data-testid="`plugin-readiness-${plugin.id}`"
-                  >
-                    {{ readinessLabel(plugin) }}
-                  </Badge>
-                </div>
-                <p v-if="plugin.description" class="text-sm text-muted-foreground line-clamp-2">
-                  {{ plugin.description }}
-                </p>
-                <p class="text-xs text-muted-foreground">
-                  {{ plugin.skills.length }} skill{{ plugin.skills.length === 1 ? '' : 's' }} ·
-                  {{ plugin.mcp_servers.length }} MCP server{{
-                    plugin.mcp_servers.length === 1 ? '' : 's'
-                  }}
-                </p>
-                <PluginOAuthConnections
-                  v-for="server in plugin.mcp_servers.filter(
-                    (entry) => entry.auth_type === 'oauth',
-                  )"
-                  :key="server.id"
-                  :plugin="plugin"
-                  :server="server"
-                />
-                <p
-                  v-if="!plugin.credential_readiness?.ready"
-                  class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
-                >
-                  <span>{{ readinessHint(plugin) }}</span>
-                  <button
-                    v-if="hasMissingOrganizationCredentials(plugin)"
-                    type="button"
-                    class="underline"
-                    :data-testid="`plugin-manage-credentials-${plugin.id}`"
-                    @click="manageCredentials"
-                  >
-                    Manage organization credentials
-                  </button>
-                </p>
-              </div>
-              <template v-if="isAdmin" #actions>
-                <div class="flex items-center gap-1">
-                  <Switch
-                    :model-value="plugin.org_enabled"
-                    :disabled="
-                      activationDisabled(plugin) || pluginStore.togglingIds.includes(plugin.id)
-                    "
-                    :aria-label="
-                      plugin.org_enabled ? `Disable ${plugin.name}` : `Enable ${plugin.name}`
-                    "
-                    :data-testid="`plugin-toggle-${plugin.id}`"
-                    @update:model-value="(v) => handleToggle(plugin, Boolean(v))"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="Edit plugin"
-                    :data-testid="`plugin-edit-${plugin.id}`"
-                    @click="openEdit(plugin)"
-                  >
-                    <Pencil />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    class="text-destructive hover:text-destructive"
-                    title="Delete plugin"
-                    :data-testid="`plugin-delete-${plugin.id}`"
-                    @click="deletingPlugin = plugin"
-                  >
-                    <Trash2 />
-                  </Button>
-                </div>
-              </template>
-            </SettingsRow>
-          </div>
-        </section>
+        </button>
       </div>
     </SettingsSection>
 
     <PluginEditorDialog v-model:open="editorOpen" :plugin="editingPlugin" />
-
-    <Dialog :open="!!deletingPlugin" @update:open="(v) => !v && (deletingPlugin = null)">
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete Plugin</DialogTitle>
-          <DialogDescription>
-            Delete {{ deletingPlugin?.name }}? This removes its skills, MCP servers, and
-            requirements. This cannot be undone.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" :disabled="deleting" @click="deletingPlugin = null">
-            Cancel
-          </Button>
-          <Button
+    <Dialog :open="!!deletingPlugin" @update:open="(value) => !value && (deletingPlugin = null)">
+      <DialogContent
+        ><DialogHeader
+          ><DialogTitle>Delete Plugin</DialogTitle
+          ><DialogDescription
+            >Delete {{ deletingPlugin?.name }}? Its skills, MCP servers, and requirements will be
+            removed. This cannot be undone.</DialogDescription
+          ></DialogHeader
+        ><DialogFooter
+          ><Button variant="outline" :disabled="deleting" @click="deletingPlugin = null"
+            >Cancel</Button
+          ><Button
             variant="destructive"
             data-testid="plugin-delete-confirm"
             :disabled="deleting"
             @click="handleDelete"
-          >
-            {{ deleting ? 'Deleting…' : 'Delete' }}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
+            >{{ deleting ? 'Deleting…' : 'Delete' }}</Button
+          ></DialogFooter
+        ></DialogContent
+      >
     </Dialog>
   </div>
 </template>

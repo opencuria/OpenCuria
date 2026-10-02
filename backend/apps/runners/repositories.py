@@ -24,10 +24,10 @@ from .enums import (
     WorkspaceStatus,
 )
 from .models import (
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     RunnerSystemMetrics,
     Task,
     Workspace,
@@ -92,8 +92,12 @@ class RunnerRepository:
         runner.disconnected_at = None
         runner.save(
             update_fields=[
-                "status", "sid", "available_runtimes",
-                "connected_at", "disconnected_at", "updated_at",
+                "status",
+                "sid",
+                "available_runtimes",
+                "connected_at",
+                "disconnected_at",
+                "updated_at",
             ]
         )
         return runner
@@ -104,9 +108,7 @@ class RunnerRepository:
         runner.status = RunnerStatus.OFFLINE
         runner.sid = ""
         runner.disconnected_at = timezone.now()
-        runner.save(
-            update_fields=["status", "sid", "disconnected_at", "updated_at"]
-        )
+        runner.save(update_fields=["status", "sid", "disconnected_at", "updated_at"])
         return runner
 
     @staticmethod
@@ -167,21 +169,21 @@ class RunnerSystemMetricsRepository:
         )
 
     @staticmethod
-    def get_history(runner_id: uuid.UUID, since: datetime) -> QuerySet[RunnerSystemMetrics]:
+    def get_history(
+        runner_id: uuid.UUID, since: datetime
+    ) -> QuerySet[RunnerSystemMetrics]:
         """Return all metrics since a given timestamp."""
-        return (
-            RunnerSystemMetrics.objects.filter(
-                runner_id=runner_id,
-                timestamp__gte=since,
-            )
-            .order_by("timestamp")
-        )
+        return RunnerSystemMetrics.objects.filter(
+            runner_id=runner_id,
+            timestamp__gte=since,
+        ).order_by("timestamp")
 
     @staticmethod
     def purge_old(runner_id: uuid.UUID, keep_hours: int = 24) -> int:
         """Delete metrics older than *keep_hours* hours. Returns count deleted."""
-        from django.utils import timezone as tz
         from datetime import timedelta
+
+        from django.utils import timezone as tz
 
         cutoff = tz.now() - timedelta(hours=keep_hours)
         deleted, _ = RunnerSystemMetrics.objects.filter(
@@ -193,6 +195,7 @@ class RunnerSystemMetricsRepository:
 # ---------------------------------------------------------------------------
 # Workspace Repository
 # ---------------------------------------------------------------------------
+
 
 def _active_harness_exists():
     """Return an Exists() annotation for busy harness sessions."""
@@ -208,11 +211,13 @@ class WorkspaceRepository:
     """Data access for Workspace records."""
 
     @staticmethod
-    def get_by_id(workspace_id: uuid.UUID) -> Workspace | None:
-        """Fetch a workspace by its ID."""
+    def get_by_id(workspace_id: uuid.UUID, *, lock: bool = False) -> Workspace | None:
+        """Fetch a workspace by ID, optionally acquiring a row lock."""
+        queryset = Workspace.objects.filter(id=workspace_id)
+        if lock:
+            queryset = queryset.select_for_update()
         return (
-            Workspace.objects.filter(id=workspace_id)
-            .select_related(
+            queryset.select_related(
                 "runner",
                 "runner__organization",
                 "created_by",
@@ -308,14 +313,83 @@ class WorkspaceRepository:
         return workspace
 
     @staticmethod
+    def list_attached_credentials(workspace_id: uuid.UUID) -> list[Any]:
+        """Return workspace credential rows with their service metadata."""
+        workspace = Workspace.objects.filter(id=workspace_id).first()
+        if workspace is None:
+            return []
+        return list(workspace.credentials.all().select_related("service"))
+
+    @staticmethod
+    def list_ordinary_credential_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return attached non-OAuth credential IDs for runner sync comparison."""
+        from django.apps import apps
+
+        credential_model = apps.get_model("credentials", "Credential")
+        return set(
+            credential_model.objects.filter(workspaces__id=workspace_id)
+            .exclude(service__credential_type="mcp_oauth")
+            .values_list("id", flat=True)
+        )
+
+    @staticmethod
     def set_credentials(workspace: Workspace, credentials: list) -> Workspace:
-        """Replace the credentials attached to a workspace."""
+        """Replace the attachment relation without claiming on-disk state."""
         workspace.credentials.set(credentials)
         workspace.save(update_fields=["updated_at"])
         cache = getattr(workspace, "_prefetched_objects_cache", None)
         if cache is not None:
             cache.pop("credentials", None)
         return workspace
+
+    @staticmethod
+    def replace_configuration(
+        workspace: Workspace,
+        *,
+        name: str | None,
+        credentials: list | None,
+        plugin_ids: list[uuid.UUID] | None,
+        enabled_by,
+        qemu_values: tuple | None = None,
+        desktop_values: tuple | None = None,
+    ) -> Workspace:
+        """Replace the selected workspace associations after service validation."""
+        if name is not None:
+            workspace.name = name
+            workspace.save(update_fields=["name", "updated_at"])
+        if credentials is not None:
+            workspace.credentials.set(credentials)
+        if qemu_values is not None:
+            (
+                workspace.qemu_vcpus,
+                workspace.qemu_memory_mb,
+                workspace.qemu_disk_size_gb,
+            ) = qemu_values
+            workspace.save(
+                update_fields=[
+                    "qemu_vcpus",
+                    "qemu_memory_mb",
+                    "qemu_disk_size_gb",
+                    "updated_at",
+                ]
+            )
+        if desktop_values is not None:
+            workspace.desktop_width, workspace.desktop_height = desktop_values
+            workspace.save(
+                update_fields=["desktop_width", "desktop_height", "updated_at"]
+            )
+        if plugin_ids is not None:
+            from apps.plugins.repositories import WorkspacePluginActivationRepository
+
+            WorkspacePluginActivationRepository.replace_for_workspace(
+                workspace, list(dict.fromkeys(plugin_ids)), enabled_by=enabled_by
+            )
+        if credentials is not None or plugin_ids is not None:
+            workspace.save(update_fields=["updated_at"])
+            cache = getattr(workspace, "_prefetched_objects_cache", None)
+            if cache is not None:
+                cache.pop("credentials", None)
+        return WorkspaceRepository.get_by_id(workspace.id)
 
     @staticmethod
     def touch_activity(
@@ -420,7 +494,14 @@ class WorkspaceRepository:
         workspace.qemu_vcpus = qemu_vcpus
         workspace.qemu_memory_mb = qemu_memory_mb
         workspace.qemu_disk_size_gb = qemu_disk_size_gb
-        workspace.save(update_fields=["qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb", "updated_at"])
+        workspace.save(
+            update_fields=[
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
         return workspace
 
     @staticmethod
@@ -450,7 +531,9 @@ class WorkspaceRepository:
         image_instance_id: uuid.UUID,
     ) -> QuerySet[Workspace]:
         """Return workspaces that still depend on an image instance."""
-        return Workspace.objects.filter(base_image_instance_id=image_instance_id).exclude(
+        return Workspace.objects.filter(
+            base_image_instance_id=image_instance_id
+        ).exclude(
             status__in=[
                 WorkspaceStatus.PENDING_DELETION,
                 WorkspaceStatus.DELETING,
@@ -551,9 +634,7 @@ class WorkspaceProcessRepository:
     ) -> WorkspaceProcess | None:
         """Fetch a process scoped to a workspace (None when foreign)."""
         return (
-            WorkspaceProcess.objects.filter(
-                id=process_id, workspace_id=workspace_id
-            )
+            WorkspaceProcess.objects.filter(id=process_id, workspace_id=workspace_id)
             .select_related("workspace", "workspace__runner", "created_by")
             .first()
         )
@@ -581,10 +662,9 @@ class WorkspaceProcessRepository:
                 queryset = queryset.filter(session_id=session_id)
         else:
             queryset = queryset.filter(kind="persistent")
-        return (
-            queryset.select_related("workspace", "workspace__runner", "created_by")
-            .first()
-        )
+        return queryset.select_related(
+            "workspace", "workspace__runner", "created_by"
+        ).first()
 
     @staticmethod
     def get_temp_by_name(
@@ -660,9 +740,7 @@ class WorkspaceProcessRepository:
             )
             if temp is not None:
                 return temp
-        return WorkspaceProcessRepository.get_by_name(
-            workspace_id, str(id_or_name)
-        )
+        return WorkspaceProcessRepository.get_by_name(workspace_id, str(id_or_name))
 
     @staticmethod
     def update_for_restart(
@@ -898,7 +976,7 @@ class ImageInstanceRepository:
         build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageInstance":
+    ) -> ImageInstance:
         """Create a new image instance record (immediately ready)."""
         image = ImageInstance.objects.create(
             runner=runner,
@@ -930,7 +1008,7 @@ class ImageInstanceRepository:
         build_job: ImageBuildJob | None = None,
         created_by=None,
         credentials: list | None = None,
-    ) -> "ImageInstance":
+    ) -> ImageInstance:
         """Create an image instance before capture/build finishes."""
         status = (
             ImageInstance.Status.BUILDING
@@ -956,7 +1034,7 @@ class ImageInstanceRepository:
         return image
 
     @staticmethod
-    def get_by_task_id(task_id: str) -> "ImageInstance | None":
+    def get_by_task_id(task_id: str) -> ImageInstance | None:
         """Find the image instance associated with a create or delete task."""
         return (
             ImageInstance.objects.filter(
@@ -976,9 +1054,7 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def mark_ready(
-        image_id, *, runner_ref: str, size_bytes: int
-    ) -> None:
+    def mark_ready(image_id, *, runner_ref: str, size_bytes: int) -> None:
         """Update a creating image instance to ready once the runner reports success."""
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.READY,
@@ -1024,7 +1100,7 @@ class ImageInstanceRepository:
         return count > 0
 
     @staticmethod
-    def get_by_id(image_id: uuid.UUID) -> "ImageInstance | None":
+    def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (
             ImageInstance.objects.filter(id=image_id)
@@ -1044,7 +1120,7 @@ class ImageInstanceRepository:
     @staticmethod
     def get_by_build_job_id(
         build_job_id: uuid.UUID,
-    ) -> "ImageInstance | None":
+    ) -> ImageInstance | None:
         """Fetch a built image instance by its runner build relation."""
         return (
             ImageInstance.objects.filter(build_job_id=build_job_id)
@@ -1062,39 +1138,39 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> "QuerySet[ImageInstance]":
+    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[ImageInstance]:
         """Return all image instances captured from a workspace."""
-        return ImageInstance.objects.filter(
-            origin_workspace_id=workspace_id
-        ).exclude(
-            status=ImageInstance.Status.DELETED
-        ).select_related(
-            "runner",
-            "origin_workspace",
-            "origin_workspace__runner",
-            "created_by",
-            "origin_definition",
-            "build_job",
-            "build_job__runner",
-            "build_job__image_definition",
+        return (
+            ImageInstance.objects.filter(origin_workspace_id=workspace_id)
+            .exclude(status=ImageInstance.Status.DELETED)
+            .select_related(
+                "runner",
+                "origin_workspace",
+                "origin_workspace__runner",
+                "created_by",
+                "origin_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
+            )
         )
 
     @staticmethod
-    def list_by_user(user) -> "QuerySet[ImageInstance]":
+    def list_by_user(user) -> QuerySet[ImageInstance]:
         """Return all visible image instances created by a specific user."""
-        return ImageInstance.objects.filter(
-            created_by=user
-        ).exclude(
-            status=ImageInstance.Status.DELETED
-        ).select_related(
-            "runner",
-            "origin_workspace",
-            "origin_workspace__runner",
-            "created_by",
-            "origin_definition",
-            "build_job",
-            "build_job__runner",
-            "build_job__image_definition",
+        return (
+            ImageInstance.objects.filter(created_by=user)
+            .exclude(status=ImageInstance.Status.DELETED)
+            .select_related(
+                "runner",
+                "origin_workspace",
+                "origin_workspace__runner",
+                "created_by",
+                "origin_definition",
+                "build_job",
+                "build_job__runner",
+                "build_job__image_definition",
+            )
         )
 
     @staticmethod
@@ -1157,14 +1233,21 @@ class ImageInstanceRepository:
     @staticmethod
     def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageInstance]:
         """Return image instances that still need runner-side deletion."""
-        return ImageInstance.objects.filter(
-            runner_id=runner_id,
-            status__in=[ImageInstance.Status.DELETING, ImageInstance.Status.PENDING_DELETION],
-        ).exclude(runner_ref="").select_related(
-            "runner",
-            "origin_definition",
-            "origin_workspace",
-            "build_job",
+        return (
+            ImageInstance.objects.filter(
+                runner_id=runner_id,
+                status__in=[
+                    ImageInstance.Status.DELETING,
+                    ImageInstance.Status.PENDING_DELETION,
+                ],
+            )
+            .exclude(runner_ref="")
+            .select_related(
+                "runner",
+                "origin_definition",
+                "origin_workspace",
+                "build_job",
+            )
         )
 
 
@@ -1176,12 +1259,8 @@ class ImageDefinitionRepository:
         return ImageDefinitionRepository.annotate_build_summaries(
             ImageDefinition.objects.filter(
                 Q(organization__isnull=True) | Q(organization_id=organization_id)
-            ).exclude(
-                status=ImageDefinition.Status.DELETED
-            )
-        ).order_by(
-            "name", "-updated_at", "-created_at"
-        )
+            ).exclude(status=ImageDefinition.Status.DELETED)
+        ).order_by("name", "-updated_at", "-created_at")
 
     @staticmethod
     def annotate_build_summaries(
@@ -1233,11 +1312,15 @@ class ImageDefinitionRepository:
                 "removing": int(getattr(definition, "summary_removing", 0) or 0),
             }
 
-        statuses = ImageBuildJob.objects.filter(
-            image_definition_id=definition.id,
-        ).exclude(
-            status=ImageBuildJob.Status.DELETED,
-        ).values_list("status", flat=True)
+        statuses = (
+            ImageBuildJob.objects.filter(
+                image_definition_id=definition.id,
+            )
+            .exclude(
+                status=ImageBuildJob.Status.DELETED,
+            )
+            .values_list("status", flat=True)
+        )
         counts = {
             "active": 0,
             "building": 0,
@@ -1274,11 +1357,13 @@ class ImageDefinitionRepository:
         organization_id: uuid.UUID,
     ) -> ImageDefinition | None:
         """Fetch a visible image definition scoped to an organization."""
-        return ImageDefinition.objects.filter(
-            id=image_definition_id,
-        ).filter(
-            Q(organization__isnull=True) | Q(organization_id=organization_id)
-        ).first()
+        return (
+            ImageDefinition.objects.filter(
+                id=image_definition_id,
+            )
+            .filter(Q(organization__isnull=True) | Q(organization_id=organization_id))
+            .first()
+        )
 
     @staticmethod
     def deactivate(definition_id: uuid.UUID) -> None:
@@ -1364,12 +1449,16 @@ class ImageBuildJobRepository:
                 Q(image_definition__organization_id=organization_id)
                 | Q(image_definition__organization__isnull=True)
             )
-        return queryset.select_related(
-            "runner",
-            "image_definition",
-            "build_task",
-            "image_instance",
-        ).defer("build_log").annotate(build_log_size=Length("build_log"))
+        return (
+            queryset.select_related(
+                "runner",
+                "image_definition",
+                "build_task",
+                "image_instance",
+            )
+            .defer("build_log")
+            .annotate(build_log_size=Length("build_log"))
+        )
 
     @staticmethod
     def get(
@@ -1397,14 +1486,16 @@ class ImageBuildJobRepository:
     @staticmethod
     def get_by_id(build_job_id: uuid.UUID) -> ImageBuildJob | None:
         """Fetch one runner image build by primary key."""
-        return ImageBuildJob.objects.filter(
-            id=build_job_id
-        ).select_related(
-            "runner",
-            "image_definition",
-            "build_task",
-            "image_instance",
-        ).first()
+        return (
+            ImageBuildJob.objects.filter(id=build_job_id)
+            .select_related(
+                "runner",
+                "image_definition",
+                "build_task",
+                "image_instance",
+            )
+            .first()
+        )
 
     @staticmethod
     def get_for_org(
@@ -1426,13 +1517,17 @@ class ImageBuildJobRepository:
         organization_id: uuid.UUID,
     ) -> int:
         """Delete a runner image build scoped to an organization."""
-        deleted, _ = ImageBuildJob.objects.filter(
-            image_definition_id=image_definition_id,
-            runner_id=runner_id,
-        ).filter(
-            Q(image_definition__organization_id=organization_id)
-            | Q(image_definition__organization__isnull=True)
-        ).delete()
+        deleted, _ = (
+            ImageBuildJob.objects.filter(
+                image_definition_id=image_definition_id,
+                runner_id=runner_id,
+            )
+            .filter(
+                Q(image_definition__organization_id=organization_id)
+                | Q(image_definition__organization__isnull=True)
+            )
+            .delete()
+        )
         return deleted
 
     @staticmethod
@@ -1498,15 +1593,19 @@ class ImageBuildJobRepository:
     @staticmethod
     def list_stale_deletes(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
         """Return build jobs stuck in deletion past the cutoff."""
-        return ImageBuildJob.objects.filter(
-            status__in=[
-                ImageBuildJob.Status.PENDING_DELETION,
-                ImageBuildJob.Status.DELETING,
-            ],
-        ).filter(
-            Q(delete_requested_at__lt=cutoff)
-            | Q(delete_requested_at__isnull=True, updated_at__lt=cutoff)
-        ).select_related("image_instance", "image_definition")
+        return (
+            ImageBuildJob.objects.filter(
+                status__in=[
+                    ImageBuildJob.Status.PENDING_DELETION,
+                    ImageBuildJob.Status.DELETING,
+                ],
+            )
+            .filter(
+                Q(delete_requested_at__lt=cutoff)
+                | Q(delete_requested_at__isnull=True, updated_at__lt=cutoff)
+            )
+            .select_related("image_instance", "image_definition")
+        )
 
     @staticmethod
     def list_in_progress_deletes_for_definition(
@@ -1545,20 +1644,25 @@ class ImageBuildJobRepository:
     def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
         """Check if any non-deleted workspaces depend on this build's image instance."""
         from .models import ImageInstance as II
+
         instances = II.objects.filter(
             build_job_id=build_job_id,
         ).exclude(status__in=[II.Status.DELETED])
         count = 0
         for instance in instances:
-            ws_count = Workspace.objects.filter(
-                base_image_instance=instance,
-            ).exclude(
-                status__in=[
-                    WorkspaceStatus.PENDING_DELETION,
-                    WorkspaceStatus.DELETING,
-                    WorkspaceStatus.REMOVED,
-                    WorkspaceStatus.DELETED,
-                ],
-            ).count()
+            ws_count = (
+                Workspace.objects.filter(
+                    base_image_instance=instance,
+                )
+                .exclude(
+                    status__in=[
+                        WorkspaceStatus.PENDING_DELETION,
+                        WorkspaceStatus.DELETING,
+                        WorkspaceStatus.REMOVED,
+                        WorkspaceStatus.DELETED,
+                    ],
+                )
+                .count()
+            )
             count += ws_count
         return count > 0, count

@@ -1491,6 +1491,14 @@ class HarnessService:
         from .services import ProviderConfigService
 
         key = str(session.id)
+        # Fail closed on missing plugin credentials before constructing provider
+        # configuration or registering/calling any harness tools.
+        mcp_snapshot = None
+        agent_key = (session.agent_name or "").strip().lower()
+        if agent_key not in {"computeruse", "title", "compaction"}:
+            mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
+                session, organization_id, None
+            )
         model_resolver = None
         small_model = ""
         agent_configs: dict[str, dict[str, Any]] = {}
@@ -1575,7 +1583,6 @@ class HarnessService:
         # runs in the sync ORM context exactly once (snapshot +
         # credential resolution, no second ORM/decrypt round in setup).
         mcp_runtime = None
-        mcp_snapshot = None
         mcp_enabled = accessor is not None and (
             session.agent_name or ""
         ).strip().lower() not in (
@@ -1588,12 +1595,8 @@ class HarnessService:
                 import apps.harness.mcp_client.runtime as mcp_runtime_module
 
                 mcp_runtime = mcp_runtime_module.McpRuntime()
-                # One prepared runtime per run (even when empty): prepare
-                # does the single workspace query + snapshot + decrypt
-                # round; setup reuses it without a second query.
-                mcp_snapshot = await sync_to_async(
-                    self._prepare_mcp_snapshot_for_run
-                )(session, organization_id, accessor)
+                # Reuse the already validated snapshot; setup does not repeat
+                # credential lookup/decryption.
                 await mcp_runtime.setup(
                     workspace=None,
                     organization_id=organization_id,
@@ -1675,9 +1678,7 @@ class HarnessService:
             tail = result.output or ""
             remainder = _tail_remainder(existing, tail)
             if remainder:
-                await sync_to_async(self.messages.append_content)(
-                    assistant, remainder
-                )
+                await sync_to_async(self.messages.append_content)(assistant, remainder)
                 await self._append_tail_text_part(session, assistant, remainder)
             # Message usage is accumulated per step_finish so abort still
             # keeps completed steps. Session usage is applied once here.
@@ -2162,9 +2163,7 @@ class HarnessService:
                     self.parts.model.objects.filter(id=step_part_id).first
                 )()
                 if step_part is not None:
-                    await sync_to_async(self.parts.mark_state)(
-                        step_part, "completed"
-                    )
+                    await sync_to_async(self.parts.mark_state)(step_part, "completed")
             # Close the per-step reasoning and text parts (DB-side; the
             # frontend already closes them live on step_finish). Resetting
             # the ids makes the next step start fresh parts so the final
@@ -2348,9 +2347,7 @@ class HarnessService:
                     },
                 )
                 safe_agent_meta = dict(part.display.get("agent_meta", {}))
-                safe_summary = _socket_text(
-                    part.display.get("summary", ""), limit=240
-                )
+                safe_summary = _socket_text(part.display.get("summary", ""), limit=240)
                 await self._emit_frontend(
                     FRONTEND_EVENT_PART,
                     {
@@ -2531,16 +2528,12 @@ class HarnessService:
             touched_id = str(part_id)
         return touched_id
 
-    async def _complete_stream_part(
-        self, run_ctx: dict[str, Any], slot: str
-    ) -> None:
+    async def _complete_stream_part(self, run_ctx: dict[str, Any], slot: str) -> None:
         """Complete+clear one running text/reasoning stream slot (best-effort)."""
         part_id = run_ctx.pop(slot, None)
         if part_id is None:
             return
-        part = await sync_to_async(
-            self.parts.model.objects.filter(id=part_id).first
-        )()
+        part = await sync_to_async(self.parts.model.objects.filter(id=part_id).first)()
         if part is not None:
             await sync_to_async(self.parts.mark_state)(part, "completed")
 
@@ -2689,17 +2682,15 @@ class HarnessService:
         """
         if not tool or not call_id:
             return None
-        candidate = (
-            await sync_to_async(
-                lambda: list(
-                    self.parts.model.objects.filter(
-                        message_id=assistant.id,
-                        type="tool",
-                        state="pending",
-                    ).order_by("position", "created_at", "id")
-                )
-            )()
-        )
+        candidate = await sync_to_async(
+            lambda: list(
+                self.parts.model.objects.filter(
+                    message_id=assistant.id,
+                    type="tool",
+                    state="pending",
+                ).order_by("position", "created_at", "id")
+            )
+        )()
         for row in candidate:
             meta = dict(row.meta or {})
             row_tool = str((row.input or {}).get("tool", "") or row.title or "")
@@ -2924,8 +2915,7 @@ class HarnessService:
             )
         if not user_message_id:
             user_message_id = str(
-                self._runs.get(str(session.id), {}).get("user_message_id", "")
-                or ""
+                self._runs.get(str(session.id), {}).get("user_message_id", "") or ""
             )
         payload: dict[str, Any] = {
             "workspace_id": str(session.workspace_id),
@@ -3189,9 +3179,8 @@ class HarnessService:
         resumed = child is not None
         if resumed:
             agent = (
-                (child.agent_name or agent or "general").strip().lower()
-                or "general"
-            )
+                child.agent_name or agent or "general"
+            ).strip().lower() or "general"
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
                 catalog_efforts = self._catalog_efforts_for_model(
@@ -3526,7 +3515,7 @@ def _tail_remainder(existing: str, tail: str) -> str:
     if existing.endswith(tail):
         return ""
     if tail.startswith(existing):
-        return tail[len(existing):]
+        return tail[len(existing) :]
     if existing.startswith(tail):
         return ""
     # A divergent final string is not a suffix of the streamed response.

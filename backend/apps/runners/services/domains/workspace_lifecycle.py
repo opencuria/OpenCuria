@@ -55,7 +55,7 @@ from ...exceptions import (
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from apps.credentials.services import ResolvedCredentials
 
-    from ...models import Runner, Task, Workspace
+    from ...models import ImageInstance, Runner, Task, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ class WorkspaceLifecycleMixin:
         return f"workspace-{str(workspace_id)[:8]}"
 
     @staticmethod
-    def _validate_runner_qemu_limits(runner: "Runner") -> None:
+    def _validate_runner_qemu_limits(runner: Runner) -> None:
         """Validate min/max/default and total limits for a runner's QEMU config."""
         if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
             raise ConflictError("Runner vCPU minimum cannot exceed maximum")
@@ -164,11 +164,11 @@ class WorkspaceLifecycleMixin:
 
     def _placement_for_image_instance(
         self,
-        image: "ImageInstance",
+        image: ImageInstance,
         *,
         organization_id: uuid.UUID | None = None,
         requested_runner_id: uuid.UUID | None = None,
-    ) -> tuple["Runner", str]:
+    ) -> tuple[Runner, str]:
         """Resolve runner and runtime from the image, not origin_workspace.
 
         ``origin_workspace`` is provenance only. Captured images stay
@@ -228,7 +228,8 @@ class WorkspaceLifecycleMixin:
         image_artifact_id: uuid.UUID | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["Workspace", "Task"]:
+        plugin_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Workspace, Task]:
         """
         Create a new workspace on a runner.
 
@@ -311,37 +312,37 @@ class WorkspaceLifecycleMixin:
             files = resolved_credential_records.files
             ssh_keys = resolved_credential_records.ssh_keys
 
-        # Create records
+        # Persist workspace, associations, plugin activations and task atomically.
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, repos, workspace_id)
-        workspace = await sync_to_async(self.workspaces.create)(
-            workspace_id=workspace_id,
-            runner=runner,
-            name=workspace_name,
-            runtime_type=runtime_type,
-            qemu_vcpus=resolved_qemu_vcpus,
-            qemu_memory_mb=resolved_qemu_memory_mb,
-            qemu_disk_size_gb=resolved_qemu_disk_size_gb,
-            desktop_width=resolved_desktop_width,
-            desktop_height=resolved_desktop_height,
-            base_image_instance=selected_image,
-            created_by=user,
-        )
-        if credentials is not None:
-            await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
-            await sync_to_async(self.workspaces.update_credentials_present)(
-                workspace,
-                bool(env_vars or files or ssh_keys),
-            )
-
         task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.CREATE_WORKSPACE,
-            workspace=workspace,
-        )
+        from ..workspace_configuration import WorkspaceConfigurationService
 
+        workspace_fields = {
+            "workspace_id": workspace_id,
+            "runner": runner,
+            "name": workspace_name,
+            "runtime_type": runtime_type,
+            "qemu_vcpus": resolved_qemu_vcpus,
+            "qemu_memory_mb": resolved_qemu_memory_mb,
+            "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
+            "desktop_width": resolved_desktop_width,
+            "desktop_height": resolved_desktop_height,
+            "base_image_instance": selected_image,
+            "created_by": user,
+        }
+        workspace, task = await sync_to_async(
+            WorkspaceConfigurationService().create, thread_sensitive=True
+        )(
+            workspace_fields=workspace_fields,
+            runner=runner,
+            user=user,
+            organization_id=organization_id,
+            credentials=list(credentials or []),
+            plugin_ids=list(plugin_ids or []),
+            task_id=task_id,
+            credentials_present=bool(env_vars or files or ssh_keys),
+        )
         # Dispatch to runner — include workspace_id so the runner
         # uses the same UUID the backend assigned.
         await self._dispatch_workspace_task(
@@ -398,76 +399,66 @@ class WorkspaceLifecycleMixin:
         qemu_disk_size_gb: int | None = None,
         desktop_width: int | None = None,
         desktop_height: int | None = None,
-    ) -> "Workspace":
-        """Update mutable workspace metadata and attached credentials."""
+        plugin_ids: list[uuid.UUID] | None = None,
+        user=None,
+        organization_id: uuid.UUID | None = None,
+    ) -> Workspace:
+        """Validate and atomically persist final workspace configuration."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-
         self._ensure_workspace_available(workspace)
+        acknowledged_credentials_present = bool(workspace.credentials_present)
 
+        trimmed_name = None
         if name is not None:
-            trimmed = name.strip()
-            if not trimmed:
+            trimmed_name = name.strip()
+            if not trimmed_name:
                 raise ValueError("Workspace name must not be empty")
-            workspace = await sync_to_async(self.workspaces.update_name)(
-                workspace, trimmed
-            )
 
         credential_records = (
             resolved_credentials.credentials
             if resolved_credentials is not None
             else credentials
         )
+        has_ordinary_selection_change = False
+        resolved_payload = resolved_credentials
+        needs_disk_sync = False
         if credential_records is not None:
-            current_ids = {credential.id for credential in workspace.credentials.all()}
-            new_ids = {credential.id for credential in credential_records}
-            ids_changed = current_ids != new_ids
-            resolved_payload = resolved_credentials
-            if resolved_payload is None and credential_records is not None:
+            current_ordinary_ids = await sync_to_async(
+                self.workspaces.list_ordinary_credential_ids
+            )(workspace.id)
+            new_ordinary_ids = {
+                credential.id
+                for credential in credential_records
+                if credential.service.credential_type != "mcp_oauth"
+            }
+            has_ordinary_selection_change = current_ordinary_ids != new_ordinary_ids
+            if resolved_payload is None:
                 from apps.credentials.services import CredentialSvc
 
-                resolved_payload = await sync_to_async(
-                    CredentialSvc().resolve_credentials
-                )(
+                resolver = CredentialSvc()
+                resolved_payload = await sync_to_async(resolver.resolve_credentials)(
                     [credential.id for credential in credential_records],
                     org_id=workspace.runner.organization_id,
                     user=workspace.created_by,
                 )
             desired_present = bool(
-                resolved_payload
-                and (
-                    resolved_payload.env_vars
-                    or resolved_payload.files
-                    or resolved_payload.ssh_keys
-                )
+                resolved_payload.env_vars
+                or resolved_payload.files
+                or resolved_payload.ssh_keys
             )
             needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
-                ids_changed or bool(workspace.credentials_present) != desired_present
+                has_ordinary_selection_change
+                or bool(workspace.credentials_present) != desired_present
             )
-            if needs_disk_sync:
-                runner = workspace.runner
-                if not runner.is_online:
-                    raise RunnerOfflineError(str(runner.id))
-
-            if ids_changed:
-                workspace = await sync_to_async(self.workspaces.set_credentials)(
-                    workspace,
-                    credential_records,
-                )
-
-            if needs_disk_sync:
-                resolved = resolved_payload
-                await self._dispatch_credential_inject(
-                    workspace,
-                    resolved=resolved,
-                    wait=True,
-                )
 
         qemu_fields_requested = any(
             value is not None
             for value in (qemu_vcpus, qemu_memory_mb, qemu_disk_size_gb)
         )
+        qemu_values = None
+        qemu_changed = False
         if qemu_fields_requested:
             if workspace.runtime_type != RuntimeType.QEMU:
                 raise ValueError("QEMU resources can only be set for QEMU workspaces")
@@ -476,9 +467,9 @@ class WorkspaceLifecycleMixin:
                 WorkspaceStatus.STOPPED,
             ):
                 raise WorkspaceStateError(
-                    f"Workspace '{workspace_id}' is '{workspace.status}', must be running or stopped to reconfigure resources"
+                    f"Workspace '{workspace_id}' is '{workspace.status}', "
+                    "must be running or stopped to reconfigure resources"
                 )
-
             runner = workspace.runner
             self._validate_runner_qemu_limits(runner)
             current = (
@@ -486,96 +477,123 @@ class WorkspaceLifecycleMixin:
                 workspace.qemu_memory_mb or runner.qemu_default_memory_mb,
                 workspace.qemu_disk_size_gb or runner.qemu_default_disk_size_gb,
             )
-            (
-                resolved_qemu_vcpus,
-                resolved_qemu_memory_mb,
-                resolved_qemu_disk_size_gb,
-            ) = self._resolve_qemu_resources(
+            qemu_values = self._resolve_qemu_resources(
                 runner=runner,
                 qemu_vcpus=qemu_vcpus,
                 qemu_memory_mb=qemu_memory_mb,
                 qemu_disk_size_gb=qemu_disk_size_gb,
                 current=current,
             )
-            qemu_resources_changed = current != (
-                resolved_qemu_vcpus,
-                resolved_qemu_memory_mb,
-                resolved_qemu_disk_size_gb,
-            )
-            if qemu_resources_changed:
+            qemu_changed = current != qemu_values
+            if qemu_changed and workspace.status == WorkspaceStatus.RUNNING:
+                if not workspace.runner.is_online:
+                    raise RunnerOfflineError(str(workspace.runner_id))
                 await self._ensure_qemu_active_capacity(
                     runner=runner,
-                    requested_vcpus=resolved_qemu_vcpus,
-                    requested_memory_mb=resolved_qemu_memory_mb,
-                    requested_disk_size_gb=resolved_qemu_disk_size_gb,
+                    requested_vcpus=qemu_values[0],
+                    requested_memory_mb=qemu_values[1],
+                    requested_disk_size_gb=qemu_values[2],
                     exclude_workspace_id=workspace.id,
                 )
 
-                workspace = await sync_to_async(self.workspaces.update_qemu_resources)(
-                    workspace,
-                    qemu_vcpus=resolved_qemu_vcpus,
-                    qemu_memory_mb=resolved_qemu_memory_mb,
-                    qemu_disk_size_gb=resolved_qemu_disk_size_gb,
-                )
-
-                if workspace.status == WorkspaceStatus.RUNNING:
-                    runner = workspace.runner
-                    if not runner.is_online:
-                        raise RunnerOfflineError(str(runner.id))
-                    # Reconfigure restarts the VM: fail workspace streams
-                    # so harness waiters surface it instead of hanging.
-                    await sync_to_async(self.mark_processes_killed)(
-                        str(workspace_id), reason="workspace_reconfigured"
-                    )
-
-                    task_id = generate_uuid()
-                    task = await sync_to_async(self.tasks.create)(
-                        task_id=task_id,
-                        runner=runner,
-                        task_type=TaskType.UPDATE_WORKSPACE,
-                        workspace=workspace,
-                    )
-                    await self._dispatch_workspace_task(
-                        runner=runner,
-                        event="task:update_workspace",
-                        task=task,
-                        workspace=workspace,
-                        operation=self._task_workspace_operation(
-                            TaskType.UPDATE_WORKSPACE
-                        ),
-                        payload={
-                            "task_id": str(task_id),
-                            "workspace_id": str(workspace_id),
-                            "qemu_vcpus": resolved_qemu_vcpus,
-                            "qemu_memory_mb": resolved_qemu_memory_mb,
-                            "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
-                        },
-                    )
-
+        desktop_values = None
         if desktop_width is not None or desktop_height is not None:
-            resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
+            desktop_values = validate_desktop_geometry(
                 workspace.desktop_width if desktop_width is None else desktop_width,
                 workspace.desktop_height if desktop_height is None else desktop_height,
             )
-            if (
-                resolved_desktop_width != workspace.desktop_width
-                or resolved_desktop_height != workspace.desktop_height
-            ):
-                workspace = await sync_to_async(
-                    self.workspaces.update_desktop_geometry
-                )(
-                    workspace,
-                    desktop_width=resolved_desktop_width,
-                    desktop_height=resolved_desktop_height,
+
+        if user is None:
+            user = workspace.created_by
+        if organization_id is None:
+            organization_id = workspace.runner.organization_id
+        from ..workspace_configuration import WorkspaceConfigurationService
+
+        workspace = await sync_to_async(
+            WorkspaceConfigurationService().update, thread_sensitive=True
+        )(
+            workspace_id=workspace_id,
+            user=user,
+            organization_id=organization_id,
+            credentials=credential_records,
+            plugin_ids=plugin_ids,
+            name=trimmed_name,
+            qemu_values=qemu_values if qemu_changed else None,
+            desktop_values=desktop_values,
+        )
+
+        # Side effects occur only after the final DB configuration is committed.
+        if qemu_changed and workspace.status == WorkspaceStatus.RUNNING:
+            await sync_to_async(self.mark_processes_killed)(
+                str(workspace_id), reason="workspace_reconfigured"
+            )
+            task_id = generate_uuid()
+            task = await sync_to_async(self.tasks.create)(
+                task_id=task_id,
+                runner=workspace.runner,
+                task_type=TaskType.UPDATE_WORKSPACE,
+                workspace=workspace,
+            )
+            await self._dispatch_workspace_task(
+                runner=workspace.runner,
+                event="task:update_workspace",
+                task=task,
+                workspace=workspace,
+                operation=self._task_workspace_operation(TaskType.UPDATE_WORKSPACE),
+                payload={
+                    "task_id": str(task_id),
+                    "workspace_id": str(workspace_id),
+                    "qemu_vcpus": qemu_values[0],
+                    "qemu_memory_mb": qemu_values[1],
+                    "qemu_disk_size_gb": qemu_values[2],
+                },
+            )
+
+        workspace.credentials_present = acknowledged_credentials_present
+        workspace.credential_sync_status = "not_required"
+        workspace.credential_sync_detail = None
+        if credential_records is not None and needs_disk_sync:
+            if not workspace.runner.is_online:
+                workspace.credential_sync_status = "pending"
+                workspace.credential_sync_detail = (
+                    "Configuration saved; credential sync awaits runner availability."
                 )
+            else:
+                try:
+                    acknowledged_presence = await self._dispatch_credential_inject(
+                        workspace, resolved=resolved_payload, wait=True
+                    )
+                    workspace = await sync_to_async(self.workspaces.get_by_id)(
+                        workspace_id
+                    )
+                    if isinstance(acknowledged_presence, bool):
+                        workspace.credentials_present = acknowledged_presence
+                        workspace.credential_sync_status = "synced"
+                    else:
+                        workspace.credentials_present = acknowledged_credentials_present
+                        workspace.credential_sync_status = "pending"
+                        workspace.credential_sync_detail = (
+                            "Configuration saved; runner disk-state acknowledgement pending."
+                        )
+                except Exception:
+                    logger.exception(
+                        "Credential sync failed for workspace %s", workspace_id
+                    )
+                    workspace = await sync_to_async(self.workspaces.get_by_id)(
+                        workspace_id
+                    )
+                    workspace.credentials_present = acknowledged_credentials_present
+                    workspace.credential_sync_status = "failed"
+                    workspace.credential_sync_detail = (
+                        "Configuration saved; runner sync failed; retry pending."
+                    )
+        return workspace
 
-        return await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-
-    async def rename_workspace(self, workspace_id: uuid.UUID, name: str) -> "Workspace":
+    async def rename_workspace(self, workspace_id: uuid.UUID, name: str) -> Workspace:
         """Rename an existing workspace."""
         return await self.update_workspace(workspace_id, name=name)
 
-    async def stop_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def stop_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Stop a running workspace."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -614,7 +632,7 @@ class WorkspaceLifecycleMixin:
         )
         return task
 
-    async def resume_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def resume_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Resume a stopped workspace."""
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -688,7 +706,7 @@ class WorkspaceLifecycleMixin:
         )
         return task
 
-    async def remove_workspace(self, workspace_id: uuid.UUID) -> "Task":
+    async def remove_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Remove a workspace and its container.
 
         If the runner is online, dispatches the delete command immediately and
@@ -768,8 +786,8 @@ class WorkspaceLifecycleMixin:
         task_id: str,
         workspace_id: str,
         status: str,
-        runner_id: str | None = None,
         credentials_present: bool | None = None,
+        runner_id: str | None = None,
     ) -> None:
         """Handle workspace:created event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -831,7 +849,6 @@ class WorkspaceLifecycleMixin:
         task_id: str,
         workspace_id: str,
         runner_id: str | None = None,
-        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -846,10 +863,6 @@ class WorkspaceLifecycleMixin:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
             self.workspaces.update_active_operation(workspace, None)
-            if credentials_present is not None:
-                self.workspaces.update_credentials_present(
-                    workspace, bool(credentials_present)
-                )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)
 
@@ -980,7 +993,7 @@ class WorkspaceLifecycleMixin:
         )
         self._forward_workspace_operation(workspace_id, None)
 
-    async def dispatch_pending_workspace_deletions(self, runner: "Runner") -> list:
+    async def dispatch_pending_workspace_deletions(self, runner: Runner) -> list:
         """Dispatch pending workspace deletions that accumulated while runner was offline."""
         from ...models import Workspace
 
@@ -1051,7 +1064,8 @@ class WorkspaceLifecycleMixin:
         resolved_credentials: ResolvedCredentials | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
-    ) -> tuple["Workspace", "Task"]:
+        plugin_ids: list[uuid.UUID] | None = None,
+    ) -> tuple[Workspace, Task]:
         """Create a workspace from an image artifact.
 
         Credentials are explicitly supplied by the caller and persisted in
@@ -1139,33 +1153,35 @@ class WorkspaceLifecycleMixin:
         if not name:
             workspace_name = f"{workspace_name} (clone)"
 
-        workspace = await sync_to_async(self.workspaces.create)(
-            workspace_id=workspace_id,
-            runner=runner,
-            name=workspace_name,
-            runtime_type=runtime_type,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            desktop_width=desktop_width,
-            desktop_height=desktop_height,
-            base_image_instance=image,
-            created_by=user,
-        )
-
-        if credentials is not None:
-            await sync_to_async(self.workspaces.set_credentials)(workspace, credentials)
-            await sync_to_async(self.workspaces.update_credentials_present)(
-                workspace,
-                bool(resolved_env_vars or resolved_files or resolved_ssh_keys),
-            )
-
         task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
+        from ..workspace_configuration import WorkspaceConfigurationService
+
+        workspace, task = await sync_to_async(
+            WorkspaceConfigurationService().create, thread_sensitive=True
+        )(
+            workspace_fields={
+                "workspace_id": workspace_id,
+                "runner": runner,
+                "name": workspace_name,
+                "runtime_type": runtime_type,
+                "qemu_vcpus": qemu_vcpus,
+                "qemu_memory_mb": qemu_memory_mb,
+                "qemu_disk_size_gb": qemu_disk_size_gb,
+                "desktop_width": desktop_width,
+                "desktop_height": desktop_height,
+                "base_image_instance": image,
+                "created_by": user,
+            },
             runner=runner,
+            user=user,
+            organization_id=organization_id,
+            credentials=list(credentials or []),
+            plugin_ids=list(plugin_ids or []),
+            task_id=task_id,
+            credentials_present=bool(
+                resolved_env_vars or resolved_files or resolved_ssh_keys
+            ),
             task_type=TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
-            workspace=workspace,
         )
 
         await self._dispatch_workspace_task(

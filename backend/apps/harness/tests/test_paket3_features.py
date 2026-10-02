@@ -157,7 +157,9 @@ def test_resolve_skill_bodies_rejects_foreign_skill(paket3_setup):
 @pytest.mark.django_db(transaction=True)
 def test_create_session_invalid_skill_is_400(paket3_setup, fake_harness_service):
     """POST with an inaccessible skill_id returns 400."""
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
     response = client.post(
         f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
         data=json.dumps(
@@ -175,7 +177,9 @@ def test_create_session_invalid_skill_is_400(paket3_setup, fake_harness_service)
 def test_create_session_returns_skill_ids_in_body(paket3_setup, fake_harness_service):
     """POST with skill_ids echoes them in the 201 response."""
     skill_id = str(paket3_setup["org_skill"].id)
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
     response = client.post(
         f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
         data=json.dumps({"prompt": "hello", "skill_ids": [skill_id]}),
@@ -258,6 +262,7 @@ async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_serv
     )
     source = HarnessMessageRepository.list_for_session(session.id)
     assert [row.role for row in source] == ["user", "assistant"]
+    await fake_harness_service.abort_run(session.id)
     forked = await fake_harness_service.fork_session(session.id)
     copied = HarnessMessageRepository.list_for_session(forked.id)
     assert [row.role for row in copied] == ["user", "assistant"]
@@ -273,7 +278,9 @@ def test_patch_session_title_happy(paket3_setup, fake_harness_service):
         organization_id=paket3_setup["org"].id,
         prompt="rename me",
     )
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
         data=json.dumps({"title": "Renamed chat"}),
@@ -291,7 +298,9 @@ def test_patch_session_foreign_workspace_is_404(paket3_setup, fake_harness_servi
         organization_id=paket3_setup["org"].id,
         prompt="foreign",
     )
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
         data=json.dumps({"title": "Nope"}),
@@ -308,7 +317,9 @@ def test_patch_session_needs_run_permission(paket3_setup, fake_harness_service):
         organization_id=paket3_setup["org"].id,
         prompt="perm",
     )
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ
+    )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
         data=json.dumps({"title": "Nope"}),
@@ -325,7 +336,9 @@ def test_delete_session_returns_204(paket3_setup, fake_harness_service):
         organization_id=paket3_setup["org"].id,
         prompt="delete me",
     )
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
     response = client.delete(f"/api/v1/harness/sessions/{session.id}")
     assert response.status_code == 204
     assert not HarnessSession.objects.filter(id=session.id).exists()
@@ -339,13 +352,17 @@ def test_delete_session_needs_run_not_read(paket3_setup, fake_harness_service):
         organization_id=paket3_setup["org"].id,
         prompt="keep",
     )
-    client = _client(user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ
+    )
     response = client.delete(f"/api/v1/harness/sessions/{session.id}")
     assert response.status_code == 403
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_title_agent_updates_session_title(harness_workspace, monkeypatch) -> None:
+async def test_title_agent_updates_session_title(
+    harness_workspace, monkeypatch
+) -> None:
     """Root session title is updated asynchronously by the title agent."""
     title_provider = FakeProvider("Short Generated Title Here")
     service = HarnessService(
@@ -686,7 +703,9 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
         await service._run_subagent_tool(
             parent=parent,
             args=TaskArgs(
-                description="d", prompt="p", subagent_type="general",
+                description="d",
+                prompt="p",
+                subagent_type="general",
                 task_id=str(foreign.id),
             ),
             ctx=ctx,
@@ -708,7 +727,9 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
             await service._run_subagent_tool(
                 parent=parent,
                 args=TaskArgs(
-                    description="d", prompt="p", subagent_type="general",
+                    description="d",
+                    prompt="p",
+                    subagent_type="general",
                     task_id=str(own.id),
                 ),
                 ctx=ctx,
@@ -723,7 +744,9 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
     fresh = await service._run_subagent_tool(
         parent=parent,
         args=TaskArgs(
-            description="d", prompt="p", subagent_type="general",
+            description="d",
+            prompt="p",
+            subagent_type="general",
             task_id=str(uuid.uuid4()),
         ),
         ctx=ctx,

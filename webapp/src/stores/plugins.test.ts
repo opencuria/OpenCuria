@@ -22,7 +22,6 @@ vi.mock('@/services/plugins.api', () => ({
   deletePlugin: vi.fn(),
   togglePluginActivation: vi.fn(),
   listWorkspacePlugins: vi.fn(),
-  updateWorkspacePlugins: vi.fn(),
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -45,7 +44,6 @@ function makePlugin(overrides: Record<string, unknown> = {}) {
     skills: [],
     mcp_servers: [],
     credential_requirements: [],
-    credential_readiness: { required_service_ids: [], missing_required_service_ids: [], ready: true },
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -58,13 +56,17 @@ describe('plugin store', () => {
     vi.clearAllMocks()
   })
 
-  it('fetches the catalog with loading/error handling', async () => {
+  it('fetches the catalog with loading/error handling and contains no OAuth status state', async () => {
     listPluginsMock.mockResolvedValue([makePlugin()])
     const store = usePluginStore()
     await store.fetchPlugins()
     expect(store.plugins).toHaveLength(1)
     expect(store.loading).toBe(false)
     expect(store.error).toBeNull()
+    expect('mcpOAuthStatuses' in store).toBe(false)
+    expect('fetchMcpOAuthStatus' in store).toBe(false)
+    expect('connectMcpOAuth' in store).toBe(false)
+    expect('disconnectMcpOAuth' in store).toBe(false)
   })
 
   it('records load errors without throwing', async () => {
@@ -90,7 +92,10 @@ describe('plugin store', () => {
     vi.mocked(pluginsApi.createPlugin).mockResolvedValue(makePlugin())
     const created = await store.createPlugin({ name: 'Playwright' })
     expect(created?.id).toBe('plugin-1')
-    expect(toast.success).toHaveBeenCalledWith('Plugin created', expect.objectContaining({ description: expect.any(String) }))
+    expect(toast.success).toHaveBeenCalledWith(
+      'Plugin created',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
 
     vi.mocked(pluginsApi.updatePlugin).mockResolvedValue(makePlugin({ name: 'Renamed' }))
     const updated = await store.updatePlugin('plugin-1', { name: 'Renamed' })
@@ -112,10 +117,13 @@ describe('plugin store', () => {
 
     vi.mocked(pluginsApi.togglePluginActivation).mockRejectedValue(new Error('forbidden'))
     expect(await store.toggleActivation('plugin-1', false)).toBe(false)
-    expect(toast.error).toHaveBeenCalledWith('Update failed', expect.objectContaining({ description: 'forbidden' }))
+    expect(toast.error).toHaveBeenCalledWith(
+      'Update failed',
+      expect.objectContaining({ description: 'forbidden' }),
+    )
   })
 
-  it('loads and replaces workspace plugin activations', async () => {
+  it('loads workspace plugin catalog metadata only', async () => {
     const store = usePluginStore()
     vi.mocked(pluginsApi.listWorkspacePlugins).mockResolvedValue([
       {
@@ -132,11 +140,6 @@ describe('plugin store', () => {
     ])
     await store.fetchWorkspacePlugins('ws-1')
     expect(store.workspacePlugins['ws-1']).toHaveLength(1)
-
-    vi.mocked(pluginsApi.updateWorkspacePlugins).mockResolvedValue([])
-    const result = await store.setWorkspacePlugins('ws-1', [])
-    expect(result).toEqual([])
-    expect(store.workspacePlugins['ws-1']).toEqual([])
   })
 
   it('tracks concurrent toggles per plugin id', async () => {
@@ -144,7 +147,10 @@ describe('plugin store', () => {
     store.plugins = [makePlugin(), makePlugin({ id: 'plugin-2', name: 'Other' })]
     let resolveToggle!: (value: ReturnType<typeof makePlugin>) => void
     vi.mocked(pluginsApi.togglePluginActivation).mockImplementation(
-      (_id: string) => new Promise((resolve) => { resolveToggle = resolve as typeof resolveToggle }),
+      (_id: string) =>
+        new Promise((resolve) => {
+          resolveToggle = resolve as typeof resolveToggle
+        }),
     )
     const pending = store.toggleActivation('plugin-1', true)
     expect(store.togglingIds).toContain('plugin-1')
@@ -173,7 +179,9 @@ describe('plugin store', () => {
   it('discards stale workspace plugin fetches after a clear', async () => {
     const store = usePluginStore()
     let firstResolve!: (value: never[]) => void
-    const first = new Promise<never[]>((resolve) => { firstResolve = resolve })
+    const first = new Promise<never[]>((resolve) => {
+      firstResolve = resolve
+    })
     vi.mocked(pluginsApi.listWorkspacePlugins).mockReturnValueOnce(first)
     const pendingFirst = store.fetchWorkspacePlugins('ws-1')
     store.clear()

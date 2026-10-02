@@ -226,6 +226,7 @@ export interface Workspace {
   has_active_session: boolean
   runner_online: boolean
   credential_ids: string[]
+  plugin_ids: string[]
   credentials_present: boolean
   base_image_name?: string | null
 }
@@ -237,6 +238,7 @@ export interface WorkspaceCreateIn {
   repos: string[]
   runtime_type?: string
   credential_ids: string[]
+  plugin_ids: string[]
   runner_id?: string | null
   qemu_vcpus?: number
   qemu_memory_mb?: number
@@ -249,6 +251,7 @@ export interface WorkspaceCreateIn {
 export interface WorkspaceUpdateIn {
   name?: string
   credential_ids?: string[]
+  plugin_ids?: string[]
   qemu_vcpus?: number
   qemu_memory_mb?: number
   qemu_disk_size_gb?: number
@@ -262,7 +265,10 @@ export interface WorkspaceUpdateOut {
   updated_at: string
   active_operation: WorkspaceOperation | null
   credential_ids: string[]
+  plugin_ids: string[]
   credentials_present: boolean
+  credential_sync_status: 'synced' | 'pending' | 'failed' | 'not_required'
+  credential_sync_detail?: string | null
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
@@ -274,6 +280,7 @@ export interface WorkspaceCreateOut {
   workspace_id: string
   task_id: string
   status: string
+  plugin_ids: string[]
 }
 
 // --- Task ---
@@ -308,6 +315,8 @@ export interface CredentialService {
   env_var_name: string
   target_path: string
   label: string
+  oauth_server_url: string
+  is_active: boolean
 }
 
 export interface Credential {
@@ -317,13 +326,33 @@ export interface Credential {
   service_id: string
   service_name: string
   service_slug: string
-  credential_type: string
+  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
   env_var_name: string
   target_path: string
   has_public_key: boolean
   created_by_id: number
   created_at: string
   updated_at: string
+  oauth_connected: boolean
+  oauth_status: string
+  oauth_reconnect_required: boolean
+  oauth_expires_at: string | null
+}
+
+export interface OAuthConnectOut {
+  authorization_url: string
+  status: 'pending'
+}
+
+export interface CredentialServiceCreateIn {
+  name: string
+  slug?: string
+  description?: string
+  credential_type: Credential['credential_type']
+  env_var_name?: string
+  target_path?: string
+  label?: string
+  oauth_server_url?: string
 }
 
 export interface CredentialCreateIn {
@@ -467,23 +496,6 @@ export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key' | 'mcp_oaut
 
 export type PluginMcpAuthType = 'none' | 'oauth'
 
-export interface McpOAuthScopeStatus {
-  connected: boolean
-  credential_id?: string | null
-  expires_at?: string | null
-  reconnect_required?: boolean
-}
-
-export interface McpOAuthStatus {
-  personal: McpOAuthScopeStatus
-  organization: McpOAuthScopeStatus
-}
-
-export interface McpOAuthConnectOut {
-  authorization_url: string
-  status: 'pending'
-}
-
 export interface PluginSkill {
   id: string
   name: string
@@ -532,24 +544,11 @@ export interface PluginMcpServerIn {
   oauth_requirement_key?: string
 }
 
-export interface PluginCredentialServiceIn {
-  slug?: string
-  name?: string
-  description?: string
-  credential_type?: PluginCredentialServiceType
-  oauth_plugin_slug?: string
-  oauth_requirement_key?: string
-  env_var_name?: string
-  target_path?: string
-  label?: string
-  service_id?: string | null
-}
-
 export interface PluginCredentialRequirementIn {
   key: string
   description?: string
   required?: boolean
-  credential_service: PluginCredentialServiceIn
+  service_id: string
 }
 
 export interface PluginCredentialRequirement {
@@ -561,13 +560,6 @@ export interface PluginCredentialRequirement {
   service_name: string
   service_slug: string
   credential_type: PluginCredentialServiceType
-  plugin_owned_service: boolean
-}
-
-export interface PluginCredentialReadiness {
-  required_service_ids: string[]
-  missing_required_service_ids: string[]
-  ready: boolean
 }
 
 export interface Plugin {
@@ -583,7 +575,6 @@ export interface Plugin {
   skills: PluginSkill[]
   mcp_servers: PluginMcpServer[]
   credential_requirements: PluginCredentialRequirement[]
-  credential_readiness: PluginCredentialReadiness | null
   created_at: string
   updated_at: string
 }
@@ -614,12 +605,6 @@ export interface PluginActivationIn {
   active: boolean
 }
 
-export interface WorkspacePluginMissingCredential {
-  key: string
-  service_id: string
-  service_slug: string
-}
-
 export interface WorkspacePlugin {
   id: string
   name: string
@@ -628,12 +613,8 @@ export interface WorkspacePlugin {
   organization_id: string | null
   is_global: boolean
   workspace_enabled: boolean
-  missing_required_credentials: WorkspacePluginMissingCredential[]
+  missing_required_credentials: Array<{ key: string; service_id: string; service_slug: string }>
   ready: boolean
-}
-
-export interface WorkspacePluginsUpdateIn {
-  plugin_ids: string[]
 }
 
 // --- API Keys ---
@@ -716,12 +697,14 @@ export interface ImageArtifactCreateOut {
 export interface ImageArtifactCloneIn {
   name?: string
   credential_ids?: string[]
+  plugin_ids?: string[]
 }
 
 export interface ImageArtifactCloneOut {
   workspace_id: string
   task_id: string
   status: string
+  plugin_ids: string[]
 }
 
 export interface RunnerImageBuild {
@@ -729,7 +712,16 @@ export interface RunnerImageBuild {
   image_definition_id: string
   runner_id: string
   image_artifact_id?: string | null
-  status: 'pending' | 'building' | 'active' | 'failed' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
+  status:
+    | 'pending'
+    | 'building'
+    | 'active'
+    | 'failed'
+    | 'deactivated'
+    | 'pending_deletion'
+    | 'deleting'
+    | 'deleted'
+    | 'delete_failed'
   /**
    * Full log text — only present on create/update responses and the
    * dedicated /log/ endpoint. List (polling) responses carry

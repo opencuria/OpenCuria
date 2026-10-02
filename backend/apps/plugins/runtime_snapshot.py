@@ -49,6 +49,7 @@ class PluginMcpServerSnapshot:
     headers: dict[str, str] = field(default_factory=dict)
     auth_type: str = "none"
     oauth_requirement_key: str = ""
+    oauth_service_id: uuid.UUID | None = None
     startup_timeout_seconds: int = 30
     request_timeout_seconds: int = 60
 

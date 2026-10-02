@@ -19,6 +19,7 @@ from apps.credentials.models import (
     Credential,
     CredentialService,
     McpOAuthClientRegistration,
+    OrgCredentialServiceActivation,
 )
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -27,6 +28,21 @@ from apps.plugins.models import Plugin
 from apps.plugins.services import PluginService
 from apps.runners.models import Runner, Workspace
 from common.utils import encrypt_value, hash_token
+
+
+def _runtime_service(org, name: str, env_var_name: str):
+    """Create and activate a service used by a test plugin dependency."""
+    service = CredentialService.objects.create(
+        name=name,
+        slug=f"{name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:8]}",
+        organization=org,
+        credential_type="env",
+        env_var_name=env_var_name,
+    )
+    OrgCredentialServiceActivation.objects.create(
+        organization=org, credential_service=service
+    )
+    return service
 
 
 @pytest.fixture
@@ -70,11 +86,7 @@ def _make_plugin(org, user, *, name="P", slug="p", published=True, enabled=True)
             {
                 "key": "api_key",
                 "required": True,
-                "credential_service": {
-                    "name": "RT Service",
-                    "credential_type": "env",
-                    "env_var_name": "RT_TOKEN",
-                },
+                "service_id": str(_runtime_service(org, "RT Service", "RT_TOKEN").id),
             }
         ],
     )
@@ -111,10 +123,15 @@ def test_snapshot_only_effective_plugins(org_ctx):
         user=org_ctx["user"],
     )
     org_ctx["workspace"].credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin_id],
     )
     snapshot = plugin_runtime.build_workspace_plugin_snapshot(
@@ -154,9 +171,9 @@ def test_global_notion_oauth_credential_enables_workspace_plugin(org_ctx, owner_
     token_payload = {
         "access_token": "notion-access-token",
         "refresh_token": "notion-refresh-token",
-        "server_id": str(server.id),
         "server_url": server.url,
         "resource": server.url,
+        "service_id": str(service.id),
         "registration_id": str(registration.id),
     }
     credential = Credential.objects.create(
@@ -166,7 +183,6 @@ def test_global_notion_oauth_credential_enables_workspace_plugin(org_ctx, owner_
         name="Notion OAuth",
         encrypted_value=encrypt_value(json.dumps(token_payload)),
         created_by=org_ctx["user"],
-        oauth_server_id=server.id,
         oauth_server_url=server.url,
         oauth_resource=server.url,
         oauth_status="connected",
@@ -181,18 +197,22 @@ def test_global_notion_oauth_credential_enables_workspace_plugin(org_ctx, owner_
         user=org_ctx["user"],
         active=True,
     )
-    org_readiness = plugin_service.get_visible(plugin.id, org_id=org_ctx["org"].id)[
-        "credential_readiness"
-    ]
-    # Org summaries deliberately ignore personal credentials, while a valid
-    # org-owned credential on the global Notion service satisfies the summary.
-    assert org_readiness["ready"] is (owner_scope == "org")
+    payload = plugin_service.get_visible(plugin.id, org_id=org_ctx["org"].id)
+    assert "credential_readiness" not in payload
 
-    workspace_plugins = plugin_service.set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin.id],
+    )
+    workspace_plugins = plugin_service.list_workspace_plugins(
+        workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
     )
     notion_state = next(item for item in workspace_plugins if item["id"] == plugin.id)
     assert notion_state["ready"] is True
@@ -222,10 +242,15 @@ def test_org_deactivate_makes_workspace_activation_ineffective(org_ctx):
         user=org_ctx["user"],
     )
     org_ctx["workspace"].credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin_id],
     )
     PluginService().set_org_activation(
@@ -272,10 +297,15 @@ def test_personal_and_org_credential_templates(org_ctx):
         org_id=org_ctx["org"].id,
     )
     org_ctx["workspace"].credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin_id],
     )
     snapshot = plugin_runtime.build_workspace_plugin_snapshot(
@@ -333,11 +363,9 @@ def test_optional_placeholder_referenced_but_missing_is_config_error(org_ctx):
             {
                 "key": "opt_key",
                 "required": False,
-                "credential_service": {
-                    "name": "Opt Service",
-                    "credential_type": "env",
-                    "env_var_name": "OPT_TOKEN",
-                },
+                "service_id": str(
+                    _runtime_service(org_ctx["org"], "Opt Service", "OPT_TOKEN").id
+                ),
             }
         ],
     )
@@ -413,11 +441,9 @@ def test_literals_preserved_and_unused_mapping_validated(org_ctx):
             {
                 "key": "req_key",
                 "required": True,
-                "credential_service": {
-                    "name": "Lit Service",
-                    "credential_type": "env",
-                    "env_var_name": "LIT_TOKEN",
-                },
+                "service_id": str(
+                    _runtime_service(org_ctx["org"], "Lit Service", "LIT_TOKEN").id
+                ),
             }
         ],
     )
@@ -473,10 +499,15 @@ def test_no_secret_values_in_snapshot(caplog, org_ctx):
         user=org_ctx["user"],
     )
     org_ctx["workspace"].credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin_id],
     )
     with caplog.at_level("INFO"):
@@ -511,10 +542,15 @@ def test_prepared_runtime_repr_hides_plaintexts(org_ctx):
         user=org_ctx["user"],
     )
     org_ctx["workspace"].credentials.add(credential)
-    PluginService().set_workspace_plugins(
-        workspace=org_ctx["workspace"],
-        org_id=org_ctx["org"].id,
+    from apps.runners.services.workspace_configuration import (
+        WorkspaceConfigurationService,
+    )
+
+    WorkspaceConfigurationService().update(
+        workspace_id=org_ctx["workspace"].id,
         user=org_ctx["user"],
+        organization_id=org_ctx["org"].id,
+        credentials=[credential],
         plugin_ids=[plugin_id],
     )
     snapshot = plugin_runtime.build_workspace_plugin_snapshot(

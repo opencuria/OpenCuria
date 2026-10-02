@@ -19,8 +19,8 @@ from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
-from django.http import HttpRequest
 from django.db.models import Q
+from django.http import HttpRequest
 from django.utils import timezone
 from ninja import Router
 
@@ -31,53 +31,54 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_api_token, hash_token
 
-from .enums import RunnerStatus as RS, WorkspaceStatus
+from .enums import RunnerStatus as RS
+from .enums import WorkspaceStatus
 from .exceptions import RunnerOfflineError
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
+    DesktopClipboardReadOut,
+    DesktopClipboardWriteIn,
+    DesktopStartOut,
+    DesktopStatusOut,
+    DesktopStopOut,
+    DesktopTakeControlOut,
     ErrorOut,
     GitCommitQuery,
     GitDiffQuery,
     GitHistoryQuery,
     GitOperationIn,
     GitRepoQuery,
-    validate_commit_hash,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
     ImageArtifactUpdateIn,
-    ImageDefinitionCreateIn,
-    ImageDefinitionDuplicateIn,
-    ImageDefinitionBuildSummaryOut,
-    ImageDefinitionOut,
-    ImageDefinitionUpdateIn,
-    RunnerCreateIn,
-    RunnerCreateOut,
-    RunnerOut,
-    RunnerUpdateIn,
-    RunnerSystemMetricsOut,
     ImageBuildJobCreateIn,
     ImageBuildJobListOut,
     ImageBuildJobOut,
     ImageBuildJobUpdateIn,
+    ImageDefinitionBuildSummaryOut,
+    ImageDefinitionCreateIn,
+    ImageDefinitionDuplicateIn,
+    ImageDefinitionOut,
+    ImageDefinitionUpdateIn,
     ProcessOut,
     ProcessStartIn,
+    RunnerCreateIn,
+    RunnerCreateOut,
+    RunnerOut,
+    RunnerSystemMetricsOut,
+    RunnerUpdateIn,
     TaskOut,
     TerminalStartIn,
-    WorkspaceFromImageArtifactIn,
-    WorkspaceFromImageArtifactOut,
     TerminalStartOut,
-    DesktopStartOut,
-    DesktopStopOut,
-    DesktopStatusOut,
-    DesktopTakeControlOut,
-    DesktopClipboardWriteIn,
-    DesktopClipboardReadOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
+    WorkspaceFromImageArtifactIn,
+    WorkspaceFromImageArtifactOut,
     WorkspaceOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
+    validate_commit_hash,
 )
 
 
@@ -92,6 +93,11 @@ def _perm_denied(permission: APIKeyPermission):
 def _workspace_credential_ids(workspace) -> list[uuid.UUID]:
     """Return attached credential IDs for a workspace."""
     return [credential.id for credential in workspace.credentials.all()]
+
+
+def _workspace_plugin_ids(workspace) -> list[uuid.UUID]:
+    """Return persisted workspace plugin selections."""
+    return list(workspace.plugin_activations.values_list("plugin_id", flat=True))
 
 
 def _workspace_base_image_name(workspace) -> str | None:
@@ -166,6 +172,9 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         ),
         runner_online=runner_online,
         credential_ids=_workspace_credential_ids(workspace),
+        plugin_ids=list(
+            workspace.plugin_activations.values_list("plugin_id", flat=True)
+        ),
         credentials_present=bool(getattr(workspace, "credentials_present", False)),
         base_image_name=_workspace_base_image_name(workspace),
     )
@@ -295,9 +304,7 @@ async def _get_owned_workspace_artifact_async(
     """Return a workspace-scoped image artifact only for the workspace owner."""
     service = _get_service()
     workspace = await _get_owned_workspace_async(request, org_id, workspace_id)
-    artifact = await sync_to_async(service.get_image_artifact)(
-        image_artifact_id
-    )
+    artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
     if artifact is None:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
     if artifact.origin_workspace_id != workspace.id:
@@ -540,7 +547,16 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
     """Create a workspace — dispatches async task to a runner."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_CREATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_CREATE)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    if "credential_ids" in payload.model_fields_set and not check_api_key_permission(
+        request, APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
     org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
@@ -575,16 +591,21 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             image_artifact_id=payload.image_artifact_id,
             user=request.user,
             organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
         )
+        plugin_ids = await sync_to_async(_workspace_plugin_ids)(workspace)
         return 202, WorkspaceCreateOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
+            plugin_ids=plugin_ids,
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="invalid_credentials")
     except RuntimeError as e:
@@ -604,7 +625,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        from .enums import RunnerStatus as RS
+        from .enums import RunnerStatus
 
         return 200, WorkspaceOut(
             id=workspace.id,
@@ -634,8 +655,11 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
             has_active_session=False,
-            runner_online=workspace.runner.status == RS.ONLINE,
+            runner_online=workspace.runner.status == RunnerStatus.ONLINE,
             credential_ids=_workspace_credential_ids(workspace),
+            plugin_ids=list(
+                workspace.plugin_activations.values_list("plugin_id", flat=True)
+            ),
             credentials_present=bool(workspace.credentials_present),
             base_image_name=_workspace_base_image_name(workspace),
         )
@@ -903,6 +927,14 @@ async def update_workspace(
     """Update mutable workspace metadata."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    if payload.plugin_ids is not None and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    if payload.credential_ids is not None and not check_api_key_permission(
+        request, APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
 
@@ -920,37 +952,6 @@ async def update_workspace(
                 org_id=org_id,
                 user=request.user,
             )
-            # Guard: removing a credential still required by an active
-            # workspace plugin would silently break the setup -> 409.
-            # Only service IDs are inspected, never secret values.
-            from apps.plugins.services import PluginService as _PluginService
-
-            remaining_service_ids = {
-                cred.service_id for cred in resolved_credentials.credentials
-            }
-            ws_for_guard = await sync_to_async(service.get_workspace)(
-                workspace_id
-            )
-            gaps = await sync_to_async(
-                _PluginService().validate_workspace_credential_removal
-            )(
-                workspace=ws_for_guard,
-                org_id=org_id,
-                remaining_service_ids=remaining_service_ids,
-                remaining_credential_ids={
-                    cred.id for cred in resolved_credentials.credentials
-                },
-            )
-            if gaps:
-                raise ConflictError(
-                    "Cannot remove credentials required by active workspace "
-                    "plugins: "
-                    + ", ".join(
-                        f"{g['plugin_id']}:{g['key']}->{g['service_id']}"
-                        for g in gaps
-                    ),
-                    code="missing_plugin_credentials",
-                )
 
         workspace = await service.update_workspace(
             workspace_id,
@@ -966,13 +967,22 @@ async def update_workspace(
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
             desktop_width=payload.desktop_width,
             desktop_height=payload.desktop_height,
+            plugin_ids=payload.plugin_ids,
+            user=request.user,
+            organization_id=org_id,
         )
+        persisted_plugin_ids = await sync_to_async(_workspace_plugin_ids)(workspace)
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
             name=workspace.name,
             updated_at=workspace.updated_at,
             active_operation=workspace.active_operation,
             credential_ids=_workspace_credential_ids(workspace),
+            plugin_ids=persisted_plugin_ids,
+            credential_sync_status=getattr(
+                workspace, "credential_sync_status", "not_required"
+            ),
+            credential_sync_detail=getattr(workspace, "credential_sync_detail", None),
             credentials_present=bool(workspace.credentials_present),
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
@@ -983,7 +993,9 @@ async def update_workspace(
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="validation_error")
 
@@ -1156,9 +1168,7 @@ async def start_process(
     Users always create persistent processes; temporary session-scoped
     processes are agent-only and cannot be started here.
     """
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
@@ -1189,9 +1199,7 @@ async def start_process(
     response={200: ProcessOut, 403: ErrorOut, 404: ErrorOut},
     summary="Get a background process",
 )
-async def get_process(
-    request: HttpRequest, workspace_id: uuid.UUID, process_id: str
-):
+async def get_process(request: HttpRequest, workspace_id: uuid.UUID, process_id: str):
     """Return one background process scoped to a workspace.
 
     ``process_id`` accepts a process UUID or the exact process name.
@@ -1232,9 +1240,7 @@ async def stop_process(
     Stopping is the only user action allowed on running temp processes;
     a stopped temp vanishes from the user list (its DB row is kept).
     """
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
@@ -1276,9 +1282,7 @@ async def restart_process(
     Temporary processes cannot be restarted by users (400) — they live
     only for their agent session.
     """
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
@@ -1326,9 +1330,7 @@ async def delete_process(
     instead; finished temps vanish from the user list while their DB
     rows are kept.
     """
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
@@ -1340,8 +1342,7 @@ async def delete_process(
         if str(getattr(existing, "kind", "") or "") == "temp":
             return 400, ErrorOut(
                 detail=(
-                    "Temporary processes cannot be deleted by users; "
-                    "stop them instead."
+                    "Temporary processes cannot be deleted by users; stop them instead."
                 ),
                 code="validation_error",
             )
@@ -1400,7 +1401,9 @@ def _git_result_to_response(result: dict):
     else → 400 intact.
     """
     if not isinstance(result, dict):
-        return 502, ErrorOut(detail="Git operation returned no result", code="runner_call_failed")
+        return 502, ErrorOut(
+            detail="Git operation returned no result", code="runner_call_failed"
+        )
     if result.get("ok"):
         return 200, result
     code = str(result.get("code") or "")
@@ -1835,9 +1838,7 @@ async def rename_image_artifact(
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
-    artifact = await sync_to_async(service.get_image_artifact)(
-        image_artifact_id
-    )
+    artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
     if artifact is None:
         return 404, ErrorOut(detail="Image artifact not found", code="not_found")
     if artifact.created_by != request.user:
@@ -1869,9 +1870,7 @@ async def delete_image_artifact_global(
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.get_image_artifact)(
-            image_artifact_id
-        )
+        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1905,14 +1904,16 @@ async def create_workspace_from_image_artifact_global(
     """Create a workspace from an image artifact."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
         return _perm_denied(APIKeyPermission.IMAGES_CLONE)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.get_image_artifact)(
-            image_artifact_id
-        )
+        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
         if artifact.created_by != request.user:
@@ -1936,18 +1937,20 @@ async def create_workspace_from_image_artifact_global(
             resolved_credentials=resolved,
             user=request.user,
             organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
         )
         return 202, WorkspaceFromImageArtifactOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
+            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except RunnerOfflineError as e:
         return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(detail=e.message, code=e.code, gaps=getattr(e, "gaps", None))
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -2048,6 +2051,10 @@ async def create_workspace_from_workspace_image_artifact(
     """Create a workspace from an image artifact."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
         return _perm_denied(APIKeyPermission.IMAGES_CLONE)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
     org_id = _get_org_id(request)
     await _require_org_membership_async(request, org_id)
 
@@ -2074,18 +2081,20 @@ async def create_workspace_from_workspace_image_artifact(
             resolved_credentials=resolved,
             user=request.user,
             organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
         )
         return 202, WorkspaceFromImageArtifactOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
+            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except RunnerOfflineError as e:
         return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(detail=e.message, code=e.code, gaps=getattr(e, "gaps", None))
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -2356,14 +2365,14 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     service = _get_service()
     try:
         await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(
-            definition_id
-        )
+        definition = await sync_to_async(service.get_image_definition)(definition_id)
         if definition is None:
             return 204, None
         return 202, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -2390,9 +2399,7 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     service = _get_service()
     try:
         await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(
-            definition_id
-        )
+        definition = await sync_to_async(service.get_image_definition)(definition_id)
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -2420,9 +2427,7 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     service = _get_service()
     try:
         await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(
-            definition_id
-        )
+        definition = await sync_to_async(service.get_image_definition)(definition_id)
         return 200, await sync_to_async(_image_definition_to_out)(definition)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -2504,6 +2509,7 @@ async def update_image_definition_runner_build(
     if not await _get_org_admin_flag_async(request, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
     from django.utils import timezone
+
     from .models import ImageBuildJob
 
     build = await sync_to_async(_get_build_job_for_org)(
@@ -2581,7 +2587,9 @@ async def delete_image_definition_runner_build(
         await service.delete_build_job(build.id)
         return 202, {"detail": "Build job deletion initiated"}
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 

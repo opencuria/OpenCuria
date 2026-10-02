@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.credentials.services import CredentialSvc
 from apps.runners.models import ImageInstance
 from apps.runners.services import RunnerService
@@ -36,6 +36,9 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
         credential_type="env",
         env_var_name="FALLBACK_TOKEN",
     )
+    OrgCredentialServiceActivation.objects.create(
+        organization_id=runner.organization_id, credential_service=credential_service
+    )
     credential = CredentialSvc().create_personal_credential(
         service_id=credential_service.id,
         name="Fallback credential",
@@ -62,6 +65,17 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
         "FALLBACK_TOKEN": "resolved-secret"
     }
 
+    # Only the runner's successful create acknowledgement updates disk state.
+    service.handle_workspace_created(
+        task_id=str(workspace.tasks.get().id),
+        workspace_id=str(workspace.id),
+        status="created",
+        credentials_present=True,
+        runner_id=str(runner.id),
+    )
+    workspace.refresh_from_db()
+    assert workspace.credentials_present is True
+
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
@@ -75,6 +89,10 @@ async def test_update_workspace_fallback_resolves_requested_credential_ids(
         credential_type="env",
         env_var_name="UPDATE_TOKEN",
     )
+    OrgCredentialServiceActivation.objects.create(
+        organization_id=workspace.runner.organization_id,
+        credential_service=credential_service,
+    )
     credential = CredentialSvc().create_personal_credential(
         service_id=credential_service.id,
         name="Update credential",
@@ -85,16 +103,21 @@ async def test_update_workspace_fallback_resolves_requested_credential_ids(
     workspace.credentials.set([])
     service._call_runner = AsyncMock(return_value={"ok": True})
 
-    await service.update_workspace(workspace.id, credentials=[credential])
+    await service.update_workspace(
+        workspace.id,
+        credentials=[credential],
+        user=user,
+        organization_id=workspace.runner.organization_id,
+    )
 
     workspace.refresh_from_db()
     assert list(workspace.credentials.values_list("id", flat=True)) == [credential.id]
-    assert workspace.credentials_present is True
+    # A successful fake call without the runner ACK does not change disk state.
+    assert workspace.credentials_present is False
     assert service._call_runner.called
     call_args = service._call_runner.await_args
     payload = next(arg for arg in call_args.args if isinstance(arg, dict))
     assert payload["env_vars"] == {"UPDATE_TOKEN": "new-workspace-secret"}
-    assert workspace.credentials_present is True
 
 
 @pytest.mark.django_db(transaction=True)
@@ -116,6 +139,9 @@ async def test_create_workspace_fallback_requires_user_and_organization(runner, 
         slug=f"fallback-{uuid.uuid4().hex[:8]}",
         credential_type="env",
         env_var_name="FALLBACK_TOKEN",
+    )
+    OrgCredentialServiceActivation.objects.create(
+        organization_id=runner.organization_id, credential_service=credential_service
     )
     credential = CredentialSvc().create_personal_credential(
         service_id=credential_service.id,
@@ -156,6 +182,9 @@ async def test_create_workspace_fallback_validates_credential_ownership(runner, 
         slug=f"fallback-{uuid.uuid4().hex[:8]}",
         credential_type="env",
         env_var_name="FALLBACK_TOKEN",
+    )
+    OrgCredentialServiceActivation.objects.create(
+        organization_id=runner.organization_id, credential_service=credential_service
     )
     credential = CredentialSvc().create_personal_credential(
         service_id=credential_service.id,
