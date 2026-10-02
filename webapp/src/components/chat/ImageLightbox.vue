@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { X, ZoomIn, ZoomOut, RotateCcw, Move, Maximize2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 
 const props = defineProps<{
   src: string
@@ -12,7 +13,14 @@ const emit = defineEmits<{
   close: []
 }>()
 
+const triggerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
 const stageEl = ref<HTMLElement | null>(null)
+const loadFailed = ref(false)
+
+function restoreFocus(event: Event): void {
+  event.preventDefault()
+  if (triggerEl?.isConnected) triggerEl.focus()
+}
 const zoom = ref(1)
 const panX = ref(0)
 const panY = ref(0)
@@ -27,6 +35,8 @@ const maxZoom = 6
 const zoomStep = 1.2
 
 let activePointerId: number | null = null
+let hasDragged = false
+let pointerStartedOnImage = false
 let dragStartX = 0
 let dragStartY = 0
 let dragOriginX = 0
@@ -34,7 +44,8 @@ let dragOriginY = 0
 let resizeObserver: ResizeObserver | null = null
 
 const fittedScale = computed(() => {
-  if (!naturalWidth.value || !naturalHeight.value || !stageWidth.value || !stageHeight.value) return 1
+  if (!naturalWidth.value || !naturalHeight.value || !stageWidth.value || !stageHeight.value)
+    return 1
   return Math.min(stageWidth.value / naturalWidth.value, stageHeight.value / naturalHeight.value)
 })
 
@@ -42,7 +53,9 @@ const fittedWidth = computed(() => naturalWidth.value * fittedScale.value)
 const fittedHeight = computed(() => naturalHeight.value * fittedScale.value)
 
 const maxPanX = computed(() => Math.max(0, (fittedWidth.value * zoom.value - stageWidth.value) / 2))
-const maxPanY = computed(() => Math.max(0, (fittedHeight.value * zoom.value - stageHeight.value) / 2))
+const maxPanY = computed(() =>
+  Math.max(0, (fittedHeight.value * zoom.value - stageHeight.value) / 2),
+)
 
 const zoomPercent = computed(() => `${Math.round(zoom.value * 100)}%`)
 
@@ -97,6 +110,14 @@ function setZoom(nextZoom: number, origin?: { x: number; y: number }): void {
   }
 }
 
+function keepViewerFocus(): void {
+  // Disabling a zoom control at its limit can drop browser focus to the page.
+  void nextTick(() => {
+    const dialog = stageEl.value?.closest<HTMLElement>('[role="dialog"]')
+    if (dialog && document.activeElement === document.body) dialog.focus()
+  })
+}
+
 function zoomIn(origin?: { x: number; y: number }): void {
   setZoom(zoom.value * zoomStep, origin)
 }
@@ -122,20 +143,25 @@ function getRelativeStagePoint(clientX: number, clientY: number): { x: number; y
 }
 
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') emit('close')
+  if (loadFailed.value || event.ctrlKey || event.metaKey || event.altKey) return
+  if (!['+', '=', '-', '0'].includes(event.key)) return
+  event.preventDefault()
   if (event.key === '+' || event.key === '=') zoomIn()
   if (event.key === '-') zoomOut()
   if (event.key === '0') resetView()
 }
 
 function onWheel(event: WheelEvent): void {
+  if (loadFailed.value || event.deltaY === 0) return
   const origin = getRelativeStagePoint(event.clientX, event.clientY)
   if (event.deltaY < 0) zoomIn(origin ?? undefined)
   else zoomOut(origin ?? undefined)
 }
 
 function onPointerDown(event: PointerEvent): void {
-  if (zoom.value <= minZoom) return
+  hasDragged = false
+  pointerStartedOnImage = event.target instanceof HTMLImageElement
+  if (zoom.value <= minZoom || event.button !== 0) return
   activePointerId = event.pointerId
   isDragging.value = true
   dragStartX = event.clientX
@@ -147,10 +173,10 @@ function onPointerDown(event: PointerEvent): void {
 
 function onPointerMove(event: PointerEvent): void {
   if (!isDragging.value || activePointerId !== event.pointerId) return
-  clampPan(
-    dragOriginX + (event.clientX - dragStartX),
-    dragOriginY + (event.clientY - dragStartY),
-  )
+  if (Math.abs(event.clientX - dragStartX) > 3 || Math.abs(event.clientY - dragStartY) > 3) {
+    hasDragged = true
+  }
+  clampPan(dragOriginX + (event.clientX - dragStartX), dragOriginY + (event.clientY - dragStartY))
 }
 
 function stopDragging(event?: PointerEvent): void {
@@ -161,52 +187,101 @@ function stopDragging(event?: PointerEvent): void {
   isDragging.value = false
 }
 
+function onStageClick(): void {
+  // Pointer capture retargets image clicks and completed pan gestures to the stage.
+  if (hasDragged || pointerStartedOnImage) return
+  emit('close')
+}
+
 function onDoubleClick(event: MouseEvent): void {
+  if (loadFailed.value) return
   const origin = getRelativeStagePoint(event.clientX, event.clientY)
   if (zoom.value > 1.5) resetView()
   else zoomIn(origin ?? undefined)
 }
 
-onMounted(() => {
-  document.addEventListener('keydown', onKeydown)
-  syncStageSize()
-  resizeObserver = new ResizeObserver(() => syncStageSize())
-  if (stageEl.value) resizeObserver.observe(stageEl.value)
-})
+// Dialog content mounts through a portal after the lightbox itself.
+watch(
+  stageEl,
+  (stage) => {
+    resizeObserver?.disconnect()
+    if (!stage) return
+    syncStageSize()
+    resizeObserver = new ResizeObserver(syncStageSize)
+    resizeObserver.observe(stage)
+  },
+  { flush: 'post' },
+)
 
-onUnmounted(() => {
-  document.removeEventListener('keydown', onKeydown)
-  resizeObserver?.disconnect()
-})
+onUnmounted(() => resizeObserver?.disconnect())
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      class="fixed inset-0 z-[9999] bg-background/95 text-foreground"
-      @click.self="emit('close')"
+  <Dialog :open="true" @update:open="!$event && emit('close')">
+    <DialogContent
+      :show-close-button="false"
+      aria-modal="true"
+      class="top-0 left-0 h-[100dvh] w-screen max-w-none max-h-none translate-x-0 translate-y-0 gap-0 rounded-none bg-background/95 p-0 text-foreground ring-0 sm:max-w-none"
+      @close-auto-focus="restoreFocus"
+      @keydown="onKeydown"
+      @focusout="keepViewerFocus"
     >
-      <div class="absolute inset-x-0 top-0 z-10 flex items-start justify-end gap-4 px-4 py-4 sm:justify-between sm:px-6">
+      <DialogTitle class="sr-only">Image Viewer</DialogTitle>
+      <DialogDescription class="sr-only">Full-screen preview with zoom and pan.</DialogDescription>
+      <div
+        class="absolute inset-x-0 top-0 z-10 flex items-start justify-end gap-4 px-4 py-4 sm:justify-between sm:px-6"
+      >
         <div class="hidden max-w-[min(50rem,72vw)] sm:block">
-          <p class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">Image Viewer</p>
+          <p class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+            Image Viewer
+          </p>
           <p v-if="props.alt" class="mt-1 truncate text-sm">{{ props.alt }}</p>
-          <p v-else class="mt-1 text-sm text-muted-foreground">Full-screen preview with zoom and pan.</p>
+          <p v-else class="mt-1 text-sm text-muted-foreground">
+            Full-screen preview with zoom and pan.
+          </p>
         </div>
 
         <div class="flex items-center gap-2 rounded-full border bg-card px-2 py-2">
-          <Button variant="ghost" size="icon-sm" title="Zoom out (-)" @click="zoomOut()">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Zoom out"
+            title="Zoom out (-)"
+            :disabled="zoom <= minZoom || loadFailed"
+            @click="zoomOut()"
+          >
             <ZoomOut />
           </Button>
           <div class="min-w-[4.75rem] text-center text-sm font-medium tabular-nums">
             {{ zoomPercent }}
           </div>
-          <Button variant="ghost" size="icon-sm" title="Zoom in (+)" @click="zoomIn()">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Zoom in"
+            title="Zoom in (+)"
+            :disabled="zoom >= maxZoom || loadFailed"
+            @click="zoomIn()"
+          >
             <ZoomIn />
           </Button>
-          <Button variant="ghost" size="icon-sm" title="Reset view (0)" @click="resetView">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Reset view"
+            title="Reset view (0)"
+            :disabled="loadFailed"
+            @click="resetView"
+          >
             <RotateCcw />
           </Button>
-          <Button variant="ghost" size="icon-sm" title="Close (Esc)" @click="emit('close')">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close image preview"
+            title="Close (Esc)"
+            @click="emit('close')"
+          >
             <X />
           </Button>
         </div>
@@ -214,7 +289,7 @@ onUnmounted(() => {
 
       <div
         ref="stageEl"
-        class="absolute inset-x-0 top-[5rem] bottom-[4.5rem] overflow-hidden px-3 sm:top-[5.75rem] sm:px-6"
+        class="absolute inset-x-0 top-[5rem] bottom-[4.5rem] touch-none overflow-hidden px-3 sm:top-[5.75rem] sm:px-6"
         :class="zoom > 1 ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-zoom-in'"
         @wheel.prevent="onWheel"
         @pointerdown="onPointerDown"
@@ -223,10 +298,14 @@ onUnmounted(() => {
         @pointercancel="stopDragging"
         @pointerleave="stopDragging"
         @dblclick.prevent="onDoubleClick"
-        @click="emit('close')"
+        @click="onStageClick"
       >
         <div class="flex h-full items-center justify-center">
+          <p v-if="loadFailed" role="status" class="text-sm text-muted-foreground">
+            Image could not be loaded.
+          </p>
           <img
+            v-else
             :src="props.src"
             :alt="props.alt ?? 'Image'"
             :style="{
@@ -238,12 +317,15 @@ onUnmounted(() => {
             class="max-w-none select-none object-contain shadow-2xl"
             draggable="false"
             @load="onImageLoad"
+            @error="loadFailed = true"
             @click.stop
           />
         </div>
       </div>
 
-      <div class="absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-4 px-4 py-3 text-xs text-muted-foreground sm:px-6">
+      <div
+        class="absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-4 px-4 py-3 text-xs text-muted-foreground sm:px-6"
+      >
         <div class="flex items-center gap-2">
           <Move :size="14" />
           <span>Drag to pan when zoomed</span>
@@ -253,6 +335,6 @@ onUnmounted(() => {
           <span>Wheel or double-click to zoom</span>
         </div>
       </div>
-    </div>
-  </Teleport>
+    </DialogContent>
+  </Dialog>
 </template>

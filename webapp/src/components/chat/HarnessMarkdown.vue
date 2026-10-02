@@ -3,6 +3,8 @@ import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Button } from '@/components/ui/button'
+import ImageLightbox from './ImageLightbox.vue'
 import { classifyWorkspaceFile, resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
@@ -108,6 +110,19 @@ function renderMarkdown(text: string): string {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
   }
+  for (const image of Array.from(root.querySelectorAll('img[src]'))) {
+    if (image.closest('a, button') || image.getAttribute('aria-hidden') === 'true') continue
+    image.setAttribute('role', 'button')
+    image.setAttribute('tabindex', '0')
+    image.setAttribute('aria-haspopup', 'dialog')
+    image.setAttribute('aria-label', `Open image preview ${image.getAttribute('alt') || 'Image'}`)
+    image.classList.add(
+      'cursor-zoom-in',
+      'focus-visible:outline-none',
+      'focus-visible:ring-2',
+      'focus-visible:ring-ring',
+    )
+  }
   return root.innerHTML
 }
 
@@ -167,6 +182,24 @@ function mediaUrl(segment: MediaSegment): string | null {
   return segment.kind === 'image'
     ? imageStore.getImageUrl(segment.path)
     : imageStore.getVideoUrl(segment.path)
+}
+
+const lightbox = ref<{ src: string; alt: string } | null>(null)
+
+function openImage(segment: ImageSegment): void {
+  const src = mediaUrl(segment)
+  if (src) lightbox.value = { src, alt: segment.label || segment.path }
+}
+
+/** Activate only sanitized HTML images, never decorative mention icons or links. */
+function onHtmlImageActivate(event: MouseEvent | KeyboardEvent): void {
+  if (event instanceof KeyboardEvent && event.key !== 'Enter' && event.key !== ' ') return
+  const image = event.target
+  if (!(image instanceof HTMLImageElement) || image.getAttribute('role') !== 'button') return
+  if (!image.closest('[data-md-html]') || image.closest('a, button, [data-mention-badge]')) return
+  event.preventDefault()
+  image.focus()
+  lightbox.value = { src: image.currentSrc || image.src, alt: image.alt || 'Image' }
 }
 
 function isMediaLoading(segment: MediaSegment): boolean {
@@ -425,16 +458,25 @@ export type { HarnessPart }
 </script>
 
 <template>
-  <div ref="rootEl" :class="rootClass">
+  <div ref="rootEl" :class="rootClass" @click="onHtmlImageActivate" @keydown="onHtmlImageActivate">
     <template v-for="(segment, index) in segments" :key="index">
       <div v-if="segment.kind === 'html'" data-md-html v-html="segment.html" />
       <template v-else>
-        <img
+        <Button
           v-if="segment.kind === 'image' && mediaUrl(segment)"
-          :src="mediaUrl(segment)!"
-          :alt="segment.label || segment.path"
-          class="my-2 max-h-96 max-w-full rounded-md border border-border object-contain"
-        />
+          type="button"
+          variant="ghost"
+          aria-haspopup="dialog"
+          :aria-label="`Open image preview ${segment.label || segment.path}`"
+          class="my-2 block h-auto max-w-full cursor-zoom-in overflow-hidden rounded-md border border-border p-0 hover:bg-transparent"
+          @click="openImage(segment)"
+        >
+          <img
+            :src="mediaUrl(segment)!"
+            :alt="segment.label || segment.path"
+            class="m-0 max-h-96 max-w-full object-contain"
+          />
+        </Button>
         <video
           v-else-if="segment.kind === 'video' && mediaUrl(segment)"
           :src="mediaUrl(segment)!"
@@ -456,4 +498,10 @@ export type { HarnessPart }
       </template>
     </template>
   </div>
+  <ImageLightbox
+    v-if="lightbox"
+    :src="lightbox.src"
+    :alt="lightbox.alt"
+    @close="lightbox = null"
+  />
 </template>
