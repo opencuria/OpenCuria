@@ -1,16 +1,38 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { parseComposerSegments, removeComposerToken, type ComposerToken } from '@/lib/composerTokens'
+import {
+  parseComposerSegments,
+  removeComposerToken,
+  type ComposerToken,
+} from '@/lib/composerTokens'
 import { workspaceFileIconUrl } from '@/lib/fileIconAssets'
+import { cn } from '@/lib/utils'
 
-const props = withDefaults(defineProps<{
-  modelValue: string
-  disabled?: boolean
-  placeholder?: string
-  ariaLabel?: string
-  ariaInvalid?: boolean
-  ariaDescribedby?: string
-}>(), { disabled: false, placeholder: '', ariaLabel: 'Chat prompt', ariaInvalid: undefined, ariaDescribedby: undefined })
+const props = withDefaults(
+  defineProps<{
+    modelValue: string
+    disabled?: boolean
+    placeholder?: string
+    ariaLabel?: string
+    ariaInvalid?: boolean
+    ariaDescribedby?: string
+    ariaControls?: string
+    ariaActiveDescendant?: string
+    testId?: string
+    editorClass?: string
+  }>(),
+  {
+    disabled: false,
+    placeholder: '',
+    ariaLabel: 'Chat prompt',
+    ariaInvalid: undefined,
+    ariaDescribedby: undefined,
+    ariaControls: undefined,
+    ariaActiveDescendant: undefined,
+    testId: 'composer-textarea',
+    editorClass: '',
+  },
+)
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   input: []
@@ -35,18 +57,23 @@ function nodeText(node: Node): string {
 function value(): string {
   const el = editor.value
   if (!el) return props.modelValue
-  return Array.from(el.childNodes).map((node) => nodeText(node)).join('')
+  return Array.from(el.childNodes)
+    .map((node) => nodeText(node))
+    .join('')
 }
 
 function offsetFor(node: Node, offset: number): number {
   const el = editor.value
   if (!el) return 0
   if (node === el) {
-    return Array.from(el.childNodes).slice(0, offset).reduce((sum, child) => sum + nodeText(child).length, 0)
+    return Array.from(el.childNodes)
+      .slice(0, offset)
+      .reduce((sum, child) => sum + nodeText(child).length, 0)
   }
   let position = 0
   for (const child of Array.from(el.childNodes)) {
-    if (child === node) return position + (child.nodeType === Node.TEXT_NODE ? offset : nodeText(child).length)
+    if (child === node)
+      return position + (child.nodeType === Node.TEXT_NODE ? offset : nodeText(child).length)
     if (child.contains(node)) return position + nodeText(child).length
     position += nodeText(child).length
   }
@@ -132,7 +159,8 @@ function chip(token: ComposerToken): HTMLElement {
   badge.dataset.mentionRaw = token.raw
   badge.dataset.testid = token.kind === 'file' ? 'composer-file-badge' : 'composer-agent-badge'
   badge.setAttribute('contenteditable', 'false')
-  badge.className = 'mx-0.5 inline-flex max-w-[min(100%,12rem)] items-center gap-1 align-middle rounded-md border border-border bg-muted/70 px-1.5 py-0.5 text-xs font-medium text-foreground'
+  badge.className =
+    'mx-0.5 inline-flex max-w-[min(100%,12rem)] items-center gap-1 align-middle rounded-md border border-border bg-muted/70 px-1.5 py-0.5 text-xs font-medium text-foreground'
   badge.title = token.kind === 'file' ? token.path : token.raw
   const icon = document.createElement('span')
   icon.className = 'group/icon relative inline-flex size-4 shrink-0 items-center justify-center'
@@ -140,7 +168,8 @@ function chip(token: ComposerToken): HTMLElement {
   remove.type = 'button'
   remove.tabIndex = 0
   remove.dataset.testid = 'composer-badge-remove'
-  remove.className = 'absolute inset-0 flex items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity group-hover/icon:opacity-100 hover:text-foreground focus:opacity-100'
+  remove.className =
+    'absolute inset-0 flex items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity group-hover/icon:opacity-100 hover:text-foreground focus:opacity-100'
   remove.setAttribute('aria-label', `Remove ${token.name} mention`)
   remove.textContent = '×'
   remove.addEventListener('mousedown', (event) => event.preventDefault())
@@ -154,7 +183,9 @@ function chip(token: ComposerToken): HTMLElement {
       if (sibling === badge) break
       start += nodeText(sibling).length
     }
-    const current = parts.find((part) => part.kind !== 'text' && part.start === start && part.raw === token.raw)
+    const current = parts.find(
+      (part) => part.kind !== 'text' && part.start === start && part.raw === token.raw,
+    )
     if (!current) return
     const next = removeComposerToken(value(), current.start, current.end)
     emit('update:modelValue', next.text)
@@ -209,7 +240,10 @@ function onInput(): void {
   if (!composing.value) {
     const tokens = parseComposerSegments(text).filter((part) => part.kind !== 'text')
     const badges = Array.from(editor.value.querySelectorAll<HTMLElement>('[data-mention-raw]'))
-    if (tokens.length !== badges.length || tokens.some((token, index) => token.raw !== badges[index]?.dataset.mentionRaw)) {
+    if (
+      tokens.length !== badges.length ||
+      tokens.some((token, index) => token.raw !== badges[index]?.dataset.mentionRaw)
+    ) {
       render(text, offset)
     } else {
       resize()
@@ -246,7 +280,12 @@ function onCopy(event: ClipboardEvent): void {
   const selection = window.getSelection()
   if (!selection?.rangeCount || !editor.value?.contains(selection.anchorNode)) return
   const fragment = selection.getRangeAt(0).cloneContents()
-  event.clipboardData?.setData('text/plain', Array.from(fragment.childNodes).map((node) => nodeText(node)).join(''))
+  event.clipboardData?.setData(
+    'text/plain',
+    Array.from(fragment.childNodes)
+      .map((node) => nodeText(node))
+      .join(''),
+  )
   event.preventDefault()
 }
 
@@ -259,10 +298,20 @@ function onCut(event: ClipboardEvent): void {
   onInput()
 }
 
-watch(() => props.modelValue, (text) => {
-  if (!composing.value && text !== value()) render(text, document.activeElement === editor.value ? Math.min(cursor(), text.length) : undefined)
+watch(
+  () => props.modelValue,
+  (text) => {
+    if (!composing.value && text !== value())
+      render(
+        text,
+        document.activeElement === editor.value ? Math.min(cursor(), text.length) : undefined,
+      )
+  },
+)
+onMounted(() => {
+  render(props.modelValue)
+  void nextTick(resize)
 })
-onMounted(() => { render(props.modelValue); void nextTick(resize) })
 defineExpose({ focus, setCursor, cursor, value, resize, el: editor })
 </script>
 
@@ -270,16 +319,23 @@ defineExpose({ focus, setCursor, cursor, value, resize, el: editor })
   <div class="relative">
     <div
       ref="editor"
-      data-testid="composer-textarea"
+      :data-testid="testId"
       role="textbox"
       :aria-label="ariaLabel"
       aria-multiline="true"
       :aria-invalid="ariaInvalid"
       :aria-describedby="ariaDescribedby"
+      :aria-controls="ariaControls"
+      :aria-activedescendant="ariaActiveDescendant"
       :aria-disabled="disabled"
       :contenteditable="disabled ? 'false' : 'true'"
       :data-placeholder="placeholder"
-      class="min-h-10 max-h-[200px] w-full overflow-y-auto whitespace-pre-wrap break-words px-4 py-2 text-base outline-none empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)] md:min-h-9"
+      :class="
+        cn(
+          'min-h-10 max-h-[200px] w-full overflow-y-auto whitespace-pre-wrap break-words px-4 py-2 text-base outline-none empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)] md:min-h-9',
+          editorClass,
+        )
+      "
       @input="onInput"
       @keydown="onKeydown"
       @paste="onPaste"

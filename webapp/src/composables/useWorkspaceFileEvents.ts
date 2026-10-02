@@ -31,7 +31,14 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
     cleanupFns.push(
       onEvent('files:list_result', (data) => {
         if (data.workspace_id !== currentId()) return
-        fileExplorerStore.handleListResult(data.request_id, data.path, data.entries, data.error)
+        fileExplorerStore.handleListResult(
+          data.request_id,
+          data.path,
+          data.entries,
+          data.error,
+          data.workspace_id,
+          true,
+        )
       }),
     )
 
@@ -105,6 +112,7 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
           data.status,
           currentId(),
           data.error,
+          fileExplorerStore.shouldRefreshUploadResult(data.request_id),
         )
         workspaceImageStore.handleUploadResult(data.request_id, data.status, data.error)
       }),

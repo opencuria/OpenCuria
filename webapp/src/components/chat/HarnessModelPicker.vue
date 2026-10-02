@@ -32,12 +32,16 @@ const props = withDefaults(
     recentEfforts?: RecentModelEntry[]
     loading?: boolean
     disabled?: boolean
+    defaultModelLabel?: string
+    allowDefault?: boolean
   }>(),
   {
     recentModels: () => [],
     recentEfforts: () => [],
     loading: false,
     disabled: false,
+    defaultModelLabel: 'Select model…',
+    allowDefault: false,
   },
 )
 
@@ -54,7 +58,7 @@ const catalogModel = computed(() => resolveCatalogModel(props.models, props.mode
 const effortOptions = computed(() => catalogModel.value?.reasoning_efforts ?? [])
 
 const triggerModelName = computed(() => {
-  if (!props.model.trim()) return 'Select model…'
+  if (!props.model.trim()) return props.defaultModelLabel
   return catalogModel.value?.name ?? props.model
 })
 
@@ -112,13 +116,16 @@ const listTitle = computed(() => {
   return showAll.value ? 'All models' : 'Recent'
 })
 
-
 function rememberedEffort(id: string): string {
   return recentEffortById.value.get(id) ?? ''
 }
 
 function selectModel(id: string): void {
   emit('update:model', id)
+  if (!id) {
+    emit('update:effort', '')
+    return
+  }
   const selected = resolveCatalogModel(props.models, id)
   // Empty effort means inherit the mode's current agent default; don't fill
   // it with a model default behind the user's back. A remembered explicit
@@ -184,6 +191,15 @@ function onOpenChange(open: boolean): void {
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent class="min-w-40" :side-offset="8">
           <DropdownMenuItem
+            v-if="allowDefault"
+            class="text-xs"
+            data-testid="composer-effort-default"
+            @click="selectEffort('')"
+          >
+            <span>Agent default</span>
+            <Check v-if="!effort" class="ml-auto size-3.5" />
+          </DropdownMenuItem>
+          <DropdownMenuItem
             v-for="option in effortOptions"
             :key="option"
             class="text-xs"
@@ -214,6 +230,16 @@ function onOpenChange(open: boolean): void {
             />
           </div>
           <div class="max-h-64 overflow-y-auto overflow-x-hidden p-1.5">
+            <button
+              v-if="allowDefault"
+              type="button"
+              class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent"
+              data-testid="composer-model-default"
+              @click="selectModel('')"
+            >
+              <span class="min-w-0 flex-1 font-medium">Agent default</span>
+              <Check v-if="!model" class="size-4 shrink-0 text-primary" />
+            </button>
             <div class="flex items-center justify-between px-2.5 pb-1 pt-1.5">
               <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {{ listTitle }}

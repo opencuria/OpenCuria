@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia'
+import { afterEach } from 'vitest'
 import { defineComponent, h, nextTick, provide, inject } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -145,6 +146,36 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
       stubs: {
         ComposerRichEditor: editorStub,
         HarnessModelPicker: true,
+        HarnessChatInput: defineComponent({
+          props: {
+            prompt: { type: String, default: '' },
+            promptError: { type: String, default: '' },
+            skillIds: { type: Array, default: () => [] },
+            disabled: Boolean,
+          },
+          emits: [
+            'update:prompt',
+            'update:skill-ids',
+            'update:model',
+            'update:effort',
+            'update:mode',
+          ],
+          setup(props, { emit }) {
+            return () =>
+              h('div', [
+                h('textarea', {
+                  'data-testid': 'task-prompt',
+                  value: props.prompt,
+                  disabled: props.disabled,
+                  onInput: (event: Event) =>
+                    emit('update:prompt', (event.target as HTMLTextAreaElement).value),
+                }),
+                props.promptError
+                  ? h('p', { 'data-testid': 'task-prompt-error' }, props.promptError)
+                  : null,
+              ])
+          },
+        }),
         DropdownMenu: passthrough,
         DropdownMenuTrigger: passthrough,
         DropdownMenuContent: passthrough,
@@ -198,14 +229,14 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
         }),
         TabsContent: defineComponent({
           props: { value: String },
-          setup(props, { slots }) {
+          setup(props, { slots, attrs }) {
             const tabs = inject<{
               props: { modelValue?: string }
               emit: (event: string, value: string) => void
             }>(tabsModelKey)
             return () =>
               props.value === tabs?.props.modelValue
-                ? h('div', { 'data-tab-content': props.value }, slots.default?.())
+                ? h('div', { ...attrs, 'data-tab-content': props.value }, slots.default?.())
                 : null
           },
         }),
@@ -232,11 +263,16 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
           },
         }),
         Select: defineComponent({
-          props: { modelValue: String },
+          props: { modelValue: String, disabled: Boolean },
           emits: ['update:modelValue'],
-          setup(_, { slots, emit }) {
+          setup(props, { slots, emit }) {
             provide(selectUpdateKey, (value: string) => emit('update:modelValue', value))
-            return () => h('div', slots.default?.())
+            return () =>
+              h(
+                'div',
+                { 'aria-disabled': props.disabled ? 'true' : undefined },
+                slots.default?.(),
+              )
           },
         }),
         SelectTrigger: defineComponent({
@@ -283,6 +319,11 @@ beforeEach(() => {
 })
 
 describe('ScheduledTaskDialog', () => {
+  afterEach(() => {
+    document.body
+      .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+      .forEach((node) => node.remove())
+  })
   it('shows concise settings, stopped-workspace hint and delayed file controls without running or saving', async () => {
     const { wrapper } = await mountDialog()
     expect(wrapper.get('[data-testid="task-name"]').element).toHaveProperty(
@@ -301,16 +342,15 @@ describe('ScheduledTaskDialog', () => {
     expect(api.runScheduledTaskNow).not.toHaveBeenCalled()
   })
 
-  it('validates beside the prompt and reveals skills and file tools progressively', async () => {
+  it('validates the prompt without separate skill or file panels', async () => {
     const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('draft')
     await wrapper.get('[data-testid="task-prompt"]').setValue('')
     await wrapper.get('[data-testid="save-task"]').trigger('click')
-    expect(wrapper.get('[data-testid="task-prompt-error"]').text()).toContain('Add a prompt')
-    await wrapper.get('[data-testid="skills-picker"]').trigger('click')
-    expect(wrapper.text()).toContain('Review skill')
-    await wrapper.get('[data-testid="toggle-files"]').trigger('click')
-    expect(wrapper.find('[data-testid="workspace-files"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="upload-files"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="save-task"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="skills-picker"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="toggle-files"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-files"]').exists()).toBe(false)
   })
 
   it('saves a weekly task through shared store, but does not run it', async () => {
@@ -327,6 +367,10 @@ describe('ScheduledTaskDialog', () => {
         name: 'Morning check',
         workspace_id: 'ws-1',
         prompt: 'Check build health',
+        skill_ids: [],
+        mode: 'build',
+        model: '',
+        reasoning_effort: '',
         recurrence: 'weekly',
         weekdays: [1, 2, 3, 4],
         timezone_name: 'Europe/Berlin',
@@ -335,6 +379,7 @@ describe('ScheduledTaskDialog', () => {
     expect(store.tasks.some((item) => item.id === 'task-new')).toBe(true)
     expect(api.runScheduledTaskNow).not.toHaveBeenCalled()
     expect(wrapper.emitted('update:open')).toBeUndefined()
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
   })
 
   it('closes clean edits from both Cancel and the close button without passing DOM events', async () => {
@@ -364,22 +409,30 @@ describe('ScheduledTaskDialog', () => {
     expect(wrapper.emitted('update:open')).toBeUndefined()
   })
 
-  it('blocks close while a save is pending', async () => {
-    let resolveUpdate!: (saved: ScheduledTask) => void
-    api.updateScheduledTask.mockReturnValueOnce(
+  it('blocks editing and close while a save is pending', async () => {
+    let resolveCreate!: (saved: ScheduledTask) => void
+    api.createScheduledTask.mockReturnValueOnce(
       new Promise((resolve) => {
-        resolveUpdate = resolve
+        resolveCreate = resolve
       }),
     )
-    const { wrapper } = await mountDialog()
-    await wrapper.get('[data-testid="task-name"]').setValue('Updated title')
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-name"]').setValue('New task')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('A valid scheduled task prompt')
     await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await nextTick()
+    expect(api.createScheduledTask).toHaveBeenCalledTimes(1)
+    const settings = wrapper.find('[aria-busy="true"]')
+    expect(settings.exists()).toBe(true)
+    expect(settings.attributes('inert')).toBeDefined()
+    expect(wrapper.find('[aria-disabled="true"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="task-prompt"]').attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="cancel-task"]').trigger('click')
     await wrapper.get('[data-testid="close-task-dialog"]').trigger('click')
     expect(wrapper.emitted('update:open')).toBeUndefined()
     expect(wrapper.text()).not.toContain('Discard unsaved changes?')
 
-    resolveUpdate({ ...task, name: 'Updated title' })
+    resolveCreate({ ...task, name: 'New task' })
     await flushPromises()
     expect(wrapper.emitted('update:open')).toBeUndefined()
   })

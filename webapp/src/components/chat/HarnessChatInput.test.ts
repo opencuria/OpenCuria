@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
@@ -12,12 +12,13 @@ import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { resetRecentModelsCache } from '@/lib/recentModels'
 import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useHarnessStore } from '@/stores/harness'
+import { useAuthStore } from '@/stores/auth'
 import { sendFilesUpload } from '@/services/socket'
 import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
 
 vi.mock('@/services/socket', async () => {
-  const actual =
-    await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
+  const actual = await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
   return {
     ...actual,
     sendFilesUpload: vi.fn(),
@@ -92,7 +93,10 @@ function mountInput(props: Record<string, unknown> = {}, attachTo?: Element) {
 
 /** Drive the contenteditable exactly as a plain-text browser input. */
 async function setEditorText(wrapper: VueWrapper, text: string): Promise<void> {
-  const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
+  const selector = wrapper.find('[data-testid="composer-textarea"]').exists()
+    ? '[data-testid="composer-textarea"]'
+    : '[data-testid="task-prompt"]'
+  const el = wrapper.get(selector).element as HTMLElement
   el.textContent = text
   const range = document.createRange()
   range.selectNodeContents(el)
@@ -100,17 +104,46 @@ async function setEditorText(wrapper: VueWrapper, text: string): Promise<void> {
   const selection = window.getSelection()!
   selection.removeAllRanges()
   selection.addRange(range)
-  await wrapper.get('[data-testid="composer-textarea"]').trigger('input')
+  await wrapper.get(selector).trigger('input')
 }
 function editorText(wrapper: VueWrapper): string {
   return (wrapper.findComponent(ComposerRichEditor).vm as unknown as { value(): string }).value()
 }
 function editorCursor(wrapper: VueWrapper, offset: number): void {
-  const editor = wrapper.findComponent(ComposerRichEditor).vm as unknown as { setCursor(offset: number): void }
+  const editor = wrapper.findComponent(ComposerRichEditor).vm as unknown as {
+    setCursor(offset: number): void
+  }
   editor.setCursor(offset)
 }
 
 describe('HarnessChatInput', () => {
+  beforeEach(() => {
+    if (typeof IntersectionObserver === 'undefined') {
+      class TestIntersectionObserver implements IntersectionObserver {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+        takeRecords(): IntersectionObserverEntry[] {
+          return []
+        }
+        root: Element | Document | null = null
+        rootMargin = '0px'
+        thresholds: ReadonlyArray<number> = []
+        constructor(
+          private callback: IntersectionObserverCallback,
+          _options?: IntersectionObserverInit,
+        ) {}
+      }
+      vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+    }
+  })
+
+  afterEach(() => {
+    document.body
+      .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+      .forEach((node) => node.remove())
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
@@ -118,8 +151,24 @@ describe('HarnessChatInput', () => {
     resetAgentConfigsCache()
     resetRecentModelsCache()
     listAgentConfigsMock.mockResolvedValue([
-      { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
-      { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-big',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+      {
+        agent: 'plan',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-small',
+        effort: '',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
     ])
     listProviderModelsMock.mockResolvedValue(catalog)
   })
@@ -130,7 +179,6 @@ describe('HarnessChatInput', () => {
       expect(listProviderModelsMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    const html = wrapper.html()
     expect(listProviderModelsMock).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Skills')
     expect(wrapper.text()).not.toContain('Fast')
@@ -147,9 +195,9 @@ describe('HarnessChatInput', () => {
       Node.DOCUMENT_POSITION_FOLLOWING,
     )
     expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="composer-textarea"]').attributes('data-placeholder')).toContain(
-      '/ for skills',
-    )
+    expect(
+      wrapper.find('[data-testid="composer-textarea"]').attributes('data-placeholder'),
+    ).toContain('/ for skills')
   })
 
   it('keeps all composer controls inside a responsive wrapping toolbar', () => {
@@ -200,10 +248,14 @@ describe('HarnessChatInput', () => {
     vm.setPrompt('Review @file:/workspace/src/shell.py with @agent:plan please')
     await wrapper.vm.$nextTick()
     expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('shell.py')
-    expect(wrapper.get('[data-testid="composer-file-badge"]').attributes('title')).toBe('/workspace/src/shell.py')
+    expect(wrapper.get('[data-testid="composer-file-badge"]').attributes('title')).toBe(
+      '/workspace/src/shell.py',
+    )
     expect(wrapper.get('[data-testid="composer-agent-badge"]').text()).toContain('plan')
     expect(editorText(wrapper)).toBe('Review @file:/workspace/src/shell.py with @agent:plan please')
-    await wrapper.get('[data-testid="composer-file-badge"] [data-testid="composer-badge-remove"]').trigger('click')
+    await wrapper
+      .get('[data-testid="composer-file-badge"] [data-testid="composer-badge-remove"]')
+      .trigger('click')
     expect(editorText(wrapper)).toBe('Review with @agent:plan please')
     expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
     await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
@@ -217,7 +269,9 @@ describe('HarnessChatInput', () => {
     await wrapper.vm.$nextTick()
     ;(wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement).focus()
     editorCursor(wrapper, 0)
-    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter', shiftKey: true })
+    await wrapper
+      .get('[data-testid="composer-textarea"]')
+      .trigger('keydown', { key: 'Enter', shiftKey: true })
     expect(editorText(wrapper)).toBe('\nbefore @file:/workspace/a.py after')
     wrapper.unmount()
     expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.py')
@@ -248,7 +302,9 @@ describe('HarnessChatInput', () => {
   it('shows settings CTA when the model catalog has no available models', async () => {
     listProviderModelsMock.mockResolvedValue([])
     const wrapper = mountInput()
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true))
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true),
+    )
     const events: Array<{ tab?: string }> = []
     const listener = (e: Event) => events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
     window.addEventListener(OPEN_SETTINGS_EVENT, listener)
@@ -290,6 +346,311 @@ describe('HarnessChatInput', () => {
     expect(typeof sends[0]![4]).toBe('string')
   })
 
+  it('uses controlled scheduled-task state without chat cache/default side effects or send controls', async () => {
+    const harness = useHarnessStore()
+    harness.agentConfigs = [
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'default/model',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+    ]
+    harness.composerDirty = false
+    sessionStorage.setItem('chat-input-ws-1-default', 'old chat draft')
+    const wrapper = mountInput({
+      variant: 'scheduled-task',
+      prompt: 'task prompt',
+      mode: 'build',
+      model: '',
+      effort: '',
+      skillIds: [],
+      skillOptions: [],
+      filesAvailable: false,
+    })
+    await vi.waitFor(() => {
+      expect(listProviderModelsMock).toHaveBeenCalled()
+      expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading')
+    })
+    expect(listAgentConfigsMock).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="task-prompt"]').attributes('aria-label')).toBe(
+      'Scheduled task prompt',
+    )
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-context-usage"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Agent default')
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(harness.composerDirty).toBe(false)
+
+    await setEditorText(wrapper, 'edited task prompt')
+    expect(wrapper.emitted('update:prompt')?.slice(-1)[0]).toEqual(['edited task prompt'])
+    expect(sessionStorage.getItem('chat-input-ws-1-default')).toBe('old chat draft')
+    wrapper.unmount()
+    expect(sessionStorage.getItem('chat-input-ws-1-default')).toBe('old chat draft')
+  })
+
+  it('preserves selected skill ids when the skill/model catalog temporarily hides them', async () => {
+    const auth = useAuthStore()
+    const skills = [
+      {
+        id: 'skill-hidden',
+        name: 'Hidden later',
+        body: 'Keep this selection',
+        scope: 'personal' as const,
+        created_by_email: null,
+        created_at: '2026-03-29T10:00:00.000Z',
+        updated_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+    const wrapper = mountInput({
+      variant: 'scheduled-task',
+      prompt: 'keep this prompt',
+      model: 'catalog/model-a',
+      skillIds: ['skill-hidden'],
+      skillOptions: skills,
+      filesAvailable: false,
+    })
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(true)
+    await wrapper.setProps({ skillOptions: [], model: 'catalog/model-b' })
+    listProviderModelsMock.mockResolvedValueOnce([])
+    resetProviderCatalogCache()
+    auth.activeOrganizationId = 'org-catalog-refresh'
+    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(2))
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(false)
+    expect(wrapper.emitted('update:skillIds')).toBeUndefined()
+    await wrapper.setProps({ skillOptions: skills })
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(true)
+    expect(wrapper.emitted('update:prompt')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shares scheduled-task skill/agent autocomplete without sending and keeps Enter as newline', async () => {
+    const skills = [
+      {
+        id: 'skill-1',
+        name: 'Lint rules',
+        body: 'Always lint',
+        scope: 'personal' as const,
+        created_by_email: null,
+        created_at: '2026-03-29T10:00:00.000Z',
+        updated_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+    const wrapper = mountInput(
+      {
+        variant: 'scheduled-task',
+        prompt: '',
+        skillIds: [],
+        skillOptions: skills,
+        filesAvailable: false,
+      },
+      document.body,
+    )
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-skill-option"]')).not.toBeNull(),
+    )
+    await document.body
+      .querySelector('[data-testid="composer-skill-option"]')!
+      .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="composer-skill-remove-skill-1"]').trigger('click')
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([[]])
+
+    await setEditorText(wrapper, '@agent:bu')
+    editorCursor(wrapper, 9)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-mention-option"]')).not.toBeNull(),
+    )
+    await editor.trigger('keydown', { key: 'Enter' })
+    expect(
+      (wrapper.findComponent(ComposerRichEditor).vm as unknown as { value(): string }).value(),
+    ).toContain('@agent:build ')
+
+    const newlineEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(newlineEnter)
+    expect(newlineEnter.defaultPrevented).toBe(false)
+    const ctrlEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(ctrlEnter)
+    expect(ctrlEnter.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('send')).toBeUndefined()
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    wrapper.unmount()
+    document.body
+      .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+      .forEach((node) => node.remove())
+  })
+
+  it('keeps IME Enter and the first Escape inside scheduled-task suggestions', async () => {
+    const wrapper = mountInput(
+      {
+        variant: 'scheduled-task',
+        prompt: '',
+        skillIds: [],
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Lint rules',
+            body: 'Always lint',
+            scope: 'personal',
+            created_by_email: null,
+            created_at: '2026-03-29T10:00:00.000Z',
+            updated_at: '2026-03-29T10:00:00.000Z',
+          },
+        ],
+        filesAvailable: false,
+      },
+      document.body,
+    )
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    const ancestorKeydown = vi.fn()
+    document.body.addEventListener('keydown', ancestorKeydown)
+
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-skill-option"]')).toBeTruthy(),
+    )
+    expect(
+      document
+        .querySelector('[data-testid="composer-suggestions-portal"]')
+        ?.closest('[data-testid="composer-card"]'),
+    ).toBeNull()
+
+    const composingEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(composingEnter)
+    expect(composingEnter.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('update:skillIds')).toBeUndefined()
+    ancestorKeydown.mockClear()
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(escape)
+    await wrapper.vm.$nextTick()
+    expect(escape.defaultPrevented).toBe(true)
+    expect(ancestorKeydown).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-testid="composer-suggestions-portal"]')).toBeNull()
+
+    editor.element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+    expect(ancestorKeydown).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    document.body.removeEventListener('keydown', ancestorKeydown)
+  })
+
+  it('keeps scheduled suggestions visible when the anchor has no room above it', async () => {
+    const skill = {
+      id: 'viewport-skill',
+      name: 'Viewport skill',
+      body: 'Skill body',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '2026-03-29T10:00:00.000Z',
+      updated_at: '2026-03-29T10:00:00.000Z',
+    }
+    const wrapper = mountInput(
+      { variant: 'scheduled-task', skillOptions: [skill], filesAvailable: false },
+      document.body,
+    )
+    const anchor = wrapper.get('[data-testid="composer-card"]').element
+    vi.spyOn(anchor, 'getBoundingClientRect').mockReturnValue(new DOMRect(12, 2, 360, 180))
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    await setEditorText(wrapper, '/View')
+    editorCursor(wrapper, 5)
+    await editor.trigger('input')
+
+    let popup: HTMLElement | undefined
+    await vi.waitFor(() => {
+      popup =
+        document.querySelector<HTMLElement>('[data-testid="composer-suggestions-portal"]') ??
+        undefined
+      expect(popup).toBeTruthy()
+      expect(popup!.style.maxHeight).not.toBe('0px')
+      expect(Number.parseFloat(popup!.style.maxHeight)).toBeGreaterThanOrEqual(32)
+      expect(popup!.querySelector('[role="option"][aria-selected="true"]')).toBeTruthy()
+    })
+
+    expect(anchor.getBoundingClientRect().top).toBe(2)
+    expect(popup?.style.translate).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('renders exactly one selected skill chip in chat and scheduled-task composers', async () => {
+    const skill = {
+      id: 'skill-1',
+      name: 'Lint rules',
+      body: 'Always lint',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '2026-03-29T10:00:00.000Z',
+      updated_at: '2026-03-29T10:00:00.000Z',
+    }
+
+    for (const variant of ['chat', 'scheduled-task'] as const) {
+      const wrapper = mountInput(
+        {
+          variant,
+          skillOptions: [skill],
+          filesAvailable: false,
+        },
+        document.body,
+      )
+      const testId = `[data-testid="composer-skill-chip-${skill.id}"]`
+      const editor = wrapper.get(
+        variant === 'chat' ? '[data-testid="composer-textarea"]' : '[data-testid="task-prompt"]',
+      )
+      await setEditorText(wrapper, '/Lin')
+      editorCursor(wrapper, 4)
+      await editor.trigger('input')
+      let option: Element | null = null
+      await vi.waitFor(() => {
+        const found =
+          variant === 'chat'
+            ? wrapper.find('[role="option"]').element
+            : document.querySelector('[data-testid="composer-skill-option"]')
+        expect(found).toBeTruthy()
+        option = found ?? null
+      })
+      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.findAll(testId)).toHaveLength(1)
+      expect(wrapper.find(testId).text()).toContain(skill.name)
+      wrapper.unmount()
+      document
+        .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+        .forEach((node) => node.remove())
+    }
+  })
+
   it('attaches a skill from the slash picker and includes it on send', async () => {
     const wrapper = mountInput({
       skillOptions: [
@@ -315,6 +676,7 @@ describe('HarnessChatInput', () => {
     expect(wrapper.find('[role="listbox"]').text()).toContain('Lint rules')
     await textarea.trigger('keydown', { key: 'Enter' })
     expect(wrapper.text()).toContain('Lint rules')
+    expect(wrapper.findAll('[data-testid="composer-skill-chip-skill-1"]')).toHaveLength(1)
 
     await setEditorText(wrapper, 'use skills')
     await textarea.trigger('keydown', { key: 'Enter' })
@@ -402,7 +764,11 @@ describe('HarnessChatInput', () => {
   it('fills the context ring from catalog limit and used tokens', async () => {
     resetProviderCatalogCache()
     const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
     const rings = wrapper.findAll('[data-testid="composer-context-usage"] circle')
     expect(rings).toHaveLength(2)
     const circumference = 2 * Math.PI * 6
@@ -416,7 +782,11 @@ describe('HarnessChatInput', () => {
   it('emits context metrics when used tokens or catalog limit change', async () => {
     resetProviderCatalogCache()
     const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
     const metrics = wrapper.emitted('context-metrics') ?? []
     expect(metrics.length).toBeGreaterThan(0)
     const last = metrics[metrics.length - 1]![0] as {
@@ -454,7 +824,9 @@ describe('HarnessChatInput', () => {
     const input = wrapper.find('[data-testid="composer-file-input"]')
     expect(input.exists()).toBe(true)
     expect((input.element as HTMLInputElement).multiple).toBe(true)
-    const clickSpy = vi.spyOn(input.element as HTMLInputElement, 'click').mockImplementation(() => {})
+    const clickSpy = vi
+      .spyOn(input.element as HTMLInputElement, 'click')
+      .mockImplementation(() => {})
     await wrapper.find('[data-testid="composer-attach"]').trigger('click')
     expect(clickSpy).toHaveBeenCalledTimes(1)
     clickSpy.mockRestore()
@@ -489,8 +861,24 @@ describe('HarnessChatInput chat upload', () => {
     resetAgentConfigsCache()
     resetRecentModelsCache()
     listAgentConfigsMock.mockResolvedValue([
-      { agent: 'build', mode: 'primary', description: '', model: 'openrouter/model-big', effort: 'high', inherit_model: false, effort_strategy: 'fixed' },
-      { agent: 'plan', mode: 'primary', description: '', model: 'openrouter/model-small', effort: '', inherit_model: false, effort_strategy: 'fixed' },
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-big',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+      {
+        agent: 'plan',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-small',
+        effort: '',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
     ])
     listProviderModelsMock.mockResolvedValue(catalog)
   })
@@ -525,16 +913,18 @@ describe('HarnessChatInput chat upload', () => {
     await vi.waitFor(() => {
       expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
     })
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading'))
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
 
     const { requestId, path, filename } = uploadRequest()
     expect(path).toBe(CHAT_UPLOAD_DIR)
     expect(filename).toBe('my_notes.txt')
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(
-        `@file:${CHAT_UPLOAD_DIR}/my_notes.txt `,
-      )
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/my_notes.txt `)
     })
   })
 
@@ -571,7 +961,8 @@ describe('HarnessChatInput chat upload', () => {
     })
   })
 
-  it('uploads dropped files on the composer card', async () => {    const store = useFileExplorerStore()
+  it('uploads dropped files on the composer card', async () => {
+    const store = useFileExplorerStore()
     vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
     const wrapper = mountInput()
     const card = wrapper.find('[data-testid="composer-card"]')
@@ -590,9 +981,7 @@ describe('HarnessChatInput chat upload', () => {
     expect(vi.mocked(sendFilesUpload).mock.calls[0]![2]).toBe(CHAT_UPLOAD_DIR)
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(
-        `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
-      )
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
     })
   })
 
@@ -638,9 +1027,7 @@ describe('HarnessChatInput chat upload', () => {
     expect(trackSpy).toHaveBeenCalledTimes(1)
 
     await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(
-        `@file:${CHAT_UPLOAD_DIR}/drop.txt `,
-      )
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
     })
     const value = editorText(wrapper) as string
     expect(value.match(/@file:/g)).toHaveLength(1)
@@ -713,6 +1100,144 @@ describe('HarnessChatInput chat upload', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(editorText(wrapper)).toBe('')
   })
+
+  it('deduplicates scheduled uploads against its selected workspace, not the shared tree', async () => {
+    const store = useFileExplorerStore()
+    store.setTree('/workspace', [
+      { name: 'unrelated.txt', path: '/workspace/unrelated.txt', type: 'file', size: 1 },
+    ])
+    const listSpy = vi
+      .spyOn(store, 'fetchDirectoryEntries')
+      .mockImplementation(async (_ws, path) => {
+        if (path === '/workspace')
+          return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
+        if (path === '/workspace/.opencuria')
+          return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
+        return [{ name: 'task.txt', path: `${CHAT_UPLOAD_DIR}/task.txt`, type: 'file', size: 1 }]
+      })
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+    const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(sendFilesUpload).mock.calls[0]![3]).toBe('task_1.txt')
+    expect(listSpy.mock.calls.map((call) => call[1])).toEqual([
+      '/workspace',
+      '/workspace/.opencuria',
+      CHAT_UPLOAD_DIR,
+    ])
+    expect(store.tree.map((entry) => entry.name)).toEqual(['unrelated.txt'])
+    succeedUpload(uploadRequest().requestId)
+    await upload
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/task_1.txt `)
+    wrapper.unmount()
+  })
+
+  it('aborts a scheduled upload when selected-workspace filename listing fails', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue(null)
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+    await vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(editorText(wrapper)).toBe('')
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('Could not check') }),
+    )
+    wrapper.unmount()
+  })
+
+  it('cancels its pending scheduled upload when the workspace changes', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as {
+      uploadChatFiles: (files: File[]) => Promise<void>
+    }
+    const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+    const requestId = uploadRequest().requestId
+    let anotherChatCompleted = false
+    const anotherChatUpload = store
+      .trackAndUpload('ws-1', 'other-chat-upload', CHAT_UPLOAD_DIR, 'other.txt', 'eA==', false)
+      .then(
+        () => {
+          anotherChatCompleted = true
+        },
+        () => {
+          anotherChatCompleted = true
+        },
+      )
+    expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([true])
+
+    await wrapper.setProps({ workspaceId: 'ws-2' })
+    await upload
+    expect(anotherChatCompleted).toBe(false)
+    expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
+    expect(editorText(wrapper)).toBe('')
+    expect(wrapper.emitted('update:prompt')).toBeUndefined()
+
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('timed out') }),
+    )
+    store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+    store.handleUploadResult('other-chat-upload', CHAT_UPLOAD_DIR, 'success', 'ws-1')
+    await anotherChatUpload
+    expect(anotherChatCompleted).toBe(true)
+    await wrapper.setProps({ workspaceId: 'ws-1' })
+    const retry = vm.uploadChatFiles([new File(['hi'], 'retry.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(2))
+    const retryId = uploadRequest(1).requestId
+    succeedUpload(retryId)
+    await retry
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/retry.txt `)
+    wrapper.unmount()
+  })
+
+  it.each(['reset', 'unmount'] as const)(
+    'cancels its owned upload on scheduled-task %s without changing another transfer',
+    async (lifecycle) => {
+      const store = useFileExplorerStore()
+      vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+      vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+      const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+      const vm = wrapper.vm as unknown as {
+        uploadChatFiles: (files: File[]) => Promise<void>
+      }
+      const upload = vm.uploadChatFiles([new File(['hi'], `${lifecycle}.txt`)])
+      await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+      const requestId = uploadRequest().requestId
+      let otherCompleted = false
+      const otherUpload = store
+        .trackAndUpload('ws-1', `other-${lifecycle}`, CHAT_UPLOAD_DIR, 'other.txt', 'eA==')
+        .then(() => {
+          otherCompleted = true
+        })
+
+      if (lifecycle === 'reset') await wrapper.setProps({ resetKey: 1 })
+      else wrapper.unmount()
+      await upload
+      expect(otherCompleted).toBe(false)
+      if (lifecycle === 'reset') {
+        expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
+        expect(editorText(wrapper)).toBe('')
+      }
+
+      store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+      expect(wrapper.emitted('update:prompt')).toBeUndefined()
+      store.handleUploadResult(`other-${lifecycle}`, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+      await otherUpload
+      expect(otherCompleted).toBe(true)
+      const { toast } = await import('vue-sonner')
+      expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+      if (lifecycle === 'reset') wrapper.unmount()
+    },
+  )
 
   it('highlights the composer card while an external file drag is active', async () => {
     const wrapper = mountInput({ uploadDrag: { active: true, uploading: false } })

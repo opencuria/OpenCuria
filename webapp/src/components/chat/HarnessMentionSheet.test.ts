@@ -30,6 +30,13 @@ describe('HarnessMentionSheet', () => {
     expect(active.attributes('data-mention-index')).toBe('9')
   })
 
+  it('accepts a caller-provided label for skill suggestions', () => {
+    const wrapper = mount(HarnessMentionSheet, {
+      props: { candidates: [], activeIndex: 0, label: 'Skill suggestions' },
+    })
+    expect(wrapper.get('[role="listbox"]').attributes('aria-label')).toBe('Skill suggestions')
+  })
+
   it('ignores hover while the pointer stays still', async () => {
     const wrapper = mount(HarnessMentionSheet, {
       props: {

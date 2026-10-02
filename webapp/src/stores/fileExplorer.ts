@@ -6,12 +6,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { FileNode, FileEntryRaw } from '@/types'
-import {
-  sendFilesList,
-  sendFilesFind,
-  sendFilesRead,
-  sendFilesDownload,
-} from '@/services/socket'
+import { sendFilesList, sendFilesFind, sendFilesRead, sendFilesDownload } from '@/services/socket'
 import {
   createChunkedTransferStore,
   decodedBase64Size,
@@ -35,6 +30,11 @@ const DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
 
 /** Delay before a download object URL is revoked (lets the click dispatch). */
 const DOWNLOAD_REVOKE_DELAY_MS = 1000
+
+/** Keep terminal upload ids briefly so duplicate/late socket results stay silent. */
+const UPLOAD_TERMINAL_TTL_MS = 30_000
+/** Bound terminal upload bookkeeping if a result stream is unusually busy. */
+const MAX_TERMINAL_UPLOAD_IDS = 500
 
 /** How long a file read may stay pending before failing visibly. */
 const CONTENT_TIMEOUT_MS = 30_000
@@ -71,6 +71,20 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // Pending request callbacks: request_id → resolver
   const pendingRequests = ref<Map<string, (data: unknown) => void>>(new Map())
+  const pendingDirectoryRequests = new Map<
+    string,
+    {
+      workspaceId: string
+      path: string
+      updateTree: boolean
+      onResult: (entries: FileEntryRaw[] | null) => void
+      signal?: AbortSignal
+      abort?: () => void
+    }
+  >()
+  const pendingUploadRefreshPolicy = new Map<string, boolean>()
+  const pendingUploadRequests = new Map<string, { workspaceId: string; path: string }>()
+  const terminalUploadRequestIds = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingFindRequests = ref<Map<string, (paths: string[]) => void>>(new Map())
 
   // Bounded reassembly for chunked content/download transfers.
@@ -88,7 +102,8 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     if (!contentChunks) {
       contentChunks = createChunkedTransferStore({
         maxChars: CONTENT_CHUNK_MAX_CHARS,
-        onTimeout: (requestId) => failContentTransfer(requestId, 'File read timed out. Please retry.'),
+        onTimeout: (requestId) =>
+          failContentTransfer(requestId, 'File read timed out. Please retry.'),
       })
     }
     return contentChunks
@@ -98,7 +113,8 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     if (!downloadChunks) {
       downloadChunks = createChunkedTransferStore({
         maxChars: CONTENT_CHUNK_MAX_CHARS,
-        onTimeout: (requestId) => failDownloadTransfer(requestId, 'Download timed out. Please retry.'),
+        onTimeout: (requestId) =>
+          failDownloadTransfer(requestId, 'Download timed out. Please retry.'),
       })
     }
     return downloadChunks
@@ -172,11 +188,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
   }
 
-  function setChildNodes(
-    nodes: FileNode[],
-    parentPath: string,
-    children: FileNode[],
-  ): void {
+  function setChildNodes(nodes: FileNode[], parentPath: string, children: FileNode[]): void {
     for (const node of nodes) {
       if (node.path === parentPath) {
         node.children = children
@@ -203,10 +215,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     return null
   }
 
-  async function ensureDirectoryLoaded(
-    workspaceId: string,
-    path: string,
-  ): Promise<void> {
+  async function ensureDirectoryLoaded(workspaceId: string, path: string): Promise<void> {
     const node = findNode(tree.value, path)
     if (path !== '/workspace' && (!node || node.type !== 'directory')) {
       return
@@ -259,10 +268,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     selectFile(path, workspaceId)
   }
 
-  function toggleExpand(
-    path: string,
-    workspaceId: string,
-  ): void {
+  function toggleExpand(path: string, workspaceId: string): void {
     if (expandedPaths.value.has(path)) {
       expandedPaths.value.delete(path)
     } else {
@@ -387,14 +393,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
   }
 
-  function cancelDownloadTransfer(requestId: string | null): void {
-    if (!requestId) return
-    getDownloadChunks().cancel(requestId)
-    clearPendingTimer(requestId)
-    pendingRequests.value.delete(requestId)
-    pendingDownloadPaths.delete(requestId)
-  }
-
   function closeFileViewer(): void {
     cancelContentTransfer(activeContentRequestId.value)
     getDownloadChunks().clear()
@@ -419,6 +417,15 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     activeContentRequestId.value = null
     loadingPaths.value = new Set()
     pendingRequests.value.clear()
+    pendingUploadRefreshPolicy.clear()
+    pendingUploadRequests.clear()
+    for (const timer of terminalUploadRequestIds.values()) clearTimeout(timer)
+    terminalUploadRequestIds.clear()
+    for (const request of pendingDirectoryRequests.values()) {
+      request.signal?.removeEventListener('abort', request.abort!)
+      request.onResult(null)
+    }
+    pendingDirectoryRequests.clear()
     pendingFindRequests.value.clear()
     pendingContentPaths.clear()
     pendingDownloadPaths.clear()
@@ -430,21 +437,73 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // -- socket request helpers -----------------------------------------------
 
-  function fetchDirectory(workspaceId: string, path: string): Promise<void> {
-    loadingPaths.value.add(path)
+  function requestDirectory(
+    workspaceId: string,
+    path: string,
+    updateTree: boolean,
+    signal?: AbortSignal,
+  ): Promise<FileEntryRaw[] | null> {
+    if (updateTree) loadingPaths.value.add(path)
     const requestId = nextRequestId()
-    return new Promise<void>((resolve) => {
-      pendingRequests.value.set(requestId, () => {
-        loadingPaths.value.delete(path)
-        resolve()
-      })
+    return new Promise((resolve) => {
+      const request: {
+        workspaceId: string
+        path: string
+        updateTree: boolean
+        onResult: (entries: FileEntryRaw[] | null) => void
+        signal?: AbortSignal
+        abort?: () => void
+      } = {
+        workspaceId,
+        path,
+        updateTree,
+        onResult: resolve,
+        signal,
+      }
+      const abort = (): void => {
+        if (pendingDirectoryRequests.get(requestId) !== request) return
+        pendingDirectoryRequests.delete(requestId)
+        signal?.removeEventListener('abort', abort)
+        clearPendingTimer(requestId)
+        if (updateTree) loadingPaths.value.delete(path)
+        resolve(null)
+      }
+      request.abort = abort
+      if (signal?.aborted) {
+        resolve(null)
+        return
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+      pendingDirectoryRequests.set(requestId, request)
       armPendingTimer(requestId, () => {
-        pendingRequests.value.delete(requestId)
-        loadingPaths.value.delete(path)
-        resolve()
+        pendingDirectoryRequests.delete(requestId)
+        signal?.removeEventListener('abort', abort)
+        if (updateTree) loadingPaths.value.delete(path)
+        resolve(null)
       })
-      sendFilesList(workspaceId, requestId, path)
+      try {
+        sendFilesList(workspaceId, requestId, path)
+      } catch {
+        clearPendingTimer(requestId)
+        pendingDirectoryRequests.delete(requestId)
+        signal?.removeEventListener('abort', abort)
+        if (updateTree) loadingPaths.value.delete(path)
+        resolve(null)
+      }
     })
+  }
+
+  function fetchDirectory(workspaceId: string, path: string): Promise<void> {
+    return requestDirectory(workspaceId, path, true).then(() => undefined)
+  }
+
+  /** Fetch a directory listing without changing the shared explorer tree. */
+  function fetchDirectoryEntries(
+    workspaceId: string,
+    path: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FileEntryRaw[] | null> {
+    return requestDirectory(workspaceId, path, false, options.signal)
   }
 
   function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
@@ -506,12 +565,60 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // -- event handlers (called from WorkspaceDetailView) ---------------------
 
+  function shouldRefreshUploadResult(requestId: string): boolean {
+    return pendingUploadRefreshPolicy.get(requestId) ?? true
+  }
+
+  function isTerminalUpload(requestId: string): boolean {
+    return terminalUploadRequestIds.has(requestId)
+  }
+
+  function markUploadTerminal(requestId: string): void {
+    const previousTimer = terminalUploadRequestIds.get(requestId)
+    if (previousTimer) clearTimeout(previousTimer)
+    const timer = setTimeout(
+      () => terminalUploadRequestIds.delete(requestId),
+      UPLOAD_TERMINAL_TTL_MS,
+    )
+    terminalUploadRequestIds.delete(requestId)
+    terminalUploadRequestIds.set(requestId, timer)
+
+    // Keep the cache bounded even if many uploads complete inside the TTL.
+    while (terminalUploadRequestIds.size > MAX_TERMINAL_UPLOAD_IDS) {
+      const oldestId = terminalUploadRequestIds.keys().next().value
+      if (oldestId === undefined) break
+      const oldestTimer = terminalUploadRequestIds.get(oldestId)
+      if (oldestTimer) clearTimeout(oldestTimer)
+      terminalUploadRequestIds.delete(oldestId)
+    }
+  }
+
   function handleListResult(
     requestId: string,
     path: string,
     entries: FileEntryRaw[],
     error?: string,
+    workspaceId?: string,
+    onlyKnownRequests = false,
   ): void {
+    const directoryRequest = pendingDirectoryRequests.get(requestId)
+    if (directoryRequest) {
+      if (
+        directoryRequest.path !== path ||
+        (workspaceId !== undefined && directoryRequest.workspaceId !== workspaceId)
+      )
+        return
+      pendingDirectoryRequests.delete(requestId)
+      directoryRequest.signal?.removeEventListener('abort', directoryRequest.abort!)
+      clearPendingTimer(requestId)
+      if (directoryRequest.updateTree) loadingPaths.value.delete(path)
+      const result = error ? null : entries
+      if (directoryRequest.updateTree && result) setTree(path, result)
+      directoryRequest.onResult(result)
+      return
+    }
+    if (onlyKnownRequests) return
+
     const callback = pendingRequests.value.get(requestId)
     if (callback) {
       callback(null)
@@ -650,7 +757,12 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
         // Pin the transfer with the requested path, not the chunk's own
         // claim, so the first wrong-path chunk fails instead of becoming
         // ground truth.
-        store.start(requestId, totalChunks, { totalChunks }, pendingContentPaths.get(requestId) ?? path)
+        store.start(
+          requestId,
+          totalChunks,
+          { totalChunks },
+          pendingContentPaths.get(requestId) ?? path,
+        )
       }
       store.addChunk(requestId, {
         workspace_id: '',
@@ -674,8 +786,26 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     status: string,
     workspaceId: string,
     error?: string,
-  ): void {
+    refreshExplorerOverride?: boolean,
+  ): boolean {
+    // Results are broadcast to each mounted workspace listener. Retain a
+    // terminal id until expiry instead of consuming it on the first duplicate.
+    if (isTerminalUpload(requestId)) return false
+
+    const request = pendingUploadRequests.get(requestId)
+    if (!request) {
+      // Upload results belong to this client only when we registered them.
+      return false
+    }
+    // Fail closed if another workspace or path accidentally reuses an id.
+    if (request.workspaceId !== workspaceId || request.path !== path) return false
+
     const callback = pendingRequests.value.get(requestId)
+    const refreshExplorer =
+      refreshExplorerOverride ?? pendingUploadRefreshPolicy.get(requestId) ?? true
+    pendingUploadRequests.delete(requestId)
+    pendingUploadRefreshPolicy.delete(requestId)
+    markUploadTerminal(requestId)
     if (callback) {
       pendingRequests.value.delete(requestId)
       clearPendingTimer(requestId)
@@ -690,11 +820,12 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     if (error || status === 'error') {
       const notify = useNotificationStore()
       notify.error('Upload failed', error ?? 'The file could not be uploaded.')
-      return
+      return true
     }
 
-    // Refresh the parent directory
-    refreshDirectory(workspaceId, path)
+    // Refresh unless an isolated scheduled-task upload owns this result.
+    if (refreshExplorer) refreshDirectory(workspaceId, path)
+    return true
   }
 
   /**
@@ -710,14 +841,19 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     _path: string,
     _filename: string,
     _content: string,
+    refreshExplorer = true,
   ): Promise<void> {
+    if (isTerminalUpload(requestId))
+      return Promise.reject(new Error('Upload request already finished.'))
+    pendingUploadRefreshPolicy.set(requestId, refreshExplorer)
+    pendingUploadRequests.set(requestId, { workspaceId: _workspaceId, path: _path })
     return new Promise<void>((resolve, reject) => {
       pendingRequests.value.set(requestId, (data: unknown) => {
+        pendingUploadRefreshPolicy.delete(requestId)
+        pendingUploadRequests.delete(requestId)
         clearPendingTimer(requestId)
         const ok =
-          data !== null &&
-          typeof data === 'object' &&
-          (data as { ok?: boolean }).ok === true
+          data !== null && typeof data === 'object' && (data as { ok?: boolean }).ok === true
         if (ok) {
           resolve()
         } else {
@@ -730,16 +866,32 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
           reject(new Error(message))
         }
       })
-      armPendingTimer(
-        requestId,
-        () => {
-          pendingRequests.value.delete(requestId)
-          const message = 'Upload timed out. Please retry.'
-          useNotificationStore().error('Upload failed', message)
-          reject(new Error(message))
-        },
-      )
+      armPendingTimer(requestId, () => {
+        pendingRequests.value.delete(requestId)
+        pendingUploadRefreshPolicy.delete(requestId)
+        pendingUploadRequests.delete(requestId)
+        markUploadTerminal(requestId)
+        const message = 'Upload timed out. Please retry.'
+        useNotificationStore().error('Upload failed', message)
+        reject(new Error(message))
+      })
     })
+  }
+
+  /**
+   * Cancel a tracked upload without a notification (e.g. its owning composer
+   * was reset or unmounted). Late results are ignored so cancellation stays
+   * silent and cannot refresh the shared explorer tree.
+   */
+  function cancelUpload(requestId: string): void {
+    const callback = pendingRequests.value.get(requestId)
+    if (!callback) return
+    pendingRequests.value.delete(requestId)
+    pendingUploadRefreshPolicy.delete(requestId)
+    pendingUploadRequests.delete(requestId)
+    clearPendingTimer(requestId)
+    markUploadTerminal(requestId)
+    callback({ ok: false, error: 'Upload cancelled.' })
   }
 
   /**
@@ -750,11 +902,13 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
    */
   function failUpload(requestId: string, message: string): void {
     const callback = pendingRequests.value.get(requestId)
+    if (!callback || !pendingUploadRequests.has(requestId) || isTerminalUpload(requestId)) return
     clearPendingTimer(requestId)
-    if (callback) {
-      pendingRequests.value.delete(requestId)
-      callback({ ok: false, error: message })
-    }
+    pendingUploadRefreshPolicy.delete(requestId)
+    pendingUploadRequests.delete(requestId)
+    pendingRequests.value.delete(requestId)
+    markUploadTerminal(requestId)
+    callback({ ok: false, error: message })
     useNotificationStore().error('Upload failed', message)
   }
 
@@ -793,12 +947,15 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
       // before atob/Blob/URL allocation.
       const decodedSize = decodedBase64Size(clean)
       if (decodedSize > DOWNLOAD_MAX_BYTES) {
-        throw new Error(
-          `Download exceeds the ${formatBytes(DOWNLOAD_MAX_BYTES)} limit.`,
-        )
+        throw new Error(`Download exceeds the ${formatBytes(DOWNLOAD_MAX_BYTES)} limit.`)
       }
       if (expectedSize !== null) {
-        if (!Number.isFinite(expectedSize) || !Number.isInteger(expectedSize) || expectedSize < 0 || expectedSize > DOWNLOAD_MAX_BYTES) {
+        if (
+          !Number.isFinite(expectedSize) ||
+          !Number.isInteger(expectedSize) ||
+          expectedSize < 0 ||
+          expectedSize > DOWNLOAD_MAX_BYTES
+        ) {
           throw new Error('Invalid download size reported by the runner.')
         }
         // Runner `size` is raw bytes (archive size for directories), so
@@ -897,7 +1054,12 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
    */
   function validateDownloadSize(size: number | undefined, content: string): void {
     if (size === undefined) return
-    if (!Number.isFinite(size) || !Number.isInteger(size) || size < 0 || size > DOWNLOAD_MAX_BYTES) {
+    if (
+      !Number.isFinite(size) ||
+      !Number.isInteger(size) ||
+      size < 0 ||
+      size > DOWNLOAD_MAX_BYTES
+    ) {
       throw new Error('Invalid download size reported by the runner.')
     }
     const decodedSize = decodedBase64Size(stripBase64Whitespace(content ?? ''))
@@ -923,7 +1085,12 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
       const store = getDownloadChunks()
       if (!store.has(requestId)) {
         // Pin with the requested path so the first wrong-path chunk fails.
-        store.start(requestId, totalChunks, { totalChunks }, pendingDownloadPaths.get(requestId) ?? path)
+        store.start(
+          requestId,
+          totalChunks,
+          { totalChunks },
+          pendingDownloadPaths.get(requestId) ?? path,
+        )
       }
       store.addChunk(requestId, {
         workspace_id: '',
@@ -968,15 +1135,18 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     closeFileViewer,
     reset,
     fetchDirectory,
+    fetchDirectoryEntries,
     findFiles,
     downloadFile,
     refreshAll,
     trackAndUpload,
+    cancelUpload,
     failUpload,
     retryViewingFile,
     formatBytes,
     // event handlers
     handleListResult,
+    shouldRefreshUploadResult,
     handleFindResult,
     handleContentResult,
     handleContentChunk,

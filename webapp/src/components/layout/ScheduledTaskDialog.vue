@@ -1,18 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import {
-  Check,
-  ChevronDown,
-  FilePlus2,
-  FolderSearch,
-  Loader2,
-  MoreHorizontal,
-  Play,
-  RefreshCw,
-  Trash2,
-  X,
-} from '@lucide/vue'
+import { Check, Loader2, MoreHorizontal, Play, RefreshCw, Trash2, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -32,15 +21,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
-import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
+import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import { runScheduledTaskNow, listScheduledTaskRuns } from '@/services/scheduledTasks.api'
 import type {
   ScheduledTask,
@@ -52,33 +39,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useSkillStore } from '@/stores/skills'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { WorkspaceStatus } from '@/types'
-import type {
-  FileEntryRaw,
-  FilesFindResultEvent,
-  FilesListResultEvent,
-  FilesUploadResultEvent,
-} from '@/types'
-import { loadProviderModelsCached } from '@/lib/providerCatalog'
-import { useRecentModels, recentCatalogModels } from '@/lib/recentModels'
-import type { ProviderModel } from '@/lib/harnessModels'
-import {
-  fileToBase64,
-  sanitizeUploadFilename,
-  resolveUniqueFilename,
-  CHAT_UPLOAD_DIR,
-  uploadTargetPath,
-  appendUploadMentions,
-  hasUploadMention,
-  UPLOAD_MAX_BYTES,
-  nextChatUploadRequestId,
-} from '@/lib/chatUpload'
-import {
-  onEvent,
-  sendFilesFind,
-  sendFilesList,
-  sendFilesUpload,
-  subscribeToWorkspace,
-} from '@/services/socket'
 import {
   isValidTimeZone,
   nextLocalOccurrence,
@@ -96,8 +56,6 @@ const authStore = useAuthStore()
 const skillStore = useSkillStore()
 const taskStore = useScheduledTaskStore()
 const notifications = useNotificationStore()
-const { entries: recentEntries } = useRecentModels()
-const recentEffortEntries = computed(() => recentEntries.value)
 
 const runs = ref<ScheduledTaskRun[]>([])
 const loadingRuns = ref(false)
@@ -111,12 +69,6 @@ const deleteError = ref('')
 const discardOpen = ref(false)
 const dirty = ref(false)
 const tab = ref<'settings' | 'runs'>('settings')
-const models = ref<ProviderModel[]>([])
-const modelLoading = ref(true)
-const fileQuery = ref('')
-const fileMatches = ref<string[]>([])
-const fileSearching = ref(false)
-const uploadInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 
 interface FormState {
@@ -226,35 +178,13 @@ let postDiscardAction: (() => void) | null = null
 let disposed = false
 let lastOrganizationId = authStore.activeOrganizationId
 
-const fileSearchRequest = ref(0)
 let formGeneration = 0
-const directoryRequests = new Map<
-  string,
-  {
-    workspaceId: string
-    path: string
-    resolve: (entries: FileEntryRaw[] | null) => void
-    cancel: () => void
-  }
->()
-const uploadRequests = new Map<
-  string,
-  { workspaceId: string; resolve: (error: string | null) => void; cancel: () => void }
->()
-const workspaceSubscriptions = new Map<string, () => void>()
-let removeUploadListener: (() => void) | null = null
-const findRequests = new Map<
-  string,
-  { workspaceId: string; resolve: (paths: string[] | null) => void; cancel: () => void }
->()
-let removeFindListener: (() => void) | null = null
-let directoryRequestCounter = 0
-let removeDirectoryListener: (() => void) | null = null
+const composerResetKey = ref(0)
 const runsRequestGeneration = ref(0)
-const filesOpen = ref(false)
 
 function applyTask(task: ScheduledTask): void {
   formGeneration += 1
+  composerResetKey.value = formGeneration
   form.value = {
     name: task.name,
     workspace_id: task.workspace_id,
@@ -272,20 +202,17 @@ function applyTask(task: ScheduledTask): void {
   dirty.value = false
   errors.value = {}
   apiError.value = ''
-  fileQuery.value = ''
-  fileMatches.value = []
   formBaseline = JSON.stringify(form.value)
 }
 function applyBlank(): void {
   formGeneration += 1
+  composerResetKey.value = formGeneration
   form.value = blankForm()
   if (visibleWorkspaces.value.length === 1) form.value.workspace_id = visibleWorkspaces.value[0]!.id
   dirty.value = false
   errors.value = {}
   apiError.value = ''
   runs.value = []
-  fileQuery.value = ''
-  fileMatches.value = []
   formBaseline = JSON.stringify(form.value)
 }
 function syncSelection(): void {
@@ -332,12 +259,6 @@ function discardChanges(): void {
   postDiscardAction = null
   action()
 }
-function toggleSkill(id: string): void {
-  form.value.skill_ids = form.value.skill_ids.includes(id)
-    ? form.value.skill_ids.filter((skillId) => skillId !== id)
-    : [...form.value.skill_ids, id]
-  dirty.value = true
-}
 function toggleWeekday(day: number): void {
   const days = new Set(form.value.weekdays)
   if (days.has(day)) days.delete(day)
@@ -346,14 +267,10 @@ function toggleWeekday(day: number): void {
   dirty.value = true
 }
 function updateForm<K extends keyof FormState>(key: K, value: FormState[K]): void {
+  if (JSON.stringify(form.value[key]) === JSON.stringify(value)) return
   form.value[key] = value
   dirty.value = true
   apiError.value = ''
-}
-function setMode(mode: 'plan' | 'build'): void {
-  if (form.value.mode === mode) return
-  form.value.mode = mode
-  dirty.value = true
 }
 function validate(): boolean {
   const result = validateSchedule(form.value)
@@ -541,251 +458,6 @@ async function openRunChat(run: ScheduledTaskRun): Promise<void> {
   })
 }
 
-function fetchWorkspaceListing(workspaceId: string, path: string): Promise<FileEntryRaw[] | null> {
-  if (!removeDirectoryListener) {
-    removeDirectoryListener = onEvent('files:list_result', (data: FilesListResultEvent) => {
-      const request = directoryRequests.get(data.request_id)
-      if (!request || request.workspaceId !== data.workspace_id || request.path !== data.path)
-        return
-      directoryRequests.delete(data.request_id)
-      request.resolve(data.error ? null : data.entries)
-    })
-  }
-  if (!workspaceSubscriptions.has(workspaceId))
-    workspaceSubscriptions.set(workspaceId, subscribeToWorkspace(workspaceId))
-  const requestId = `scheduled-task-files-${++directoryRequestCounter}-${Date.now()}`
-  return new Promise((resolve) => {
-    const timeout = window.setTimeout(() => {
-      directoryRequests.delete(requestId)
-      resolve(null)
-    }, 15_000)
-    directoryRequests.set(requestId, {
-      workspaceId,
-      path,
-      resolve: (entries) => {
-        window.clearTimeout(timeout)
-        resolve(entries)
-      },
-      cancel: () => {
-        window.clearTimeout(timeout)
-        resolve(null)
-      },
-    })
-    try {
-      sendFilesList(workspaceId, requestId, path)
-    } catch {
-      window.clearTimeout(timeout)
-      directoryRequests.delete(requestId)
-      resolve(null)
-    }
-  })
-}
-
-function waitForUpload(workspaceId: string, requestId: string): Promise<void> {
-  if (!removeUploadListener) {
-    removeUploadListener = onEvent('files:upload_result', (data: FilesUploadResultEvent) => {
-      const request = uploadRequests.get(data.request_id)
-      if (!request || request.workspaceId !== data.workspace_id) return
-      uploadRequests.delete(data.request_id)
-      request.resolve(
-        data.error || data.status === 'error'
-          ? data.error || 'The file could not be uploaded.'
-          : null,
-      )
-    })
-  }
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      uploadRequests.delete(requestId)
-      reject(new Error('Upload timed out. Please retry.'))
-    }, 30_000)
-    uploadRequests.set(requestId, {
-      workspaceId,
-      resolve: (error) => {
-        window.clearTimeout(timeout)
-        if (error) reject(new Error(error))
-        else resolve()
-      },
-      cancel: () => {
-        window.clearTimeout(timeout)
-        reject(new Error('Upload cancelled because the dialog closed.'))
-      },
-    })
-  })
-}
-
-function searchWorkspaceFiles(workspaceId: string, query: string): Promise<string[] | null> {
-  if (!removeFindListener) {
-    removeFindListener = onEvent('files:find_result', (data: FilesFindResultEvent) => {
-      const request = findRequests.get(data.request_id)
-      if (!request || request.workspaceId !== data.workspace_id) return
-      findRequests.delete(data.request_id)
-      request.resolve(data.error ? null : data.paths.map((entry) => entry.path))
-    })
-  }
-  if (!workspaceSubscriptions.has(workspaceId))
-    workspaceSubscriptions.set(workspaceId, subscribeToWorkspace(workspaceId))
-  const requestId = `scheduled-task-find-${++directoryRequestCounter}-${Date.now()}`
-  return new Promise((resolve) => {
-    const timeout = window.setTimeout(() => {
-      findRequests.delete(requestId)
-      resolve(null)
-    }, 15_000)
-    findRequests.set(requestId, {
-      workspaceId,
-      resolve: (paths) => {
-        window.clearTimeout(timeout)
-        resolve(paths)
-      },
-      cancel: () => {
-        window.clearTimeout(timeout)
-        resolve(null)
-      },
-    })
-    if (!sendFilesFind(workspaceId, requestId, query, 40)) {
-      window.clearTimeout(timeout)
-      findRequests.delete(requestId)
-      resolve(null)
-    }
-  })
-}
-async function searchFiles(): Promise<void> {
-  if (!workspaceCanManageFiles.value || !form.value.workspace_id) return
-  const request = ++fileSearchRequest.value
-  const workspaceId = form.value.workspace_id
-  fileSearching.value = true
-  fileMatches.value = []
-  try {
-    const matches = await searchWorkspaceFiles(workspaceId, fileQuery.value.trim())
-    if (request === fileSearchRequest.value && workspaceId === form.value.workspace_id) {
-      if (matches === null && props.open)
-        notifications.error(
-          'Could not search workspace files',
-          'The file search failed or timed out. Please try again.',
-        )
-      else if (matches !== null) fileMatches.value = matches
-    }
-  } catch (error) {
-    if (request === fileSearchRequest.value && props.open) {
-      fileMatches.value = []
-      notifications.error(
-        'Could not search workspace files',
-        error instanceof Error ? error.message : 'Please try again.',
-      )
-    }
-  } finally {
-    if (request === fileSearchRequest.value) fileSearching.value = false
-  }
-}
-function addFileMention(path: string): void {
-  const token = `@${`file:${path}`}`
-  if (hasUploadMention(form.value.prompt, path)) return
-  form.value.prompt = form.value.prompt
-    ? `${form.value.prompt}${form.value.prompt.endsWith('\n') ? '' : '\n'}${token} `
-    : `${token} `
-  dirty.value = true
-}
-async function uploadFiles(fileList: FileList | File[] | null): Promise<void> {
-  if (!fileList || !workspaceCanManageFiles.value || !form.value.workspace_id) return
-  const files = Array.from(fileList)
-  uploading.value = true
-  const generation = formGeneration
-  try {
-    const workspaceId = form.value.workspace_id
-    // The Pinia explorer tree is shared with workspace tools; force-refresh it
-    // for this workspace instead of trusting a potentially stale other tree.
-    const rootEntries = await fetchWorkspaceListing(workspaceId, '/workspace')
-    if (form.value.workspace_id !== workspaceId || !rootEntries) {
-      if (props.open && formGeneration === generation)
-        notifications.error(
-          'Upload failed',
-          'Could not load the selected workspace files. Please retry.',
-        )
-      return
-    }
-    const metadataDir = rootEntries.find(
-      (entry) => entry.path === '/workspace/.opencuria' && entry.type === 'directory',
-    )
-    const metadataEntries = metadataDir
-      ? await fetchWorkspaceListing(workspaceId, '/workspace/.opencuria')
-      : []
-    if (formGeneration !== generation || form.value.workspace_id !== workspaceId) return
-    if (metadataDir && metadataEntries === null) {
-      if (props.open && formGeneration === generation)
-        notifications.error(
-          'Upload failed',
-          'Could not check existing workspace uploads. Please retry.',
-        )
-      return
-    }
-    const uploadDir = metadataEntries?.find(
-      (entry) => entry.path === CHAT_UPLOAD_DIR && entry.type === 'directory',
-    )
-    const uploadEntries = uploadDir ? await fetchWorkspaceListing(workspaceId, CHAT_UPLOAD_DIR) : []
-    if (formGeneration !== generation || form.value.workspace_id !== workspaceId) return
-    if (uploadEntries === null) {
-      if (props.open && formGeneration === generation)
-        notifications.error('Upload failed', 'Could not load existing upload names. Please retry.')
-      return
-    }
-    const taken = new Set(uploadEntries.map((entry) => entry.name))
-    const uploaded: string[] = []
-    for (const file of files) {
-      if (file.size > UPLOAD_MAX_BYTES) {
-        notifications.error('Upload failed', `“${file.name}” is larger than the 10 MB limit.`)
-        continue
-      }
-      const name = resolveUniqueFilename(taken, sanitizeUploadFilename(file.name))
-      const path = uploadTargetPath(name)
-      if (hasUploadMention(form.value.prompt, path)) continue
-      const content = await fileToBase64(file)
-      if (formGeneration !== generation || form.value.workspace_id !== workspaceId) return
-      const requestId = nextChatUploadRequestId(name)
-      const tracked = waitForUpload(workspaceId, requestId)
-      try {
-        sendFilesUpload(workspaceId, requestId, CHAT_UPLOAD_DIR, name, content, false)
-      } catch (error) {
-        uploadRequests
-          .get(requestId)
-          ?.resolve(error instanceof Error ? error.message : 'The file could not be uploaded.')
-      }
-      await tracked
-      uploaded.push(path)
-    }
-    if (
-      uploaded.length &&
-      props.open &&
-      formGeneration === generation &&
-      form.value.workspace_id === workspaceId
-    ) {
-      form.value.prompt = appendUploadMentions(form.value.prompt, uploaded)
-      dirty.value = true
-      notifications.success(
-        'Files uploaded',
-        `${uploaded.length} file${uploaded.length === 1 ? '' : 's'} added to the prompt.`,
-      )
-    }
-  } catch (error) {
-    if (props.open && formGeneration === generation)
-      notifications.error(
-        'Upload failed',
-        error instanceof Error ? error.message : 'Could not upload files.',
-      )
-  } finally {
-    uploading.value = false
-    if (uploadInput.value) uploadInput.value.value = ''
-  }
-}
-
-watch(
-  () => form.value.workspace_id,
-  () => {
-    fileSearchRequest.value += 1
-    fileSearching.value = false
-    fileMatches.value = []
-    fileQuery.value = ''
-  },
-)
 watch(
   () => taskStore.selectedTaskId,
   (id) => {
@@ -797,6 +469,7 @@ watch(
     else if (!id) applyBlank()
     else {
       formGeneration += 1
+      composerResetKey.value = formGeneration
       form.value = blankForm()
       dirty.value = false
       errors.value = {}
@@ -814,6 +487,7 @@ watch(
   (id) => {
     lastOrganizationId = id
     formGeneration += 1
+    composerResetKey.value = formGeneration
     runsRequestGeneration.value += 1
     runs.value = []
     syncSelection()
@@ -841,21 +515,7 @@ watch(
       loadingRuns.value = false
       stopRunsPolling()
       formGeneration += 1
-      fileSearchRequest.value += 1
-      for (const request of directoryRequests.values()) request.cancel()
-      for (const request of findRequests.values()) request.cancel()
-      for (const request of uploadRequests.values()) request.cancel()
-      directoryRequests.clear()
-      findRequests.clear()
-      uploadRequests.clear()
-      for (const unsubscribe of workspaceSubscriptions.values()) unsubscribe()
-      workspaceSubscriptions.clear()
-      removeDirectoryListener?.()
-      removeDirectoryListener = null
-      removeFindListener?.()
-      removeFindListener = null
-      removeUploadListener?.()
-      removeUploadListener = null
+      composerResetKey.value = formGeneration
       uploading.value = false
     }
   },
@@ -866,36 +526,12 @@ onUnmounted(() => {
   stopRunsPolling()
   runsRequestGeneration.value += 1
   formGeneration += 1
-  fileSearchRequest.value += 1
-  removeDirectoryListener?.()
-  removeFindListener?.()
-  removeUploadListener?.()
-  for (const request of directoryRequests.values()) request.cancel()
-  for (const request of findRequests.values()) request.cancel()
-  for (const request of uploadRequests.values()) request.cancel()
-  directoryRequests.clear()
-  findRequests.clear()
-  uploadRequests.clear()
-  for (const unsubscribe of workspaceSubscriptions.values()) unsubscribe()
-  workspaceSubscriptions.clear()
 })
 onMounted(async () => {
   if (props.open) openDialog()
   const jobs: Promise<unknown>[] = []
   if (!workspaceStore.workspaces.length) jobs.push(workspaceStore.fetchWorkspaces())
   if (!skillStore.skills.length) jobs.push(skillStore.fetchSkills())
-  jobs.push(
-    loadProviderModelsCached()
-      .then((result) => {
-        models.value = result
-      })
-      .catch(() => {
-        models.value = []
-      })
-      .finally(() => {
-        modelLoading.value = false
-      }),
-  )
   await Promise.all(jobs)
 })
 </script>
@@ -1031,11 +667,13 @@ onMounted(async () => {
                   ><span class="block text-xs font-medium">Workspace</span>
                   <Select
                     :model-value="form.workspace_id || undefined"
-                    :disabled="!isNew"
+                    :disabled="!isNew || busy"
                     @update:model-value="updateForm('workspace_id', String($event))"
                   >
                     <SelectTrigger class="h-9 w-full rounded-lg" data-testid="task-workspace"
-                      ><SelectValue placeholder="Select a workspace…">{{ chosenWorkspace?.name }}</SelectValue>
+                      ><SelectValue placeholder="Select a workspace…">{{
+                        chosenWorkspace?.name
+                      }}</SelectValue>
                     </SelectTrigger>
                     <SelectContent
                       ><SelectItem
@@ -1064,197 +702,35 @@ onMounted(async () => {
               </div>
 
               <section class="space-y-2" aria-labelledby="instructions-heading">
-                <div class="flex items-center justify-between gap-2">
-                  <h3 id="instructions-heading" class="text-xs font-semibold">Instructions</h3>
-                  <DropdownMenu
-                    ><DropdownMenuTrigger as-child
-                      ><Button
-                        variant="outline"
-                        size="sm"
-                        class="h-8 rounded-lg px-2.5 text-xs"
-                        data-testid="task-mode"
-                        >{{ form.mode === 'build' ? 'Build' : 'Plan'
-                        }}<ChevronDown class="ml-1.5 size-3.5" /></Button></DropdownMenuTrigger
-                    ><DropdownMenuContent align="end"
-                      ><DropdownMenuItem data-testid="task-mode-build" @select="setMode('build')"
-                        >Build{{ form.mode === 'build' ? ' ✓' : '' }}</DropdownMenuItem
-                      ><DropdownMenuItem data-testid="task-mode-plan" @select="setMode('plan')"
-                        >Plan{{ form.mode === 'plan' ? ' ✓' : '' }}</DropdownMenuItem
-                      ></DropdownMenuContent
-                    ></DropdownMenu
-                  >
-                </div>
-                <div
-                  class="overflow-hidden rounded-lg border border-border bg-background focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/10 [&_[contenteditable]]:min-h-24"
-                  data-testid="task-prompt-container"
+                <h3 id="instructions-heading" class="text-xs font-semibold">Instructions</h3>
+                <HarnessChatInput
+                  :prompt="form.prompt"
+                  :mode="form.mode"
+                  :model="form.model"
+                  :effort="form.reasoning_effort"
+                  :skill-ids="form.skill_ids"
+                  @update:prompt="updateForm('prompt', $event)"
+                  @update:mode="updateForm('mode', $event)"
+                  @update:model="updateForm('model', $event)"
+                  @update:effort="updateForm('reasoning_effort', $event)"
+                  @update:skill-ids="updateForm('skill_ids', $event)"
+                  variant="scheduled-task"
+                  :reset-key="composerResetKey"
+                  :workspace-id="form.workspace_id"
+                  :skill-options="skillStore.skills"
+                  :files-available="workspaceCanManageFiles"
+                  :disabled="busy || taskUnavailable"
+                  :prompt-error="errors.prompt"
+                  @uploading="uploading = $event"
+                />
+                <p
+                  v-if="!workspaceCanManageFiles && chosenWorkspace"
+                  class="px-4 text-xs text-muted-foreground"
+                  data-testid="files-disabled-hint"
                 >
-                  <ComposerRichEditor
-                    v-model="form.prompt"
-                    :disabled="busy"
-                    placeholder="Describe the recurring work… Use @file:path to reference workspace files."
-                    data-testid="task-prompt"
-                    aria-label="Scheduled task prompt"
-                    :aria-invalid="Boolean(errors.prompt)"
-                    aria-describedby="task-prompt-error"
-                    @update:model-value="dirty = true"
-                  />
-                  <p
-                    v-if="errors.prompt"
-                    id="task-prompt-error"
-                    data-testid="task-prompt-error"
-                    role="alert"
-                    class="border-t border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive"
-                  >
-                    {{ errors.prompt }}
-                  </p>
-                  <div
-                    class="flex min-h-9 flex-wrap items-center gap-1 border-t border-border px-2 py-1"
-                  >
-                    <HarnessModelPicker
-                      :model="form.model"
-                      :effort="form.reasoning_effort"
-                      :models="models"
-                      :recent-models="recentCatalogModels(models)"
-                      :recent-efforts="recentEffortEntries"
-                      :loading="modelLoading"
-                      @update:model="updateForm('model', $event)"
-                      @update:effort="updateForm('reasoning_effort', $event)"
-                    /><span
-                      v-if="!form.model"
-                      class="hidden text-xs text-muted-foreground sm:inline"
-                      >Using {{ form.mode }} defaults</span
-                    ><Button
-                      v-if="form.model"
-                      variant="ghost"
-                      size="sm"
-                      class="h-7 text-xs"
-                      data-testid="use-agent-default"
-                      @click="((form.model = ''), (form.reasoning_effort = ''), (dirty = true))"
-                      >Use defaults</Button
-                    >
-                  </div>
-                </div>
-                <div class="flex flex-wrap items-center gap-2">
-                  <DropdownMenu v-if="skillStore.skills.length"
-                    ><DropdownMenuTrigger as-child
-                      ><Button
-                        variant="outline"
-                        size="sm"
-                        class="h-8 rounded-lg text-xs"
-                        data-testid="skills-picker"
-                        >Skills{{ form.skill_ids.length ? ` · ${form.skill_ids.length}` : ''
-                        }}<ChevronDown class="ml-1.5 size-3.5" /></Button></DropdownMenuTrigger
-                    ><DropdownMenuContent align="start" class="max-h-56 overflow-y-auto"
-                      ><DropdownMenuItem
-                        v-for="skill in skillStore.skills"
-                        :key="skill.id"
-                        :data-testid="`skill-${skill.id}`"
-                        @select.prevent="toggleSkill(skill.id)"
-                        ><Checkbox
-                          :model-value="form.skill_ids.includes(skill.id)"
-                          class="pointer-events-none"
-                        /><span>{{ skill.name }}</span></DropdownMenuItem
-                      ></DropdownMenuContent
-                    ></DropdownMenu
-                  >
-                  <span v-else class="text-xs text-muted-foreground">No skills available</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-8 rounded-lg px-2 text-xs text-muted-foreground"
-                    :aria-expanded="filesOpen"
-                    data-testid="toggle-files"
-                    @click="filesOpen = !filesOpen"
-                    ><FolderSearch class="mr-1.5 size-3.5" />{{
-                      filesOpen ? 'Hide files' : 'Attach or browse files'
-                    }}</Button
-                  >
-                </div>
-                <div
-                  v-if="filesOpen"
-                  class="space-y-2 rounded-lg border border-border p-3"
-                  data-testid="workspace-files"
-                >
-                  <div class="flex items-center justify-between gap-2">
-                    <p class="text-xs font-medium">
-                      Workspace files
-                      <span class="font-normal text-muted-foreground"
-                        >· Search to add a prompt mention, or upload an attachment.</span
-                      >
-                    </p>
-                    <input
-                      ref="uploadInput"
-                      type="file"
-                      multiple
-                      class="hidden"
-                      data-testid="upload-input"
-                      @change="uploadFiles(($event.target as HTMLInputElement).files)"
-                    /><Button
-                      variant="outline"
-                      size="sm"
-                      class="h-8 shrink-0 rounded-lg"
-                      :disabled="!workspaceCanManageFiles || uploading"
-                      data-testid="upload-files"
-                      :title="
-                        workspaceCanManageFiles
-                          ? 'Upload files to this workspace'
-                          : 'File upload is available when the workspace is running and its runner is online'
-                      "
-                      @click="uploadInput?.click()"
-                      ><Loader2 v-if="uploading" class="mr-1.5 size-3.5 animate-spin" /><FilePlus2
-                        v-else
-                        class="mr-1.5 size-3.5"
-                      />Upload</Button
-                    >
-                  </div>
-                  <p
-                    v-if="!workspaceCanManageFiles"
-                    class="text-xs text-muted-foreground"
-                    data-testid="files-disabled-hint"
-                  >
-                    {{
-                      chosenWorkspace
-                        ? `File browse and upload need a running workspace and online runner. ${chosenWorkspace.status === WorkspaceStatus.STOPPED ? 'This stopped workspace resumes automatically when the task runs.' : ''} You can still edit the prompt and keep existing file mentions.`
-                        : 'Select a running workspace to browse files or upload attachments.'
-                    }}
-                  </p>
-                  <div v-else class="flex gap-2">
-                    <Input
-                      v-model="fileQuery"
-                      placeholder="Search workspace files…"
-                      class="h-8 rounded-lg"
-                      data-testid="file-search"
-                      @keydown.enter.prevent="searchFiles"
-                    /><Button
-                      variant="outline"
-                      size="sm"
-                      class="h-8 rounded-lg"
-                      :disabled="fileSearching"
-                      data-testid="browse-files"
-                      @click="searchFiles"
-                      ><Loader2
-                        v-if="fileSearching"
-                        class="mr-1 size-3.5 animate-spin"
-                      /><FolderSearch v-else class="mr-1 size-3.5" />Browse</Button
-                    >
-                  </div>
-                  <div
-                    v-if="fileMatches.length"
-                    class="max-h-32 space-y-1 overflow-y-auto rounded-md border border-border p-1"
-                    data-testid="file-results"
-                  >
-                    <button
-                      v-for="path in fileMatches"
-                      :key="path"
-                      type="button"
-                      class="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-                      @click="addFileMention(path)"
-                    >
-                      <span class="truncate font-mono">{{ path.replace('/workspace/', '') }}</span
-                      ><span class="shrink-0 text-primary">Add mention</span>
-                    </button>
-                  </div>
-                </div>
+                  File search and upload need a running workspace and online runner. Existing file
+                  mentions remain available.
+                </p>
               </section>
 
               <section
@@ -1377,7 +853,9 @@ onMounted(async () => {
                     <p class="text-xs font-medium">Enabled</p>
                     <p class="text-xs text-muted-foreground">
                       {{
-                        form.enabled ? 'Run automatically on this schedule.' : 'Paused · no runs will start'
+                        form.enabled
+                          ? 'Run automatically on this schedule.'
+                          : 'Paused · no runs will start'
                       }}
                     </p>
                   </div>

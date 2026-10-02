@@ -2,13 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useFileExplorerStore } from './fileExplorer'
-import { sendFilesDownload, sendFilesRead } from '@/services/socket'
+import { sendFilesDownload, sendFilesList, sendFilesRead } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
   sendFilesRead: vi.fn(),
   sendFilesDownload: vi.fn(),
+  sendFilesUpload: vi.fn(),
 }))
 
 vi.mock('vue-sonner', () => ({
@@ -65,6 +66,164 @@ afterEach(() => {
   } catch {
     // ignore — pinia already torn down
   }
+})
+
+describe('fileExplorer correlated directory listings', () => {
+  it('returns correlated entries without mutating the shared explorer tree', async () => {
+    const store = useFileExplorerStore()
+    const result = store.fetchDirectoryEntries(WS_ID, '/workspace')
+    const requestId =
+      vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
+    const entries = [
+      { name: 'task.txt', path: '/workspace/task.txt', type: 'file' as const, size: 4 },
+    ]
+
+    store.handleListResult(requestId, '/workspace', entries, undefined, 'ws-other')
+    expect(store.tree).toEqual([])
+    store.handleListResult(requestId, '/workspace', entries, undefined, WS_ID)
+
+    await expect(result).resolves.toEqual(entries)
+    expect(store.tree).toEqual([])
+  })
+
+  it('fails closed on directory permission errors and clears pending state on abort', async () => {
+    const store = useFileExplorerStore()
+    const failed = store.fetchDirectoryEntries(WS_ID, '/workspace/.opencuria')
+    const failedId =
+      vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
+    store.handleListResult(failedId, '/workspace/.opencuria', [], 'Permission denied', WS_ID)
+    await expect(failed).resolves.toBeNull()
+
+    const controller = new AbortController()
+    const aborted = store.fetchDirectoryEntries(WS_ID, '/workspace', { signal: controller.signal })
+    controller.abort()
+    await expect(aborted).resolves.toBeNull()
+  })
+
+  it('resolves timed out listings as unavailable and ignores late results', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useFileExplorerStore()
+      const result = store.fetchDirectoryEntries(WS_ID, '/workspace')
+      const requestId =
+        vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
+      vi.advanceTimersByTime(30_001)
+      await expect(result).resolves.toBeNull()
+      store.handleListResult(requestId, '/workspace', [], undefined, WS_ID)
+      expect(store.tree).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('fileExplorer tracked upload cancellation', () => {
+  it('deduplicates terminal upload results until TTL expiry and refreshes once', async () => {
+    const store = useFileExplorerStore()
+    const refresh = vi.mocked(sendFilesList)
+    const upload = store.trackAndUpload(WS_ID, 'upload-once', '/workspace', 'once.txt', 'eA==')
+
+    expect(
+      store.handleUploadResult('unknown-from-other-client', '/workspace', 'success', WS_ID),
+    ).toBe(false)
+    expect(refresh).not.toHaveBeenCalled()
+    vi.mocked(sendFilesList).mockClear()
+    expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(true)
+    await upload
+    expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(false)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledWith(WS_ID, expect.any(String), '/workspace')
+  })
+
+  it('deduplicates errors and keeps cancelled tombstones through repeated late results', async () => {
+    const { toast } = await import('vue-sonner')
+    const store = useFileExplorerStore()
+    const refresh = vi.mocked(sendFilesList)
+    refresh.mockClear()
+    const failed = store.trackAndUpload(
+      WS_ID,
+      'upload-failed-once',
+      '/workspace',
+      'failed.txt',
+      'eA==',
+    )
+    const rejected = expect(failed).rejects.toThrow('Disk full')
+    expect(
+      store.handleUploadResult('upload-failed-once', '/workspace', 'error', WS_ID, 'Disk full'),
+    ).toBe(true)
+    await rejected
+    expect(
+      store.handleUploadResult('upload-failed-once', '/workspace', 'error', WS_ID, 'Disk full'),
+    ).toBe(false)
+
+    const cancelled = store.trackAndUpload(
+      WS_ID,
+      'upload-cancelled-twice',
+      '/workspace',
+      'cancel.txt',
+      'eA==',
+    )
+    const cancelledRejected = expect(cancelled).rejects.toThrow('Upload cancelled.')
+    store.cancelUpload('upload-cancelled-twice')
+    await cancelledRejected
+    expect(
+      store.handleUploadResult(
+        'upload-cancelled-twice',
+        '/workspace',
+        'error',
+        WS_ID,
+        'late error',
+      ),
+    ).toBe(false)
+    expect(
+      store.handleUploadResult(
+        'upload-cancelled-twice',
+        '/workspace',
+        'error',
+        WS_ID,
+        'late error',
+      ),
+    ).toBe(false)
+
+    expect(refresh).not.toHaveBeenCalled()
+    expect(vi.mocked(toast.error)).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels only the requested upload silently and ignores its late result', async () => {
+    const { toast } = await import('vue-sonner')
+    const store = useFileExplorerStore()
+    const otherUpload = store.trackAndUpload(
+      WS_ID,
+      'upload-other',
+      '/workspace',
+      'other.txt',
+      'eA==',
+    )
+    const cancelledUpload = store.trackAndUpload(
+      WS_ID,
+      'upload-owned',
+      '/workspace',
+      'owned.txt',
+      'eA==',
+      false,
+    )
+    const otherRejected = expect(otherUpload).rejects.toThrow('Upload cancelled.')
+    const cancelledRejected = expect(cancelledUpload).rejects.toThrow('Upload cancelled.')
+
+    store.cancelUpload('upload-owned')
+    await cancelledRejected
+    expect(store.shouldRefreshUploadResult('upload-owned')).toBe(true)
+    expect(store.shouldRefreshUploadResult('upload-other')).toBe(true)
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+
+    store.handleUploadResult('upload-owned', '/workspace', 'success', WS_ID)
+    expect(vi.mocked(sendFilesList)).not.toHaveBeenCalled()
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+
+    store.cancelUpload('upload-other')
+    await otherRejected
+    store.reset()
+  })
 })
 
 describe('fileExplorer chunked content reads', () => {

@@ -112,6 +112,24 @@ describe('HarnessModelPicker', () => {
     expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(true)
   })
 
+  it('offers agent-default reset only when enabled', async () => {
+    const regular = mount(HarnessModelPicker, {
+      props: { model: 'openrouter/think', effort: 'high', models },
+      global: { stubs },
+    })
+    expect(regular.find('[data-testid="composer-model-default"]').exists()).toBe(false)
+    expect(regular.find('[data-testid="composer-effort-default"]').exists()).toBe(false)
+
+    const scheduled = mount(HarnessModelPicker, {
+      props: { model: 'openrouter/think', effort: 'high', models, allowDefault: true },
+      global: { stubs },
+    })
+    await scheduled.find('[data-testid="composer-model-default"]').trigger('click')
+    expect(scheduled.emitted('update:model')).toEqual([['']])
+    expect(scheduled.emitted('update:effort')).toEqual([['']])
+    expect(scheduled.find('[data-testid="composer-effort-default"]').exists()).toBe(true)
+  })
+
   it('shows provider labels next to each model row', () => {
     const wrapper = mount(HarnessModelPicker, {
       props: {
