@@ -24,10 +24,10 @@ from .enums import (
     WorkspaceStatus,
 )
 from .models import (
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     RunnerSystemMetrics,
     Task,
     Workspace,
@@ -77,49 +77,116 @@ class RunnerRepository:
         )
 
     @staticmethod
-    def set_online(
-        runner: Runner,
+    def register_session(
+        runner_id: uuid.UUID,
         *,
         sid: str,
-        available_runtimes: list[str] | None = None,
-    ) -> Runner:
-        """Mark a runner as online with its Socket.IO session ID."""
-        runner.status = RunnerStatus.ONLINE
-        runner.sid = sid
-        if available_runtimes is not None:
-            runner.available_runtimes = available_runtimes
-        runner.connected_at = timezone.now()
-        runner.disconnected_at = None
-        runner.save(
-            update_fields=[
-                "status", "sid", "available_runtimes",
-                "connected_at", "disconnected_at", "updated_at",
-            ]
-        )
-        return runner
+        available_runtimes: list[str],
+    ) -> tuple[Runner | None, str | None, bool]:
+        """Atomically bind a runner to a SID, returning its prior SID/state."""
+        from django.db import transaction
+
+        with transaction.atomic():
+            for _attempt in range(3):
+                current = Runner.objects.filter(id=runner_id).first()
+                if current is None:
+                    return None, None, False
+                old_sid = current.sid
+                old_status = current.status
+                changed = old_status != RunnerStatus.ONLINE or old_sid != sid
+                now = timezone.now()
+                updated = Runner.objects.filter(
+                    id=runner_id,
+                    sid=old_sid,
+                    status=old_status,
+                ).update(
+                    status=RunnerStatus.ONLINE,
+                    sid=sid,
+                    available_runtimes=available_runtimes,
+                    connected_at=now if changed else current.connected_at,
+                    disconnected_at=None,
+                    updated_at=now,
+                )
+                if updated:
+                    current.sid = sid
+                    current.status = RunnerStatus.ONLINE
+                    current.available_runtimes = available_runtimes
+                    current.connected_at = now if changed else current.connected_at
+                    current.disconnected_at = None
+                    return current, old_sid, changed
+            return None, None, False
 
     @staticmethod
-    def set_offline(runner: Runner) -> Runner:
-        """Mark a runner as offline."""
-        runner.status = RunnerStatus.OFFLINE
-        runner.sid = ""
-        runner.disconnected_at = timezone.now()
-        runner.save(
-            update_fields=["status", "sid", "disconnected_at", "updated_at"]
+    def set_offline_for_sid(sid: str) -> Runner | None:
+        """Transition the current SID offline and return its transition snapshot."""
+        transition_runner = Runner.objects.filter(
+            sid=sid,
+            status=RunnerStatus.ONLINE,
+        ).first()
+        if transition_runner is None:
+            return None
+        now = timezone.now()
+        updated = Runner.objects.filter(
+            id=transition_runner.id,
+            sid=sid,
+            status=RunnerStatus.ONLINE,
+        ).update(
+            status=RunnerStatus.OFFLINE,
+            sid="",
+            disconnected_at=now,
+            updated_at=now,
         )
-        return runner
+        if not updated:
+            return None
+        # Return the data read before CAS, not a re-read that might see a
+        # concurrent successor session and misrepresent this offline event.
+        transition_runner.status = RunnerStatus.OFFLINE
+        transition_runner.sid = ""
+        transition_runner.disconnected_at = now
+        return transition_runner
+
+    @staticmethod
+    def get_active_session(runner_id: uuid.UUID, sid: str) -> Runner | None:
+        """Return the persisted runner only when *sid* remains active."""
+        return Runner.objects.filter(
+            id=runner_id,
+            sid=sid,
+            status=RunnerStatus.ONLINE,
+        ).first()
+
+    @staticmethod
+    def is_active_session(runner_id: uuid.UUID, sid: str) -> bool:
+        """Return whether *sid* is the runner's persisted online session."""
+        return Runner.objects.filter(
+            id=runner_id,
+            sid=sid,
+            status=RunnerStatus.ONLINE,
+        ).exists()
+
+    @staticmethod
+    def get_id_for_sid(sid: str) -> uuid.UUID | None:
+        """Find an online runner ID bound to *sid*."""
+        return Runner.objects.filter(
+            sid=sid,
+            status=RunnerStatus.ONLINE,
+        ).values_list("id", flat=True).first()
+
+    @staticmethod
+    def record_heartbeat(runner_id: uuid.UUID, sid: str) -> bool:
+        """Persist liveness only while *sid* remains the current session."""
+        now = timezone.now()
+        return bool(
+            Runner.objects.filter(
+                id=runner_id,
+                sid=sid,
+                status=RunnerStatus.ONLINE,
+            ).update(last_heartbeat_at=now, updated_at=now)
+        )
 
     @staticmethod
     def list_by_organization(organization_id: uuid.UUID) -> QuerySet[Runner]:
         """Return all runners for a specific organization."""
         return Runner.objects.filter(organization_id=organization_id)
-
-    @staticmethod
-    def update_heartbeat(runner: Runner) -> Runner:
-        """Update the last heartbeat timestamp for a runner."""
-        runner.last_heartbeat_at = timezone.now()
-        runner.save(update_fields=["last_heartbeat_at", "updated_at"])
-        return runner
 
     @staticmethod
     def update_qemu_settings(runner: Runner, **fields) -> Runner:
@@ -180,8 +247,9 @@ class RunnerSystemMetricsRepository:
     @staticmethod
     def purge_old(runner_id: uuid.UUID, keep_hours: int = 24) -> int:
         """Delete metrics older than *keep_hours* hours. Returns count deleted."""
-        from django.utils import timezone as tz
         from datetime import timedelta
+
+        from django.utils import timezone as tz
 
         cutoff = tz.now() - timedelta(hours=keep_hours)
         deleted, _ = RunnerSystemMetrics.objects.filter(
@@ -249,6 +317,24 @@ class WorkspaceRepository:
             )
             .prefetch_related("credentials__service")
             .annotate(has_active_harness_session=_active_harness_exists())
+        )
+
+    @staticmethod
+    def list_ids_for_runner(runner_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return workspace IDs owned by one runner."""
+        return set(
+            Workspace.objects.filter(runner_id=runner_id).values_list("id", flat=True)
+        )
+
+    @staticmethod
+    def list_status_workspace_ids(runner_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return nonterminal workspace IDs eligible for runner status fanout."""
+        from .enums import WorkspaceStatus
+
+        return list(
+            Workspace.objects.filter(runner_id=runner_id)
+            .exclude(status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED])
+            .values_list("id", flat=True)
         )
 
     @staticmethod

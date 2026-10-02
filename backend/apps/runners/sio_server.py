@@ -18,9 +18,8 @@ from collections import defaultdict
 import socketio
 from asgiref.sync import sync_to_async
 
-from common.utils import hash_token
-
 logger = logging.getLogger(__name__)
+PROTOCOL_VERSION = 1
 
 # ---------------------------------------------------------------------------
 # Singleton instances
@@ -47,6 +46,7 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
     - every user may only access their own workspaces
     """
     from apps.organizations.models import Membership
+
     from .repositories import WorkspaceRepository
 
     try:
@@ -160,18 +160,30 @@ def create_sio_app() -> socketio.ASGIApp:
 # ---------------------------------------------------------------------------
 
 
+async def _get_runner_session(sio: socketio.AsyncServer, sid: str) -> dict | None:
+    """Return a runner session, treating disconnected Socket.IO SIDs as absent."""
+    try:
+        return await sio.get_session(sid)
+    except KeyError:
+        return None
+
+
 async def _require_runner_id(
     sio: socketio.AsyncServer, sid: str, event: str
 ) -> str | None:
-    """Return the runner_id from *sid*'s session, or warn and return None.
-
-    All runner→backend event handlers call this so that events from
-    sessions that were never properly authenticated are silently dropped.
-    """
-    session = await sio.get_session(sid)
+    """Return the runner ID only for the currently registered session SID."""
+    session = await _get_runner_session(sio, sid)
     runner_id = session.get("runner_id") if session else None
-    if not runner_id:
+    if not runner_id or session.get("protocol_version") != PROTOCOL_VERSION:
         logger.warning("%s from unauthenticated session (sid=%s)", event, sid)
+        return None
+    service = get_runner_service()
+    if not await service.is_active_runner_session(runner_id, sid):
+        logger.warning("%s from stale runner session (sid=%s)", event, sid)
+        return None
+    if not sio.manager.is_connected(sid, "/"):
+        logger.warning("%s from disconnected runner session (sid=%s)", event, sid)
+        return None
     return runner_id
 
 
@@ -185,8 +197,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
         Authenticate using the Bearer token from the Authorization header.
         """
-        service = get_runner_service()
-
         # Extract token from the Authorization header. Under Daphne,
         # WebSocket handshake headers never reach engine.io's environ,
         # so a websocket-only connect carries the token in the
@@ -202,68 +212,153 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             candidate = str(auth.get("token") or "").strip()
             if candidate:
                 token = candidate
+        if (
+            not isinstance(auth, dict)
+            or auth.get("protocol_version") != PROTOCOL_VERSION
+        ):
+            raise socketio.exceptions.ConnectionRefusedError(
+                "Unsupported runner protocol",
+                {"code": "protocol_mismatch", "retryable": False},
+            )
         if not token:
             logger.warning("Connection rejected: no Bearer token (sid=%s)", sid)
             raise socketio.exceptions.ConnectionRefusedError(
-                "Missing Authorization header"
+                "Missing Authorization header",
+                {"code": "missing_token", "retryable": False},
             )
 
-        try:
-            runner = await sync_to_async(service.authenticate_runner)(token)
-        except Exception:
-            logger.warning("Connection rejected: invalid token (sid=%s)", sid)
-            raise socketio.exceptions.ConnectionRefusedError("Invalid API token")
+        from common.exceptions import AuthenticationError
 
-        # Store runner_id in the session for later lookups
-        await sio.save_session(sid, {"runner_id": str(runner.id)})
-        logger.info("Runner connected: %s (sid=%s)", runner.id, sid)
+        try:
+            service = get_runner_service()
+            runner = await service.authenticate_runner_async(token)
+        except AuthenticationError:
+            logger.warning("Connection rejected: invalid token (sid=%s)", sid)
+            raise socketio.exceptions.ConnectionRefusedError(
+                "Invalid API token",
+                {"code": "invalid_token", "retryable": False},
+            )
+        except Exception:
+            logger.exception("Runner authentication backend unavailable (sid=%s)", sid)
+            raise socketio.exceptions.ConnectionRefusedError(
+                "Runner authentication temporarily unavailable",
+                {"code": "backend_unavailable", "retryable": True},
+            )
+
+        # Authenticate but defer ONLINE state until protocol-1 registration.
+        await sio.save_session(
+            sid,
+            {"runner_id": str(runner.id), "protocol_version": PROTOCOL_VERSION},
+        )
+        logger.info("Runner authenticated: %s (sid=%s)", runner.id, sid)
 
     @sio.event
     async def disconnect(sid: str):
-        """Handle runner disconnection."""
+        """Handle a runner disconnection, conditionally for the current SID."""
         service = get_runner_service()
-        await sync_to_async(service.unregister_runner)(sid)
+        session = await _get_runner_session(sio, sid)
+        runner_id = session.get("runner_id") if session else None
+        if not runner_id:
+            from .repositories import RunnerRepository
+
+            runner_id = await sync_to_async(RunnerRepository.get_id_for_sid)(sid)
+        if not runner_id:
+            logger.info("Ignoring unregistered runner disconnect (sid=%s)", sid)
+            return
+        runner_id = str(runner_id)
+        async with service.runner_session_lock(runner_id):
+            disconnected_id = await service.unregister_runner_async(sid)
+            if disconnected_id:
+                service.cancel_runner_session_work(disconnected_id, sid)
         logger.info("Runner disconnected (sid=%s)", sid)
 
     # --- Runner → Backend events ---
 
     @sio.on("runner:register")
-    async def on_runner_register(sid: str, data: dict):
-        """Handle runner registration with runtime capabilities."""
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
-
+    async def on_runner_register(sid: str, data: dict | None = None):
+        """Validate and register protocol 1, returning before background work."""
+        data = data if isinstance(data, dict) else {}
+        session = await _get_runner_session(sio, sid)
+        runner_id = session.get("runner_id") if session else None
         if not runner_id:
-            logger.warning("runner:register from unknown session (sid=%s)", sid)
-            return
+            return {"ok": False, "code": "unauthenticated", "retryable": False}
+        if (
+            session.get("protocol_version") != PROTOCOL_VERSION
+            or data.get("protocol_version") != PROTOCOL_VERSION
+        ):
+            return {"ok": False, "code": "protocol_mismatch", "retryable": False}
+        if data.get("status") != "ready":
+            return {"ok": False, "code": "invalid_registration", "retryable": False}
+        runtimes = data.get("supported_runtimes")
+        allowed_runtimes = {"docker", "qemu"}
+        if (
+            not isinstance(runtimes, list)
+            or not runtimes
+            or any(not isinstance(value, str) for value in runtimes)
+            or not set(runtimes).issubset(allowed_runtimes)
+        ):
+            return {"ok": False, "code": "invalid_registration", "retryable": False}
 
-        from .repositories import RunnerRepository
-        import uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
-        if runner is None:
-            logger.warning(
-                "runner:register for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
+        service = get_runner_service()
+        async with service.runner_session_lock(str(runner_id)):
+            if not sio.manager.is_connected(sid, "/"):
+                return {"ok": False, "code": "stale_session", "retryable": True}
+            try:
+                runner = await service.register_runner_async(
+                    str(runner_id),
+                    sid=sid,
+                    available_runtimes=runtimes,
+                )
+                if runner is None:
+                    return {"ok": False, "code": "runner_deleted", "retryable": False}
+            except Exception:
+                logger.exception("Runner registration failed (runner_id=%s)", runner_id)
+                return {"ok": False, "code": "backend_unavailable", "retryable": True}
+            session_is_active = await service.is_active_runner_session(
+                str(runner.id), sid
             )
+            if not sio.manager.is_connected(sid, "/") or not session_is_active:
+                disconnected_id = await service.unregister_runner_async(sid)
+                if disconnected_id:
+                    service.cancel_runner_session_work(disconnected_id, sid)
+                return {"ok": False, "code": "stale_session", "retryable": True}
+            if getattr(runner, "_registration_changed", False) and (
+                service.reserve_runner_online_notification(str(runner.id), sid)
+            ):
+                try:
+                    await service.notify_runner_online_async(runner)
+                except Exception:
+                    service.release_runner_online_notification(str(runner.id), sid)
+                    raise
+                service.mark_runner_online_notified(str(runner.id), sid)
+            superseded_sid = getattr(runner, "_superseded_sid", None)
+            if superseded_sid:
+                service.cancel_runner_session_work(str(runner.id), superseded_sid)
+            service.schedule_runner_drain(runner, sid)
+
+        return {
+            "ok": True,
+            "protocol_version": PROTOCOL_VERSION,
+            "runner_id": str(runner.id),
+            "sid": sid,
+        }
+
+    @sio.on("runner:status")
+    async def on_runner_status(sid: str, data: dict):
+        """Queue the latest workspace snapshot for asynchronous reconciliation."""
+        runner_id = await _require_runner_id(sio, sid, "runner:status")
+        if not runner_id:
             return
-
-        await sync_to_async(service.register_runner)(
-            runner,
-            sid=sid,
-            available_runtimes=data.get("supported_runtimes", ["docker"]),
-        )
-
-        # Dispatch any image builds that were created while the runner
-        # was offline (e.g. during bootstrap).
-        runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
-        if runner is not None:
-            await service.dispatch_pending_image_builds(runner)
-            await service.dispatch_pending_image_deletions(runner)
-            await service.dispatch_pending_workspace_deletions(runner)
-            await service.dispatch_pending_build_job_deletions(runner)
+        workspaces = data.get("workspaces") if isinstance(data, dict) else None
+        if not isinstance(workspaces, list):
+            logger.warning("Invalid runner:status snapshot (sid=%s)", sid)
+            return
+        service = get_runner_service()
+        runner = await service.get_active_runner_for_sid(runner_id, sid)
+        if runner is None:
+            logger.warning("runner:status from stale session (sid=%s)", sid)
+            return
+        service.enqueue_runner_snapshot(runner, sid, workspaces)
 
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
@@ -368,26 +463,12 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     @sio.on("workspace:cleanup_unknown_done")
     async def on_workspace_cleanup_unknown_done(sid: str, data: dict):
         """Handle successful unknown-workspace cleanup reported by runner."""
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
+        runner_id = await _require_runner_id(sio, sid, "workspace:cleanup_unknown_done")
         if not runner_id:
-            logger.warning(
-                "workspace:cleanup_unknown_done from unknown session (sid=%s)",
-                sid,
-            )
             return
-
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        service = get_runner_service()
+        runner = await service.get_active_runner_for_sid(runner_id, sid)
         if runner is None:
-            logger.warning(
-                "workspace:cleanup_unknown_done for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
             return
 
         await sync_to_async(service.handle_unknown_workspace_cleanup_result)(
@@ -399,26 +480,14 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     @sio.on("workspace:cleanup_unknown_failed")
     async def on_workspace_cleanup_unknown_failed(sid: str, data: dict):
         """Handle failed unknown-workspace cleanup reported by runner."""
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
+        runner_id = await _require_runner_id(
+            sio, sid, "workspace:cleanup_unknown_failed"
+        )
         if not runner_id:
-            logger.warning(
-                "workspace:cleanup_unknown_failed from unknown session (sid=%s)",
-                sid,
-            )
             return
-
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        service = get_runner_service()
+        runner = await service.get_active_runner_for_sid(runner_id, sid)
         if runner is None:
-            logger.warning(
-                "workspace:cleanup_unknown_failed for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
             return
 
         await sync_to_async(service.handle_unknown_workspace_cleanup_result)(
@@ -967,31 +1036,23 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("runner:system_metrics")
     async def on_runner_system_metrics(sid: str, data: dict):
-        """Persist host system metrics reported by a runner once per minute."""
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
-
+        """Persist host system metrics reported by an active runner."""
+        runner_id = await _require_runner_id(sio, sid, "runner:system_metrics")
         if not runner_id:
-            logger.warning("runner:system_metrics from unknown session (sid=%s)", sid)
             return
 
-        from .repositories import RunnerRepository, RunnerSystemMetricsRepository
         from django.utils import timezone
-        import uuid as _uuid
 
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        from .repositories import RunnerSystemMetricsRepository
+
+        runner = await get_runner_service().get_active_runner_for_sid(runner_id, sid)
         if runner is None:
-            logger.warning(
-                "runner:system_metrics for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
             return
 
         try:
             ts_raw = data.get("timestamp")
             if ts_raw:
-                from datetime import datetime, timezone as dt_tz
+                from datetime import datetime
 
                 timestamp = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
             else:
@@ -1022,50 +1083,16 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.exception("Failed to store system metrics for runner %s", runner_id)
 
     @sio.on("runner:heartbeat")
-    async def on_runner_heartbeat(sid: str, data: dict):
-        """Handle periodic heartbeat from a runner.
-
-        Reconciles workspace states between the runner's actual
-        container states and the backend's records.
-        """
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
-
+    async def on_runner_heartbeat(sid: str, data: dict | None = None):
+        """Persist lightweight liveness for the currently registered SID."""
+        runner_id = await _require_runner_id(sio, sid, "runner:heartbeat")
         if not runner_id:
-            logger.warning("runner:heartbeat from unknown session (sid=%s)", sid)
-            return
-
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
-        if runner is None:
-            logger.warning(
-                "runner:heartbeat for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
-            return
-
-        credential_sync_ids = await sync_to_async(service.handle_heartbeat)(
-            runner=runner,
-            workspaces=data.get("workspaces", []),
-        )
-        # Async verify pass for heartbeat-vanished process rows: the
-        # sync heartbeat only stashes candidates (no RPCs allowed
-        # there); this resolves them against the runner — live rows
-        # reattach as RUNNING, confirmed-gone rows become EXITED,
-        # unverifiable rows stay RUNNING.
-        try:
-            await service.reconcile_vanished_processes(runner)
-        except Exception:
-            logger.exception(
-                "reconcile_vanished_processes failed for runner %s",
-                runner_id,
-            )
-        if credential_sync_ids:
-            await service.dispatch_credential_reconcile(credential_sync_ids)
+            return {"ok": False, "code": "stale_session", "retryable": True}
+        service = get_runner_service()
+        updated = await service.record_runner_heartbeat(runner_id, sid)
+        if not updated:
+            return {"ok": False, "code": "stale_session", "retryable": True}
+        return {"ok": True, "sid": sid, "protocol_version": PROTOCOL_VERSION}
 
 
 def _extract_bearer_token(environ: dict) -> str | None:

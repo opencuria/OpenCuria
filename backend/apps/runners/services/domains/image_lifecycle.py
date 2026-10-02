@@ -20,6 +20,7 @@ import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -29,11 +30,15 @@ from common.utils import generate_uuid
 
 from ...enums import RuntimeType, TaskStatus, TaskType, WorkspaceStatus
 from ...exceptions import (
+    PendingDispatchError,
     RunnerOfflineError,
     TaskNotFoundError,
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ...models import ImageInstance, ImageBuildJob, Runner, Task, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +363,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
 
     async def activate_build_job(self, build, *, created_by=None):
         """Make an existing runner image selectable, or build it if none exists."""
-        from ...models import ImageBuildJob, ImageInstance
+        from ...models import ImageInstance, ImageBuildJob
 
         self._ensure_definition_mutable(build.image_definition)
         instance = await sync_to_async(self.image_instances.get_by_build_job_id)(
@@ -645,6 +650,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
     ) -> None:
         """Mark a runner image build as active and complete its task."""
         from django.utils import timezone
+
         from ...models import ImageInstance, ImageBuildJob
 
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1322,22 +1328,25 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         # Check if all are already done
         await sync_to_async(self._check_definition_deletion_complete)(definition_id)
 
-    async def dispatch_pending_build_job_deletions(self, runner: "Runner") -> list:
-        """Dispatch pending build job deletions that accumulated while runner was offline."""
-        from ...models import ImageBuildJob, ImageInstance
+    async def dispatch_pending_build_job_deletions(
+        self, runner: Runner
+    ) -> list[ImageBuildJob]:
+        """Dispatch offline build-job deletions, raising if any item fails."""
+        from ...models import ImageInstance, ImageBuildJob
 
         pending = await sync_to_async(
             lambda: list(self.build_jobs.list_pending_delete_for_runner(runner.id))
         )()
 
         dispatched = []
+        failures: list[str] = []
         for build in pending:
-            instance = await sync_to_async(
-                lambda: getattr(build, "image_instance", None)
-            )()
-            if not instance or not instance.runner_ref:
-                continue
             try:
+                instance = await sync_to_async(
+                    lambda: getattr(build, "image_instance", None)
+                )()
+                if not instance or not instance.runner_ref:
+                    continue
                 reused_active_task = False
                 if not build.deleting_task_id:
                     task = None
@@ -1386,10 +1395,13 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 )
                 await sync_to_async(self.tasks.mark_in_progress)(task)
                 dispatched.append(build)
-            except Exception:
+            except Exception as exc:
+                failures.append(f"{build.id}: {exc}")
                 logger.exception(
                     "Failed to dispatch pending build deletion %s for runner %s",
                     build.id,
                     runner.id,
                 )
+        if failures:
+            raise PendingDispatchError("pending build-job deletion dispatch", failures)
         return dispatched

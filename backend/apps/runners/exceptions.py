@@ -21,6 +21,20 @@ class RunnerOfflineError(ConflictError):
         super().__init__(message=f"Runner '{runner_id}' is offline")
 
 
+class PendingDispatchError(RuntimeError):
+    """Raised after a pending-work drain partially fails for a runner."""
+
+    retryable = True
+
+    def __init__(self, operation: str, failures: list[str]) -> None:
+        self.operation = operation
+        self.failures = tuple(failures)
+        super().__init__(
+            f"{operation} failed for {len(failures)} pending item(s): "
+            + "; ".join(failures)
+        )
+
+
 class RunnerTimeoutError(ConflictError):
     """Raised when a runner RPC reply does not arrive before the budget."""
 

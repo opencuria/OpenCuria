@@ -5,18 +5,17 @@ Tests for repository layer.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
 
 import pytest
-from django.utils import timezone
 
-from common.utils import hash_token
-
-from apps.accounts.models import User
 from apps.organizations.models import Organization
 from apps.runners.enums import RunnerStatus, TaskStatus, TaskType, WorkspaceStatus
-from apps.runners.models import Runner, Task, Workspace
-from apps.runners.repositories import RunnerRepository, TaskRepository, WorkspaceRepository
+from apps.runners.repositories import (
+    RunnerRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
+from common.utils import hash_token
 
 
 @pytest.mark.django_db
@@ -38,12 +37,25 @@ class TestRunnerRepository:
         found = RunnerRepository.get_by_token_hash(token_hash)
         assert found is not None
 
-    def test_set_online_offline(self, runner):
-        RunnerRepository.set_online(runner, sid="sid-1")
-        assert runner.status == RunnerStatus.ONLINE
-
-        RunnerRepository.set_offline(runner)
+    def test_register_and_conditionally_set_offline(self, runner):
+        registered, previous_sid, changed = RunnerRepository.register_session(
+            runner.id,
+            sid="sid-1",
+            available_runtimes=["docker"],
+        )
+        assert previous_sid == "test-sid-123"
+        assert changed is True
+        assert registered.sid == "sid-1"
+        assert registered.status == RunnerStatus.ONLINE
+        assert registered.available_runtimes == ["docker"]
+        assert RunnerRepository.set_offline_for_sid("old-sid") is None
+        offline = RunnerRepository.set_offline_for_sid("sid-1")
+        assert offline.sid == ""
+        assert offline.status == RunnerStatus.OFFLINE
+        assert offline.connected_at == registered.connected_at
+        runner.refresh_from_db()
         assert runner.status == RunnerStatus.OFFLINE
+        assert runner.sid == ""
 
 
 @pytest.mark.django_db

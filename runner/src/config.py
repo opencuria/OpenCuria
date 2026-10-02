@@ -7,6 +7,7 @@ and optionally from a .env file in the runner directory.
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Runtime type identifiers
@@ -51,12 +52,40 @@ class RunnerSettings(BaseSettings):
     qemu_ssh_user: str = "root"
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
 
-    # Heartbeat
-    heartbeat_interval: int = 15  # seconds between heartbeats to backend
+    # Connection supervision (seconds).
+    connection_timeout: float = Field(default=10, gt=0)
+    runtime_setup_timeout: float = Field(default=120, gt=0)
+    cleanup_timeout: float = Field(default=5, gt=0)
+    reconnect_delay: float = Field(default=2, gt=0)
+    reconnect_delay_max: float = Field(default=30, gt=0)
+
+    # Heartbeat liveness is independent of workspace/runtime snapshots.
+    heartbeat_interval: float = Field(default=15, gt=0)
+
+    @model_validator(mode="after")
+    def validate_connection_settings(self) -> "RunnerSettings":
+        """Reject unusable local configuration before retrying a connection."""
+        from urllib.parse import urlsplit
+
+        url = urlsplit(self.backend_url)
+        if url.scheme not in {"http", "https", "ws", "wss"} or not url.hostname:
+            raise ValueError("backend_url must be an HTTP(S) or WS(S) URL")
+        if url.username or url.password or url.query or url.fragment:
+            raise ValueError("backend_url must not contain credentials or query data")
+        if self.reconnect_delay_max < self.reconnect_delay:
+            raise ValueError("reconnect_delay_max must be at least reconnect_delay")
+        if not self.enabled_runtime_list or any(
+            value not in {RUNTIME_DOCKER, RUNTIME_QEMU}
+            for value in self.enabled_runtime_list
+        ):
+            raise ValueError("enabled_runtimes must contain docker and/or qemu")
+        return self
 
     # SSH health check — self-healing for QEMU workspaces that become unreachable
     ssh_health_check_interval: int = 30  # seconds between SSH reachability checks
-    ssh_unreachable_timeout: int = 90  # seconds before an unreachable workspace is restarted
+    ssh_unreachable_timeout: int = (
+        90  # seconds before an unreachable workspace is restarted
+    )
 
     # Logging
     log_level: str = "INFO"

@@ -139,9 +139,6 @@ class HeartbeatReconcilerMixin:
         Returns:
             Workspace IDs whose on-disk credentials need live reconciliation.
         """
-        # Update heartbeat timestamp
-        self.runners.update_heartbeat(runner)
-
         # Build lookup of runner-reported workspace states
         runner_ws_payloads: dict[str, dict] = {}
         runner_ws_states: dict[str, str] = {}
@@ -366,8 +363,18 @@ class HeartbeatReconcilerMixin:
         failure, so one bad workspace cannot wedge later heartbeats.
         Returns IDs of changed processes.
         """
-        pending = self._pending_process_verify
-        self._pending_process_verify = {}
+        workspace_ids = await sync_to_async(self.workspaces.list_ids_for_runner)(
+            runner.id
+        )
+        pending: dict[str, list] = {}
+        for workspace_id, rows in list(self._pending_process_verify.items()):
+            try:
+                workspace_uuid = uuid.UUID(str(workspace_id))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if workspace_uuid in workspace_ids:
+                pending[workspace_id] = rows
+                self._pending_process_verify.pop(workspace_id, None)
         changed: list[uuid.UUID] = []
         for ws_id_str, rows in pending.items():
             try:

@@ -72,7 +72,11 @@ async def test_stream_output_delegated_with_runner_id(fresh_sio):
     runner, workspace = _make_runner_workspace(
         sid="stream-sio-sid-1", prefix="stream-sio-happy"
     )
-    server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    server.get_session = AsyncMock(
+        return_value={"runner_id": str(runner.id), "protocol_version": 1}
+    )
+    server.manager.is_connected = lambda _sid, _namespace: True
+    service.is_active_runner_session = AsyncMock(return_value=True)
     data = {
         "connection_id": "conn-1",
         "workspace_id": str(workspace.id),
@@ -96,7 +100,11 @@ async def test_stream_closed_delegated(fresh_sio):
     runner, workspace = _make_runner_workspace(
         sid="stream-sio-sid-2", prefix="stream-sio-closed"
     )
-    server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    server.get_session = AsyncMock(
+        return_value={"runner_id": str(runner.id), "protocol_version": 1}
+    )
+    server.manager.is_connected = lambda _sid, _namespace: True
+    service.is_active_runner_session = AsyncMock(return_value=True)
     data = {
         "connection_id": "conn-2",
         "workspace_id": str(workspace.id),
@@ -224,8 +232,12 @@ async def test_stream_output_ack_ok_and_nack():
     runner, workspace = _make_runner_workspace(
         sid="stream-sio-sid-ack", prefix="stream-sio-ack"
     )
-    fresh_server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    fresh_server.get_session = AsyncMock(
+        return_value={"runner_id": str(runner.id), "protocol_version": 1}
+    )
+    fresh_server.manager.is_connected = lambda _sid, _namespace: True
     service = RunnerService(sio_server=None)
+    service.is_active_runner_session = AsyncMock(return_value=True)
     import apps.runners.sio_server as mod
 
     orig = mod.get_runner_service

@@ -23,11 +23,18 @@ from asgiref.sync import sync_to_async
 from common.exceptions import AuthenticationError
 from common.utils import generate_uuid, hash_token
 
-from ...enums import RunnerStatus, RuntimeType, TaskStatus, TaskType
-from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
+from ...enums import RuntimeType, TaskStatus, TaskType
+from ...exceptions import (
+    PendingDispatchError,
+    RunnerNotFoundError,
+    WorkspaceNotFoundError,
+)
+from ..infra.runner_presence import run_presence_query
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
-    from ...models import Runner, Workspace
+    from ...models import ImageBuildJob, ImageInstance, Runner, Workspace
+else:
+    from ...models import ImageBuildJob
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,7 @@ logger = logging.getLogger(__name__)
 class RunnerLifecycleMixin:
     """Runner lifecycle and read queries shared by RunnerService."""
 
-    def authenticate_runner(self, token: str) -> "Runner":
+    def authenticate_runner(self, token: str) -> Runner:
         """
         Authenticate a runner by its API token.
 
@@ -47,43 +54,136 @@ class RunnerLifecycleMixin:
             raise AuthenticationError("Invalid runner API token")
         return runner
 
+    async def authenticate_runner_async(self, token: str) -> Runner:
+        """Authenticate on the bounded presence database lane."""
+        return await run_presence_query(self.authenticate_runner, token)
+
     def register_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         *,
         sid: str,
         available_runtimes: list[str] | None = None,
-    ) -> "Runner":
-        """
-        Mark a runner as online after it connects and sends runner:register.
-
-        Args:
-            runner: The authenticated Runner instance.
-            sid: Socket.IO session ID for targeted messaging.
-            available_runtimes: List of runtime types the runner supports.
-        """
-        runner = self.runners.set_online(
-            runner,
+    ) -> Runner:
+        """Synchronously register a runner for internal service callers."""
+        runner_id = runner.id
+        runner, old_sid, changed = self.runners.register_session(
+            runner_id,
             sid=sid,
-            available_runtimes=available_runtimes or ["docker"],
+            available_runtimes=(
+                ["docker"] if available_runtimes is None else available_runtimes
+            ),
         )
-        logger.info(
-            "Runner registered: %s",
-            runner.id,
-        )
+        if runner is None:
+            raise RunnerNotFoundError(str(runner_id))
+        runner._registration_changed = changed
+        runner._superseded_sid = old_sid if old_sid != sid else None
+        logger.info("Runner registered: %s (sid=%s)", runner.id, sid)
         return runner
 
-    async def dispatch_pending_image_builds(self, runner: "Runner") -> list:
-        """Dispatch pending image builds that were created while the runner was offline.
+    def notify_runner_online(self, runner: Runner) -> None:
+        """Synchronously notify frontend for internal service callers."""
+        self._forward_runner_status_to_frontend(runner, "online")
 
-        This is called after a runner registers online.  It queries for
-        ``ImageBuildJob`` records with status ``pending`` and no associated
-        build task, then triggers the regular build pipeline for each.
+    def unregister_runner(self, sid: str) -> str | None:
+        """Synchronously unregister a runner for internal service callers."""
+        runner = self.runners.set_offline_for_sid(sid)
+        if runner is None:
+            logger.info("Ignoring stale runner disconnect (sid=%s)", sid)
+            return None
+        self._disconnect_streams_for_id(str(runner.id))
+        self._forward_runner_status_to_frontend(runner, "offline")
+        return str(runner.id)
 
-        Returns the list of dispatched ImageBuildJob records.
+    async def unregister_runner_async(self, sid: str) -> str | None:
+        """Commit an SID-conditional offline transition and clean up its streams."""
+        runner = await run_presence_query(self.runners.set_offline_for_sid, sid)
+        if runner is None:
+            logger.info("Ignoring stale runner disconnect (sid=%s)", sid)
+            return None
+        runner_id = str(runner.id)
+        await run_presence_query(self._disconnect_streams_for_id, runner_id)
+        await self.notify_runner_status_async(runner, "offline")
+        logger.info("Runner unregistered: %s", runner_id)
+        return runner_id
+
+    async def notify_runner_online_async(self, runner: Runner) -> None:
+        """Queue an online event after the registration SID is verified."""
+        await self.notify_runner_status_async(runner, "online")
+
+    async def notify_runner_status_async(self, runner: Runner, status: str) -> None:
+        """Forward runner status using the bounded database lane for fanout lookup."""
+        workspace_ids = await run_presence_query(
+            self.workspaces.list_status_workspace_ids, runner.id
+        )
+        event = "runner:offline" if status == "offline" else "runner:online"
+        for workspace_id in workspace_ids:
+            workspace_id = str(workspace_id)
+            self._forward_to_frontend(
+                event,
+                {"workspace_id": workspace_id, "runner_id": str(runner.id)},
+                workspace_id,
+            )
+
+    async def register_runner_async(
+        self,
+        runner_id: str,
+        *,
+        sid: str,
+        available_runtimes: list[str],
+    ) -> Runner | None:
+        """Commit registration on the bounded presence DB lane."""
+        runner, old_sid, changed = await run_presence_query(
+            self.runners.register_session,
+            uuid.UUID(runner_id),
+            sid=sid,
+            available_runtimes=available_runtimes,
+        )
+        if runner is None:
+            return None
+        runner._registration_changed = changed
+        runner._superseded_sid = old_sid if old_sid != sid else None
+        logger.info("Runner registered: %s (sid=%s)", runner.id, sid)
+        return runner
+
+    async def is_active_runner_session(self, runner_id: str, sid: str) -> bool:
+        """Return whether *sid* is the active, persisted runner session."""
+        return await run_presence_query(
+            self.runners.is_active_session,
+            uuid.UUID(runner_id),
+            sid,
+        )
+
+    async def get_runner_async(self, runner_id: str) -> Runner | None:
+        """Load a runner on the bounded presence database lane."""
+        return await run_presence_query(self.runners.get_by_id, uuid.UUID(runner_id))
+
+    async def get_active_runner_for_sid(
+        self, runner_id: str, sid: str
+    ) -> Runner | None:
+        """Load a runner only when its persisted online SID still matches."""
+        return await run_presence_query(
+            self.runners.get_active_session,
+            uuid.UUID(runner_id),
+            sid,
+        )
+
+    async def record_runner_heartbeat(self, runner_id: str, sid: str) -> bool:
+        """Persist liveness only while *sid* remains the active session."""
+        return await run_presence_query(
+            self.runners.record_heartbeat,
+            uuid.UUID(runner_id),
+            sid,
+        )
+
+    async def dispatch_pending_image_builds(
+        self, runner: Runner
+    ) -> list[ImageBuildJob]:
+        """Dispatch offline-created builds, raising if any item fails.
+
+        Successful items remain dispatched; :class:`PendingDispatchError`
+        reports failures so the coordinator retries on the next runner status.
         """
-        from ...models import ImageBuildJob
-
         await sync_to_async(self.timeout_stale_image_operations)()
 
         pending_builds = await sync_to_async(
@@ -97,6 +197,7 @@ class RunnerLifecycleMixin:
         )()
 
         dispatched = []
+        failures: list[str] = []
         for build in pending_builds:
             try:
                 await self.trigger_build_job(
@@ -110,16 +211,21 @@ class RunnerLifecycleMixin:
                     build.id,
                     runner.id,
                 )
-            except Exception:
+            except Exception as exc:
+                failures.append(f"{build.id}: {exc}")
                 logger.exception(
                     "Failed to dispatch pending image build %s for runner %s",
                     build.id,
                     runner.id,
                 )
+        if failures:
+            raise PendingDispatchError("pending image build dispatch", failures)
         return dispatched
 
-    async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
-        """Dispatch pending image deletions that accumulated while runner was offline."""
+    async def dispatch_pending_image_deletions(
+        self, runner: Runner
+    ) -> list[ImageInstance]:
+        """Dispatch offline image deletions, raising if any item fails."""
         from ...models import ImageInstance
 
         pending_images = await sync_to_async(
@@ -127,6 +233,7 @@ class RunnerLifecycleMixin:
         )()
 
         dispatched = []
+        failures: list[str] = []
         for image in pending_images:
             try:
                 reused_active_task = False
@@ -170,47 +277,33 @@ class RunnerLifecycleMixin:
                 )
                 await sync_to_async(self.tasks.mark_in_progress)(task)
                 dispatched.append(image)
-            except Exception:
+            except Exception as exc:
+                failures.append(f"{image.id}: {exc}")
                 logger.exception(
                     "Failed to dispatch pending image deletion %s for runner %s",
                     image.id,
                     runner.id,
                 )
+        if failures:
+            raise PendingDispatchError("pending image deletion dispatch", failures)
         return dispatched
 
-    def unregister_runner(self, sid: str) -> None:
-        """
-        Mark a runner as offline when it disconnects.
+    def _disconnect_streams(self, runner: Runner) -> None:
+        """Fail byte streams owned by a runner after its session ends."""
+        self._disconnect_streams_for_id(str(runner.id))
 
-        Looks up the runner by its Socket.IO session ID.
-        """
-        from ...models import Runner
-
+    def _disconnect_streams_for_id(self, runner_id: str) -> None:
+        """Fail byte streams using repository-only ownership lookups."""
         try:
-            runner = Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
-        except Runner.DoesNotExist:
-            logger.warning("Disconnect from unknown SID: %s", sid)
-            return
-
-        self.runners.set_offline(runner)
-        logger.info("Runner unregistered: %s", runner.id)
-        # Fail any open byte streams so harness waiters surface offline
-        # instead of hanging until their timeout.
-        try:
-            self.fail_streams_for_runner(str(runner.id))
+            self.fail_streams_for_runner(runner_id)
         except Exception:
-            logger.exception(
-                "Failed failing streams for runner %s", runner.id
-            )
-
-        # Notify frontend about runner going offline so it can update display.
-        self._forward_runner_status_to_frontend(runner, "offline")
+            logger.exception("Failed failing streams for runner %s", runner_id)
 
     def update_runner_qemu_settings(
         self,
         runner_id: uuid.UUID,
         **fields,
-    ) -> "Runner":
+    ) -> Runner:
         """Update per-runner QEMU resource limits/defaults."""
         runner = self.get_runner(runner_id)
         updated_fields = dict(fields)
@@ -225,13 +318,13 @@ class RunnerLifecycleMixin:
         self._validate_runner_qemu_limits(runner)
         return self.runners.update_qemu_settings(runner, **updated_fields)
 
-    def list_runners(self, organization_id: uuid.UUID | None = None) -> list["Runner"]:
+    def list_runners(self, organization_id: uuid.UUID | None = None) -> list[Runner]:
         """Return all registered runners, optionally filtered by organization."""
         if organization_id:
             return list(self.runners.list_by_organization(organization_id))
         return list(self.runners.list_all())
 
-    def get_runner(self, runner_id: uuid.UUID) -> "Runner":
+    def get_runner(self, runner_id: uuid.UUID) -> Runner:
         """Return a runner by ID or raise RunnerNotFoundError."""
         runner = self.runners.get_by_id(runner_id)
         if runner is None:
@@ -243,7 +336,7 @@ class RunnerLifecycleMixin:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         user=None,
-    ) -> list["Workspace"]:
+    ) -> list[Workspace]:
         """Return workspaces filtered by org and owner."""
         if runner_id:
             qs = self.workspaces.list_by_runner(runner_id)
@@ -257,7 +350,7 @@ class RunnerLifecycleMixin:
 
         return list(qs)
 
-    def get_workspace(self, workspace_id: uuid.UUID) -> "Workspace":
+    def get_workspace(self, workspace_id: uuid.UUID) -> Workspace:
         """Return a workspace by ID or raise WorkspaceNotFoundError."""
         workspace = self.workspaces.get_by_id(workspace_id)
         if workspace is None:
@@ -282,7 +375,7 @@ class RunnerLifecycleMixin:
         *,
         user,
         organization_id: uuid.UUID,
-    ) -> "Workspace":
+    ) -> Workspace:
         """Return a workspace only when it belongs to the active org and owner."""
         workspace = self.get_workspace(workspace_id)
         if workspace.runner.organization_id != organization_id:

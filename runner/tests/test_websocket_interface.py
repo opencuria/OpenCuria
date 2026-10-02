@@ -1,6 +1,6 @@
 import unittest
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
@@ -120,6 +120,7 @@ class WebSocketMetricsPathTests(unittest.TestCase):
             interface._sio.eio.websocket_extra_options["max_msg_size"],
             SOCKETIO_MAX_HTTP_BUFFER_SIZE,
         )
+        self.assertFalse(interface._sio.eio.handle_sigint)
 
     def test_storage_root_defaults_to_var_lib_opencuria(self) -> None:
         settings = RunnerSettings(
@@ -150,8 +151,8 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
 
 class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
-    async def test_connect_snapshot_is_reused_for_first_heartbeat(self) -> None:
-        """Connect snapshot is not immediately re-probed for the first heartbeat."""
+    async def test_initial_snapshot_is_reused_for_first_status_update(self) -> None:
+        """Initial prepared snapshot is not immediately re-probed for status."""
         import asyncio
         import contextlib
 
@@ -160,25 +161,30 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         service.get_workspace_heartbeat_statuses = AsyncMock(return_value=workspaces)
         interface = WebSocketInterface(service, RunnerSettings())
         interface._sio.connected = True
+        interface._sio.eio.state = "connected"
         emitted = asyncio.Event()
 
         async def _emit(event, payload):
-            if event == "runner:heartbeat":
+            if event == "runner:status":
+                self.assertEqual(payload, {"workspaces": workspaces})
                 emitted.set()
 
         interface._sio.emit = AsyncMock(side_effect=_emit)
-        heartbeat = asyncio.create_task(
-            interface._heartbeat_loop(initial_workspaces=workspaces)
-        )
-        await asyncio.wait_for(emitted.wait(), timeout=1)
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
+        status = asyncio.create_task(interface._status_loop(interface._sio, workspaces))
+        try:
+            await asyncio.wait_for(emitted.wait(), timeout=1)
+        finally:
+            status.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await status
 
         service.sync_from_runtime.assert_not_awaited()
         service.get_workspace_heartbeat_statuses.assert_not_awaited()
 
     async def test_connect_recovers_desktop_sessions_before_reannounce(self) -> None:
+        import asyncio
+        import contextlib
+
         service = DummyService()
         service.get_workspace_heartbeat_statuses = AsyncMock(
             return_value=[
@@ -196,9 +202,15 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         interface = WebSocketInterface(service, RunnerSettings())
+        interface._sio.connected = True
+        interface._sio.eio.state = "connected"
         interface._sio.emit = AsyncMock()
+        from src.interfaces.websocket_lifecycle import RunnerSession
 
-        await interface._sio.handlers["/"]["connect"]()
+        session = RunnerSession(interface._sio)
+        snapshot = await interface._prepare_session(session)
+        await interface._activate_session(session, snapshot)
+        await asyncio.sleep(0)
 
         service.sync_from_runtime.assert_awaited_once()
         service.recover_desktop_sessions_from_runtime.assert_awaited_once()
@@ -209,10 +221,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "port": 6901,
                 "container_ip": "127.0.0.1",
                 "network_name": "workspace-net",
-                "viewer": False,
-                "computer_use": False,
             },
         )
+        await interface._cleanup_session(session)
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
@@ -401,6 +412,31 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             ["binary"],
         )
         self.assertEqual(result, {"ok": True, "subprotocol": "binary"})
+
+    async def test_cancelled_desktop_proxy_handshake_closes_session(self) -> None:
+        """Cancellation before tunnel ownership transfer releases its connector."""
+        import asyncio
+        import contextlib
+
+        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        started = asyncio.Event()
+        session = AsyncMock()
+
+        async def blocked_connect(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        session.ws_connect.side_effect = blocked_connect
+        with patch("src.interfaces.websocket.aiohttp.ClientSession", return_value=session):
+            task = asyncio.create_task(
+                interface._open_desktop_proxy_tunnel(uuid.uuid4(), "cancelled")
+            )
+            await asyncio.wait_for(started.wait(), 2)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        session.close.assert_awaited_once()
+        self.assertEqual(interface._desktop_proxy_tunnels, {})
 
     async def test_desktop_proxy_ws_send_forwards_payload(self) -> None:
         service = DummyService()

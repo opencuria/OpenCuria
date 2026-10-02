@@ -4,8 +4,8 @@ Connects to the Django backend, authenticates with a Bearer token,
 and listens for task events.  Harness exec output is streamed back
 to the backend in real time via ``harness:*`` events.
 
-Includes a periodic heartbeat that reports workspace container states
-so the backend can reconcile its records with actual runtime state.
+Confirmed liveness heartbeats are independent of runtime status snapshots,
+so slow workspace checks cannot stall the connection watchdog.
 
 A separate metrics loop collects host CPU, RAM, and disk usage every
 60 seconds and sends them to the backend as ``runner:system_metrics``.
@@ -21,6 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
 import aiohttp
@@ -32,6 +33,12 @@ from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
 from ..service import WorkspaceService
 from .base import Interface
+from .websocket_lifecycle import (
+    ConnectionSupervisor,
+    FatalConnectionError,
+    RunnerSession,
+    cancel_tasks,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -75,6 +82,7 @@ class DesktopProxyTunnel:
     websocket: aiohttp.ClientWebSocketResponse
     reader_task: asyncio.Task
     workspace_id: uuid.UUID
+    client: socketio.AsyncClient
 
 
 class WebSocketInterface(Interface):
@@ -83,22 +91,11 @@ class WebSocketInterface(Interface):
     def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
         super().__init__(service)
         self._settings = settings
-        self._sio = socketio.AsyncClient(
-            reconnection=True,
-            reconnection_attempts=0,  # unlimited
-            reconnection_delay=2,
-            reconnection_delay_max=30,
-            logger=False,
-            # Engine.IO clients do not take max_http_buffer_size (server
-            # only). aiohttp's ws_connect default max_msg_size is 4 MiB;
-            # raise it to match backend Socket.IO / Daphne 200 MiB caps
-            # so inbound workspace file payloads are not dropped.
-            websocket_extra_options={
-                "max_msg_size": SOCKETIO_MAX_HTTP_BUFFER_SIZE,
-            },
-        )
+        self._handler_tasks: set[asyncio.Task] = set()
+        self._mutation_tasks: set[asyncio.Task] = set()
+        self._session_closing = False
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
-        self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._status_task: asyncio.Task | None = None
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._health_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._vm_cpu_samples: dict[str, tuple[int, float, int]] = {}
@@ -108,8 +105,94 @@ class WebSocketInterface(Interface):
         # Keyed by request_id; entries expire and are dropped on disconnect
         # so partial uploads can never grow without bounds.
         self._upload_transfers: dict[str, dict] = {}
-        self._setup_handlers()
+        self._supervisor = ConnectionSupervisor(
+            settings,
+            self._create_client,
+            self._prepare_session,
+            self._activate_session,
+            self._cleanup_session,
+            service.supported_runtimes,
+        )
+        # Construct a dormant client so handler-level consumers can inspect it.
+        self._sio = self._create_client()
 
+    def _create_client(self) -> socketio.AsyncClient:
+        client = socketio.AsyncClient(
+            reconnection=False,
+            handle_sigint=False,
+            logger=False,
+            websocket_extra_options={
+                "max_msg_size": SOCKETIO_MAX_HTTP_BUFFER_SIZE,
+            },
+        )
+        self._sio = client
+        self._session_closing = False
+        self._setup_handlers()
+        return client
+
+    async def _prepare_session(self, session: RunnerSession) -> list[dict]:
+        await self._service.sync_from_runtime()
+        session.require_transport()
+        await self._service.recover_desktop_sessions_from_runtime()
+        session.require_transport()
+        snapshot = await self._service.get_workspace_heartbeat_statuses()
+        session.require_transport()
+        return snapshot
+
+    async def _activate_session(
+        self, session: RunnerSession, snapshot: list[dict]
+    ) -> None:
+        sio = session.client
+        session.require_transport()
+        for workspace in snapshot:
+            desktop = workspace.get("desktop")
+            if desktop:
+                await sio.emit(
+                    "desktop:process",
+                    {"workspace_id": workspace["workspace_id"], **desktop},
+                )
+        self._status_task = asyncio.create_task(self._status_loop(sio, snapshot))
+        self._metrics_task = asyncio.create_task(self._metrics_loop(sio))
+
+    async def _cleanup_session(self, session: RunnerSession) -> None:
+        # No replacement client is installed until its predecessor is drained.
+        self._session_closing = True
+        tasks = list(self._running_tasks.values()) + [
+            task for task in self._handler_tasks if task not in self._mutation_tasks
+        ]
+        tasks.extend(t for t in (self._status_task, self._metrics_task) if t)
+        await cancel_tasks(tasks, self._settings.cleanup_timeout)
+        # Runtime mutations must reach their safe completion boundary. Cancelling
+        # midway through container/VM creation or removal corrupts local state.
+        if self._mutation_tasks:
+            done, pending = await asyncio.wait(
+                list(self._mutation_tasks), timeout=self._settings.runtime_setup_timeout
+            )
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+            if pending:
+                raise FatalConnectionError("runtime_mutation_drain_timeout")
+        # Draining start_terminal can add a pump after the first cancel pass.
+        await cancel_tasks(
+            list(self._running_tasks.values()), self._settings.cleanup_timeout
+        )
+        self._running_tasks.clear()
+        self._handler_tasks.clear()
+        self._mutation_tasks.clear()
+        self._status_task = self._metrics_task = None
+
+        async def close_resources() -> None:
+            streams = getattr(self._service, "streams", None)
+            if streams is not None:
+                await self._service.streams.close_all_streams(
+                    reason="backend_disconnect"
+                )
+            for tunnel_id in list(self._desktop_proxy_tunnels):
+                await self._finalize_desktop_proxy_tunnel(tunnel_id)
+            self._upload_transfers.clear()
+
+        await asyncio.wait_for(close_resources(), self._settings.cleanup_timeout)
     async def _fetch_desktop_http(
         self,
         workspace_id: uuid.UUID,
@@ -151,13 +234,14 @@ class WebSocketInterface(Interface):
         self,
         tunnel_id: str,
         websocket: aiohttp.ClientWebSocketResponse,
+        sio: socketio.AsyncClient,
     ) -> None:
         """Forward upstream desktop WebSocket frames back to the backend."""
         close_code = 1000
         try:
             async for msg in websocket:
                 if msg.type == aiohttp.WSMsgType.BINARY:
-                    await self._sio.emit(
+                    await sio.emit(
                         "desktop:proxy_ws_frame",
                         {
                             "tunnel_id": tunnel_id,
@@ -166,7 +250,7 @@ class WebSocketInterface(Interface):
                         },
                     )
                 elif msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._sio.emit(
+                    await sio.emit(
                         "desktop:proxy_ws_frame",
                         {
                             "tunnel_id": tunnel_id,
@@ -214,18 +298,20 @@ class WebSocketInterface(Interface):
                 max_msg_size=16 * 1024 * 1024,
                 headers={"Origin": upstream_origin},
             )
-        except Exception:
+        except BaseException:
+            # Cancellation during the handshake must release the new connector.
             await session.close()
             raise
 
         reader_task = asyncio.create_task(
-            self._desktop_proxy_reader(tunnel_id, websocket)
+            self._desktop_proxy_reader(tunnel_id, websocket, self._sio)
         )
         self._desktop_proxy_tunnels[tunnel_id] = DesktopProxyTunnel(
             session=session,
             websocket=websocket,
             reader_task=reader_task,
             workspace_id=workspace_id,
+            client=self._sio,
         )
         return {"ok": True, "subprotocol": chosen_protocol}
 
@@ -317,8 +403,8 @@ class WebSocketInterface(Interface):
         with contextlib.suppress(Exception):
             await tunnel.session.close()
 
-        if self._sio.connected:
-            await self._sio.emit(
+        if tunnel.client.connected:
+            await tunnel.client.emit(
                 "desktop:proxy_ws_closed",
                 {
                     "tunnel_id": tunnel_id,
@@ -326,46 +412,25 @@ class WebSocketInterface(Interface):
                 },
             )
 
-    # -- heartbeat -------------------------------------------------------------
+    # -- workspace status snapshots --------------------------------------------
 
-    async def _heartbeat_loop(
-        self, initial_workspaces: list[dict] | None = None
+    async def _status_loop(
+        self, sio: socketio.AsyncClient, initial_workspaces: list[dict]
     ) -> None:
-        """Periodically send workspace container states to the backend."""
-        interval = self._settings.heartbeat_interval
-        # Reuse the connection snapshot for the immediate heartbeat: connect()
-        # already refreshed runtime state and checked process/desktop liveness
-        # to reannounce active desktop sessions.
-        pending_workspaces = initial_workspaces
+        """Send runtime snapshots independently of confirmed liveness heartbeats."""
+        pending = initial_workspaces
         while True:
             try:
-                if not self._sio.connected:
-                    await asyncio.sleep(interval)
-                    continue
-
-                if pending_workspaces is not None:
-                    workspaces = pending_workspaces
-                    pending_workspaces = None
-                else:
-                    # Refresh each interval to continue detecting external
-                    # container/runtime changes after the initial snapshot.
+                if pending is None:
                     await self._service.sync_from_runtime()
-                    workspaces = await self._service.get_workspace_heartbeat_statuses()
-
-                await self._sio.emit(
-                    "runner:heartbeat",
-                    {"workspaces": workspaces},
-                )
-                logger.debug(
-                    "heartbeat_sent",
-                    workspace_count=len(workspaces),
-                )
-                await asyncio.sleep(interval)
+                    pending = await self._service.get_workspace_heartbeat_statuses()
+                await sio.emit("runner:status", {"workspaces": pending})
+                pending = None
             except asyncio.CancelledError:
-                break
+                raise
             except Exception:
-                logger.exception("heartbeat_failed")
-                await asyncio.sleep(interval)
+                logger.exception("runner_status_failed")
+            await asyncio.sleep(self._settings.heartbeat_interval)
 
     # -- system metrics loop ---------------------------------------------------
 
@@ -440,7 +505,7 @@ class WebSocketInterface(Interface):
             probe = probe.parent
         return str(probe)
 
-    async def _metrics_loop(self) -> None:
+    async def _metrics_loop(self, sio: socketio.AsyncClient) -> None:
         """Collect host system metrics every 60 s and emit to backend."""
         # Trigger the first psutil CPU sample so the 60-s average is meaningful
         psutil.cpu_percent(interval=None)
@@ -448,7 +513,7 @@ class WebSocketInterface(Interface):
         while True:
             try:
                 await asyncio.sleep(60)
-                if not self._sio.connected:
+                if not sio.connected:
                     continue
 
                 cpu = await asyncio.to_thread(psutil.cpu_percent, 1)
@@ -466,7 +531,7 @@ class WebSocketInterface(Interface):
                     "disk_total_bytes": disk.total,
                     "vm_metrics": vm_metrics,
                 }
-                await self._sio.emit("runner:system_metrics", payload)
+                await sio.emit("runner:system_metrics", payload)
                 logger.debug(
                     "system_metrics_sent",
                     cpu=cpu,
@@ -484,95 +549,6 @@ class WebSocketInterface(Interface):
 
     def _setup_handlers(self) -> None:
         sio = self._sio
-
-        @sio.event
-        async def connect() -> None:
-            logger.info("websocket_connected", url=self._settings.backend_url)
-            # Sync cache from runtime before registering
-            await self._service.sync_from_runtime()
-            await self._service.recover_desktop_sessions_from_runtime()
-            # Announce this runner to the backend
-            await sio.emit(
-                "runner:register",
-                {
-                    "supported_runtimes": self._service.supported_runtimes,
-                    "status": "ready",
-                },
-            )
-            # Re-announce live desktop processes so the backend can
-            # reconstruct VNC proxy routing. Do not treat this as a
-            # viewer acquire — desktop:started is reserved for that.
-            heartbeat_workspaces = (
-                await self._service.get_workspace_heartbeat_statuses()
-            )
-            for workspace in heartbeat_workspaces:
-                desktop = workspace.get("desktop")
-                if not desktop:
-                    continue
-                await sio.emit(
-                    "desktop:process",
-                    {
-                        "workspace_id": workspace["workspace_id"],
-                        "port": desktop["port"],
-                        "container_ip": desktop["container_ip"],
-                        "network_name": desktop["network_name"],
-                        "viewer": bool(desktop.get("viewer")),
-                        "computer_use": bool(desktop.get("computer_use")),
-                    },
-                )
-            # Start heartbeat, reusing the just-collected connect snapshot for
-            # its first payload instead of repeating per-process/desktop execs.
-            if self._heartbeat_task is None or self._heartbeat_task.done():
-                self._heartbeat_task = asyncio.create_task(
-                    self._heartbeat_loop(initial_workspaces=heartbeat_workspaces)
-                )
-            # Start system metrics loop
-            if self._metrics_task is None or self._metrics_task.done():
-                self._metrics_task = asyncio.create_task(self._metrics_loop())
-            # Start SSH health check loop (self-healing)
-            if self._health_check_task is None or self._health_check_task.done():
-                self._health_check_task = asyncio.create_task(
-                    self._service.run_health_check_loop()
-                )
-
-        @sio.event
-        async def disconnect() -> None:
-            logger.warning("websocket_disconnected")
-            # Backend is gone: fail all generic streams closed so no MCP
-            # process tree lingers without a consumer.
-            with contextlib.suppress(Exception):
-                await self._service.streams.close_all_streams(
-                    reason="backend_disconnect"
-                )
-            # Cancel stream pumps too: they would otherwise linger until
-            # their next read raises (the service sessions are already
-            # gone, so every pump is just spinning on ValueError->EOF).
-            for task_key, task in list(self._running_tasks.items()):
-                if task_key.startswith("stream:") and not task.done():
-                    task.cancel()
-            # Stop heartbeat on disconnect (will be restarted on reconnect)
-            if self._heartbeat_task and not self._heartbeat_task.done():
-                self._heartbeat_task.cancel()
-            self._heartbeat_task = None
-            # Stop metrics loop on disconnect
-            if self._metrics_task and not self._metrics_task.done():
-                self._metrics_task.cancel()
-            self._metrics_task = None
-            if self._desktop_proxy_tunnels:
-                for tunnel_id in list(self._desktop_proxy_tunnels.keys()):
-                    with contextlib.suppress(Exception):
-                        await self._close_desktop_proxy_tunnel(tunnel_id)
-            # Partial chunked uploads are keyed by request_id only; the
-            # backend waiter is gone after a reconnect, so drop them to
-            # bound memory and avoid reassembling stale data.
-            self._upload_transfers.clear()
-            # Keep the health check loop running across reconnects — workspaces
-            # can still be unreachable even when the backend connection is down.
-            # The loop will restart automatically on the next connect() if needed.
-
-        @sio.event
-        async def connect_error(data: object) -> None:
-            logger.error("websocket_connect_error", data=data)
 
         # -- helper: chunked file transport --------------------------------------
         # Daphne's default inbound message/frame cap is 1 MiB (oversize
@@ -3262,54 +3238,55 @@ class WebSocketInterface(Interface):
                 log.exception("clone_failed")
 
 
+        # Engine.IO dispatches incoming messages in independent tasks. Own the
+        # application handlers as well as their spawned pumps so old operations
+        # cannot survive teardown and affect a successor session.
+        def session_handler(event, handler):
+            @wraps(handler)
+            async def tracked(*args, **kwargs):
+                if self._sio is not sio or self._session_closing:
+                    return None
+                task = asyncio.current_task()
+                self._handler_tasks.add(task)
+                mutation = event.startswith("task:") or event in {
+                    "harness:process_start",
+                    "harness:process_stop",
+                }
+                if mutation:
+                    self._mutation_tasks.add(task)
+                try:
+                    return await handler(*args, **kwargs)
+                except socketio.exceptions.SocketIOError:
+                    # Completion of a local mutation remains valid even when its
+                    # old reply transport has disappeared. Never send via a new SID.
+                    if sio.connected:
+                        raise
+                    return None
+                finally:
+                    self._handler_tasks.discard(task)
+                    self._mutation_tasks.discard(task)
+            return tracked
+
+        for event, handler in list(sio.handlers.get("/", {}).items()):
+            sio.on(event, handler=session_handler(event, handler))
+
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect to the backend and block until disconnected."""
-        headers = {"Authorization": f"Bearer {self._settings.api_token}"}
-        # Daphne never forwards WebSocket handshake headers into
-        # python-engine.io's environ, so the backend cannot see
-        # ``Authorization`` on a websocket-only connect. The token
-        # additionally travels in the Socket.IO auth payload (inside
-        # the WS frames — never in URLs/logs); the header above is
-        # kept for proxies/backends that forward handshake headers.
-        url = self._settings.backend_url
-        auth = {"token": self._settings.api_token} if self._settings.api_token else None
-
-        logger.info(
-            "websocket_connecting",
-            url=self._settings.backend_url,
-        )
-
-        await self._sio.connect(
-            url,
-            headers=headers,
-            auth=auth,
-            transports=["websocket"],
-            socketio_path=self._settings.socketio_path,
-        )
-
-        # Block until the connection is closed (reconnects are automatic)
-        await self._sio.wait()
+        """Supervise confirmed sessions while local SSH health checks stay alive."""
+        if self._health_check_task is None or self._health_check_task.done():
+            self._health_check_task = asyncio.create_task(
+                self._service.run_health_check_loop()
+            )
+        await self._supervisor.run()
 
     async def stop(self) -> None:
-        """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
-        with contextlib.suppress(Exception):
-            await self._service.streams.close_all_streams(reason="runner_shutdown")
-        # Cancel heartbeat
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-        # Cancel metrics loop
-        if self._metrics_task and not self._metrics_task.done():
-            self._metrics_task.cancel()
-        # Cancel health check loop
-        if self._health_check_task and not self._health_check_task.done():
-            self._health_check_task.cancel()
-
-        for task_id, task in self._running_tasks.items():
-            task.cancel()
-            logger.info("task_cancelled", task_id=task_id)
-        self._running_tasks.clear()
-
-        if self._sio.connected:
-            await self._sio.disconnect()
+        """Interrupt retries and release transport resources, never workspaces."""
+        try:
+            await self._supervisor.stop()
+        finally:
+            if self._health_check_task:
+                await cancel_tasks(
+                    [self._health_check_task], self._settings.cleanup_timeout
+                )
+                self._health_check_task = None

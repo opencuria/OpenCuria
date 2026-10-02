@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
+from src.interfaces.websocket_lifecycle import RunnerSession
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 
@@ -200,7 +201,7 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertIn("d1", _svc._streams)
-        await handlers["disconnect"]()
+        await _interface._cleanup_session(RunnerSession(_interface._sio))
         self.assertNotIn("d1", _svc._streams)
 
     async def test_cancelled_pump_emits_plain_close_no_error(self) -> None:

@@ -208,6 +208,9 @@ Recommended setup flow:
    sudo journalctl -u opencuria-runner -f
    ```
 
+See [runner connection lifecycle](./docs/runner-connections.md) for retry,
+heartbeat, timeout, and disconnect behavior.
+
 QEMU image definitions currently require `ubuntu:<version>` as the base distro.
 When a QEMU image build is triggered, the runner downloads the matching Ubuntu
 cloud image into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.

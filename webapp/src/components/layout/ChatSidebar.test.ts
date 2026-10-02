@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent } from 'vue'
+import { defineComponent, reactive } from 'vue'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,7 +18,8 @@ const authStore = {
   logout: vi.fn(),
 }
 
-const workspaceStore = {
+const workspaceStore = reactive({
+  activeWorkspace: { id: 'ws-2', runner_online: true },
   workspaces: [
     {
       id: 'ws-1',
@@ -42,9 +43,15 @@ const workspaceStore = {
   fetchWorkspaces: vi.fn(),
   updateWorkspaceStatus: vi.fn(),
   updateWorkspaceOperation: vi.fn(),
-  updateWorkspaceRunnerOnline: vi.fn(),
+  updateWorkspaceRunnerOnline: vi.fn((workspaceId: string, online: boolean) => {
+    const workspace = workspaceStore.workspaces.find((item) => item.id === workspaceId)
+    if (workspace) workspace.runner_online = online
+    if (workspaceStore.activeWorkspace?.id === workspaceId) {
+      workspaceStore.activeWorkspace.runner_online = online
+    }
+  }),
   handleWorkspaceError: vi.fn(),
-}
+})
 
 const defaultConversation: HarnessConversation = {
   session_id: 's-1',
@@ -74,6 +81,12 @@ const harnessStore = {
   renameSession: vi.fn(),
   removeSession: vi.fn(),
   handleSessionStatus: vi.fn(),
+}
+
+const socketEventListeners = new Map<string, Set<(data: { workspace_id: string }) => void>>()
+
+function emitSocketEvent(event: string, data: { workspace_id: string }): void {
+  for (const listener of socketEventListeners.get(event) ?? []) listener(data)
 }
 
 const routerPush = vi.fn()
@@ -125,7 +138,12 @@ vi.mock('@/services/socket', () => ({
   isConnected: { value: true },
   subscribeToWorkspace: vi.fn(),
   unsubscribeFromWorkspace: vi.fn(),
-  onEvent: () => () => {},
+  onEvent: (event: string, callback: (data: never) => void) => {
+    const listener = callback as unknown as (data: { workspace_id: string }) => void
+    if (!socketEventListeners.has(event)) socketEventListeners.set(event, new Set())
+    socketEventListeners.get(event)!.add(listener)
+    return () => socketEventListeners.get(event)?.delete(listener)
+  },
   onReconnect: () => () => {},
 }))
 
@@ -167,6 +185,8 @@ describe('ChatSidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    socketEventListeners.clear()
+    workspaceStore.activeWorkspace = { id: 'ws-2', runner_online: true }
     conversationStore.conversations = [makeConversation({ unread: true })]
     conversationStore.uniqueWorkspaceIds = ['ws-1']
     workspaceStore.workspaces = [
@@ -217,6 +237,42 @@ describe('ChatSidebar', () => {
     expect(wrapper.text()).not.toContain('Beta')
     expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
+  })
+
+  it('updates scoped workspace availability on offline and online events without reload', async () => {
+    workspaceStore.workspaces.find((workspace) => workspace.id === 'ws-2')!.status =
+      WorkspaceStatus.RUNNING
+    workspaceStore.workspaces.find((workspace) => workspace.id === 'ws-2')!.runner_online = true
+    const wrapper = mountSidebar()
+    const beta = workspaceStore.workspaces.find((workspace) => workspace.id === 'ws-2')!
+
+    expect(
+      wrapper.findAll('[data-testid="workspace-row"]').map((row) => row.attributes('aria-label')),
+    ).toContain('Open workspace Beta')
+
+    emitSocketEvent('runner:offline', { workspace_id: 'ws-2' })
+    await wrapper.vm.$nextTick()
+
+    expect(workspaceStore.updateWorkspaceRunnerOnline).toHaveBeenCalledWith('ws-2', false)
+    expect(beta.runner_online).toBe(false)
+    expect(workspaceStore.activeWorkspace?.runner_online).toBe(false)
+    expect(
+      wrapper.findAll('[data-testid="workspace-row"]').map((row) => row.attributes('aria-label')),
+    ).not.toContain('Open workspace Beta')
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
+
+    emitSocketEvent('runner:online', { workspace_id: 'ws-2' })
+    await wrapper.vm.$nextTick()
+
+    expect(workspaceStore.updateWorkspaceRunnerOnline).toHaveBeenLastCalledWith('ws-2', true)
+    expect(beta.runner_online).toBe(true)
+    expect(workspaceStore.activeWorkspace?.runner_online).toBe(true)
+    expect(
+      wrapper.findAll('[data-testid="workspace-row"]').map((row) => row.attributes('aria-label')),
+    ).toContain('Open workspace Beta')
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
   })
 
   it('shows action-required chats in their own section', () => {

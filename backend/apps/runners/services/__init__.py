@@ -32,23 +32,18 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from asgiref.sync import sync_to_async
+
+from ..models import Runner
 from ..repositories import (
+    ImageBuildJobRepository,
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
-    ImageBuildJobRepository,
     TaskRepository,
     WorkspaceProcessRepository,
     WorkspaceRepository,
 )
-
-from .infra.ownership import OwnershipMixin
-from .infra.task_dispatch import TaskDispatchMixin
-from .infra.rpc_registry import RpcRegistryMixin
-from .infra.runner_transport import RunnerTransportMixin
-from .infra.frontend_bus import FrontendBusMixin
-from .infra.session_store import SessionStoreMixin
-from .infra.state import PendingMap
 from .domains.credential_sync import (
     _CREDENTIAL_INJECT_TIMEOUT_SECONDS,
     CredentialSyncMixin,
@@ -62,6 +57,14 @@ from .domains.process_manager import ProcessManagerMixin
 from .domains.runner_lifecycle import RunnerLifecycleMixin
 from .domains.stream_transport import StreamTransportMixin
 from .domains.workspace_lifecycle import WorkspaceLifecycleMixin
+from .infra.frontend_bus import FrontendBusMixin
+from .infra.ownership import OwnershipMixin
+from .infra.rpc_registry import RpcRegistryMixin
+from .infra.runner_supervisor import RunnerSupervisorMixin
+from .infra.runner_transport import RunnerTransportMixin
+from .infra.session_store import SessionStoreMixin
+from .infra.state import PendingMap
+from .infra.task_dispatch import TaskDispatchMixin
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ class RunnerService(
     HeartbeatReconcilerMixin,
     ImageLifecycleMixin,
     RunnerLifecycleMixin,
+    RunnerSupervisorMixin,
 ):
     """
     Central business logic for runner management and task dispatching.
@@ -190,6 +194,22 @@ class RunnerService(
         # Per workspace/repo serialisation guards for git operations.
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
+        self._init_runner_supervisor()
+
+    async def reconcile_runner_snapshot(
+        self, runner: Runner, workspaces: list[dict]
+    ) -> None:
+        """Reconcile one coalesced runner snapshot off the event loop."""
+        credential_ids = await sync_to_async(self.handle_heartbeat)(
+            runner, workspaces
+        )
+        await self.reconcile_vanished_processes(runner)
+        if credential_ids:
+            await self.dispatch_credential_reconcile(credential_ids)
+
+    def cancel_runner_session_work(self, runner_id: str, sid: str) -> None:
+        """Drop queued work owned by a disconnected or superseded SID."""
+        self._runner_supervisor.cancel_session(runner_id, sid)
 
     # In-memory mapping: workspace_id (str) → terminal_id (str)
     _active_terminals: dict[str, str] = {}

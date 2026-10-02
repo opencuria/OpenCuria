@@ -47,6 +47,7 @@ from ...enums import (
     WorkspaceStatus,
 )
 from ...exceptions import (
+    PendingDispatchError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
     WorkspaceStateError,
@@ -55,7 +56,7 @@ from ...exceptions import (
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from apps.credentials.services import ResolvedCredentials
 
-    from ...models import Runner, Task, Workspace
+    from ...models import ImageInstance, Runner, Task, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -980,8 +981,10 @@ class WorkspaceLifecycleMixin:
         )
         self._forward_workspace_operation(workspace_id, None)
 
-    async def dispatch_pending_workspace_deletions(self, runner: "Runner") -> list:
-        """Dispatch pending workspace deletions that accumulated while runner was offline."""
+    async def dispatch_pending_workspace_deletions(
+        self, runner: Runner
+    ) -> list[Workspace]:
+        """Dispatch offline workspace deletions, raising if any item fails."""
         from ...models import Workspace
 
         pending = await sync_to_async(
@@ -997,6 +1000,7 @@ class WorkspaceLifecycleMixin:
         )()
 
         dispatched = []
+        failures: list[str] = []
         for ws in pending:
             try:
                 # Find existing task
@@ -1032,12 +1036,15 @@ class WorkspaceLifecycleMixin:
                 )
                 await sync_to_async(self.tasks.mark_in_progress)(task)
                 dispatched.append(ws)
-            except Exception:
+            except Exception as exc:
+                failures.append(f"{ws.id}: {exc}")
                 logger.exception(
                     "Failed to dispatch pending workspace deletion %s for runner %s",
                     ws.id,
                     runner.id,
                 )
+        if failures:
+            raise PendingDispatchError("pending workspace deletion dispatch", failures)
         return dispatched
 
     async def create_workspace_from_image_artifact(

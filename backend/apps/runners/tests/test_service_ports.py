@@ -196,3 +196,15 @@ def test_facade_constants_reachable():
     assert "workspace:stream_start" in svc._CALL_REPLY_EVENTS
     assert isinstance(RunnerService._active_terminals, dict)
     assert isinstance(RunnerService._active_desktops, dict)
+
+
+def test_register_deleted_runner_raises_not_found():
+    """Repository deletion racing an internal registration has a clear error."""
+    from apps.runners.exceptions import RunnerNotFoundError
+
+    service = RunnerService()
+    service.runners = MagicMock()
+    service.runners.register_session.return_value = (None, None, False)
+    runner_id = uuid.uuid4()
+    with pytest.raises(RunnerNotFoundError, match=str(runner_id)):
+        service.register_runner(types.SimpleNamespace(id=runner_id), sid="new")

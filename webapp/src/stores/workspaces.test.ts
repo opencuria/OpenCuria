@@ -87,6 +87,23 @@ describe('workspace transition state', () => {
     expect(store.activeWorkspace?.id).toBe('workspace-2')
   })
 
+  it('applies runner offline and online events to the list and active workspace', () => {
+    const store = useWorkspaceStore()
+    const listedWorkspace = makeWorkspace({ id: 'workspace-runner' })
+    store.workspaces = [listedWorkspace]
+    store.activeWorkspace = makeWorkspace({ id: 'workspace-runner' })
+
+    store.updateWorkspaceRunnerOnline('workspace-runner', false)
+
+    expect(store.workspaces[0]?.runner_online).toBe(false)
+    expect(store.activeWorkspace?.runner_online).toBe(false)
+
+    store.updateWorkspaceRunnerOnline('workspace-runner', true)
+
+    expect(store.workspaces[0]?.runner_online).toBe(true)
+    expect(store.activeWorkspace?.runner_online).toBe(true)
+  })
+
   it('derives transition labels from backend active_operation', () => {
     const store = useWorkspaceStore()
     store.workspaces = [

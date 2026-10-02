@@ -78,7 +78,11 @@ async def test_git_reply_delegated_with_exact_runner_id(fresh_sio):
     runner, workspace = _make_runner_workspace(
         sid="git-sio-sid-1", prefix="git-sio-happy"
     )
-    server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    server.get_session = AsyncMock(
+        return_value={"runner_id": str(runner.id), "protocol_version": 1}
+    )
+    server.manager.is_connected = lambda _sid, _namespace: True
+    service.is_active_runner_session = AsyncMock(return_value=True)
 
     data = {
         "request_id": "req-abc",

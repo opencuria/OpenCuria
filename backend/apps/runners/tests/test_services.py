@@ -20,6 +20,7 @@ from apps.credentials.services import (
     ResolvedCredentialFile,
     ResolvedCredentials,
 )
+from apps.organizations.models import Organization
 from apps.runners.enums import (
     ProcessStatus,
     RunnerStatus,
@@ -29,23 +30,20 @@ from apps.runners.enums import (
     WorkspaceStatus,
 )
 from apps.runners.exceptions import (
-    RunnerNotFoundError,
+    PendingDispatchError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
-    WorkspaceStateError,
 )
-from common.exceptions import ConflictError, NotFoundError
-
 from apps.runners.models import (
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     Task,
     Workspace,
 )
-from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
+from common.exceptions import ConflictError, NotFoundError
 
 
 @pytest.fixture
@@ -73,6 +71,46 @@ class TestRegisterRunner:
         service.unregister_runner(runner.sid)
         runner.refresh_from_db()
         assert runner.status == RunnerStatus.OFFLINE
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_pending_image_build_drain_reports_partial_dispatch_failure(
+    service, runner, user, monkeypatch
+):
+    """Any failed pending item keeps the coordinator eligible for retry."""
+    definitions = [
+        ImageDefinition.objects.create(
+            organization=runner.organization,
+            created_by=user,
+            name=f"pending-build-{index}-{uuid.uuid4().hex[:6]}",
+            runtime_type="docker",
+            base_distro="ubuntu:24.04",
+        )
+        for index in range(2)
+    ]
+    builds = [
+        ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.PENDING,
+        )
+        for definition in definitions
+    ]
+    attempted = []
+
+    async def trigger_build_job(*, image_definition, runner, activate):
+        attempted.append(image_definition)
+        if image_definition.id == definitions[0].id:
+            raise RuntimeError("temporary build dispatch failure")
+
+    service.trigger_build_job = trigger_build_job
+    with pytest.raises(PendingDispatchError) as raised:
+        await service.dispatch_pending_image_builds(runner)
+
+    assert len(attempted) == 2
+    assert raised.value.retryable is True
+    assert str(builds[0].id) in str(raised.value)
 
 
 @pytest.mark.django_db
