@@ -4,14 +4,12 @@ import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 import {
-  capConversationGroups,
   conversationTitle,
   extractActionRequired,
   extractActiveConversations,
   formatTimeAgo,
-  groupConversationsByTime,
+  groupConversationsByWorkspace,
   selectSidebarWorkspaces,
-  VISIBLE_CONVERSATION_LIMIT,
 } from './conversationGroups'
 
 const NOW = new Date('2026-03-15T15:00:00').getTime()
@@ -64,12 +62,6 @@ function workspace(overrides: Partial<Workspace> = {}): Workspace {
     credentials_present: false,
     ...overrides,
   }
-}
-
-function atHour(isoDate: string, hour: number): string {
-  const date = new Date(`${isoDate}T00:00:00`)
-  date.setHours(hour, 0, 0, 0)
-  return date.toISOString()
 }
 
 describe('conversationTitle', () => {
@@ -177,73 +169,220 @@ describe('extractActionRequired', () => {
   })
 })
 
-describe('groupConversationsByTime', () => {
-  it('buckets around local midnight, 7 days, and 30 days', () => {
-    const groups = groupConversationsByTime(
-      [
-        conversation({ session_id: 'today', last_message_at: atHour('2026-03-15', 10) }),
-        conversation({ session_id: 'yesterday', last_message_at: atHour('2026-03-14', 22) }),
-        conversation({ session_id: 'week', last_message_at: atHour('2026-03-10', 12) }),
-        conversation({ session_id: 'month', last_message_at: atHour('2026-03-01', 12) }),
-        conversation({ session_id: 'older', last_message_at: atHour('2026-01-01', 12) }),
-      ],
-      NOW,
-    )
-
+describe('groupConversationsByWorkspace', () => {
+  it('groups duplicate names by ID with deterministic workspace ID ties', () => {
+    const workspaces = [workspace({ id: 'b' }), workspace({ id: 'a' })]
+    const groups = groupConversationsByWorkspace(workspaces, [
+      conversation({ session_id: 'b-chat', workspace_id: 'b' }),
+      conversation({ session_id: 'a-chat', workspace_id: 'a' }),
+      conversation({ session_id: 'a-chat-2', workspace_id: 'a' }),
+    ])
     expect(
-      groups.map((group) => [group.key, group.conversations.map((row) => row.session_id)]),
+      groups.map((group) => [
+        group.workspaceId,
+        group.name,
+        group.conversations.map((row) => row.session_id),
+      ]),
     ).toEqual([
-      ['today', ['today']],
-      ['yesterday', ['yesterday']],
-      ['last7days', ['week']],
-      ['last30days', ['month']],
-      ['older', ['older']],
+      ['a', 'Alpha', ['a-chat', 'a-chat-2']],
+      ['b', 'Alpha', ['b-chat']],
+    ])
+    expect(groups[0]?.workspace).toBe(workspaces[1])
+  })
+
+  it('sorts live first, then numeric and case-insensitive alphabetical names in both partitions', () => {
+    const workspaces = [
+      workspace({ id: 'online-z', name: 'Zebra' }),
+      workspace({ id: 'offline-10', name: 'alpha 10', runner_online: false }),
+      workspace({ id: 'online-10', name: 'alpha 10' }),
+      workspace({ id: 'offline-z', name: 'Zebra', runner_online: false }),
+      workspace({ id: 'online-2', name: 'Alpha 2' }),
+      workspace({ id: 'offline-2', name: 'Alpha 2', runner_online: false }),
+    ]
+    const groups = groupConversationsByWorkspace(workspaces, [])
+    expect(groups.map((group) => group.workspaceId)).toEqual([
+      'online-2',
+      'online-10',
+      'online-z',
+      'offline-2',
+      'offline-10',
+      'offline-z',
+    ])
+    expect(groupConversationsByWorkspace([...workspaces].reverse(), [])).toEqual(groups)
+  })
+
+  it('marks only RUNNING workspaces with an online runner online', () => {
+    const groups = groupConversationsByWorkspace(
+      [
+        workspace({ id: 'running-online' }),
+        workspace({ id: 'stopped-online', status: WorkspaceStatus.STOPPED }),
+        workspace({ id: 'running-offline', runner_online: false }),
+      ],
+      [conversation({ workspace_id: 'stopped-online' })],
+    )
+    expect(groups.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['running-online', true],
+      ['running-offline', false],
+      ['stopped-online', false],
     ])
   })
 
-  it('omits empty buckets and keeps newest-first order inside a bucket', () => {
-    const groups = groupConversationsByTime(
-      [
-        conversation({ session_id: 'newer', last_message_at: atHour('2026-03-15', 14) }),
-        conversation({ session_id: 'older-today', last_message_at: atHour('2026-03-15', 8) }),
-      ],
-      NOW,
-    )
-
-    expect(groups).toHaveLength(1)
-    expect(groups[0]?.key).toBe('today')
-    expect(groups[0]?.label).toBe('Today')
-    expect(groups[0]?.conversations.map((row) => row.session_id)).toEqual(['newer', 'older-today'])
+  it('ignores activity, updated timestamps, busy and unread, sorting chats by last message then session ID', () => {
+    const workspaces = [
+      workspace({ id: 'z', name: 'Zebra', last_activity_at: new Date(NOW + 60_000).toISOString() }),
+      workspace({ id: 'a', name: 'Alpha', last_activity_at: new Date(NOW - 60_000).toISOString() }),
+    ]
+    const conversations = ['z', 'a'].flatMap((workspace_id) => [
+      conversation({
+        workspace_id,
+        session_id: `${workspace_id}-old`,
+        status: 'busy',
+        unread: true,
+        updated_at: new Date(NOW + 60_000).toISOString(),
+        last_message_at: new Date(NOW - 60_000).toISOString(),
+      }),
+      conversation({ workspace_id, session_id: `${workspace_id}-tie-b` }),
+      conversation({
+        workspace_id,
+        session_id: `${workspace_id}-new`,
+        updated_at: new Date(NOW - 60_000).toISOString(),
+        last_message_at: new Date(NOW + 1).toISOString(),
+      }),
+      conversation({ workspace_id, session_id: `${workspace_id}-tie-a` }),
+    ])
+    const groups = groupConversationsByWorkspace(workspaces, conversations)
+    expect(
+      groups.map((group) => [group.workspaceId, group.conversations.map((row) => row.session_id)]),
+    ).toEqual([
+      ['a', ['a-new', 'a-tie-a', 'a-tie-b', 'a-old']],
+      ['z', ['z-new', 'z-tie-a', 'z-tie-b', 'z-old']],
+    ])
+    expect(groupConversationsByWorkspace(workspaces, [...conversations].reverse())).toEqual(groups)
   })
-})
 
-describe('capConversationGroups', () => {
-  it('uses an eight-chat default limit while preserving explicit expansion limits', () => {
-    expect(VISIBLE_CONVERSATION_LIMIT).toBe(8)
-    const groups = groupConversationsByTime(Array.from({ length: 10 }, (_, index) => conversation({ session_id: `chat-${index}`, last_message_at: atHour('2026-03-15', 14 - index) })), NOW)
-    const capped = capConversationGroups(groups)
-    expect(capped.groups.flatMap((group) => group.conversations)).toHaveLength(8)
-    expect(capped.hiddenCount).toBe(2)
-    expect(capConversationGroups(groups, 20).hiddenCount).toBe(0)
+  it('does not mutate input arrays or workspace and chat objects', () => {
+    const workspaces = [workspace({ id: 'z', name: 'Zebra' }), workspace({ id: 'a' })]
+    const conversations = [
+      conversation({
+        session_id: 'old',
+        workspace_id: 'a',
+        last_message_at: new Date(NOW - 1).toISOString(),
+      }),
+      conversation({ session_id: 'new', workspace_id: 'a' }),
+    ]
+    const before = structuredClone({ workspaces, conversations })
+    workspaces.forEach(Object.freeze)
+    conversations.forEach(Object.freeze)
+    Object.freeze(workspaces)
+    Object.freeze(conversations)
+    const groups = groupConversationsByWorkspace(workspaces, conversations)
+    expect({ workspaces, conversations }).toEqual(before)
+    expect(groups[0]?.conversations).not.toBe(conversations)
+    expect(groups[0]?.conversations[0]).toBe(conversations[1])
   })
 
-  it('trims later groups and reports the hidden count', () => {
-    const groups = groupConversationsByTime(
+  it('prefers current workspace names, then chat names, then a short workspace ID', () => {
+    const groups = groupConversationsByWorkspace(
+      [workspace({ id: 'current', name: '  Renamed  ' }), workspace({ id: 'blank', name: '   ' })],
       [
-        conversation({ session_id: 't1', last_message_at: atHour('2026-03-15', 14) }),
-        conversation({ session_id: 't2', last_message_at: atHour('2026-03-15', 13) }),
-        conversation({ session_id: 'y1', last_message_at: atHour('2026-03-14', 12) }),
-        conversation({ session_id: 'y2', last_message_at: atHour('2026-03-14', 11) }),
+        conversation({ workspace_id: 'current', workspace_name: 'Old name' }),
+        conversation({ workspace_id: 'blank', workspace_name: '  Chat name  ' }),
+        conversation({ workspace_id: 'missing', workspace_name: '  Historical name  ' }),
+        conversation({ workspace_id: '12345678-abcd', workspace_name: '   ' }),
       ],
-      NOW,
     )
+    expect(Object.fromEntries(groups.map((group) => [group.workspaceId, group.name]))).toEqual({
+      current: 'Renamed',
+      blank: 'Chat name',
+      missing: 'Historical name',
+      '12345678-abcd': 'Workspace 12345678',
+    })
+  })
 
-    const capped = capConversationGroups(groups, 3)
+  it('preserves missing and deleted history offline but omits hidden empty workspaces', () => {
+    const hiddenStatuses = [
+      WorkspaceStatus.REMOVED,
+      WorkspaceStatus.DELETED,
+      WorkspaceStatus.DELETING,
+      WorkspaceStatus.PENDING_DELETION,
+    ]
+    const workspaces = hiddenStatuses.flatMap((status) => [
+      workspace({ id: `${status}-history`, status }),
+      workspace({ id: `${status}-empty`, status, active_operation: WorkspaceOperation.CREATING }),
+    ])
+    const conversations = [
+      conversation({ workspace_id: 'missing' }),
+      ...hiddenStatuses.map((status) => conversation({ workspace_id: `${status}-history` })),
+    ]
+    const groups = groupConversationsByWorkspace(workspaces, conversations)
+    expect(groups.map((group) => group.workspaceId).sort()).toEqual(
+      conversations.map((row) => row.workspace_id).sort(),
+    )
+    expect(groups.every((group) => !group.online && group.conversations.length === 1)).toBe(true)
+    expect(groups.find((group) => group.workspaceId === 'missing')?.workspace).toBeNull()
+  })
 
-    expect(capped.hiddenCount).toBe(1)
-    expect(capped.groups.map((group) => group.conversations.map((row) => row.session_id))).toEqual([
-      ['t1', 't2'],
-      ['y1'],
+  it('shows online, creating, operating and runner-offline RUNNING empty workspaces, not stopped empty ones', () => {
+    const groups = groupConversationsByWorkspace(
+      [
+        workspace({ id: 'online' }),
+        workspace({ id: 'creating', status: WorkspaceStatus.CREATING, runner_online: false }),
+        workspace({
+          id: 'operating',
+          status: WorkspaceStatus.STOPPED,
+          active_operation: WorkspaceOperation.CREATING,
+        }),
+        workspace({ id: 'runner-offline', runner_online: false }),
+        workspace({ id: 'stopped', status: WorkspaceStatus.STOPPED }),
+      ],
+      [],
+    )
+    expect(groups.map((group) => group.workspaceId)).toEqual([
+      'online',
+      'creating',
+      'operating',
+      'runner-offline',
+    ])
+    expect(groups.map((group) => group.online)).toEqual([true, false, false, false])
+    expect(groups.every((group) => group.conversations.length === 0)).toBe(true)
+  })
+
+  it('does not apply a global workspace or conversation cap', () => {
+    const workspaces = Array.from({ length: 12 }, (_, index) => workspace({ id: `ws-${index}` }))
+    const conversations = workspaces.flatMap(({ id }) =>
+      Array.from({ length: 8 }, (_, index) =>
+        conversation({ workspace_id: id, session_id: `${id}-chat-${index}` }),
+      ),
+    )
+    const groups = groupConversationsByWorkspace(workspaces, conversations)
+    expect(groups).toHaveLength(12)
+    expect(groups.every((group) => group.conversations.length === 8)).toBe(true)
+  })
+
+  it('reorders after workspace and runner status changes without losing history', () => {
+    const alpha = workspace({ id: 'a', name: 'Alpha', status: WorkspaceStatus.STOPPED })
+    const zebra = workspace({ id: 'z', name: 'Zebra' })
+    const conversations = [conversation({ workspace_id: 'a' }), conversation({ workspace_id: 'z' })]
+    const initial = groupConversationsByWorkspace([alpha, zebra], conversations)
+    expect(initial.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['z', true],
+      ['a', false],
+    ])
+    const changed = groupConversationsByWorkspace(
+      [
+        { ...alpha, status: WorkspaceStatus.RUNNING },
+        { ...zebra, runner_online: false },
+      ],
+      conversations,
+    )
+    expect(changed.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['a', true],
+      ['z', false],
+    ])
+    expect(changed.map((group) => group.conversations.length)).toEqual([1, 1])
+    expect(initial.map((group) => [group.workspaceId, group.online])).toEqual([
+      ['z', true],
+      ['a', false],
     ])
   })
 })
