@@ -36,11 +36,10 @@ function tokensFromRecord(record: Record<string, unknown> | undefined): {
 }
 
 function tokensFromStepFinish(part: HarnessPart): { prompt: number; completion: number } {
-  const meta = part.meta ?? {}
+  // Live/full parts carry meta; compact timeline snapshots carry display.
+  const tokens = part.meta?.['tokens'] ?? part.display?.['tokens']
   return tokensFromRecord(
-    meta['tokens'] && typeof meta['tokens'] === 'object'
-      ? (meta['tokens'] as Record<string, unknown>)
-      : undefined,
+    tokens && typeof tokens === 'object' ? (tokens as Record<string, unknown>) : undefined,
   )
 }
 

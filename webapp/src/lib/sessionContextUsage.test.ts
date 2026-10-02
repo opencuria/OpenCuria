@@ -77,6 +77,71 @@ describe('resolveMessageContextTokens', () => {
     expect(tokens).toEqual({ prompt: 30, completion: 5, used: 35 })
   })
 
+  it('uses the last compact timeline step, not accumulated message totals', () => {
+    const usage = getSessionContextUsage({
+      modelId: 'chatgpt/gpt-6.1-sol',
+      models: [{ ...models[0]!, id: 'chatgpt/gpt-6.1-sol', context_length: 1_050_000 }],
+      messages: [
+        makeMessage({
+          model: 'chatgpt/gpt-6.1-sol',
+          tokens: { prompt: 300_000, completion: 15_000, total: 315_000 },
+          parts: [
+            makePart({
+              id: 's1',
+              meta: {},
+              display: { step: 1, tokens: { prompt_tokens: 120_000, completion_tokens: 6_000 } },
+            }),
+            makePart({
+              id: 's2',
+              meta: {},
+              display: {
+                step: 2,
+                tokens: { prompt_tokens: 180_000, completion_tokens: 9_000, total_tokens: 189_000 },
+              },
+            }),
+          ],
+        }),
+      ],
+    })
+    expect(usage).toEqual({
+      used: 189_000,
+      limit: 1_050_000,
+      percent: 18,
+      promptTokens: 180_000,
+      completionTokens: 9_000,
+    })
+  })
+
+  it('prefers streamed metadata over an older timeline display', () => {
+    const tokens = resolveMessageContextTokens(
+      makeMessage({
+        parts: [
+          makePart({
+            meta: { tokens: { prompt_tokens: 40, completion_tokens: 10 } },
+            display: { tokens: { prompt_tokens: 30, completion_tokens: 5 } },
+          }),
+        ],
+      }),
+    )
+    expect(tokens).toEqual({ prompt: 40, completion: 10, used: 50 })
+  })
+
+  it('ignores malformed or non-finite timeline usage without using accumulated totals', () => {
+    for (const tokens of [
+      undefined,
+      'invalid',
+      { prompt_tokens: NaN, completion_tokens: Infinity },
+    ]) {
+      const usage = resolveMessageContextTokens(
+        makeMessage({
+          tokens: { prompt: 900, completion: 100 },
+          parts: [makePart({ display: { tokens } })],
+        }),
+      )
+      expect(usage).toEqual({ prompt: 0, completion: 0, used: 0 })
+    }
+  })
+
   it('falls back to message totals when no step-finish parts exist', () => {
     const tokens = resolveMessageContextTokens(
       makeMessage({

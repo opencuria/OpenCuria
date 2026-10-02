@@ -902,7 +902,9 @@ class ChatGPTAdapter(ProviderAdapter):
                     )
                 )
             return None
-        if event_type in ("response.completed", "response.incomplete"):
+        if event_type in (
+            "response.completed", "response.incomplete", "response.done"
+        ):
             response = event.get("response")
             if not isinstance(response, dict):
                 has_tools = bool(
