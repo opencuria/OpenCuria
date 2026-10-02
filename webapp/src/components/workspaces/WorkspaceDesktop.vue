@@ -58,13 +58,21 @@ function handleUpdateOpen(open: boolean): void {
   if (!open) desktopStore.close()
 }
 
+function handleInteractOutside(event: CustomEvent<{ originalEvent: Event }>): void {
+  const target = event.detail.originalEvent.target
+  if (target instanceof Element && target.closest('[data-testid="desktop-surface"]'))
+    event.preventDefault()
+}
+
 function setModalHost(el: Element | ComponentPublicInstance | null): void {
   modalDesktopHost.value = el instanceof HTMLElement ? el : null
 }
 </script>
 
 <template>
-  <Dialog :open="desktopStore.isOpen" @update:open="handleUpdateOpen">
+  <!-- The persistent VNC surface is a sibling outside this portal. A modal dialog locks
+       body pointer-events and hides background accessibility/focus, making the desktop inert. -->
+  <Dialog :open="desktopStore.isOpen" :modal="false" @update:open="handleUpdateOpen">
     <!-- Width comes from the inline style (desktop aspect ratio); the
       important modifier only drops Dialog's default sm:max-w-md cap. -->
     <DialogContent
@@ -74,6 +82,7 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
       :style="contentStyle"
       data-testid="workspace-desktop-modal"
       @open-auto-focus.prevent
+      @interact-outside="handleInteractOutside"
     >
       <DialogTitle class="sr-only">Desktop</DialogTitle>
       <DialogDescription id="workspace-desktop-description" class="sr-only">

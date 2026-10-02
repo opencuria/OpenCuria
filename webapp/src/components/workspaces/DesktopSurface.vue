@@ -309,6 +309,13 @@ function onViewportChange(): void {
   refreshHostBounds()
 }
 
+function onHostMotionEnd(event: Event): void {
+  const host = activeHost()
+  const target = event.target
+  if (host && target instanceof Node && (host === target || host.contains(target) || target.contains(host)))
+    refreshHostBounds()
+}
+
 function isParentDesktopFocus(): boolean {
   if (!document.hasFocus()) return false
   const active = document.activeElement
@@ -472,6 +479,8 @@ onMounted(() => {
   document.addEventListener('focusout', onParentFocusOut, true)
   window.addEventListener('resize', onViewportChange)
   window.addEventListener('scroll', onViewportChange, true)
+  window.addEventListener('transitionend', onHostMotionEnd, true)
+  window.addEventListener('animationend', onHostMotionEnd, true)
   document.addEventListener('visibilitychange', onVisibilityChange)
   updateParentFocus()
   refreshHostBounds()
@@ -496,6 +505,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('focusout', onParentFocusOut, true)
   window.removeEventListener('resize', onViewportChange)
   window.removeEventListener('scroll', onViewportChange, true)
+  window.removeEventListener('transitionend', onHostMotionEnd, true)
+  window.removeEventListener('animationend', onHostMotionEnd, true)
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
@@ -605,15 +616,15 @@ watch(desktopIframeRef, () => {
 
     <div
       v-if="clipboardHint && !desktopStore.computerUseActive && surfaceVisible && (desktopStore.isOpen ? modalVisible : !desktopStore.isOpen)"
-      class="absolute bottom-3 left-1/2 z-25 flex w-[calc(100%-1.5rem)] max-w-xl -translate-x-1/2 flex-wrap items-center gap-2 rounded-md bg-card px-3 py-2 text-xs text-foreground shadow-lg"
+      class="pointer-events-none absolute bottom-3 left-1/2 z-25 flex w-[calc(100%-1.5rem)] max-w-xl -translate-x-1/2 flex-wrap items-center gap-2 rounded-md bg-card px-3 py-2 text-xs text-foreground shadow-lg"
       role="status"
       data-testid="desktop-clipboard-fallback"
     >
       <span class="min-w-0 flex-1 basis-full sm:basis-auto">{{ clipboardHint }}</span>
-      <Button class="shrink-0" size="sm" variant="outline" @click="requestNativeClipboardPanel">
+      <Button class="pointer-events-auto shrink-0" size="sm" variant="outline" @click="requestNativeClipboardPanel">
         Open KasmVNC clipboard
       </Button>
-      <Button class="shrink-0" size="sm" variant="ghost" aria-label="Dismiss clipboard notice" @click="clipboardHint = ''">
+      <Button class="pointer-events-auto shrink-0" size="sm" variant="ghost" aria-label="Dismiss clipboard notice" @click="clipboardHint = ''">
         Dismiss
       </Button>
     </div>

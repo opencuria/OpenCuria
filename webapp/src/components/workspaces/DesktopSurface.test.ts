@@ -479,7 +479,10 @@ describe('DesktopSurface', () => {
       'flex-wrap',
     ]))
     expect(hint.find('span').classes()).toEqual(expect.arrayContaining(['min-w-0', 'flex-1']))
-    expect(hint.findAll('button').every((entry) => entry.classes().includes('shrink-0'))).toBe(true)
+    expect(hint.classes()).toContain('pointer-events-none')
+    expect(hint.findAll('button').every((entry) =>
+      entry.classes().includes('shrink-0') && entry.classes().includes('pointer-events-auto'),
+    )).toBe(true)
     button!.click()
     expect(posts.filter((entry) => entry.kind === 'open-panel')).toHaveLength(1)
   })

@@ -24,14 +24,25 @@ vi.mock('@/services/socket', () => ({
 
 const stopDesktop = vi.mocked(workspacesApi.stopDesktop)
 
+const dialogStub = {
+  name: 'DialogStub',
+  props: ['open', 'modal'],
+  template: '<div data-testid="dialog-root" :data-modal="modal"><slot /></div>',
+}
+const dialogContentStub = {
+  name: 'DialogContentStub',
+  emits: ['interactOutside'],
+  template: '<div><slot /></div>',
+}
+
 const uiStubs = {
   Button: {
     template: '<button v-bind="$attrs" :title="title"><slot /></button>',
     props: ['title'],
   },
   LoadingSpinner: { template: '<div />' },
-  Dialog: { template: '<div><slot /></div>', props: ['open'] },
-  DialogContent: { template: '<div><slot /></div>' },
+  Dialog: dialogStub,
+  DialogContent: dialogContentStub,
   DialogTitle: { template: '<span><slot /></span>' },
   DialogDescription: { template: '<span><slot /></span>' },
 }
@@ -50,6 +61,36 @@ describe('WorkspaceDesktop modal', () => {
     localStorage.clear()
     modalDesktopHost.value = null
     stopDesktop.mockResolvedValue({ task_id: 'task-2' })
+  })
+
+  it('keeps the native iframe interactive while preserving ordinary outside-dismiss behavior', () => {
+    const store = useDesktopStore()
+    store.open()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    const wrapper = mountDesktop()
+    const dialog = wrapper.findComponent(dialogStub)
+    const content = wrapper.findComponent(dialogContentStub)
+    expect(dialog.props('modal')).toBe(false)
+
+    const surface = document.createElement('div')
+    surface.dataset.testid = 'desktop-surface'
+    const iframe = document.createElement('iframe')
+    surface.append(iframe)
+    document.body.append(surface)
+
+    const nativeFrameClick = new MouseEvent('pointerdown', { bubbles: true })
+    Object.defineProperty(nativeFrameClick, 'target', { value: iframe })
+    const nativeOutsideEvent = new CustomEvent('interactOutside', { detail: { originalEvent: nativeFrameClick }, cancelable: true })
+    content.vm.$emit('interactOutside', nativeOutsideEvent)
+    expect(nativeOutsideEvent.defaultPrevented).toBe(true)
+
+    const regularOutsideClick = new MouseEvent('pointerdown', { bubbles: true })
+    Object.defineProperty(regularOutsideClick, 'target', { value: document.body })
+    const regularOutsideEvent = new CustomEvent('interactOutside', { detail: { originalEvent: regularOutsideClick }, cancelable: true })
+    content.vm.$emit('interactOutside', regularOutsideEvent)
+    expect(regularOutsideEvent.defaultPrevented).toBe(false)
+    surface.remove()
   })
 
   it('sizes the viewport to the desktop aspect ratio', () => {

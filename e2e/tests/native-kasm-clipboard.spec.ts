@@ -211,24 +211,40 @@ test('pinned KasmVNC clipboard transfers text, HTML and PNG both ways on real Xv
   const vmSeed = 'Remote clipboard seed — 東京\nSecond line from the VM'
   await expect.poll(() => readFile(vmTextFile, 'utf8')).toBe(vmSeed)
   const canvas = frame.locator('#noVNC_container canvas')
-  const canvasSize = await canvas.boundingBox()
-  expect(canvasSize).toBeTruthy()
-  const scaleX = canvasSize!.width / 1024
-  const scaleY = canvasSize!.height / 768
-  const editorPoint = { x: 220 * scaleX, y: 150 * scaleY }
-  await canvas.click({ position: editorPoint })
-  await expect.poll(() => canvas.evaluate(element =>
-    element === document.activeElement || element.contains(document.activeElement),
-  )).toBe(true)
+  const canvasBox = await canvas.boundingBox()
+  const canvasSize = await canvas.evaluate(element => ({
+    width: (element as HTMLCanvasElement).width,
+    height: (element as HTMLCanvasElement).height,
+  }))
+  expect(canvasBox).toBeTruthy()
+  const clicksFile = vmTextFile.replace(/\.txt$/, '.clicks.json')
+  const nativeClicks = JSON.parse(await readFile(clicksFile, 'utf8')) as {
+    textRect: [number, number, number, number]
+    textFocus: boolean
+  }
+  const [textX, textY, textWidth, textHeight] = nativeClicks.textRect
+  const editorPoint = {
+    x: canvasBox!.x + (textX + textWidth / 2) * canvasBox!.width / canvasSize.width,
+    y: canvasBox!.y + (textY + textHeight / 2) * canvasBox!.height / canvasSize.height,
+  }
   const nativePasteText = 'Local keyboard paste from Chromium\nsecond line from browser'
   await writeClipboard(page, 'text/plain', nativePasteText)
   await expect.poll(() => clipboardRead(frame, 'text/plain'), { timeout: 10_000 })
     .toBe(nativePasteText)
-  await canvas.click({ position: editorPoint })
+  await page.mouse.click(editorPoint.x, editorPoint.y)
   await expect.poll(() => canvas.evaluate(element =>
     element === document.activeElement || element.contains(document.activeElement),
   )).toBe(true)
-  await canvas.press('Control+V')
+  await expect.poll(async () =>
+    (JSON.parse(await readFile(clicksFile, 'utf8')) as { textFocus: boolean }).textFocus,
+  ).toBe(true)
+  await expect.poll(() => frame.locator('html').evaluate(html =>
+    html.classList.contains('noVNC_connected') && document.hasFocus() &&
+    document.visibilityState === 'visible' &&
+    Boolean((window as Window & { __opencuriaClipboardCanRead?: () => boolean })
+      .__opencuriaClipboardCanRead?.()),
+  )).toBe(true)
+  await page.keyboard.press('Control+v')
   await expect.poll(() => readFile(vmTextFile, 'utf8'), { timeout: 10_000 })
     .toContain(nativePasteText)
   const { execFileSync } = await import('node:child_process')

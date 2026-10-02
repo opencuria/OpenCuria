@@ -131,9 +131,18 @@ sys.path.insert(0, os.environ['OPENCURIA_BACKEND'])
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 import django
 django.setup()
-from apps.runners.desktop_proxy import apply_vnc_client_patches
+from apps.runners.desktop_proxy import (
+    _KASM_133_PATCHED_BUNDLE_SIZE,
+    _KASM_133_PATCHED_SHA256,
+    apply_vnc_client_patches,
+    patch_kasm_133_clipboard_bundle,
+)
 source = open('/usr/share/kasmvnc/www/dist/main.bundle.js', 'rb').read()
 _, patched = apply_vnc_client_patches('/dist/main.bundle.js', [], source)
+assert len(patched) == _KASM_133_PATCHED_BUNDLE_SIZE
+assert hashlib.sha256(patched).hexdigest() == _KASM_133_PATCHED_SHA256
+patch_kasm_133_clipboard_bundle.cache_clear()
+assert patch_kasm_133_clipboard_bundle(patched) == patched
 print(hashlib.sha256(patched).hexdigest())
 PY
 )"

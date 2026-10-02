@@ -15,7 +15,9 @@ function createEnvironment() {
   const events = new Map();
   const sent = [];
   const apiReads = [];
+  const textReads = [];
   const fallbacks = [];
+  const documentMutations = [];
   const nativeClipboard = { value: '' };
   const parent = { postMessage() {} };
   const elements = new Map();
@@ -30,8 +32,8 @@ function createEnvironment() {
   }
   const document = {
     visibilityState: 'visible', hasFocus: () => true, referrer: 'https://app.example/',
-    body: { appendChild(node) { node.parentNode = this; } },
-    head: { appendChild(node) { node.parentNode = this; } }, activeElement: null,
+    body: { appendChild(node) { documentMutations.push(node); node.parentNode = this; } },
+    head: { appendChild(node) { documentMutations.push(node); node.parentNode = this; } }, activeElement: null,
     getElementById(id) { return elements.get(id) || null; },
     createElement(tag) { return makeElement(tag); },
     addEventListener(name, fn) { events.set(`doc:${name}`, fn); },
@@ -45,7 +47,11 @@ function createEnvironment() {
     userAgent: 'Chrome/140.0',
     clipboard: {
       read() { const item = deferred(); apiReads.push(item); return item.promise; },
-      readText: async () => nativeClipboard.value,
+      readText() {
+        const item = deferred(); textReads.push(item);
+        item.promise.catch(() => {});
+        return item.promise;
+      },
       write: async () => {}, writeText: async text => { nativeClipboard.value = text; },
     },
   };
@@ -136,8 +142,8 @@ function createEnvironment() {
     return { key, code, ...modifiers, target: canvas, preventDefault() { prevented = true; },
       stopImmediatePropagation() {}, get prevented() { return prevented; } };
   }
-  return { events, apiReads, sent, nativeClipboard, nativePanelText, textarea, panel, elements,
-    window, document, RFB, Keyboard, UI, rfb, keyboard, contextMessage, message, key, fallbacks };
+  return { events, apiReads, textReads, sent, nativeClipboard, nativePanelText, textarea, panel, elements,
+    window, document, RFB, Keyboard, UI, rfb, keyboard, contextMessage, message, key, fallbacks, documentMutations };
 }
 
 function item(mime, value, getTypeGate) {
@@ -185,15 +191,52 @@ async function testKeyboardQueueAndFallback() {
   assert.ok(env.fallbacks.includes('permission'), 'a native read denial offers manual panel fallback');
   assert.equal(keyboard._keyDownList.ControlLeft, undefined);
   assert.equal(env.events.has('window:message'), true);
+  assert.equal(env.documentMutations.length, 0, 'clipboard read failure must not create or reparent the native panel');
   env.message('open-panel'); env.textarea.value = 'manual'; env.UI.clipboardSend();
   assert.equal(env.sent.length, 2); assert.equal(Buffer.from(env.sent[1].data[0]).toString(), 'manual');
 }
 
 async function testEmptyUnsupportedAndNativeClipboardPanelKeyboard() {
   const env = createEnvironment(); env.contextMessage(1); env.window.listeners.focus();
+  env.rfb._resendClipboardNextUserDrivenEvent = false;
+  const pointerdown = env.events.get('doc:pointerdown');
+  pointerdown({ target: env.canvas });
+  assert.equal(env.textReads.length, 0, 'ordinary surface clicks do not start clipboard reads');
+  assert.equal(env.fallbacks.length, 0, 'ordinary surface clicks do not post fallback notices');
+  assert.equal(env.documentMutations.length, 0, 'ordinary surface clicks do not create or reparent native panel');
+
+  env.rfb.clipboardBinary = false;
+  env.rfb.checkLocalClipboard();
+  assert.equal(env.textReads.length, 0, 'ordinary focus clipboard checks are not user gestures');
+  assert.equal(env.fallbacks.length, 0, 'ordinary focus clipboard checks do not post fallbacks');
+
   env.rfb._resendClipboardNextUserDrivenEvent = true;
+  env.rfb.clipboardBinary = true;
+  env.rfb.checkLocalClipboard();
+  assert.equal(env.apiReads.length, 1, 'focus resend triggers only its existing one-shot binary read');
+  env.apiReads[0].resolve([]); await settle(); await settle();
+  assert.equal(env.fallbacks.length, 0, 'empty automatic clipboard reads are silent');
+  assert.equal(env.documentMutations.length, 0, 'empty clipboard does not prepare the native panel');
+
+  env.rfb.clipboardBinary = false;
+  env.rfb._resendClipboardNextUserDrivenEvent = true;
+  env.rfb.checkLocalClipboard();
+  assert.equal(env.textReads.length, 1, 'one-shot text clipboard reads retain the focus resend path');
+  env.textReads[0].resolve(''); await settle(); await settle();
+  assert.equal(env.fallbacks.length, 0, 'empty automatic text clipboard is silent');
+
   const unsupported = await env.rfb.clipboardPasteDataFrom([{ types: ['application/octet-stream'], getType: async () => ({}) }]);
   assert.equal(unsupported, false, 'unsupported local MIME cannot reuse/send stale clipboard data');
+  const writeItem = (mime, value) => ({ types: [mime], async getType() {
+    return { size: Buffer.byteLength(value), async arrayBuffer() { return new TextEncoder().encode(value).buffer; } };
+  } });
+  env.rfb._resendClipboardNextUserDrivenEvent = true;
+  env.rfb.clipboardBinary = true;
+  env.rfb.checkLocalClipboard();
+  env.apiReads[1].resolve([writeItem('application/octet-stream', 'file-only')]);
+  await settle(); await settle();
+  assert.equal(env.fallbacks.length, 0, 'file-only automatic MIME reads are silent');
+  assert.equal(env.sent.length, 0, 'file-only local MIME cannot send stale clipboard data');
   env.keyboard._handleKeyDown({ key: 'v', code: 'KeyV', ctrlKey: true, target: env.textarea,
     preventDefault() { throw new Error('native clipboard text entry was intercepted'); },
     stopImmediatePropagation() { throw new Error('native clipboard text entry was intercepted'); } });

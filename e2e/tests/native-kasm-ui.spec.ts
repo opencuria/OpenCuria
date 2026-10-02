@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { test, expect } from '@playwright/test'
 
 const baseUrl = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5173'
@@ -8,9 +8,14 @@ const fixtureOrigin = new URL(fixtureUrl).origin
 declare global {
   interface Window {
     __nativeUi?: { connect: () => void; open: () => void; openModal: () => void }
+    setTestContext?: (value: object) => void
   }
 }
 const workspaceId = 'native-ui-test'
+const nativeTextFile = process.env.NATIVE_VM_TEXT_FILE
+
+type NativeClick = { count: number; down: number; up: number; rect: [number, number, number, number] }
+type NativeClicks = Record<'sidebar' | 'modal' | 'bottom', NativeClick>
 
 test.skip(process.env.NATIVE_KASM_CLIPBOARD_E2E !== '1', 'requires isolated native Xvnc fixture')
 test.setTimeout(120_000)
@@ -26,6 +31,7 @@ body{margin:0}[data-testid="diagnostic-sidebar"]{height:calc(100vh - 48px);margi
 </style></head><body><div id="app"></div><script type="module" src="/src/native-ui-diagnostic.js"></script></body></html>`
 
 async function installActualDesktopUI(page: import('@playwright/test').Page, apiCalls: string[]): Promise<void> {
+  await page.setViewportSize({ width: 1920, height: 1200 })
   const surface = await fetch(`${baseUrl}/src/components/workspaces/DesktopSurface.vue`).then(response => response.text())
   const store = await fetch(`${baseUrl}/src/stores/desktop.ts`).then(response => response.text())
   const vueUrl = surface.match(/(["'])(\/node_modules\/\.vite\/deps\/vue\.js\?v=[^"']+)\1/)?.[2]
@@ -87,12 +93,74 @@ const app = createApp({ setup() {
   await page.goto(`${baseUrl}/native-ui`)
 }
 
-test('actual DesktopSurface fallback button opens the native panel; textarea writes to real X11 clipboard', async ({ page, context }) => {
+test('empty clipboard keeps real native desktop mouse clicks working', async ({ page, context }) => {
+  test.skip(!nativeTextFile || !process.env.NATIVE_WS_PORT, 'fixture must provide native Xvnc coordinates')
+  await mkdir('/workspace/.opencuria/playwright', { recursive: true })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixtureOrigin })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(baseUrl).origin })
+  await installActualDesktopUI(page, [])
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.getByRole('button', { name: 'Open sidebar' }).click()
+  await page.evaluate(() => window.__nativeUi?.connect())
+  const frame = page.frameLocator('[data-testid="desktop-surface-iframe"]')
+  await expect(frame.locator('html')).toHaveClass(/noVNC_connected/, { timeout: 30_000 })
+  await expect.poll(() => frame.locator('html').evaluate(() => location.origin)).toBe(new URL(baseUrl).origin)
+  await expect.poll(() => frame.locator('#noVNC_container canvas').count()).toBe(1)
+  await page.evaluate(async () => navigator.clipboard.writeText(''))
+
+  const clicksFile = nativeTextFile!.replace(/\.txt$/, '.clicks.json')
+  async function clickNativeButton(name: 'sidebar' | 'modal' | 'bottom'): Promise<void> {
+    const canvas = frame.locator('#noVNC_container canvas')
+    const box = await canvas.boundingBox()
+    const size = await canvas.evaluate(element => ({ width: (element as HTMLCanvasElement).width, height: (element as HTMLCanvasElement).height }))
+    expect(box).toBeTruthy()
+    const clicks = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+    const [x, y, width, height] = clicks[name].rect
+    const point = {
+      x: box!.x + (x + width / 2) * box!.width / size.width,
+      y: box!.y + (y + height / 2) * box!.height / size.height,
+    }
+    await page.mouse.click(point.x, point.y)
+    await expect.poll(async () => {
+      const current = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+      return current[name].count
+    }, { timeout: 5_000 }).toBe(clicks[name].count + 1)
+    await expect.poll(async () => {
+      const current = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+      return current[name].up
+    }, { timeout: 2_000 }).toBe(clicks[name].up + 1)
+  }
+
+  await clickNativeButton('sidebar')
+  await expect(page.getByTestId('desktop-clipboard-fallback')).toHaveCount(0)
+  await page.evaluate(() => window.__nativeUi?.openModal())
+  await expect(page.getByTestId('workspace-desktop-modal')).toBeVisible()
+  // The dialog animates for 100ms; wait for it to settle before using the
+  // transformed canvas bounds to aim real clicks at the native display.
+  await page.waitForTimeout(150)
+  await expect.poll(() => page.evaluate(() => {
+    const host = document.querySelector<HTMLElement>('[data-testid="desktop-modal-host"]')!
+    const surface = document.querySelector<HTMLElement>('[data-testid="desktop-surface"]')!
+    const hostRect = host.getBoundingClientRect()
+    const surfaceRect = surface.getBoundingClientRect()
+    return Math.max(
+      Math.abs(hostRect.left - surfaceRect.left), Math.abs(hostRect.top - surfaceRect.top),
+      Math.abs(hostRect.width - surfaceRect.width), Math.abs(hostRect.height - surfaceRect.height),
+    )
+  })).toBeLessThan(1)
+  await expect(page.getByTestId('desktop-surface')).toHaveCSS('pointer-events', 'auto')
+  await clickNativeButton('modal')
+  await expect(page.getByTestId('desktop-clipboard-fallback')).toHaveCount(0)
+  await clickNativeButton('bottom')
+  await expect(page.getByTestId('desktop-clipboard-fallback')).toHaveCount(0)
+  await page.screenshot({ path: '/workspace/.opencuria/playwright/desktop-click-regression-fixed.png' })
+})
+
+test('actual DesktopSurface fallback button opens the native panel; textarea writes to real X11 clipboard', async ({ page, context, browser }) => {
   const apiCalls: string[] = []
   const pageErrors: string[] = []
   page.on('pageerror', error => pageErrors.push(error.message))
   await mkdir('/workspace/.opencuria/playwright', { recursive: true })
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixtureOrigin })
   await installActualDesktopUI(page, apiCalls)
   await page.getByRole('button', { name: 'Open sidebar' }).click()
   await expect.poll(() => apiCalls.some(call => call.includes('/desktop/status/'))).toBe(true)
@@ -101,15 +169,54 @@ test('actual DesktopSurface fallback button opens the native panel; textarea wri
   const frame = page.frameLocator('[data-testid="desktop-surface-iframe"]')
   await expect(frame.locator('html')).toHaveClass(/noVNC_connected/, { timeout: 30_000 })
   await expect(page.getByTestId('desktop-surface')).toBeVisible()
+  await expect.poll(() => page.getByTestId('desktop-surface').evaluate((surface: HTMLElement) => surface.style.pointerEvents)).toBe('auto')
 
-  const cdp = await context.newCDPSession(page)
+  const cdp = await browser.newBrowserCDPSession()
+  const { browserContextIds } = await cdp.send('Target.getBrowserContexts') as { browserContextIds: string[] }
   await cdp.send('Browser.setPermission', {
-    permission: { name: 'clipboard-read' },
+    permission: { name: 'clipboard-read', allowWithoutSanitization: false },
     setting: 'denied',
-    origin: fixtureOrigin,
+    origin: new URL(baseUrl).origin,
+    browserContextId: browserContextIds[browserContextIds.length - 1],
   })
-  await frame.locator('#noVNC_container canvas').click({ position: { x: 200, y: 180 } })
-  await expect(page.getByTestId('desktop-clipboard-fallback')).toContainText('Clipboard access was denied', { timeout: 15_000 })
+  await expect.poll(() => frame.locator('body').evaluate(async () => (await navigator.permissions.query({ name: 'clipboard-read' as PermissionName })).state)).toBe('denied')
+  const canvas = frame.locator('#noVNC_container canvas')
+  const canvasBox = await canvas.boundingBox()
+  const canvasSize = await canvas.evaluate(element => ({ width: (element as HTMLCanvasElement).width, height: (element as HTMLCanvasElement).height }))
+  expect(canvasBox).toBeTruthy()
+  await page.mouse.click(canvasBox!.x + 220 * canvasBox!.width / canvasSize.width, canvasBox!.y + 150 * canvasBox!.height / canvasSize.height)
+  await expect.poll(() => canvas.evaluate(element => element === document.activeElement || element.contains(document.activeElement))).toBe(true)
+  await expect.poll(() => frame.locator('html').evaluate(() => Boolean((window as Window & { __opencuriaClipboardCanRead?: () => boolean }).__opencuriaClipboardCanRead?.()))).toBe(true)
+  await page.keyboard.press('Control+v')
+  const fallbackHint = page.getByTestId('desktop-clipboard-fallback')
+  await expect(fallbackHint).toContainText('Clipboard access was denied', { timeout: 15_000 })
+
+  const clicksFile = nativeTextFile!.replace(/\.txt$/, '.clicks.json')
+  const beforeSidebarClick = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+  const [nativeX, nativeY, nativeWidth, nativeHeight] = beforeSidebarClick.sidebar.rect
+  const sidebarPoint = {
+    x: canvasBox!.x + (nativeX + nativeWidth / 2) * canvasBox!.width / canvasSize.width,
+    y: canvasBox!.y + (nativeY + nativeHeight / 2) * canvasBox!.height / canvasSize.height,
+  }
+  const desktopOverridesBeforeClick = apiCalls.filter(call => call.startsWith('POST ') && call.endsWith('/desktop/'))
+  await page.mouse.click(sidebarPoint.x, sidebarPoint.y)
+  await expect.poll(async () => {
+    const current = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+    return current.sidebar.count
+  }).toBe(beforeSidebarClick.sidebar.count + 1)
+  await expect.poll(async () => {
+    const current = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+    return current.sidebar.down
+  }).toBe(beforeSidebarClick.sidebar.down + 1)
+  await expect.poll(async () => {
+    const current = JSON.parse(await readFile(clicksFile, 'utf8')) as NativeClicks
+    return current.sidebar.up
+  }).toBe(beforeSidebarClick.sidebar.up + 1)
+  await expect(fallbackHint).toContainText('Clipboard access was denied')
+  expect(apiCalls.filter(call => call.startsWith('POST ') && call.endsWith('/desktop/')),
+    'a permitted native pointer click must not retry the denied clipboard operation')
+    .toEqual(desktopOverridesBeforeClick)
+
   await page.getByRole('button', { name: 'Open KasmVNC clipboard' }).click()
   await expect(frame.locator('#opencuria-clipboard-panel')).toBeVisible()
   await expect(frame.locator('#opencuria-clipboard-panel')).toHaveCSS('background-color', 'rgb(32, 36, 42)')

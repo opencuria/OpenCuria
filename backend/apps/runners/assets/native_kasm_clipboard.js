@@ -23,7 +23,7 @@
     generation: 0,
     panel: null,
     panelOpen: false,
-    fallback: false,
+    fallbackReason: '',
   };
   var pendingRead = null;
   var pendingVmWrites = Promise.resolve();
@@ -91,8 +91,8 @@
 
   function fallback(reason) {
     if (reason !== 'unsupported' && reason !== 'permission' && reason !== 'unavailable') return;
-    state.fallback = true;
-    ensureNativePanel();
+    if (state.fallbackReason === reason) return;
+    state.fallbackReason = reason;
     post('fallback', { reason: reason });
   }
 
@@ -113,6 +113,7 @@
     if (state.focused === focused) return;
     state.focused = focused;
     state.generation += 1;
+    if (!focused) state.fallbackReason = '';
     pendingRead = null;
     if (typeof UI !== 'undefined' && UI.rfb) {
       UI.rfb._clipHash = 0;
@@ -176,23 +177,23 @@
     return true;
   }
 
-  function readLocalClipboard(rfb, explicitGesture) {
+  function readLocalClipboard(rfb) {
     if (!seamless(rfb) || !rfb.clipboardUp ||
-        (!explicitGesture && !rfb._resendClipboardNextUserDrivenEvent)) return;
+        !rfb._resendClipboardNextUserDrivenEvent) return;
     if (!rfb.clipboardBinary) {
       if (pendingRead && pendingRead.generation === state.generation && pendingRead.promise)
         return pendingRead.promise;
       if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
-        fallback('unsupported');
         return;
       }
       var textGeneration = state.generation;
-      var textRead = { generation: textGeneration, failure: null };
+      var textRead = { generation: textGeneration, failure: null, changed: false };
       pendingRead = textRead;
       try {
         textRead.promise = navigator.clipboard.readText().then(function (text) {
           if (pendingRead !== textRead || !allowed(rfb, textGeneration)) return false;
           if (!text) return false;
+          textRead.changed = true;
           var result = rfb.clipboardPasteFrom(text);
           return Boolean(result) && allowed(rfb, textGeneration);
         }).catch(function () {
@@ -201,32 +202,34 @@
           return false;
         }).then(function (sent) {
           if (pendingRead === textRead) pendingRead = null;
-          if (sent && allowed(rfb, textGeneration)) rfb._resendClipboardNextUserDrivenEvent = false;
-          else if (allowed(rfb, textGeneration) && !textRead.failure) fallback('unavailable');
+          if (allowed(rfb, textGeneration)) rfb._resendClipboardNextUserDrivenEvent = false;
+          if (!sent && allowed(rfb, textGeneration) && !textRead.failure && textRead.changed)
+            fallback('unavailable');
           return sent;
         });
       } catch (_) {
         if (pendingRead === textRead) pendingRead = null;
-        fallback('unavailable');
       }
       return;
     }
-    if (!chromiumClipboardAvailable()) {
-      fallback('unsupported');
-      return;
-    }
-    uploadLocalClipboard(rfb, state.generation);
+    if (!chromiumClipboardAvailable()) return;
+    uploadLocalClipboard(rfb, state.generation, false);
   }
 
-  function uploadLocalClipboard(rfb, generation) {
+  function uploadLocalClipboard(rfb, generation, explicitGesture) {
     if (!allowed(rfb, generation)) return Promise.resolve(false);
     if (pendingRead && pendingRead.generation === generation && pendingRead.promise)
       return pendingRead.promise;
-    var read = { generation: generation, failure: null };
+    var read = { generation: generation, failure: null, noData: false };
     pendingRead = read;
     try {
       read.promise = navigator.clipboard.read().then(function (items) {
         if (pendingRead !== read || !allowed(rfb, generation)) return false;
+        read.noData = !(items || []).some(function (item) {
+          return Array.prototype.some.call(item.types || [], function (mime) {
+            return mime === 'text/plain' || mime === 'text/html' || mime === 'image/png';
+          });
+        });
         return Promise.resolve(rfb.clipboardPasteDataFrom(items)).then(function (sent) {
           return Boolean(sent) && allowed(rfb, generation);
         });
@@ -236,14 +239,15 @@
         return false;
       }).then(function (sent) {
         if (pendingRead === read) pendingRead = null;
-        if (sent && allowed(rfb, generation)) rfb._resendClipboardNextUserDrivenEvent = false;
-        else if (allowed(rfb, generation) && !read.failure) fallback('unavailable');
+        if (allowed(rfb, generation)) rfb._resendClipboardNextUserDrivenEvent = false;
+        if (!sent && explicitGesture && allowed(rfb, generation) &&
+            !read.failure && !read.noData) fallback('unavailable');
         return sent;
       });
       return read.promise;
     } catch (_) {
       if (pendingRead === read) pendingRead = null;
-      fallback('unavailable');
+      if (explicitGesture) fallback('unavailable');
       return Promise.resolve(false);
     }
   }
@@ -314,7 +318,7 @@
         return;
       }
       // This read is synchronous with the trusted paste key event.
-      uploadLocalClipboard(rfb, pending.generation).catch(function () { return false; }).then(function (sent) {
+      uploadLocalClipboard(rfb, pending.generation, true).catch(function () { return false; }).then(function (sent) {
         if (keyboard.__opencuriaPastePending !== pending) return;
         if (!sent || !allowed(rfb, pending.generation)) {
           keyboard.__opencuriaPastePending = null;
@@ -463,6 +467,7 @@
       state.computerUseActive = message.computerUseActive;
       state.workspaceId = message.workspaceId;
       if (changed) {
+        state.fallbackReason = '';
         state.generation += 1;
         pendingRead = null;
         if (typeof UI !== 'undefined' && UI.rfb) {
@@ -487,7 +492,9 @@
         state.panel.style.display = 'block';
       }
       if (state.enabled && state.connected && state.visible && state.parentFocused &&
-          !state.computerUseActive && !chromiumClipboardAvailable()) fallback('unsupported');
+          !state.computerUseActive && !chromiumClipboardAvailable()) {
+        fallback('unsupported');
+      }
       return;
     }
     if (message.kind === 'open-panel' && state.visible && state.parentFocused &&
@@ -506,9 +513,6 @@
   document.addEventListener('pointerdown', function (event) {
     if (!event.target || event.target.closest('#opencuria-clipboard-panel')) return;
     setFocused(true);
-    // A genuine surface gesture always refreshes the local clipboard; focus
-    // changes can consume Kasm's one-shot resend before this trusted handler.
-    if (typeof UI !== 'undefined' && UI.rfb) readLocalClipboard(UI.rfb, true);
   }, true);
   document.addEventListener('focusin', function (event) {
     if (event.target && event.target.id === 'noVNC_clipboard_text') setFocused(true);
