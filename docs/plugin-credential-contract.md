@@ -19,7 +19,10 @@ rejected with HTTP 409 and `code: "missing_plugin_credentials"`. The optional
 `plugin_name`, `key`, `service_id`, `service_name`, and `credential_type`. MCP
 returns the same `code` and `gaps` object. Optional requirements do not block.
 The legacy plugin-write route/tool is removed; selection is only changed with
-workspace create/update.
+workspace create/update. Plugin details link to Credentials with `add_credential=<service_id>`
+to open the new-credential flow for that service; `reconnect_credential=<credential_id>`
+opens reconnection for that existing credential. Both deep links include
+`settings=credentials` (the fixed OAuth callback return tab).
 
 Workspace update response fields include
 `credential_sync_status: "synced" | "pending" | "failed" | "not_required"`

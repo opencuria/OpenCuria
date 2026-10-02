@@ -15,16 +15,39 @@ Register the exact callback URL above with the MCP provider when it supports sta
 
 For local development with Vite, open the site as `http://127.0.0.1:5173` (not `localhost` or a different hostname) and keep the backend callback on `http://127.0.0.1:8000`; `localhost`, `127.0.0.1`, and `::1` are distinct cookie hosts. The Vite dev-server proxy points at that backend. Set `MCP_OAUTH_FRONTEND_RETURN_URL=http://127.0.0.1:5173/?settings=credentials` in the environment used by the backend if `.env` already overrides the development default. Docker Compose uses `http://127.0.0.1:8080` for the frontend and `http://127.0.0.1:8000` for the backend/callback.
 
-The OAuth server endpoints and dynamic client registration must use HTTPS and public DNS addresses. OpenCuria requires PKCE S256 and dynamic client registration. A provider that does not support these capabilities cannot connect. Notion authorization requires a real Notion account and browser interaction, so an end-to-end provider connection is not available in automated tests.
+## Upgrading an existing installation
+
+Before upgrading, back up the database and `CREDENTIAL_ENCRYPTION_KEY`; keep the
+same encryption key configured after the upgrade. Update the backend's
+`MCP_OAUTH_FRONTEND_RETURN_URL` to the Credentials tab, for example
+`https://app.example.com/?settings=credentials` (use your frontend origin).
+The previous frontend return URL is not supported; there is no compatibility
+redirect. Then apply the current forward migrations before starting the backend:
+
+```bash
+cd backend
+.venv/bin/python manage.py migrate --noinput
+```
+
+The forward migrations preserve credential IDs and workspace associations for
+safely matched connections, and preserve usable encrypted grants. Legacy
+connections whose plugin/service/endpoint mapping is ambiguous are marked as
+requiring reconnection; pending OAuth authorization transactions are invalidated
+and must be started again. The former plugin/server-specific OAuth routes and
+plugin-only workspace write route/tool have been removed without compatibility
+shims. Use the credential-service OAuth flows and workspace create/update
+selection APIs instead. Older migration files remain in the repository as
+migration history; do not manually rerun or edit them.
+
+The OAuth server endpoints and dynamic client registration must use HTTPS and public DNS addresses. OpenCuria requires PKCE S256 and dynamic client registration. A provider that does not support these capabilities cannot connect. The focused browser end-to-end tests exercise the application OAuth handshake and callback against a deterministic test provider; they do not authorize against Notion or verify a live Notion account. A live external-provider test has not been performed.
 
 ## Connect and use
 
-1. In **Settings → Credentials**, activate a visible OAuth credential service and connect a named personal account; organization accounts require an organization admin. Connect does not require an activated plugin. OAuth credential services can be referenced by multiple plugins only when their fixed endpoint matches exactly. Provider `code` and `state` are consumed by the backend and never appear in the frontend redirect URL.
-2. Open a workspace's **Edit** dialog and attach the connected OAuth credential under Credentials. OAuth connection alone does not grant the credential to a workspace.
-3. Enable the plugin for the organization (admin) and select it for the workspace. Attach one credential from the required service. Plugin activation remains independent of service activation.
-4. For a shared connection, an admin completes the organization OAuth flow once; members can attach that organization credential to their workspaces.
+1. In **Settings → Credentials**, choose a visible OAuth credential service and connect a named personal account. To share the account, an organization admin can instead create an organization-scoped account; members can use that shared connection. Each connection is a separately named credential, so you can keep multiple personal and organization accounts. New credentials require an organization admin to activate their service in **Settings → Credential Services**; plugin activation is not required. OAuth credential services can be referenced by multiple plugins only when their fixed endpoint matches exactly. Provider `code` and `state` are consumed by the backend and never appear in the frontend redirect URL.
+2. Enable the plugin for the organization (admin) and select it for the workspace. Attach one credential from each required service. Both workspace creation and editing support plugin and credential selection together. The UI blocks saving until required credentials are selected, and the API rejects incomplete selections; OAuth connection alone does not grant a credential to a workspace. Plugin activation is independent of credential-service activation.
+3. From **Settings → Credentials**, use **Reconnect** to authorize an existing account again. Reconnection updates that credential in place and preserves its ID and workspace attachments. Service activation gates new credentials only: an existing credential can be reconnected while its service is inactive. If a token expires or is revoked, OpenCuria indicates that reconnection is needed.
 
-OAuth credential entries are informational in **Settings → Credentials**. They cannot be manually created, edited, or deleted there; use the credential-specific Connect, Reconnect, and Disconnect actions. Disconnecting revokes the local usable connection but preserves workspace attachments; detach it in each workspace if it should no longer be associated. Reconnect replaces the authorization through the provider flow. If a token expires or is revoked, OpenCuria will indicate that reconnection is needed.
+OAuth credential entries can be renamed or deleted using the standard credential actions; token values remain provider-managed and are never exposed or edited. Personal credentials can be managed by their owner; organization credentials require an organization admin. Deletion follows the usual workspace guard: it is blocked if the credential is required by an active plugin in an attached workspace. Disconnecting clears the provider grant but preserves workspace attachments; detach it in each workspace if it should no longer be associated. Plugin activation does not activate a credential service, and inactive services block only creation of new credentials.
 
 ## Security and operations
 
