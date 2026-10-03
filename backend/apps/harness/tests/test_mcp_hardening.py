@@ -329,22 +329,25 @@ async def test_runtime_collision_first_wins_collider_closed():
             core_tool_names=[],
             snapshot=prepared,
         )
+        assert opened == ["a", "b"]
+        # First server kept, colliding server skipped + closed.
+        assert [c.server_slug for c in runtime.connections] == ["a"]
+        assert "b" in closed
+        assert any(s["server"] == "b" for s in runtime.skipped)
+        from apps.harness.tools.base import ToolRegistry
+
+        registry = ToolRegistry()
+        registered = runtime.register_tools(registry)
+        assert sorted(registered) == sorted(
+            [_namespaced("plug", "a", "echo"), _namespaced("plug", "a", "solo")]
+        )
+        await runtime.aclose()
+        assert closed == ["b", "a"]
+        await runtime.aclose()
+        assert closed == ["b", "a"]
     finally:
         McpServerConnection.open = real_open  # type: ignore[assignment]
         McpServerConnection.aclose = real_close  # type: ignore[assignment]
-    assert opened == ["a", "b"]
-    # First server kept, colliding server skipped + closed.
-    assert [c.server_slug for c in runtime.connections] == ["a"]
-    assert "b" in closed
-    assert any(s["server"] == "b" for s in runtime.skipped)
-    from apps.harness.tools.base import ToolRegistry
-
-    registry = ToolRegistry()
-    registered = runtime.register_tools(registry)
-    assert sorted(registered) == sorted(
-        [_namespaced("plug", "a", "echo"), _namespaced("plug", "a", "solo")]
-    )
-    await runtime.aclose()
 
 
 # -- setup exception / cancellation close ------------------------------------
@@ -421,18 +424,16 @@ async def test_runtime_setup_exception_closes_opened():
             accessor=object(),
             snapshot=prepared,
         )
+        # Good server kept; bogus transport skipped; nothing leaked.
+        assert [c.server_slug for c in runtime.connections] == ["good"]
+        assert any(s["server"] == "bad" for s in runtime.skipped)
+        assert "bad" in closed
+        await runtime.aclose()
+        await runtime.aclose()
+        assert closed == ["bad", "good"]
     finally:
         McpServerConnection.open = real_open  # type: ignore[assignment]
         McpServerConnection.aclose = real_close  # type: ignore[assignment]
-    # Good server kept; bogus transport skipped; nothing leaked.
-    assert [c.server_slug for c in runtime.connections] == ["good"]
-    assert any(s["server"] == "bad" for s in runtime.skipped)
-    # The skipped bad server was closed during setup; the fake good
-    # server never entered the stack (open was stubbed), so runtime
-    # close has nothing to do — assert idempotent close instead.
-    assert "bad" in closed
-    await runtime.aclose()
-    await runtime.aclose()
 
 
 @pytest.mark.asyncio

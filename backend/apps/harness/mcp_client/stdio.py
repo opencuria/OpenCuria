@@ -209,10 +209,9 @@ async def workspace_stdio_client(
                                     tail = text_tail.strip()
                                     if tail and not failed:
                                         try:
-                                            message = (
-                                                types.JSONRPCMessage.model_validate_json(
-                                                    tail
-                                                )
+                                            message_type = types.JSONRPCMessage
+                                            message = message_type.model_validate_json(
+                                                tail
                                             )
                                         except Exception:
                                             logger.warning(
@@ -303,9 +302,7 @@ async def workspace_stdio_client(
                                             # the exception and continue, since
                                             # newline framing stays intact.
                                             await read_tx.send(
-                                                ValueError(
-                                                    "MCP stdio line parse error"
-                                                )
+                                                ValueError("MCP stdio line parse error")
                                             )
                                         except anyio.ClosedResourceError:
                                             break
@@ -398,37 +395,41 @@ async def workspace_stdio_client(
         await anyio.sleep(0)
         yield read_rx, write_tx
     finally:
-        supervisor_should_run = False
-        if supervisor is not None:
-            supervisor.cancel()
-            try:
-                import asyncio as _asyncio
+        # Shield only this generator's teardown, after the SDK session has
+        # exited. The outer startup deadline may still be cancelled, so every
+        # asynchronous cleanup checkpoint must be protected from level cancellation.
+        with anyio.CancelScope(shield=True):
+            supervisor_should_run = False
+            if supervisor is not None:
+                supervisor.cancel()
+                try:
+                    import asyncio as _asyncio
 
-                await _asyncio.shield(supervisor)
-            except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
+                    await _asyncio.shield(supervisor)
+                except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
+                    pass
+                except BaseException:  # pragma: no cover - teardown must not raise
+                    pass
+            # Teardown: exactly one structured line so a failure always
+            # carries the sanitized stderr tail — this is the excerpt that
+            # answers "why did the server die" (e.g. missing binary,
+            # bad flag, chrome crash). Secrets never appear verbatim.
+            try:
+                excerpt = _accessor_stderr_excerpt(accessor)
+            except Exception:  # pragma: no cover - never break teardown
+                excerpt = ""
+            logger.bind(
+                server=desc,
+                connection_id=getattr(stream, "connection_id", ""),
+            ).warning(
+                "mcp_stdio_stderr_excerpt",
+                excerpt=excerpt,
+            )
+            try:
+                await stream.send_eof()
+            except Exception:  # pragma: no cover - best effort
                 pass
-            except BaseException:  # pragma: no cover - teardown must not raise
+            try:
+                await stream.aclose()
+            except Exception:  # pragma: no cover - best effort
                 pass
-        # Teardown: exactly one structured line so a failure always
-        # carries the sanitized stderr tail — this is the excerpt that
-        # answers "why did the server die" (e.g. missing binary,
-        # bad flag, chrome crash). Secrets never appear verbatim.
-        try:
-            excerpt = _accessor_stderr_excerpt(accessor)
-        except Exception:  # pragma: no cover - never break teardown
-            excerpt = ""
-        logger.bind(
-            server=desc,
-            connection_id=getattr(stream, "connection_id", ""),
-        ).warning(
-            "mcp_stdio_stderr_excerpt",
-            excerpt=excerpt,
-        )
-        try:
-            await stream.send_eof()
-        except Exception:  # pragma: no cover - best effort
-            pass
-        try:
-            await stream.aclose()
-        except Exception:  # pragma: no cover - best effort
-            pass

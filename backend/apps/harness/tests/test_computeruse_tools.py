@@ -368,9 +368,11 @@ def test_computeruse_recording_marker_trust_rejects_untrusted() -> None:
         assert f"![Computer use]({target})" not in display, target
 
 
+@pytest.mark.parametrize("agent", ALLOWED_SUBAGENT_TYPES)
 @pytest.mark.django_db(transaction=True)
 async def test_parent_cancel_propagates_through_subagent_tool(
     harness_workspace,
+    agent,
 ) -> None:
     """Cancelling the waiting parent re-raises; no ToolError conversion."""
     import asyncio
@@ -389,7 +391,7 @@ async def test_parent_cancel_propagates_through_subagent_tool(
     args = TaskArgs(
         description="desktop task",
         prompt="click save",
-        subagent_type="computeruse",
+        subagent_type=agent,
     )
     gate = asyncio.Event()
 
@@ -467,11 +469,13 @@ async def test_independent_computeruse_cancel_converts_to_tool_error(
     assert finished[-1]["status"] == "aborted"
 
 
+@pytest.mark.parametrize("agent", ["general", "explore"])
 @pytest.mark.django_db(transaction=True)
-async def test_independent_general_cancel_reraises(
+async def test_independent_child_start_cancel_converts_to_tool_error(
     harness_workspace,
+    agent,
 ) -> None:
-    """Independent non-computeruse child cancel still propagates CancelledError."""
+    """A child interrupted before admission cannot abort the waiting parent."""
     import asyncio
 
     accessor = FakeAccessor()
@@ -488,7 +492,7 @@ async def test_independent_general_cancel_reraises(
     args = TaskArgs(
         description="search task",
         prompt="find things",
-        subagent_type="general",
+        subagent_type=agent,
     )
 
     async def _cancelled_start_run(*_a: object, **_k: object):
@@ -496,7 +500,7 @@ async def test_independent_general_cancel_reraises(
 
     service.start_run = _cancelled_start_run  # type: ignore[method-assign]
     ctx = _task_ctx(parent, str(harness_workspace.id))
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(ToolError, match="task_id:"):
         await service._run_subagent_tool(
             parent=parent,
             args=args,
@@ -505,6 +509,8 @@ async def test_independent_general_cancel_reraises(
             organization_id=harness_workspace.runner.organization_id,
             default_model="default-model",
         )
+
+    assert current_task_cancelling() == 0
 
 
 def current_task_cancelling() -> int:

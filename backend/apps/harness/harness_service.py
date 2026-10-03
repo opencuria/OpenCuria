@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 
@@ -151,6 +152,9 @@ class HarnessService:
         self._provider_factory = provider_factory
         self._accessor_factory = accessor_factory
         self._tasks: dict[str, asyncio.Task] = {}
+        self._admissions: dict[str, asyncio.Task] = {}
+        # Cancellation is not proof of user intent (e.g. an MCP deadline).
+        self._abort_requested: set[str] = set()
         self._pending_permissions: dict[str, asyncio.Future[str]] = {}
         self._pending_questions: dict[str, asyncio.Future[list[Any]]] = {}
         self._event_locks: dict[str, asyncio.Lock] = {}
@@ -879,7 +883,8 @@ class HarnessService:
 
     def is_running(self, session_id: uuid.UUID) -> bool:
         """Return True when a run task is active for *session_id*."""
-        task = self._tasks.get(str(session_id))
+        key = str(session_id)
+        task = self._tasks.get(key) or self._admissions.get(key)
         return task is not None and not task.done()
 
     async def start_run(
@@ -961,6 +966,10 @@ class HarnessService:
             raise ConflictError(detail)
 
         assistant: HarnessMessage | None = None
+        spawned_task: asyncio.Task | None = None
+        owner = asyncio.current_task()
+        if owner is not None:
+            self._admissions[key] = owner
         try:
             prior_user_messages = await sync_to_async(
                 lambda: self.messages.model.objects.filter(
@@ -1002,7 +1011,7 @@ class HarnessService:
                     user_id=user_id,
                     organization_id=org_id,
                 )
-            self._runs[key] = {
+            run_context = {
                 "session_id": key,
                 "workspace_id": workspace_id or str(session.workspace_id),
                 "organization_id": str(org_id),
@@ -1015,20 +1024,37 @@ class HarnessService:
                 "subtask_parts": {},
                 "skill_bodies": skill_bodies,
             }
-            task = self._spawn_background(
-                self._execute_run(
-                    session=session,
-                    prompt=prompt.strip(),
-                    history=history,
-                    assistant=assistant,
-                    provider=provider,
-                    organization_id=org_id,
-                    depth=depth,
-                    max_depth=max_depth,
-                )
+            self._runs[key] = run_context
+            run_coro = self._execute_run(
+                session=session,
+                prompt=prompt.strip(),
+                history=history,
+                assistant=assistant,
+                provider=provider,
+                organization_id=org_id,
+                depth=depth,
+                max_depth=max_depth,
             )
-            self._tasks[key] = task
-            task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
+            spawned_task = self._spawn_background(run_coro)
+            self._tasks[key] = spawned_task
+            self._admissions.pop(key, None)
+
+            def run_done(task: asyncio.Task) -> None:
+                # A cancelled task may never execute its first instruction, so
+                # neither the run's except nor finally would finalize its shell.
+                if task.cancelled() and not run_context.get("execution_started"):
+                    run_coro.close()
+                    run_context["finalizing"] = True
+                    finalizer = self._spawn_background(
+                        self._finalize_unstarted_run(session, assistant)
+                    )
+                    self._tasks[key] = finalizer
+                    finalizer.add_done_callback(
+                        lambda done: self._on_run_task_done(done, key)
+                    )
+                self._on_run_task_done(task, key)
+
+            spawned_task.add_done_callback(run_done)
             if session.parent_id is None and prior_user_messages == 0:
                 self._spawn_background(
                     self._generate_title(
@@ -1054,30 +1080,41 @@ class HarnessService:
                 user_message_id=str(user_message.id),
             )
             return assistant
-        except BaseException:
-            if assistant is not None and key in self._tasks:
+        except BaseException as exc:
+            if spawned_task is not None:
                 # Once the background turn is spawned the durable chat is live;
                 # a caller's cancellation or emission error must not erase it.
                 log.exception("harness_run_admitted_with_caller_error")
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return assistant
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
-            )
-            session.status = HarnessSessionStatus.IDLE
-            if assistant is not None:
-                await sync_to_async(self.messages.complete)(
-                    assistant,
-                    finish="error",
-                    error="Run admission failed before the harness started",
+            user_abort = self._user_abort_requested(session)
+            with anyio.CancelScope(shield=True):
+                await sync_to_async(self.sessions.mark_status)(
+                    session, HarnessSessionStatus.IDLE
                 )
+                session.status = HarnessSessionStatus.IDLE
+                if assistant is not None:
+                    await sync_to_async(self.messages.complete)(
+                        assistant,
+                        finish="aborted" if user_abort else "error",
+                        error=(
+                            "aborted by user"
+                            if user_abort
+                            else "Run admission failed before the harness started: "
+                            + (str(exc) or type(exc).__name__)
+                        ),
+                    )
             raise
+        finally:
+            if self._admissions.get(key) is owner:
+                self._admissions.pop(key, None)
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run task, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
-        children = await sync_to_async(self.sessions.list_children)(session_id)
         key = str(session.id)
-        task = self._tasks.get(key)
+        task = self._tasks.get(key) or self._admissions.get(key)
         if task is None or task.done():
             # Still ensure idle status (e.g. task already finished).
             if session.status != HarnessSessionStatus.IDLE:
@@ -1085,14 +1122,35 @@ class HarnessService:
                     session, HarnessSessionStatus.IDLE
                 )
                 session.status = HarnessSessionStatus.IDLE
-        else:
-            task.cancel()
+        elif self._runs.get(key, {}).get("finalizing"):
+            # Cleanup owns its terminal outcome; repeated stop must not cancel it.
             try:
-                await task
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done():
+                    raise
+            session = await sync_to_async(self.get_session)(session.id)
+        else:
+            # Mark the entire live tree before cancellation can propagate through
+            # awaited child tasks. Only this explicit abort path implies user intent.
+            descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
+                session.id
+            )
+            self._abort_requested.update(str(child_id) for child_id in descendant_ids)
+            # Another stop may have raced the repository await above. Never
+            # inject a second cancellation into terminal persistence/cleanup.
+            if not task.cancelling() and not self._runs.get(key, {}).get("finalizing"):
+                task.cancel()
+            try:
+                await asyncio.shield(task)
             except asyncio.CancelledError:
                 pass
             except Exception:  # pragma: no cover - abort must not raise
                 log.exception("harness_abort_run_error", session_id=key)
+            # A pre-entry cancellation may have installed its fallback finalizer.
+            finalizer = self._tasks.get(key)
+            if finalizer is not None and finalizer is not task:
+                await finalizer
             # Belt-and-braces: _execute_run's finally already marked idle;
             # ensure state even if cancellation raced.
             fresh = await sync_to_async(self.sessions.get_by_id)(session.id)
@@ -1104,8 +1162,11 @@ class HarnessService:
                 )
                 session.status = HarnessSessionStatus.IDLE
         await self._reject_pending_user_gates(session)
+        # Admissions may have added children after the initial stop traversal.
+        children = await sync_to_async(self.sessions.list_children)(session_id)
         for child in children:
             await self.abort_run(child.id)
+        self._abort_requested.discard(key)
         return session
 
     async def abort_busy_computeruse_for_workspace(
@@ -1486,7 +1547,8 @@ class HarnessService:
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
         """Drop the run task and retrieve any leftover exception."""
-        self._tasks.pop(key, None)
+        if self._tasks.get(key) is task:
+            self._tasks.pop(key, None)
         if task.cancelled():
             return
         exc = task.exception()
@@ -1536,7 +1598,9 @@ class HarnessService:
         from .services import ProviderConfigService
 
         key = str(session.id)
+        self._runs.get(key, {})["execution_started"] = True
         mcp_runtime = None
+        phase = "startup"
         try:
             # Fail closed on missing plugin credentials before constructing provider
             # configuration or registering/calling any harness tools.
@@ -1559,7 +1623,9 @@ class HarnessService:
                 config_service = ProviderConfigService()
                 config = None
                 try:
-                    config = await sync_to_async(config_service.get_config)(organization_id)
+                    config = await sync_to_async(config_service.get_config)(
+                        organization_id
+                    )
                 except NotFoundError:
                     config = None
                 resolver = await sync_to_async(config_service.build_resolver)(
@@ -1570,10 +1636,14 @@ class HarnessService:
                 agent_configs = await sync_to_async(HarnessService._agent_configs_map)(
                     organization_id
                 )
-                agent_name = (session.agent_name or session.mode or "build").strip().lower()
+                agent_name = (
+                    (session.agent_name or session.mode or "build").strip().lower()
+                )
                 row = agent_configs.get(agent_name, {})
                 agent_model = (
-                    "" if row.get("inherit_model") else str(row.get("model") or "").strip()
+                    ""
+                    if row.get("inherit_model")
+                    else str(row.get("model") or "").strip()
                 )
                 agent_effort = (
                     ""
@@ -1591,7 +1661,9 @@ class HarnessService:
                     raise ValueError("No model configured for harness run")
                 session.model = model_default
                 legacy_effort = (config.default_effort if config else "") or ""
-                run_effort = normalize_reasoning_effort(agent_effort or legacy_effort or "")
+                run_effort = normalize_reasoning_effort(
+                    agent_effort or legacy_effort or ""
+                )
                 if not (session.reasoning_effort or "").strip() and run_effort:
                     # Robust fallback for sessions created before effort defaults
                     # existed (or while no config existed at create time).
@@ -1614,9 +1686,9 @@ class HarnessService:
             )
             agent_s_run_config = None
             if (session.agent_name or "").strip().lower() == "computeruse":
-                agent_s_run_config = await sync_to_async(self._resolve_agent_s_run_config)(
-                    organization_id, model
-                )
+                agent_s_run_config = await sync_to_async(
+                    self._resolve_agent_s_run_config
+                )(organization_id, model)
             accessor = None
             if self._accessor_factory is not None:
                 accessor = await self._accessor_factory(str(session.workspace_id))
@@ -1709,6 +1781,7 @@ class HarnessService:
                     agent_configs=dict(agent_configs),
                 ),
             )
+            phase = "run"
             result = await loop_runner.run(
                 prompt, session.agent_name or "build", model, session.mode, opts
             )
@@ -1741,52 +1814,107 @@ class HarnessService:
             )
             await self._settle_open_stream_parts(assistant)
         except asyncio.CancelledError:
-            await sync_to_async(self.messages.complete)(
-                assistant, finish="aborted", error="aborted by user"
-            )
-            await self._fail_open_parts(assistant, state="error", output="aborted")
+            await self._record_run_interruption(session, assistant, phase=phase)
             raise
         except Exception as exc:
-            await sync_to_async(self.messages.complete)(
-                assistant, finish="error", error=str(exc)
-            )
-            await self._fail_open_parts(assistant, state="error", output=str(exc))
+            # SDK cancellation is level-triggered until its scopes are closed.
+            with anyio.CancelScope(shield=True):
+                await sync_to_async(self.messages.complete)(
+                    assistant, finish="error", error=str(exc)
+                )
+                await self._fail_open_parts(assistant, state="error", output=str(exc))
             log.exception("harness_run_failed", session_id=key)
         finally:
-            if mcp_runtime is not None:
+            self._runs.get(key, {})["finalizing"] = True
+            # MCP scopes belong to this task and must close here, in LIFO order.
+            # Even a cancellation during teardown must reach status finalization.
+            try:
                 try:
-                    await mcp_runtime.aclose()
-                except Exception:  # pragma: no cover - close must not break runs
-                    log.exception("mcp_runtime_close_failed", session_id=key)
-            # Session-scoped temp processes die with the run: stop them
-            # before marking idle so success, error, and abort (stopped
-            # by user) all clean up. The cleanup is shielded like the
-            # Agent-S desktop lease release: an abort racing the finally
-            # must not cancel the stops, and stops are best-effort (a
-            # single failure never fails the run or swallows the abort).
-            await self._cleanup_session_processes(
-                workspace_id=str(session.workspace_id),
+                    if mcp_runtime is not None:
+                        try:
+                            await mcp_runtime.aclose()
+                        except asyncio.CancelledError:
+                            current = asyncio.current_task()
+                            if current is not None and current.cancelling():
+                                raise
+                            log.warning("mcp_runtime_close_interrupted", session_id=key)
+                        except Exception:  # pragma: no cover - best effort
+                            log.exception("mcp_runtime_close_failed", session_id=key)
+                finally:
+                    await self._cleanup_session_processes(
+                        workspace_id=str(session.workspace_id),
+                        session_id=key,
+                        reason="run_finished",
+                    )
+            finally:
+                await self._finalize_run(session, assistant)
+
+    def _user_abort_requested(self, session: HarnessSession) -> bool:
+        """Inherit explicit stop intent for children admitted during tree traversal."""
+        key = str(session.id)
+        if session.parent_id and str(session.parent_id) in self._abort_requested:
+            self._abort_requested.add(key)
+        return key in self._abort_requested
+
+    async def _record_run_interruption(
+        self, session: HarnessSession, assistant: HarnessMessage, *, phase: str
+    ) -> None:
+        """Persist interruption provenance even inside a cancelled MCP scope."""
+        key = str(session.id)
+        user_abort = self._user_abort_requested(session)
+        error = "aborted by user" if user_abort else "Run interrupted unexpectedly"
+        with anyio.CancelScope(shield=True):
+            await sync_to_async(self.messages.complete)(
+                assistant, finish="aborted" if user_abort else "error", error=error
+            )
+            await self._fail_open_parts(assistant, state="error", output=error)
+        if not user_abort:
+            log.warning(
+                "harness_run_interrupted",
                 session_id=key,
-                reason="run_finished",
+                parent_session_id=str(session.parent_id or ""),
+                phase=phase,
             )
+
+    async def _finalize_unstarted_run(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Settle an admitted background task cancelled before execution entry."""
+        try:
+            await self._record_run_interruption(session, assistant, phase="startup")
+        finally:
+            await self._finalize_run(session, assistant)
+
+    async def _finalize_run(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Release tracking and publish idle after the owning run has settled."""
+        key = str(session.id)
+        self._runs.get(key, {})["finalizing"] = True
+        try:
+            with anyio.CancelScope(shield=True):
+                await sync_to_async(self.sessions.mark_status)(
+                    session, HarnessSessionStatus.IDLE
+                )
+                await self._emit_frontend(
+                    FRONTEND_EVENT_STATUS,
+                    self._session_status_payload(
+                        session,
+                        "idle",
+                        model=assistant.model or "",
+                        assistant=assistant,
+                    ),
+                    str(session.workspace_id),
+                )
+                if session.parent_id is None:
+                    await self._emit_conversations_changed(session.workspace_id)
+        finally:
             self._runs.pop(key, None)
-            self._tasks.pop(key, None)
             self._event_locks.pop(key, None)
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
-            )
-            await self._emit_frontend(
-                FRONTEND_EVENT_STATUS,
-                self._session_status_payload(
-                    session,
-                    "idle",
-                    model=assistant.model or "",
-                    assistant=assistant,
-                ),
-                str(session.workspace_id),
-            )
-            if session.parent_id is None:
-                await self._emit_conversations_changed(session.workspace_id)
+            self._abort_requested.discard(key)
+            # Keep task ownership until all persistence/emission awaits have finished.
+            if self._tasks.get(key) is asyncio.current_task():
+                self._tasks.pop(key, None)
 
     async def _cleanup_session_processes(
         self,
@@ -1851,19 +1979,20 @@ class HarnessService:
                 await asyncio.shield(task)
                 break
             except asyncio.CancelledError:
+                current = asyncio.current_task()
+                cancelled = cancelled or bool(current and current.cancelling())
                 if task.done():
-                    cancelled = True
+                    if task.cancelled():
+                        log.warning(
+                            "harness_process_cleanup_interrupted",
+                            workspace_id=str(workspace_id),
+                            session_id=str(session_id),
+                            reason=reason,
+                        )
                     break
-                cancelled = True
                 continue
             except Exception:
-                log.exception(
-                    "harness_process_cleanup_failed",
-                    workspace_id=str(workspace_id),
-                    session_id=str(session_id),
-                    reason=reason,
-                )
-                return
+                break
         if task.done() and not task.cancelled():
             exc = task.exception()
             if exc is not None:
@@ -3288,6 +3417,7 @@ class HarnessService:
             },
         )
         status = "completed"
+        assistant: HarnessMessage | None = None
         child_task: asyncio.Task[None] | None = None
         try:
             assistant = await self.start_run(
@@ -3299,41 +3429,67 @@ class HarnessService:
             )
             child_task = self._tasks.get(str(child.id))
             if child_task is not None:
-                await child_task
+                # Cancel execution explicitly below, not an already-settling owner.
+                await asyncio.shield(child_task)
             assistant = await sync_to_async(self.messages.model.objects.get)(
                 id=assistant.id
             )
             output = assistant.content or ""
             if assistant.finish in ("error", "aborted"):
-                status = "error"
+                error = assistant.error or "Subagent run interrupted"
+                if output:
+                    error += "\n\nPartial output:\n" + output[:TASK_OUTPUT_MAX_CHARS]
+                raise ToolError(error, tool="task")
         except asyncio.CancelledError:
             tracked = child_task or self._tasks.get(str(child.id))
             if tracked is not None and not tracked.done():
-                tracked.cancel()
+                if not tracked.cancelling() and not self._runs.get(
+                    str(child.id), {}
+                ).get("finalizing"):
+                    tracked.cancel()
                 try:
-                    await tracked
+                    await asyncio.shield(tracked)
                 except (asyncio.CancelledError, Exception):
                     pass
-            # Only an *independent* child cancel (take-control abort of a
-            # computer-use child; the waiting parent itself is not being
-            # cancelled) becomes a ToolError so the parent run continues.
-            # When the parent task itself is being cancelled, propagate
-            # the CancelledError — converting it would suppress the
-            # parent's cancellation. Non-computeruse independent cancels
-            # keep the previous behaviour (re-raise).
-            parent_cancelling = False
-            try:
-                current = asyncio.current_task()
-                parent_cancelling = bool(
-                    current is not None and current.cancelling() > 0
-                )
-            except Exception:  # pragma: no cover - defensive
-                parent_cancelling = False
-            if parent_cancelling or agent != "computeruse":
+            # A task cancelled before entry installs a replacement finalizer.
+            # Await that owner without cancelling it before reading its outcome.
+            finalizer = self._tasks.get(str(child.id))
+            if finalizer is not None and finalizer is not tracked:
+                with anyio.CancelScope(shield=True):
+                    while not finalizer.done():
+                        try:
+                            await asyncio.shield(finalizer)
+                        except asyncio.CancelledError:
+                            # A parent stop can arrive while this child is already
+                            # settling. Finish the join before propagating it below.
+                            continue
+            # Awaiting a cancelled child does not cancel this tool task. Only
+            # cancellation of the waiting task/parent should stop the whole run.
+            current = asyncio.current_task()
+            parent_task = self._tasks.get(str(parent.id))
+            if (
+                (current is not None and current.cancelling())
+                or str(parent.id) in self._abort_requested
+                or (parent_task is not None and parent_task.cancelling())
+            ):
                 raise
-            # A cancelled computer-use child must not cancel the waiting
-            # parent (take-control semantics): report the abort as a tool
-            # error so the parent run can continue.
+            error = "Subagent run aborted"
+            if assistant is not None:
+                await sync_to_async(assistant.refresh_from_db)()
+                error = assistant.error or error
+                if assistant.content:
+                    error += (
+                        "\n\nPartial output:\n"
+                        + assistant.content[:TASK_OUTPUT_MAX_CHARS]
+                    )
+            log.warning(
+                "harness_subagent_interrupted",
+                session_id=str(parent.id),
+                child_session_id=str(child.id),
+                subtask_id=subtask_id,
+                agent=agent,
+                phase="startup" if assistant is None else "run",
+            )
             await self._on_runner_event(
                 parent,
                 parent_assistant,
@@ -3343,10 +3499,13 @@ class HarnessService:
                     "child_session_id": str(child.id),
                     "agent": agent,
                     "status": "aborted",
-                    "summary": "subagent run aborted",
+                    "summary": error[:500],
                 },
             )
-            raise ToolError("Subagent run aborted", tool="task")
+            raise ToolError(
+                f"Subagent '{agent}' failed (task_id: {child.id}): {error}",
+                tool="task",
+            )
         except Exception as exc:
             await self._on_runner_event(
                 parent,

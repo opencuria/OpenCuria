@@ -6,12 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
-import {
-  onEvent,
-  onReconnect,
-  subscribeToWorkspace,
-  unsubscribeFromWorkspace,
-} from '@/services/socket'
+import { onEvent, onReconnect, subscribeToWorkspace } from '@/services/socket'
 import type { HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 import {
@@ -129,11 +124,11 @@ const activeNotice = computed<NoticeSheetState | null>(() => {
     if (i < lastUserIndex) break
     if (message.notice_dismissed_at) continue
     if (harness.dismissedNoticeIds[message.id]) continue
-    const aborted = message.finish === 'aborted'
+    const stoppedByUser = message.finish === 'aborted' && message.error === 'aborted by user'
     return {
       messageId: message.id,
-      text: aborted ? 'Run stopped by user' : message.error,
-      tone: aborted ? 'info' : 'error',
+      text: stoppedByUser ? 'Run stopped by user' : message.error,
+      tone: stoppedByUser ? 'info' : 'error',
     }
   }
   return null
