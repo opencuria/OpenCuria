@@ -1,5 +1,6 @@
+<!-- Shared model/effort menu for composers and settings. -->
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ArrowLeft, Check, ChevronDown, Search } from '@lucide/vue'
 import {
   DropdownMenu,
@@ -34,6 +35,16 @@ const props = withDefaults(
     disabled?: boolean
     defaultModelLabel?: string
     allowDefault?: boolean
+    defaultOptionLabel?: string
+    defaultEffortValue?: string
+    allowEffortDefault?: boolean
+    defaultEffortLabel?: string
+    inheritedEffortOptions?: { value: string; label: string }[]
+    showEffort?: boolean
+    manualFallback?: boolean
+    effortFallback?: 'preserve' | 'model-default'
+    variant?: 'composer' | 'field'
+    inputId?: string
   }>(),
   {
     recentModels: () => [],
@@ -42,6 +53,15 @@ const props = withDefaults(
     disabled: false,
     defaultModelLabel: 'Select model…',
     allowDefault: false,
+    defaultOptionLabel: 'Agent default',
+    defaultEffortValue: '',
+    defaultEffortLabel: 'Agent default',
+    allowEffortDefault: undefined,
+    inheritedEffortOptions: () => [],
+    showEffort: true,
+    manualFallback: false,
+    effortFallback: 'preserve',
+    variant: 'composer',
   },
 )
 
@@ -50,12 +70,39 @@ const emit = defineEmits<{
   'update:effort': [value: string]
 }>()
 
+const open = ref(false)
 const search = ref('')
+
+watch(
+  () => props.disabled,
+  (disabled) => {
+    if (disabled) open.value = false
+  },
+)
 const showAll = ref(false)
 
 const catalogModel = computed(() => resolveCatalogModel(props.models, props.model))
 
-const effortOptions = computed(() => catalogModel.value?.reasoning_efforts ?? [])
+const effortOptions = computed(() => {
+  if (!props.showEffort) return []
+  if (!props.model.trim() && props.inheritedEffortOptions.length > 0)
+    return props.inheritedEffortOptions
+  return (catalogModel.value?.reasoning_efforts ?? []).map((value) => ({
+    value,
+    label: formatEffort(value),
+  }))
+})
+const effortLabel = computed(
+  () =>
+    effortOptions.value.find((option) => option.value === props.effort)?.label ||
+    formatEffort(props.effort) ||
+    props.defaultEffortLabel,
+)
+const hasEffortDefault = computed(
+  () =>
+    (props.allowEffortDefault ?? props.allowDefault) &&
+    (props.model.trim() || props.inheritedEffortOptions.length === 0),
+)
 
 const triggerModelName = computed(() => {
   if (!props.model.trim()) return props.defaultModelLabel
@@ -121,21 +168,27 @@ function rememberedEffort(id: string): string {
 }
 
 function selectModel(id: string): void {
+  if (props.disabled) return
+  if (id && id.trim() === props.model.trim()) return
+  if (!id && !props.model && props.inheritedEffortOptions.length > 0) return
   emit('update:model', id)
   if (!id) {
-    emit('update:effort', '')
+    emit('update:effort', props.defaultEffortValue)
     return
   }
   const selected = resolveCatalogModel(props.models, id)
   // Empty effort means inherit the mode's current agent default; don't fill
   // it with a model default behind the user's back. A remembered explicit
   // effort can still be restored when selecting this model again.
+  const current = !props.model.trim() && props.inheritedEffortOptions.length > 0 ? '' : props.effort
   const remembered = rememberedEffort(id)
-  if (remembered) emit('update:effort', snapEffort(selected, remembered))
-  else if (props.effort) emit('update:effort', snapEffort(selected, props.effort))
+  if (remembered) emit('update:effort', selected ? snapEffort(selected, remembered) : remembered)
+  else if (current || props.effortFallback === 'model-default')
+    emit('update:effort', selected ? snapEffort(selected, current) : current)
 }
 
 function selectEffort(value: string): void {
+  if (props.disabled) return
   emit('update:effort', value)
 }
 
@@ -157,13 +210,19 @@ function onOpenChange(open: boolean): void {
 </script>
 
 <template>
-  <DropdownMenu @update:open="onOpenChange">
+  <DropdownMenu v-model:open="open" @update:open="onOpenChange">
     <DropdownMenuTrigger as-child :disabled="disabled">
       <Button
         type="button"
-        variant="ghost"
+        :id="inputId"
+        :variant="variant === 'field' ? 'outline' : 'ghost'"
         size="sm"
-        class="h-8 min-w-0 max-w-full shrink gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground sm:max-w-56"
+        :class="
+          variant === 'field'
+            ? 'h-9 w-full min-w-0 justify-between gap-2 font-normal'
+            : 'h-8 min-w-0 max-w-full shrink gap-1 px-2 text-xs font-medium text-muted-foreground hover:text-foreground sm:max-w-56'
+        "
+        :title="triggerModelName"
         data-testid="composer-model-trigger"
         :disabled="disabled"
       >
@@ -179,7 +238,7 @@ function onOpenChange(open: boolean): void {
       </Button>
     </DropdownMenuTrigger>
     <DropdownMenuContent
-      side="top"
+      :side="variant === 'field' ? 'bottom' : 'top'"
       align="start"
       class="w-56 min-w-56"
       data-testid="composer-model-menu"
@@ -187,27 +246,29 @@ function onOpenChange(open: boolean): void {
       <DropdownMenuSub v-if="effortOptions.length > 0">
         <DropdownMenuSubTrigger class="justify-between text-xs" data-testid="composer-effort-row">
           <span>Effort</span>
-          <span class="text-muted-foreground">{{ formatEffort(effort) }}</span>
+          <span class="text-muted-foreground">{{ effortLabel }}</span>
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent class="min-w-40" :side-offset="8">
           <DropdownMenuItem
-            v-if="allowDefault"
+            v-if="hasEffortDefault"
             class="text-xs"
             data-testid="composer-effort-default"
+            :disabled="disabled"
             @click="selectEffort('')"
           >
-            <span>Agent default</span>
+            <span>{{ defaultEffortLabel }}</span>
             <Check v-if="!effort" class="ml-auto size-3.5" />
           </DropdownMenuItem>
           <DropdownMenuItem
             v-for="option in effortOptions"
-            :key="option"
+            :key="option.value"
             class="text-xs"
-            :data-testid="`composer-effort-${option}`"
-            @click="selectEffort(option)"
+            :data-testid="`composer-effort-${option.value}`"
+            :disabled="disabled"
+            @click="selectEffort(option.value)"
           >
-            <span>{{ formatEffort(option) }}</span>
-            <Check v-if="effort === option" class="ml-auto size-3.5" />
+            <span>{{ option.label }}</span>
+            <Check v-if="effort === option.value" class="ml-auto size-3.5" />
           </DropdownMenuItem>
         </DropdownMenuSubContent>
       </DropdownMenuSub>
@@ -215,10 +276,14 @@ function onOpenChange(open: boolean): void {
         <DropdownMenuSubTrigger class="justify-between text-xs" data-testid="composer-model-row">
           <span>Model</span>
           <span class="max-w-28 truncate text-muted-foreground">
-            {{ model.trim() ? (catalogModel?.name ?? model) : 'Select model…' }}
+            {{ triggerModelName }}
           </span>
         </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent class="w-80 p-0" :side-offset="8" data-testid="composer-model-list">
+        <DropdownMenuSubContent
+          class="w-80 max-w-[calc(100vw-2rem)] p-0"
+          :side-offset="8"
+          data-testid="composer-model-list"
+        >
           <div class="flex items-center gap-2 border-b border-border px-3 py-2.5">
             <Search class="size-3.5 shrink-0 text-muted-foreground" />
             <Input
@@ -230,17 +295,31 @@ function onOpenChange(open: boolean): void {
             />
           </div>
           <div class="max-h-64 overflow-y-auto overflow-x-hidden p-1.5">
-            <button
+            <DropdownMenuItem
               v-if="allowDefault"
-              type="button"
+              :disabled="disabled"
               class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent"
               data-testid="composer-model-default"
               @click="selectModel('')"
             >
-              <span class="min-w-0 flex-1 font-medium">Agent default</span>
+              <span class="min-w-0 flex-1 font-medium">{{ defaultOptionLabel }}</span>
               <Check v-if="!model" class="size-4 shrink-0 text-primary" />
-            </button>
-            <div class="flex items-center justify-between px-2.5 pb-1 pt-1.5">
+            </DropdownMenuItem>
+            <div v-if="models.length === 0 && manualFallback" class="p-2.5">
+              <Input
+                :model-value="model"
+                placeholder="provider/model-id"
+                aria-label="Model ID"
+                data-testid="model-manual-input"
+                :disabled="disabled"
+                @keydown.stop
+                @update:model-value="selectModel(String($event))"
+              />
+            </div>
+            <div
+              v-if="models.length > 0"
+              class="flex items-center justify-between px-2.5 pb-1 pt-1.5"
+            >
               <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {{ listTitle }}
                 <span v-if="!isSearching && !showAll && !hasHistory"> · suggestions</span>
@@ -259,10 +338,10 @@ function onOpenChange(open: boolean): void {
                 Recent
               </button>
             </div>
-            <button
+            <DropdownMenuItem
               v-for="item in visibleModels"
               :key="item.id"
-              type="button"
+              :disabled="disabled"
               class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent"
               :title="item.id"
               :data-testid="`composer-model-${item.id}`"
@@ -275,9 +354,11 @@ function onOpenChange(open: boolean): void {
                 </span>
               </span>
               <Check v-if="model === item.id" class="size-4 shrink-0 text-primary" />
-            </button>
+            </DropdownMenuItem>
             <p
-              v-if="visibleModels.length === 0 && !loading"
+              v-if="
+                visibleModels.length === 0 && !loading && !(models.length === 0 && manualFallback)
+              "
               class="px-2.5 py-4 text-center text-xs text-muted-foreground"
             >
               No models match.

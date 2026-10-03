@@ -3,7 +3,7 @@
  *
  * Written on successful sends via `saveRecentModel` (fire-and-forget, never
  * blocks sending); read once per composer mount and mirrored into
- * `HarnessModelPicker` as `recentModels`. Capped at 6 entries in the UI;
+ * `ModelPicker` as `recentModels`. Capped at 6 entries in the UI;
  * the server keeps 10 (LRU) so deletions stay invisible.
  */
 

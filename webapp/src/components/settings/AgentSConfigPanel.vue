@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import ProviderModelCombobox from './ProviderModelCombobox.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsSection from './SettingsSection.vue'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -92,13 +92,6 @@ async function loadState(): Promise<void> {
   } finally {
     loading.value = false
   }
-}
-
-/** Scroll to the Computer Use row (owns the Agent-S main model). */
-function gotoComputerUse(): void {
-  document
-    .querySelector('[data-testid="agent-row-computeruse"]')
-    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function toText(value: unknown): string {
@@ -254,27 +247,7 @@ onMounted(() => {
     </div>
 
     <template v-else>
-      <SettingsSection
-        title="Agent-S grounding"
-        description="Vision grounding for click coordinates. The main Agent-S model is the Computer Use model above."
-      >
-        <div
-          class="rounded-md border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
-          data-testid="agent-s-main-model-hint"
-        >
-          The Agent-S main model is configured as the Computer Use model above — this panel only
-          holds the separate grounding model and harness behavior values.
-          <Button
-            size="sm"
-            variant="outline"
-            class="ml-2"
-            data-testid="agent-s-goto-computeruse"
-            @click="gotoComputerUse"
-          >
-            Show Computer Use model
-          </Button>
-        </div>
-
+      <SettingsSection title="Agent-S grounding" description="Screen targeting for Computer Use.">
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
             class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
@@ -283,17 +256,21 @@ onMounted(() => {
               <Label for="agent-s-grounding-model" class="block text-sm font-medium">
                 Grounding model
               </Label>
-              <p class="text-sm text-muted-foreground">
-                Empty uses the Computer Use main model as fallback.
-              </p>
+              <p class="text-sm text-muted-foreground">Inherit uses the Computer Use model.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <ProviderModelCombobox
+              <ModelPicker
                 input-id="agent-s-grounding-model"
-                v-model="groundingModel"
+                v-model:model="groundingModel"
                 effort=""
                 :models="catalog"
-                empty-hint="Connect a provider under Provider & Models to browse models, or enter a provider/model id manually."
+                allow-default
+                default-model-label="Inherit"
+                default-option-label="Inherit"
+                :show-effort="false"
+                manual-fallback
+                variant="field"
+                :disabled="saving"
               />
             </div>
           </div>
@@ -305,9 +282,7 @@ onMounted(() => {
               <Label for="agent-s-grounding-width" class="block text-sm font-medium">
                 Grounding width
               </Label>
-              <p class="text-sm text-muted-foreground">
-                Grounding model output coordinate width (1–7680).
-              </p>
+              <p class="text-sm text-muted-foreground">Coordinate space in pixels (1–7680).</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -335,9 +310,7 @@ onMounted(() => {
               <Label for="agent-s-grounding-height" class="block text-sm font-medium">
                 Grounding height
               </Label>
-              <p class="text-sm text-muted-foreground">
-                Grounding model output coordinate height (1–7680).
-              </p>
+              <p class="text-sm text-muted-foreground">Coordinate space in pixels (1–7680).</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -365,7 +338,7 @@ onMounted(() => {
               <Label for="agent-s-temperature" class="block text-sm font-medium">
                 Model temperature
               </Label>
-              <p class="text-sm text-muted-foreground">Empty uses the provider default (0–2).</p>
+              <p class="text-sm text-muted-foreground">Blank uses provider default (0–2).</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -390,17 +363,14 @@ onMounted(() => {
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title="Agent-S run behavior"
-        description="Step budgets, screenshot cap, delays, and Agent-S loop features."
-      >
+      <SettingsSection title="Agent-S run behavior" description="Limits and desktop timing.">
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
             class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
               <Label for="agent-s-max-steps" class="block text-sm font-medium">Max steps</Label>
-              <p class="text-sm text-muted-foreground">Outer-loop step budget per run (min 1).</p>
+              <p class="text-sm text-muted-foreground">Steps per run.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -427,7 +397,7 @@ onMounted(() => {
               <Label for="agent-s-max-trajectory" class="block text-sm font-medium">
                 Max trajectory length
               </Label>
-              <p class="text-sm text-muted-foreground">Recent-step context window (min 1).</p>
+              <p class="text-sm text-muted-foreground">Recent steps kept in context.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -454,7 +424,7 @@ onMounted(() => {
               <Label for="agent-s-screenshot-max" class="block text-sm font-medium">
                 Screenshot max dimension
               </Label>
-              <p class="text-sm text-muted-foreground">Screenshot long-edge cap in px (1–7680).</p>
+              <p class="text-sm text-muted-foreground">Longest edge in pixels (1–7680).</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -479,21 +449,21 @@ onMounted(() => {
             class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
-              <span class="block text-sm font-medium text-foreground">Reflection</span>
-              <p class="text-sm text-muted-foreground">
-                Let Agent-S reflect and replan between steps.
+              <Label for="agent-s-enable-reflection" class="block text-sm font-medium"
+                >Reflection</Label
+              >
+              <p id="agent-s-reflection-hint" class="text-sm text-muted-foreground">
+                Replan between steps.
               </p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <label class="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  v-model="enableReflection"
-                  class="size-4"
-                  data-testid="agent-s-enable-reflection"
-                />
-                Enable reflection
-              </label>
+              <Switch
+                id="agent-s-enable-reflection"
+                :model-value="enableReflection"
+                aria-describedby="agent-s-reflection-hint"
+                data-testid="agent-s-enable-reflection"
+                @update:model-value="enableReflection = $event"
+              />
             </div>
           </div>
 
@@ -501,21 +471,21 @@ onMounted(() => {
             class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
-              <span class="block text-sm font-medium text-foreground">Code agent</span>
-              <p class="text-sm text-muted-foreground">
-                Allow Agent-S to run sandboxed file/data code snippets in the workspace.
+              <Label for="agent-s-enable-code-agent" class="block text-sm font-medium"
+                >Code agent</Label
+              >
+              <p id="agent-s-code-agent-hint" class="text-sm text-muted-foreground">
+                Run sandboxed code in the workspace.
               </p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <label class="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  v-model="enableCodeAgent"
-                  class="size-4"
-                  data-testid="agent-s-enable-code-agent"
-                />
-                Enable code agent
-              </label>
+              <Switch
+                id="agent-s-enable-code-agent"
+                :model-value="enableCodeAgent"
+                aria-describedby="agent-s-code-agent-hint"
+                data-testid="agent-s-enable-code-agent"
+                @update:model-value="enableCodeAgent = $event"
+              />
             </div>
           </div>
 
@@ -527,23 +497,17 @@ onMounted(() => {
                 Session recording
               </Label>
               <p id="agent-s-recording-hint" class="text-sm text-muted-foreground">
-                Captures the workspace display as video during computer-use runs.
-                It may include sensitive content visible on screen. Off by default.
+                Records the workspace screen, including sensitive content. Off by default.
               </p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <div class="flex items-center gap-3">
-                <Switch
-                  id="agent-s-enable-recording"
-                  :model-value="enableRecording"
-                  aria-describedby="agent-s-recording-hint"
-                  data-testid="agent-s-enable-recording"
-                  @update:model-value="enableRecording = $event"
-                />
-                <span class="text-sm text-muted-foreground" aria-hidden="true">
-                  {{ enableRecording ? 'On' : 'Off' }}
-                </span>
-              </div>
+              <Switch
+                id="agent-s-enable-recording"
+                :model-value="enableRecording"
+                aria-describedby="agent-s-recording-hint"
+                data-testid="agent-s-enable-recording"
+                @update:model-value="enableRecording = $event"
+              />
             </div>
           </div>
 
@@ -554,9 +518,7 @@ onMounted(() => {
               <Label for="agent-s-pre-delay" class="block text-sm font-medium">
                 Pre-action delay (s)
               </Label>
-              <p class="text-sm text-muted-foreground">
-                Wait before each desktop action (0–600 s).
-              </p>
+              <p class="text-sm text-muted-foreground">Before each desktop action.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -585,7 +547,7 @@ onMounted(() => {
               <Label for="agent-s-post-delay" class="block text-sm font-medium">
                 Post-action delay (s)
               </Label>
-              <p class="text-sm text-muted-foreground">Wait after each desktop action (0–600 s).</p>
+              <p class="text-sm text-muted-foreground">After each desktop action.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input
@@ -614,7 +576,7 @@ onMounted(() => {
               <Label for="agent-s-wait-delay" class="block text-sm font-medium">
                 Wait delay (s)
               </Label>
-              <p class="text-sm text-muted-foreground">Wait after a WAIT signal (0–600 s).</p>
+              <p class="text-sm text-muted-foreground">After a WAIT signal.</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
               <Input

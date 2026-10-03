@@ -31,7 +31,7 @@ import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harne
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { loadRecentModels, recentCatalogModels, useRecentModels } from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
-import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 import {
   appendUploadMentions,
@@ -1300,7 +1300,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              <HarnessModelPicker
+              <ModelPicker
                 :model="localModel"
                 :effort="localEffort"
                 :models="catalog"

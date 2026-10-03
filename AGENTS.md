@@ -40,6 +40,12 @@ layer, one implementation per behavior, composition over duplication.
 - All agentic knowledge lives in `backend/apps/harness/`. The runner never
   prompts, never decides, never owns provider/tool/permission logic.
 - `webapp`: use only shadcn-vue components from `webapp/src/components/ui/`.
+- UI: less is more. Use fewer controls and less text; remaining copy must
+  describe intent clearly and concisely. Combine related choices rather than
+  adding separate buttons, selectors, or repeated explanations.
+- Keep one design language. Reuse existing components and interaction patterns
+  before creating anything new. Use the shared `ModelPicker` for model/effort
+  selection in composers and settings; do not add competing selectors.
 - Docs/setup details live in `README.md` and component READMEs; do not
   duplicate them here.
 

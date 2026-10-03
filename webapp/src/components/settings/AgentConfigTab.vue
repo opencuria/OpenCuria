@@ -14,21 +14,19 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import AgentSConfigPanel from './AgentSConfigPanel.vue'
-import ProviderModelCombobox from './ProviderModelCombobox.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsSection from './SettingsSection.vue'
 import {
   CONFIGURABLE_AGENTS,
-  EFFORT_STRATEGIES,
   PRIMARY_AGENTS,
   SUBAGENT_IDS,
   agentDisplayName,
-  resolvePreviewEffort,
   type AgentConfig,
   type AgentConfigId,
   type EffortStrategy,
 } from '@/lib/harnessAgents'
 import { invalidateAgentConfigs, loadAgentConfigsCached } from '@/lib/agentConfigs'
-import { formatEffort, resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
+import type { ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import {
   getSubagentConfig,
@@ -65,7 +63,6 @@ interface AgentState {
   effort: string
   inherit: boolean
   strategy: EffortStrategy
-  description: string
 }
 
 const state = ref<Record<AgentConfigId, AgentState>>(
@@ -76,7 +73,7 @@ const state = ref<Record<AgentConfigId, AgentState>>(
 )
 
 function defaultState(): AgentState {
-  return { model: '', effort: '', inherit: false, strategy: 'inherit', description: '' }
+  return { model: '', effort: '', inherit: false, strategy: 'inherit' }
 }
 
 function applyConfigs(next: AgentConfig[]): void {
@@ -88,9 +85,9 @@ function applyConfigs(next: AgentConfig[]): void {
     out[agent] = {
       model: cfg?.model ?? '',
       effort: cfg?.effort ?? '',
-      inherit: cfg?.inherit_model ?? false,
-      strategy: (cfg?.effort_strategy as EffortStrategy | undefined) ?? 'inherit',
-      description: cfg?.description ?? '',
+      inherit: cfg?.inherit_model ?? SUBAGENT_IDS.includes(agent),
+      strategy:
+        cfg?.effort_strategy && cfg.effort_strategy !== 'fixed' ? cfg.effort_strategy : 'inherit',
     }
   }
   state.value = out
@@ -120,18 +117,34 @@ async function loadState(): Promise<void> {
   }
 }
 
-/** Preview effort list: resolve against the build agent's configured model. */
-const buildModelEfforts = computed<string[]>(() => {
-  const buildModel = state.value['build']?.model ?? ''
-  return resolveCatalogModel(catalog.value, buildModel)?.reasoning_efforts ?? []
-})
+const agentHints: Record<AgentConfigId, string> = {
+  build: 'Write and run code.',
+  plan: 'Plan before making changes.',
+  general: 'Delegated tasks.',
+  explore: 'Read-only research.',
+  computeruse: 'Desktop automation.',
+}
+const inheritedEfforts = [
+  { value: 'inherit', label: 'Inherit' },
+  { value: 'lowest', label: 'Lowest' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'highest', label: 'Highest' },
+]
 
-function strategyHint(agent: AgentConfigId): string {
-  const s = agentState(agent)
-  if (s.strategy === 'inherit') return 'Uses the parent run effort'
-  const preview = resolvePreviewEffort(buildModelEfforts.value, s.strategy)
-  const label = EFFORT_STRATEGIES.find((o) => o.value === s.strategy)?.label ?? s.strategy
-  return preview ? `${label} → ${formatEffort(preview)}` : `${label} effort of the parent model`
+function setSubagentModel(agent: AgentConfigId, model: string): void {
+  const current = agentState(agent)
+  current.inherit = !model.trim()
+  current.model = model
+  if (current.inherit) current.effort = ''
+}
+
+function setSubagentEffort(agent: AgentConfigId, effort: string): void {
+  const current = agentState(agent)
+  if (current.inherit) {
+    current.strategy = (effort || 'inherit') as EffortStrategy
+  } else {
+    current.effort = effort
+  }
 }
 
 const modelsDirty = computed(() => {
@@ -146,8 +159,8 @@ const modelsDirty = computed(() => {
     const effort = inherit ? '' : s.effort.trim()
     if (model !== (c?.model ?? '')) return true
     if (effort !== (c?.effort ?? '')) return true
-    if (inherit !== (c?.inherit_model ?? false)) return true
-    if (strategy !== (c?.effort_strategy ?? 'fixed')) return true
+    if (inherit !== (c?.inherit_model ?? SUBAGENT_IDS.includes(agent))) return true
+    if (strategy !== (c?.effort_strategy ?? (inherit ? 'inherit' : 'fixed'))) return true
   }
   return false
 })
@@ -244,10 +257,7 @@ onMounted(() => {
     </div>
 
     <template v-else>
-      <SettingsSection
-        title="Primary agents"
-        description="Models for new build and plan runs. A model is required."
-      >
+      <SettingsSection title="Primary agents" description="Defaults for new runs.">
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <div
             v-for="agent in PRIMARY_AGENTS"
@@ -259,16 +269,20 @@ onMounted(() => {
               <Label :for="`agent-model-${agent}`" class="block text-sm font-medium">
                 {{ agentDisplayName(agent) }}
               </Label>
-              <p class="text-sm text-muted-foreground">{{ agentState(agent).description }}</p>
+              <p class="text-sm text-muted-foreground">{{ agentHints[agent] }}</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <ProviderModelCombobox
+              <ModelPicker
                 :input-id="`agent-model-${agent}`"
-                v-model="state[agent].model"
-                :effort="state[agent].effort"
+                v-model:model="state[agent].model"
+                v-model:effort="state[agent].effort"
                 :models="catalog"
-                empty-hint="Connect a provider under Provider & Models to browse models."
-                @update:effort="state[agent].effort = $event"
+                variant="field"
+                manual-fallback
+                effort-fallback="model-default"
+                allow-effort-default
+                default-effort-label="Provider default"
+                :disabled="saving"
               />
             </div>
           </div>
@@ -276,10 +290,7 @@ onMounted(() => {
         <p v-if="primaryMissing" class="text-xs text-muted-foreground">Select a model</p>
       </SettingsSection>
 
-      <SettingsSection
-        title="Subagents"
-        description="Helper agents spawned during a run. Inherit the parent run model or pick a custom model."
-      >
+      <SettingsSection title="Subagents" description="Inherit from the parent or choose a model.">
         <div
           class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
           data-testid="subagent-settings-group"
@@ -293,7 +304,7 @@ onMounted(() => {
                 Maximum nesting depth
               </Label>
               <p id="subagent-depth-hint" class="text-sm text-muted-foreground">
-                Limits nested delegation. Main agent is depth 0.
+                Main agent is depth 0.
               </p>
             </div>
             <div class="w-full shrink-0 space-y-1 sm:w-80">
@@ -314,7 +325,7 @@ onMounted(() => {
                 "
               />
               <p id="subagent-depth-scope" class="text-xs text-muted-foreground">
-                Default: 2 · New runs · Organization-wide
+                Default: 2 · New runs
               </p>
               <p
                 v-if="depthError"
@@ -333,81 +344,30 @@ onMounted(() => {
             class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
           >
             <div class="min-w-0 space-y-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-sm font-medium text-foreground">{{
-                  agentDisplayName(agent)
-                }}</span>
-                <span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
-                  >Subagent</span
-                >
-              </div>
-              <p class="text-sm text-muted-foreground">{{ agentState(agent).description }}</p>
-              <div
-                class="flex items-center gap-4 pt-1"
-                role="radiogroup"
-                :aria-label="`${agentDisplayName(agent)} mode`"
-              >
-                <label class="flex items-center gap-1.5 text-sm">
-                  <input
-                    type="radio"
-                    :name="`agent-mode-${agent}`"
-                    :checked="!state[agent].inherit"
-                    :data-testid="`agent-mode-custom-${agent}`"
-                    @change="state[agent].inherit = false"
-                  />
-                  Custom
-                </label>
-                <label class="flex items-center gap-1.5 text-sm">
-                  <input
-                    type="radio"
-                    :name="`agent-mode-${agent}`"
-                    :checked="state[agent].inherit"
-                    :data-testid="`agent-mode-inherit-${agent}`"
-                    @change="state[agent].inherit = true"
-                  />
-                  Inherit from parent run
-                </label>
-              </div>
+              <Label :for="`agent-model-${agent}`" class="block text-sm font-medium">
+                {{ agentDisplayName(agent) }}
+              </Label>
+              <p class="text-sm text-muted-foreground">{{ agentHints[agent] }}</p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <div
-                :class="state[agent].inherit ? 'pointer-events-none opacity-50' : undefined"
-                :aria-disabled="state[agent].inherit"
-              >
-                <ProviderModelCombobox
-                  :input-id="`agent-model-${agent}`"
-                  v-model="state[agent].model"
-                  :effort="state[agent].effort"
-                  :models="catalog"
-                  empty-hint="Connect a provider under Provider & Models to browse models."
-                  @update:effort="state[agent].effort = $event"
-                />
-              </div>
-              <div v-if="state[agent].inherit" class="mt-2 space-y-1">
-                <select
-                  :data-testid="`agent-strategy-${agent}`"
-                  :value="state[agent].strategy"
-                  class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  @change="
-                    state[agent].strategy = ($event.target as HTMLSelectElement)
-                      .value as EffortStrategy
-                  "
-                >
-                  <option
-                    v-for="opt in EFFORT_STRATEGIES.filter((o) => o.value !== 'fixed')"
-                    :key="opt.value"
-                    :value="opt.value"
-                  >
-                    {{ opt.label }}
-                  </option>
-                </select>
-                <p
-                  class="text-xs text-muted-foreground"
-                  :data-testid="`agent-strategy-hint-${agent}`"
-                >
-                  {{ strategyHint(agent) }}
-                </p>
-              </div>
+              <ModelPicker
+                :input-id="`agent-model-${agent}`"
+                :model="state[agent].inherit ? '' : state[agent].model"
+                :effort="state[agent].inherit ? state[agent].strategy : state[agent].effort"
+                :models="catalog"
+                :inherited-effort-options="inheritedEfforts"
+                :default-effort-value="state[agent].strategy"
+                variant="field"
+                allow-default
+                default-model-label="Inherit"
+                default-option-label="Inherit"
+                default-effort-label="Provider default"
+                manual-fallback
+                effort-fallback="model-default"
+                :disabled="saving"
+                @update:model="setSubagentModel(agent, $event)"
+                @update:effort="setSubagentEffort(agent, $event)"
+              />
             </div>
           </div>
         </div>

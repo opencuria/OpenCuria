@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
-import HarnessModelPicker from './HarnessModelPicker.vue'
+import ModelPicker from './ModelPicker.vue'
 import type { ProviderModel } from '@/lib/harnessModels'
 
 const models: ProviderModel[] = [
@@ -98,9 +98,9 @@ const stubs = {
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
 }
 
-describe('HarnessModelPicker', () => {
+describe('ModelPicker', () => {
   it('lists catalog models without an Auto entry', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
@@ -113,14 +113,14 @@ describe('HarnessModelPicker', () => {
   })
 
   it('offers agent-default reset only when enabled', async () => {
-    const regular = mount(HarnessModelPicker, {
+    const regular = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
     expect(regular.find('[data-testid="composer-model-default"]').exists()).toBe(false)
     expect(regular.find('[data-testid="composer-effort-default"]').exists()).toBe(false)
 
-    const scheduled = mount(HarnessModelPicker, {
+    const scheduled = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models, allowDefault: true },
       global: { stubs },
     })
@@ -131,7 +131,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('shows provider labels next to each model row', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: {
         model: 'openrouter/think',
         effort: 'high',
@@ -147,7 +147,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('does not invent an effort when catalog data arrives for an inherited default model', async () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: '', models: [] },
       global: { stubs },
     })
@@ -157,7 +157,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('shows the model without duplicating the separately selected effort', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
@@ -168,7 +168,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('hides the effort submenu when the model has no reasoning', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: 'chatgpt/plain', effort: '', models },
       global: { stubs },
     })
@@ -178,7 +178,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('shows a placeholder trigger when no model is selected', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
@@ -188,7 +188,7 @@ describe('HarnessModelPicker', () => {
   })
 
   it('filters the catalog by model name and provider label', async () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
@@ -198,9 +198,9 @@ describe('HarnessModelPicker', () => {
   })
 })
 
-describe('HarnessModelPicker recent/all', () => {
+describe('ModelPicker recent/all', () => {
   it('defaults to recent (max 6) with an All Models button', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: 'openrouter/think', effort: 'high', models },
       global: { stubs },
     })
@@ -214,7 +214,7 @@ describe('HarnessModelPicker recent/all', () => {
   })
 
   it('shows only the passed recents first', () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: {
         model: '',
         effort: '',
@@ -229,7 +229,7 @@ describe('HarnessModelPicker recent/all', () => {
   })
 
   it('reveals all models after clicking All Models', async () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
@@ -240,7 +240,7 @@ describe('HarnessModelPicker recent/all', () => {
   })
 
   it('searches the full catalog even in recent mode', async () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: { model: '', effort: '', models },
       global: { stubs },
     })
@@ -251,7 +251,7 @@ describe('HarnessModelPicker recent/all', () => {
   })
 
   it('restores the last-used effort when selecting a model', async () => {
-    const wrapper = mount(HarnessModelPicker, {
+    const wrapper = mount(ModelPicker, {
       props: {
         model: '',
         effort: 'low',
@@ -264,5 +264,152 @@ describe('HarnessModelPicker recent/all', () => {
     await wrapper.find('[data-testid="composer-model-openrouter/think"]').trigger('click')
     expect(wrapper.emitted('update:model')).toEqual([['openrouter/think']])
     expect(wrapper.emitted('update:effort')).toEqual([['high']])
+  })
+})
+
+describe('ModelPicker settings', () => {
+  it('uses Inherit as the first model option and keeps effort strategies inside the menu', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: {
+        model: '',
+        effort: 'lowest',
+        models,
+        allowDefault: true,
+        defaultModelLabel: 'Inherit',
+        defaultOptionLabel: 'Inherit',
+        variant: 'field',
+        inheritedEffortOptions: [
+          { value: 'inherit', label: 'Inherit' },
+          { value: 'lowest', label: 'Lowest' },
+        ],
+      },
+      global: { stubs },
+    })
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toBe('Inherit')
+    expect(wrapper.get('[data-testid="composer-model-default"]').text()).toBe('Inherit')
+    expect(wrapper.get('[data-testid="composer-effort-row"]').text()).toContain('Lowest')
+    expect(wrapper.findAll('select')).toHaveLength(0)
+    expect(wrapper.find('[data-testid="composer-effort-default"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="composer-effort-inherit"]').trigger('click')
+    expect(wrapper.emitted('update:effort')).toEqual([['inherit']])
+  })
+
+  it('does not mistake inherited Medium strategy for an explicit fixed effort', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: {
+        model: '',
+        effort: 'medium',
+        models: [{ ...models[0]!, reasoning_efforts: ['low', 'medium', 'high'] }],
+        inheritedEffortOptions: [{ value: 'medium', label: 'Medium' }],
+        effortFallback: 'model-default',
+      },
+      global: { stubs },
+    })
+    await wrapper.get('[data-testid="composer-model-openrouter/think"]').trigger('click')
+    expect(wrapper.emitted('update:effort')).toEqual([['high']])
+  })
+
+  it('ignores changes from already-open content after becoming disabled', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: { model: 'openrouter/think', effort: 'high', models },
+      global: { stubs },
+    })
+    await wrapper.setProps({ disabled: true })
+    await wrapper.get('[data-testid="composer-model-chatgpt/plain"]').trigger('click')
+    await wrapper.get('[data-testid="composer-effort-low"]').trigger('click')
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+  })
+
+  it('keeps the normal composer effort empty but settings may opt into a model default', async () => {
+    const regular = mount(ModelPicker, {
+      props: { model: '', effort: '', models },
+      global: { stubs },
+    })
+    await regular.get('[data-testid="composer-model-openrouter/think"]').trigger('click')
+    expect(regular.emitted('update:effort')).toBeUndefined()
+    const settings = mount(ModelPicker, {
+      props: { model: '', effort: '', models, effortFallback: 'model-default' },
+      global: { stubs },
+    })
+    await settings.get('[data-testid="composer-model-openrouter/think"]').trigger('click')
+    expect(settings.emitted('update:effort')).toEqual([['high']])
+  })
+
+  it('allows provider-default effort without making model inheritance available', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: {
+        model: 'openrouter/think',
+        effort: 'high',
+        models,
+        allowEffortDefault: true,
+        defaultEffortLabel: 'Provider default',
+      },
+      global: { stubs },
+    })
+    expect(wrapper.find('[data-testid="composer-model-default"]').exists()).toBe(false)
+    const reset = wrapper.get('[data-testid="composer-effort-default"]')
+    expect(reset.text()).toBe('Provider default')
+    await reset.trigger('click')
+    expect(wrapper.emitted('update:effort')).toEqual([['']])
+  })
+
+  it('supports grounding without effort and manual models without a catalog', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: {
+        model: '',
+        effort: '',
+        models: [],
+        showEffort: false,
+        manualFallback: true,
+        allowDefault: true,
+        defaultOptionLabel: 'Inherit',
+      },
+      global: { stubs },
+    })
+    expect(wrapper.find('[data-testid="composer-effort-row"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="composer-model-default"]').text()).toBe('Inherit')
+    await wrapper.get('input[placeholder="provider/model-id"]').setValue('custom/model')
+    expect(wrapper.emitted('update:model')).toEqual([['custom/model']])
+  })
+
+  it('never changes the value on mount or disables the saved setting on missing catalog data', () => {
+    const wrapper = mount(ModelPicker, {
+      props: {
+        model: 'custom/model',
+        effort: 'high',
+        models: [],
+        manualFallback: true,
+        inputId: 'model-setting',
+        variant: 'field',
+        disabled: true,
+      },
+      global: { stubs },
+    })
+    expect(wrapper.get('#model-setting').attributes('disabled')).toBeDefined()
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+  })
+})
+
+describe('ModelPicker non-destructive selection', () => {
+  it('preserves fixed effort while editing a manual model without catalog data', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: { model: 'custom/model', effort: 'high', models: [], manualFallback: true },
+      global: { stubs },
+    })
+    await wrapper.get('[data-testid="model-manual-input"]').setValue('custom/another-model')
+    expect(wrapper.emitted('update:model')).toEqual([['custom/another-model']])
+    expect(wrapper.emitted('update:effort')).toEqual([['high']])
+  })
+
+  it('does not make an unchanged model dirty or replace provider-default effort', async () => {
+    const wrapper = mount(ModelPicker, {
+      props: { model: 'openrouter/think', effort: '', models, effortFallback: 'model-default' },
+      global: { stubs },
+    })
+    await wrapper.get('[data-testid="composer-model-openrouter/think"]').trigger('click')
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
   })
 })

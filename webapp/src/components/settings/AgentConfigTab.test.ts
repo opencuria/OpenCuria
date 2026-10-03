@@ -76,15 +76,13 @@ const configs: AgentConfig[] = [
 ]
 
 const stubs = {
-  Popover: { template: '<div><slot /></div>' },
-  PopoverTrigger: { template: '<div><slot /></div>' },
-  PopoverContent: { template: '<div><slot /></div>' },
-  Command: { template: '<div><slot /></div>' },
-  CommandInput: { template: '<input />' },
-  CommandList: { template: '<div><slot /></div>' },
-  CommandEmpty: { template: '<div><slot /></div>' },
-  CommandGroup: { props: ['heading'], template: '<div><slot /></div>' },
-  CommandItem: { template: '<button type="button" @click="$emit(\'select\')"><slot /></button>' },
+  DropdownMenu: { template: '<div><slot /></div>' },
+  DropdownMenuTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
+  DropdownMenuSub: { template: '<div><slot /></div>' },
+  DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuSubContent: { template: '<div><slot /></div>' },
 }
 
 function mountTab() {
@@ -122,13 +120,22 @@ describe('AgentConfigTab', () => {
     )
   })
 
-  it('renders primary rows and inherit strategy selects', async () => {
+  it('uses a single shared model and effort menu per agent', async () => {
     const wrapper = mountTab()
     await flushPromises()
     expect(wrapper.find('[data-testid="agent-row-build"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="agent-row-plan"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="agent-row-general"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="agent-strategy-general"]').exists()).toBe(true)
+    expect(wrapper.findAll('input[type="radio"]')).toHaveLength(0)
+    expect(wrapper.findAll('select')).toHaveLength(0)
+    for (const agent of ['general', 'explore', 'computeruse']) {
+      const row = wrapper.get(`[data-testid="agent-row-${agent}"]`)
+      expect(row.findAll('[data-testid="composer-model-trigger"]')).toHaveLength(1)
+      expect(row.get('[data-testid="composer-model-default"]').text()).toBe('Inherit')
+    }
+    expect(
+      wrapper.get('[data-testid="agent-row-explore"] [data-testid="composer-effort-row"]').text(),
+    ).toContain('Lowest')
     expect(wrapper.find('[data-testid="agent-configs-status"]').text()).toBe('All changes saved')
   })
 
@@ -136,7 +143,9 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     // Make dirty: switch computeruse to inherit.
-    await wrapper.find('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+    await wrapper
+      .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
+      .trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
     await wrapper.find('[data-testid="save-agent-configs"]').trigger('click')
@@ -159,7 +168,9 @@ describe('AgentConfigTab', () => {
     vi.mocked(harnessApi.saveAgentConfigs).mockRejectedValueOnce(new Error('boom'))
     const wrapper = mountTab()
     await flushPromises()
-    await wrapper.find('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+    await wrapper
+      .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
+      .trigger('click')
     await wrapper.find('[data-testid="save-agent-configs"]').trigger('click')
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('Failed to save agent models', {
@@ -180,9 +191,7 @@ describe('AgentConfigTab', () => {
       (wrapper.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
     ).toBe('2')
     expect(wrapper.text()).toContain('Main agent is depth 0.')
-    expect(wrapper.get('#subagent-depth-scope').text()).toBe(
-      'Default: 2 · New runs · Organization-wide',
-    )
+    expect(wrapper.get('#subagent-depth-scope').text()).toBe('Default: 2 · New runs')
     expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
   })
 
@@ -207,6 +216,48 @@ describe('AgentConfigTab', () => {
     expect(row.get('input').attributes('aria-describedby')).toBe(
       'subagent-depth-hint subagent-depth-scope subagent-depth-error',
     )
+  })
+
+  it('preserves inherited effort strategies across model selection and saves fixed defaults', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    const row = wrapper.get('[data-testid="agent-row-explore"]')
+    await row.get('[data-testid="composer-effort-highest"]').trigger('click')
+    await row.get('[data-testid="composer-model-openrouter/model-big"]').trigger('click')
+    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(harnessApi.saveAgentConfigs).mock.calls[0]![0]).toContainEqual({
+      agent: 'explore',
+      model: 'openrouter/model-big',
+      effort: 'medium',
+      inherit_model: false,
+      effort_strategy: 'fixed',
+    })
+    // Saved fixed configs no longer persist a relative strategy. Choose a new
+    // inherited strategy and verify reselection does not reset it.
+    await row.get('[data-testid="composer-model-default"]').trigger('click')
+    await row.get('[data-testid="composer-effort-lowest"]').trigger('click')
+    await row.get('[data-testid="composer-model-default"]').trigger('click')
+    expect(row.get('[data-testid="composer-effort-row"]').text()).toContain('Lowest')
+    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(harnessApi.saveAgentConfigs).mock.lastCall![0]).toContainEqual({
+      agent: 'explore',
+      model: '',
+      effort: '',
+      inherit_model: true,
+      effort_strategy: 'lowest',
+    })
+  })
+
+  it('restores inherited strategy when toggling models before saving', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    const row = wrapper.get('[data-testid="agent-row-explore"]')
+    await row.get('[data-testid="composer-effort-highest"]').trigger('click')
+    await row.get('[data-testid="composer-model-openrouter/model-big"]').trigger('click')
+    await row.get('[data-testid="composer-model-default"]').trigger('click')
+    expect(row.get('[data-testid="composer-effort-row"]').text()).toContain('Highest')
   })
 
   it('loads a stored override', async () => {
@@ -296,7 +347,9 @@ describe('AgentConfigTab', () => {
       const wrapper = mountTab()
       await flushPromises()
       await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
-      await wrapper.get('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+      await wrapper
+        .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
+        .trigger('click')
       await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
       await flushPromises()
       expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
@@ -316,7 +369,11 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
-    await wrapper.get('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+    await wrapper
+      .get(
+        '[data-testid="agent-row-computeruse"] [data-testid="composer-model-openrouter/model-big"]',
+      )
+      .trigger('click')
     expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
     expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
   })

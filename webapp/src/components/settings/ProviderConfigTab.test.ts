@@ -5,7 +5,7 @@ import { toast } from 'vue-sonner'
 
 import ProviderConfigTab from './ProviderConfigTab.vue'
 import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
-import ProviderModelCombobox from './ProviderModelCombobox.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import * as harnessApi from '@/services/harness.api'
 import * as providerCatalog from '@/lib/providerCatalog'
 import type { ProviderModel } from '@/lib/harnessModels'
@@ -74,20 +74,15 @@ const stubs = {
     emits: ['update:open', 'changed', 'connected'],
     template: '<div data-testid="provider-connection-dialog" />',
   },
-  Popover: { template: '<div><slot /></div>' },
-  PopoverTrigger: { template: '<div><slot /></div>' },
-  PopoverContent: { template: '<div><slot /></div>' },
-  Command: { template: '<div><slot /></div>' },
-  CommandInput: { template: '<input />' },
-  CommandList: { template: '<div><slot /></div>' },
-  CommandEmpty: { template: '<div><slot /></div>' },
-  CommandGroup: {
-    props: ['heading'],
-    template: '<div><span v-if="heading">{{ heading }}</span><slot /></div>',
-  },
-  CommandItem: {
+  DropdownMenu: { template: '<div><slot /></div>' },
+  DropdownMenuTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuItem: {
     template: '<button type="button" @click="$emit(\'select\')"><slot /></button>',
   },
+  DropdownMenuSub: { template: '<div><slot /></div>' },
+  DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
+  DropdownMenuSubContent: { template: '<div><slot /></div>' },
 }
 
 function mountTab() {
@@ -142,7 +137,7 @@ describe('ProviderConfigTab', () => {
     }))
   })
 
-  it('renders provider rows and default model pickers after load', async () => {
+  it('renders provider rows and one shared small-model selector after load', async () => {
     const wrapper = mountTab()
     await flushPromises()
 
@@ -152,7 +147,21 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('[data-testid="provider-row-chatgpt"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-amazon-bedrock"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-openai-compatible"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="provider-small-model-trigger"]').exists()).toBe(true)
+    const pickers = wrapper.findAllComponents(ModelPicker)
+    expect(pickers).toHaveLength(1)
+    expect(pickers[0]?.props()).toMatchObject({
+      inputId: 'provider-small-model',
+      model: 'openrouter/model-big',
+      variant: 'field',
+      manualFallback: true,
+      allowDefault: true,
+      defaultModelLabel: 'None',
+      defaultOptionLabel: 'None',
+      allowEffortDefault: true,
+      defaultEffortLabel: 'Provider default',
+      effortFallback: 'model-default',
+      disabled: false,
+    })
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Connected')
     expect(wrapper.find('[data-testid="provider-status-chatgpt"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="provider-detail-openrouter"]').text()).toContain('••••cdef')
@@ -196,8 +205,8 @@ describe('ProviderConfigTab', () => {
     expect(saveButton.attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
 
-    // First combobox is the default model picker; pick the ChatGPT model.
-    await wrapper.find('[data-testid="model-option-chatgpt/gpt-5"]').trigger('click')
+    // Pick the ChatGPT model with the shared selector.
+    await wrapper.find('[data-testid="composer-model-chatgpt/gpt-5"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Unsaved changes')
@@ -223,7 +232,7 @@ describe('ProviderConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
 
-    await wrapper.find('[data-testid="model-option-chatgpt/gpt-5"]').trigger('click')
+    await wrapper.find('[data-testid="composer-model-chatgpt/gpt-5"]').trigger('click')
     await wrapper.find('[data-testid="save-default-models"]').trigger('click')
     await flushPromises()
 
@@ -264,7 +273,7 @@ describe('ProviderConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
 
-    const combos = wrapper.findAllComponents(ProviderModelCombobox)
+    const combos = wrapper.findAllComponents(ModelPicker)
     expect(combos.length).toBe(1)
     const defaultCombo = combos[0]
     // Small combo binds small_effort='' initially.
@@ -289,6 +298,76 @@ describe('ProviderConfigTab', () => {
       computer_use_model: 'openrouter/model-big',
       default_effort: 'high',
       computer_use_effort: 'high',
+    })
+  })
+
+  it('normalizes both small-model defaults before saving and retains legacy defaults', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+
+    const picker = wrapper.findComponent(ModelPicker)
+    picker.vm.$emit('update:model', ' openrouter/model-big ')
+    picker.vm.$emit('update:effort', ' high ')
+    await flushPromises()
+    await wrapper.find('[data-testid="save-default-models"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConfigMock).toHaveBeenCalledWith({
+      small_model: 'openrouter/model-big',
+      small_effort: 'high',
+      default_model: 'openrouter/model-big',
+      computer_use_model: 'openrouter/model-big',
+      default_effort: 'high',
+      computer_use_effort: 'high',
+    })
+    expect(picker.props('model')).toBe('openrouter/model-big')
+    expect(picker.props('effort')).toBe('high')
+    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
+  })
+
+  it('permits manual defaults without a connected provider and never auto-selects a model', async () => {
+    vi.mocked(providerCatalog.loadProviderModelsCached).mockResolvedValue([])
+    getProviderConfigMock.mockResolvedValue({
+      base_url: '',
+      default_model: '',
+      small_model: '',
+      computer_use_model: '',
+      default_effort: '',
+      small_effort: '',
+      computer_use_effort: '',
+      has_api_key: false,
+      api_key_hint: '',
+    })
+    listProviderConnectionsMock.mockResolvedValue([
+      { provider: 'openrouter', connected: false },
+      { provider: 'chatgpt', connected: false },
+      { provider: 'amazon-bedrock', connected: false },
+      { provider: 'openai-compatible', connected: false },
+    ])
+    const wrapper = mountTab()
+    await flushPromises()
+
+    expect(wrapper.findAllComponents(ModelPicker)).toHaveLength(1)
+    const picker = wrapper.findComponent(ModelPicker)
+    expect(picker.props('model')).toBe('')
+    expect(picker.props('effort')).toBe('')
+    expect(wrapper.find('[data-testid="defaults-no-provider-hint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="save-default-models"]').attributes('disabled')).toBeDefined()
+    expect(saveProviderConfigMock).not.toHaveBeenCalled()
+
+    await wrapper.find('input[placeholder="provider/model-id"]').setValue('custom/manual-model')
+    await flushPromises()
+    expect(picker.props('model')).toBe('custom/manual-model')
+    await wrapper.find('[data-testid="save-default-models"]').trigger('click')
+    await flushPromises()
+
+    expect(saveProviderConfigMock).toHaveBeenCalledWith({
+      small_model: 'custom/manual-model',
+      small_effort: '',
+      default_model: '',
+      computer_use_model: '',
+      default_effort: '',
+      computer_use_effort: '',
     })
   })
 

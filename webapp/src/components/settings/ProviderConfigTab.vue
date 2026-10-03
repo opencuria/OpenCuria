@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
-import ProviderModelCombobox from './ProviderModelCombobox.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
 import { PROVIDER_META, connectionDetail, type ProviderMeta } from './providerMeta'
@@ -271,13 +271,20 @@ onMounted(() => {
               </p>
             </div>
             <div class="w-full shrink-0 sm:w-80">
-              <ProviderModelCombobox
+              <ModelPicker
                 input-id="provider-small-model"
-                v-model="smallModel"
-                :effort="smallEffort"
+                v-model:model="smallModel"
+                v-model:effort="smallEffort"
                 :models="catalog"
-                empty-hint="Connect a provider to browse models, or enter a provider/model id manually."
-                @update:effort="smallEffort = $event"
+                :disabled="savingDefaults"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="None"
+                default-option-label="None"
+                allow-effort-default
+                default-effort-label="Provider default"
+                effort-fallback="model-default"
               />
             </div>
           </div>

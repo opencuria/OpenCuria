@@ -145,7 +145,7 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
       plugins: [router],
       stubs: {
         ComposerRichEditor: editorStub,
-        HarnessModelPicker: true,
+        ModelPicker: true,
         HarnessChatInput: defineComponent({
           props: {
             prompt: { type: String, default: '' },

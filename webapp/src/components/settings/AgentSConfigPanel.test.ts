@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { defineComponent } from 'vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { toast } from 'vue-sonner'
 
@@ -38,15 +40,24 @@ const defaults: AgentSConfig = {
 }
 
 const stubs = {
-  Popover: { template: '<div><slot /></div>' },
-  PopoverTrigger: { template: '<div><slot /></div>' },
-  PopoverContent: { template: '<div><slot /></div>' },
-  Command: { template: '<div><slot /></div>' },
-  CommandInput: { template: '<input />' },
-  CommandList: { template: '<div><slot /></div>' },
-  CommandEmpty: { template: '<div><slot /></div>' },
-  CommandGroup: { props: ['heading'], template: '<div><slot /></div>' },
-  CommandItem: { template: '<button type="button" @click="$emit(\'select\')"><slot /></button>' },
+  ModelPicker: defineComponent({
+    props: {
+      model: String,
+      effort: String,
+      models: Array,
+      inputId: String,
+      variant: String,
+      defaultModelLabel: String,
+      defaultOptionLabel: String,
+      allowDefault: Boolean,
+      showEffort: Boolean,
+      manualFallback: Boolean,
+      disabled: Boolean,
+    },
+    emits: ['update:model', 'update:effort'],
+    template: `<input :id="inputId" :value="model" :placeholder="defaultModelLabel"
+      :disabled="disabled" @input="$emit('update:model', $event.target.value)" />`,
+  }),
 }
 
 function mountPanel() {
@@ -63,16 +74,76 @@ describe('AgentSConfigPanel', () => {
     saveAgentSConfigMock.mockImplementation(async (data) => ({ ...defaults, ...data }))
   })
 
-  it('loads defaults and explains the Computer Use main model', async () => {
+  it('loads defaults without duplicate model instructions or navigation buttons', async () => {
     const wrapper = mountPanel()
     await flushPromises()
 
     expect(getAgentSConfigMock).toHaveBeenCalled()
     expect(wrapper.find('[data-testid="agent-s-config-panel"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="agent-s-main-model-hint"]').text()).toContain('Computer Use')
-    expect(wrapper.find('[data-testid="agent-s-goto-computeruse"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="agent-s-main-model-hint"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="agent-s-goto-computeruse"]').exists()).toBe(false)
+    expect(wrapper.findAll('button')).toHaveLength(4) // Three switches and Save only.
     expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('All changes saved')
     expect(wrapper.find('[data-testid="save-agent-s-config"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('uses the shared grounding picker with inheritance and manual fallback', async () => {
+    getAgentSConfigMock.mockResolvedValue({ ...defaults, grounding_model: 'openai/gpt-5' })
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    const picker = wrapper.findComponent(ModelPicker)
+    expect(picker.props()).toMatchObject({
+      model: 'openai/gpt-5',
+      effort: '',
+      models: [],
+      inputId: 'agent-s-grounding-model',
+      variant: 'field',
+      defaultModelLabel: 'Inherit',
+      defaultOptionLabel: 'Inherit',
+      allowDefault: true,
+      showEffort: false,
+      manualFallback: true,
+      disabled: false,
+    })
+    await wrapper.find('#agent-s-grounding-model').setValue('anthropic/custom-model')
+    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await flushPromises()
+    expect(saveAgentSConfigMock).toHaveBeenLastCalledWith({
+      grounding_model: 'anthropic/custom-model',
+    })
+
+    picker.vm.$emit('update:model', '')
+    await flushPromises()
+    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await flushPromises()
+    expect(saveAgentSConfigMock).toHaveBeenLastCalledWith({ grounding_model: '' })
+    expect(wrapper.find('#agent-s-grounding-model').attributes('placeholder')).toBe('Inherit')
+  })
+
+  it('links reflection and code switches to labels and hints and saves toggles', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    for (const field of ['reflection', 'code-agent']) {
+      const id = `agent-s-enable-${field}`
+      const toggle = wrapper.find(`[data-testid="${id}"]`)
+      expect(toggle.attributes('id')).toBe(id)
+      expect(toggle.attributes('role')).toBe('switch')
+      expect(toggle.attributes('aria-checked')).toBe('true')
+      expect(toggle.attributes('aria-describedby')).toBe(`agent-s-${field}-hint`)
+      expect(wrapper.find(`label[for="${id}"]`).exists()).toBe(true)
+      await toggle.trigger('click')
+      expect(toggle.attributes('aria-checked')).toBe('false')
+    }
+    expect(wrapper.text()).not.toContain('Enable reflection')
+    expect(wrapper.text()).not.toContain('Enable code agent')
+    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await flushPromises()
+    expect(saveAgentSConfigMock).toHaveBeenCalledWith({
+      enable_reflection: false,
+      enable_code_agent: false,
+    })
   })
 
   it('tracks dirty state and saves only changed fields', async () => {
@@ -95,7 +166,7 @@ describe('AgentSConfigPanel', () => {
     await flushPromises()
 
     await wrapper.find('[data-testid="agent-s-temperature"]').setValue('0.7')
-    await wrapper.find('[data-testid="agent-s-enable-reflection"]').setValue(false)
+    await wrapper.find('[data-testid="agent-s-enable-reflection"]').trigger('click')
     await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
     await flushPromises()
 
@@ -126,14 +197,10 @@ describe('AgentSConfigPanel', () => {
     expect(toggle.attributes('aria-describedby')).toBe('agent-s-recording-hint')
     expect(wrapper.find('#agent-s-recording-hint').text()).toContain('sensitive content')
     expect(wrapper.find('#agent-s-recording-hint').text()).toContain('Off by default')
-    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe(
-      'All changes saved',
-    )
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('All changes saved')
 
     await toggle.trigger('click')
-    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe(
-      'Unsaved changes',
-    )
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('Unsaved changes')
     await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ enable_recording: true })
