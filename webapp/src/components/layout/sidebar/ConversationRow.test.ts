@@ -33,7 +33,10 @@ function makeConversation(overrides: Partial<HarnessConversation> = {}): Harness
   }
 }
 
-function mountRow(overrides: Partial<HarnessConversation> = {}, props: Record<string, unknown> = {}) {
+function mountRow(
+  overrides: Partial<HarnessConversation> = {},
+  props: Record<string, unknown> = {},
+) {
   return mount(ConversationRow, {
     props: { conversation: makeConversation(overrides), ...props },
     global: { stubs: dropdownStubs },
@@ -53,6 +56,64 @@ describe('ConversationRow', () => {
 
     expect(wrapper.find('[data-testid="unread-dot"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="busy-spinner"]').exists()).toBe(false)
+  })
+
+  it.each([
+    ['plan', 'build', 'lucide-list-todo', 'bg-primary/5'],
+    ['build', 'plan', 'lucide-hammer', 'bg-emerald-500/10'],
+  ] as const)(
+    'uses the %s agent symbol only in the inbox, independently of mode',
+    (agent_name, mode, iconClass, background) => {
+      const wrapper = mountRow(
+        { unread: true, agent_name, mode },
+        { inbox: true, showWorkspace: true },
+      )
+      const icon = wrapper.get('[data-testid="inbox-result-icon"]')
+      expect(icon.attributes('data-kind')).toBe(agent_name)
+      expect(icon.classes()).toContain(iconClass)
+      expect(wrapper.get('[data-testid="conversation-row"]').classes()).toContain(background)
+      expect(wrapper.get('[data-testid="conversation-row"]').attributes('aria-label')).toBe(
+        `Open chat First chat — Unread ${agent_name} response`,
+      )
+      expect(wrapper.find('[data-testid="inbox-result-edge"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="unread-dot"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="conversation-row-meta"]').text()).toContain('Alpha')
+      expect(
+        mountRow({ unread: true, agent_name, mode })
+          .find('[data-testid="inbox-result-icon"]')
+          .exists(),
+      ).toBe(false)
+    },
+  )
+
+  it.each(['question', 'permission', 'both'] as const)(
+    'prioritizes %s gates over the inbox result symbol',
+    (attention_kind) => {
+      const wrapper = mountRow(
+        { unread: true, needs_attention: true, attention_kind },
+        { inbox: true },
+      )
+      expect(wrapper.find('[data-testid="attention-icon"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="attention-edge"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="inbox-result-icon"]').exists()).toBe(false)
+    },
+  )
+
+  it('does not label busy or read inbox rows as plan/build results', () => {
+    for (const overrides of [{ unread: false }, { unread: true, status: 'busy' as const }]) {
+      const wrapper = mountRow(overrides, { inbox: true })
+      expect(wrapper.find('[data-testid="inbox-result-icon"]').exists()).toBe(false)
+    }
+  })
+
+  it('updates the inbox icon when the agent changes and uses a stronger active background', async () => {
+    const wrapper = mountRow({ unread: true }, { inbox: true, active: true })
+    expect(wrapper.get('[data-testid="conversation-row"]').classes()).toContain('bg-emerald-500/20')
+    await wrapper.setProps({
+      conversation: makeConversation({ unread: true, agent_name: 'plan', mode: 'plan' }),
+    })
+    expect(wrapper.get('[data-testid="inbox-result-icon"]').attributes('data-kind')).toBe('plan')
+    expect(wrapper.get('[data-testid="conversation-row"]').classes()).toContain('bg-primary/15')
   })
 
   it('shows a spinner instead of an unread dot while busy', () => {
@@ -87,7 +148,9 @@ describe('ConversationRow', () => {
   it('emits mark-unread from the row menu when the chat is read', async () => {
     const wrapper = mountRow({ unread: false })
 
-    const unread = wrapper.findAll('button').find((button) => button.text().includes('Mark as unread'))
+    const unread = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('Mark as unread'))
     expect(unread).toBeTruthy()
     await unread!.trigger('click')
 

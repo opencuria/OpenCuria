@@ -278,7 +278,10 @@ class HarnessService:
         if normalized not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         session = self.get_session(session_id)
-        return self.sessions.set_mode(session, normalized)
+        updated = self.sessions.set_mode(session, normalized)
+        if updated.parent_id is None:
+            self._emit_conversations_changed_sync(updated.workspace_id)
+        return updated
 
     def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
         """Persist a model override for subsequent runs."""

@@ -221,6 +221,8 @@ describe('ChatSidebar', () => {
     expect(wrapper.text()).toContain('All workspaces (2)')
     expect(wrapper.text()).not.toContain('Beta')
     expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
+    expect(wrapper.get('[data-testid="inbox-count"]').text()).toBe('1')
+    expect(wrapper.findAll('[data-testid="inbox-result-icon"]')).toHaveLength(1)
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
   })
 
@@ -236,8 +238,8 @@ describe('ChatSidebar', () => {
     ]
     const wrapper = mountSidebar()
 
-    expect(wrapper.find('[data-testid="action-required-section"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('Action required')
+    expect(wrapper.find('[data-testid="inbox-section"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="inbox-section"]').text()).toContain('Inbox')
     expect(wrapper.text()).toContain('Needs a permission')
     expect(wrapper.findAll('[data-testid="attention-icon"]')).toHaveLength(2)
     expect(wrapper.get('[data-testid="workspace-conversation-group"]').text()).toContain(
@@ -251,15 +253,107 @@ describe('ChatSidebar', () => {
       makeConversation({ workspace_id: 'ws-2', workspace_name: 'Beta', needs_attention: true }),
     ]
     const wrapper = mountSidebar()
-    expect(wrapper.find('[data-testid="action-required-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="inbox-section"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('First chat')
+  })
+
+  it('combines gates and idle unread across workspaces with one count and no busy results', () => {
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'build', unread: true }),
+      makeConversation({
+        session_id: 'stopped-plan',
+        title: 'Archived plan',
+        workspace_id: 'ws-2',
+        workspace_name: 'Beta',
+        unread: true,
+        mode: 'plan',
+        agent_name: 'plan',
+      }),
+      makeConversation({
+        session_id: 'question',
+        status: 'busy',
+        unread: true,
+        needs_attention: true,
+        attention_kind: 'question',
+      }),
+      makeConversation({
+        session_id: 'busy',
+        title: 'Still running',
+        status: 'busy',
+        unread: true,
+        manual_unread: true,
+      }),
+      makeConversation({ session_id: 'read', title: 'Read chat' }),
+    ]
+    const wrapper = mountSidebar()
+    const inbox = wrapper.get('[data-testid="inbox-section"]')
+    expect(wrapper.get('[data-testid="inbox-count"]').text()).toBe('3')
+    expect(inbox.findAll('[data-testid="conversation-row"]')).toHaveLength(3)
+    expect(inbox.findAll('[data-testid="attention-icon"]')).toHaveLength(1)
+    expect(
+      inbox
+        .findAll('[data-testid="inbox-result-icon"]')
+        .map((icon) => icon.attributes('data-kind')),
+    ).toEqual(['build', 'plan'])
+    expect(inbox.text()).toContain('Archived plan')
+    expect(inbox.text()).not.toContain('Still running')
+    expect(inbox.text()).not.toContain('Read chat')
+    expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
+    expect(
+      wrapper
+        .get('[data-testid="workspace-conversation-list"]')
+        .find('[data-testid="inbox-result-icon"]')
+        .exists(),
+    ).toBe(false)
+  })
+
+  it('hides the inbox when there are only read or busy chats', () => {
+    conversationStore.conversations = [
+      makeConversation(),
+      makeConversation({ session_id: 'busy', status: 'busy', unread: true }),
+    ]
+    expect(mountSidebar().find('[data-testid="inbox-section"]').exists()).toBe(false)
+  })
+
+  it('opens and marks a stopped workspace inbox chat as read', async () => {
+    conversationStore.conversations = [
+      makeConversation({
+        session_id: 'stopped-plan',
+        workspace_id: 'ws-2',
+        workspace_name: 'Beta',
+        unread: true,
+        mode: 'plan',
+        agent_name: 'plan',
+      }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper
+      .get('[data-testid="inbox-section"]')
+      .get('[data-testid="conversation-row"]')
+      .trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('stopped-plan')
+    expect(routerPush).toHaveBeenCalledWith({
+      path: '/workspaces/ws-2',
+      query: { session: 'stopped-plan' },
+    })
   })
 
   it('persists collapsed workspace IDs across sidebar remounts, without navigating', async () => {
     const wrapper = mountSidebar()
     await wrapper.get('[aria-label="Collapse workspace Alpha"]').trigger('click')
-    expect(wrapper.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    expect(
+      wrapper
+        .get('[data-testid="workspace-conversation-group"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(false)
+    expect(
+      wrapper
+        .get('[data-testid="inbox-section"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(true)
     expect(routerPush).not.toHaveBeenCalled()
     expect(
       JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
@@ -269,7 +363,12 @@ describe('ChatSidebar', () => {
     expect(reopened.get('[aria-label="Expand workspace Alpha"]').attributes('aria-expanded')).toBe(
       'false',
     )
-    expect(reopened.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    expect(
+      reopened
+        .get('[data-testid="workspace-conversation-group"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(false)
     await reopened.get('[aria-label="Expand workspace Alpha"]').trigger('click')
     expect(reopened.find('[data-testid="conversation-row"]').exists()).toBe(true)
     expect(
@@ -341,7 +440,10 @@ describe('ChatSidebar', () => {
 
   it('forwards rename and read actions from workspace chat rows', async () => {
     const wrapper = mountSidebar()
-    await wrapper.get('[data-testid="mark-read-item"]').trigger('click')
+    await wrapper
+      .get('[data-testid="workspace-conversation-group"]')
+      .get('[data-testid="mark-read-item"]')
+      .trigger('click')
     expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
     const rename = wrapper.findAll('button').find((button) => button.text() === 'Rename')!
     await rename.trigger('click')
