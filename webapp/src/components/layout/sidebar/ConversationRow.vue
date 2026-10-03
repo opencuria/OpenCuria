@@ -7,6 +7,8 @@ import { computed, nextTick, ref } from 'vue'
 import {
   Check,
   CircleAlert,
+  Hammer,
+  ListTodo,
   Loader2,
   Mail,
   MailOpen,
@@ -34,8 +36,9 @@ const props = withDefaults(
     conversation: HarnessConversation
     active?: boolean
     showWorkspace?: boolean
+    inbox?: boolean
   }>(),
-  { active: false, showWorkspace: false },
+  { active: false, showWorkspace: false, inbox: false },
 )
 
 const emit = defineEmits<{
@@ -65,6 +68,44 @@ const attentionLabel = computed(() => {
   if (attentionKind.value === 'permission') return 'Permission required'
   if (attentionKind.value === 'both') return 'Permission and question waiting'
   return 'Action required'
+})
+
+// The inbox reflects existing idle/unread state, not run success or task completion.
+const inboxResult = computed(() => {
+  if (
+    !props.inbox ||
+    needsAttention.value ||
+    !props.conversation.unread ||
+    props.conversation.status !== 'idle'
+  ) {
+    return null
+  }
+  return props.conversation.agent_name === 'plan'
+    ? {
+        icon: ListTodo,
+        kind: 'plan',
+        label: 'Unread plan response',
+        iconClass: 'text-sidebar-accent-foreground',
+        edgeClass: 'bg-primary',
+        rowClass: props.active ? 'bg-primary/15' : 'bg-primary/5 hover:bg-primary/10',
+      }
+    : {
+        icon: Hammer,
+        kind: 'build',
+        label: 'Unread build response',
+        iconClass: 'text-emerald-700 dark:text-emerald-400',
+        edgeClass: 'bg-emerald-500',
+        rowClass: props.active ? 'bg-emerald-500/20' : 'bg-emerald-500/10 hover:bg-emerald-500/15',
+      }
+})
+const statusLabel = computed(() =>
+  needsAttention.value ? attentionLabel.value : inboxResult.value?.label,
+)
+const rowClass = computed(() => {
+  if (needsAttention.value) {
+    return props.active ? 'bg-amber-500/20' : 'bg-amber-500/10 hover:bg-amber-500/15'
+  }
+  return inboxResult.value?.rowClass ?? (props.active ? 'bg-primary/10' : 'hover:bg-muted')
 })
 
 function handleSelect(): void {
@@ -141,17 +182,9 @@ function tooltipDate(): string {
     tabindex="0"
     data-testid="conversation-row"
     :aria-selected="props.active"
-    :aria-label="needsAttention ? `Open chat ${title} — ${attentionLabel}` : `Open chat ${title}`"
+    :aria-label="statusLabel ? `Open chat ${title} — ${statusLabel}` : `Open chat ${title}`"
     class="group/row relative flex h-8 cursor-pointer items-center gap-1.5 rounded-xl px-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary"
-    :class="
-      needsAttention
-        ? props.active
-          ? 'bg-amber-500/20'
-          : 'bg-amber-500/10 hover:bg-amber-500/15'
-        : props.active
-          ? 'bg-primary/10'
-          : 'hover:bg-muted'
-    "
+    :class="rowClass"
     @click="handleSelect"
     @keydown.enter="handleSelect"
   >
@@ -160,7 +193,13 @@ function tooltipDate(): string {
       class="absolute inset-y-1 left-0 w-0.5 rounded-full bg-amber-500"
       data-testid="attention-edge"
     />
-    <div class="flex size-4 shrink-0 items-center justify-center">
+    <span
+      v-else-if="inboxResult"
+      class="absolute inset-y-1 left-0 w-0.5 rounded-full"
+      :class="inboxResult.edgeClass"
+      data-testid="inbox-result-edge"
+    />
+    <div class="flex size-4 shrink-0 items-center justify-center" :title="statusLabel">
       <component
         :is="attentionIcon"
         v-if="needsAttention"
@@ -171,6 +210,14 @@ function tooltipDate(): string {
         v-else-if="props.conversation.status === 'busy'"
         data-testid="busy-spinner"
         class="size-3 animate-spin text-primary"
+      />
+      <component
+        :is="inboxResult.icon"
+        v-else-if="inboxResult"
+        data-testid="inbox-result-icon"
+        :data-kind="inboxResult.kind"
+        class="size-3.5"
+        :class="inboxResult.iconClass"
       />
       <span
         v-else-if="props.conversation.unread"
@@ -193,6 +240,7 @@ function tooltipDate(): string {
           <div class="font-medium">{{ title }}</div>
           <div>{{ props.conversation.workspace_name }}</div>
           <div v-if="needsAttention" class="text-amber-200">{{ attentionLabel }}</div>
+          <div v-else-if="inboxResult">{{ inboxResult.label }}</div>
           <div class="text-background/70">{{ tooltipDate() }}</div>
         </TooltipContent>
       </Tooltip>

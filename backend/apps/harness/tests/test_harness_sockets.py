@@ -139,6 +139,80 @@ async def test_conversation_changes_emit_for_lifecycle_mutations(harness_workspa
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("is_child", [False, True], ids=["root", "child"])
+@pytest.mark.parametrize("mode", ["plan", "build"])
+async def test_mode_change_invalidates_only_root_conversations(
+    harness_workspace, is_child: bool, mode: str
+) -> None:
+    """Persist normalized mode/agent before notifying the root workspace feed."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+        assert stored.mode == mode
+        assert stored.agent_name == mode
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+    )
+    session = HarnessSessionRepository.create(
+        workspace_id=parent.workspace_id,
+        organization_id=parent.organization_id,
+        title="mode change",
+        mode="build" if mode == "plan" else "plan",
+        agent_name="build" if mode == "plan" else "plan",
+        parent_id=parent.id if is_child else None,
+    )
+
+    updated = await sync_to_async(service.set_mode)(session.id, f" {mode.upper()} ")
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert updated.mode == stored.mode == mode
+    assert updated.agent_name == stored.agent_name == mode
+    assert emitted == (
+        []
+        if is_child
+        else [
+            {
+                "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+                "workspace_id": str(harness_workspace.id),
+            }
+        ]
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_invalid_mode_does_not_invalidate_conversations(
+    harness_workspace,
+) -> None:
+    """Rejected modes neither persist nor notify the conversation feed."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="invalid mode",
+        mode="build",
+        agent_name="build",
+    )
+
+    with pytest.raises(ValueError, match="Invalid mode"):
+        await sync_to_async(service.set_mode)(session.id, "invalid")
+
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert stored.mode == "build"
+    assert stored.agent_name == "build"
+    assert emitted == []
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_conversation_change_emit_failure_is_best_effort(harness_workspace) -> None:
     """A failed socket emit cannot break a synchronous lifecycle mutation."""
     async def _broken_emit(_event: str, _data: dict[str, Any]) -> None:

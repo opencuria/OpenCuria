@@ -81,7 +81,7 @@ async function installFixtures(page: Page) {
   conversations[0]!.needs_attention = true;
   conversations[0]!.attention_kind = "permission";
   conversations[1]!.unread = true;
-  // Hidden history must not leak into Action required or mark-all-read.
+  // Archived gates take precedence over unread and remain hidden until running.
   const archivedChat = conversations.find(
     (row) => row.session_id === "archive-0",
   )!;
@@ -89,6 +89,8 @@ async function installFixtures(page: Page) {
   archivedChat.attention_kind = "permission";
   archivedChat.unread = true;
   const readSessionIds: string[] = [];
+  const failedReads = new Set<string>();
+  let conversationRequests = 0;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const payload = Buffer.from(JSON.stringify({ exp: 4102444800 })).toString(
@@ -141,7 +143,10 @@ async function installFixtures(page: Page) {
         ],
       });
     if (path === "/workspaces/") return json(workspaces);
-    if (path === "/harness/conversations/") return json(conversations);
+    if (path === "/harness/conversations/") {
+      conversationRequests += 1;
+      return json(conversations);
+    }
     if (path.includes("/harness/sessions/")) {
       const sessionId = path.split("/harness/sessions/")[1]!.split("/")[0]!;
       const chat = conversations.find((row) => row.session_id === sessionId);
@@ -156,6 +161,7 @@ async function installFixtures(page: Page) {
         }
         if (path.endsWith("/read")) {
           readSessionIds.push(sessionId);
+          if (failedReads.has(sessionId)) return json({ detail: "Read failed" }, 500);
           chat.unread = false;
           chat.manual_unread = false;
           return route.fulfill({ status: 204 });
@@ -193,6 +199,8 @@ async function installFixtures(page: Page) {
   return {
     workspaces,
     readSessionIds,
+    failedReads,
+    get conversationRequests() { return conversationRequests; },
     errors,
     conversations,
     emit: async (event: string, data: unknown) => {
@@ -272,7 +280,7 @@ async function settledScreenshot(page: Page, filename: string) {
 }
 
 async function rowMenu(page: Page, title: string) {
-  const row = page.getByRole("button", {
+  const row = groups(page).getByRole("button", {
     name: `Open chat ${title}`,
     exact: true,
   });
@@ -307,8 +315,8 @@ test("desktop: workspace order, independent pagination, actions and global searc
   await expect(page.getByTestId("time-list")).toHaveCount(0);
   await expect(page.getByTestId("workspace-section")).toHaveCount(0);
   await expect(
-    page.getByTestId("action-required-section").getByTestId("conversation-row"),
-  ).toHaveCount(1);
+    page.getByTestId("inbox-section").getByTestId("conversation-row"),
+  ).toHaveCount(2);
   await expect(group(page, "alpha").getByTestId("attention-icon")).toHaveCount(
     1,
   );
@@ -518,8 +526,8 @@ test("live runner/workspace events reorder groups without losing expansion or st
   });
   await expect(group(page, "alpha")).toHaveCount(0);
   await expect(
-    page.getByTestId("action-required-section").getByTestId("conversation-row"),
-  ).toHaveCount(1);
+    page.getByTestId("inbox-section").getByTestId("conversation-row"),
+  ).toHaveCount(2);
   fixture.workspaces.find((row) => row.id === "alpha")!.status = "running";
   await fixture.emit("workspace:status_changed", {
     workspace_id: "alpha",
@@ -724,14 +732,14 @@ test("polling: only running groups survive stop/start, with collapse keyed by wo
   alpha.status = "stopped";
   await page.clock.fastForward(30_000);
   await expect(group(page, "alpha")).toHaveCount(0);
-  await expect(page.getByTestId("action-required-section")).toHaveCount(0);
+  await expect(page.getByTestId("inbox-section").getByTestId("conversation-row")).toHaveCount(1);
   await expectStoredCollapse(page, ["alpha"]);
   alpha.status = "running";
   await page.clock.fastForward(30_000);
   await expectCollapsed(page, "alpha", "Alpha");
   await expect(
-    page.getByTestId("action-required-section").getByTestId("conversation-row"),
-  ).toHaveCount(1);
+    page.getByTestId("inbox-section").getByTestId("conversation-row"),
+  ).toHaveCount(2);
   await collapseToggle(page, "alpha").click();
   await expectExpanded(page, "alpha", "Alpha");
   alpha.status = "deleted";
@@ -739,3 +747,431 @@ test("polling: only running groups survive stop/start, with collapse keyed by wo
   await expect(group(page, "alpha")).toHaveCount(0);
   expect(fixture.errors).toEqual([]);
 });
+
+const inbox = (page: Page) => page.getByTestId("inbox-section");
+const inboxRow = (page: Page, title: string) =>
+  inbox(page).getByTestId("conversation-row").filter({ hasText: title });
+
+async function installInboxFixtures(page: Page) {
+  const fixture = await installFixtures(page);
+  fixture.conversations.splice(0);
+  const add = (
+    id: string,
+    title: string,
+    overrides: Partial<ReturnType<typeof chats>[number]> = {},
+  ) => {
+    const row = {
+      ...chats("alpha", "Alpha", 1)[0]!,
+      session_id: id,
+      title,
+      unread: true,
+      last_message_at: "2026-10-03T10:00:00Z",
+      ...overrides,
+    };
+    fixture.conversations.push(row);
+    return row;
+  };
+  const plan = add("result-plan", "Review deployment plan", {
+    agent_name: "plan",
+    mode: "build",
+  });
+  const build = add("result-build", "Deployment checks ready", {
+    agent_name: "build",
+    mode: "plan",
+    last_message_at: "2026-10-03T11:00:00Z",
+  });
+  const question = add("gate-question", "Choose rollout strategy", {
+    needs_attention: true,
+    attention_kind: "question",
+    status: "busy",
+    agent_name: "plan",
+    last_message_at: "2026-10-03T09:00:00Z",
+  });
+  const permission = add("gate-permission", "Approve staging access", {
+    needs_attention: true,
+    attention_kind: "permission",
+    last_message_at: "2026-10-03T09:00:00Z",
+  });
+  const stopped = add("stopped-result", "Archived audit ready", {
+    workspace_id: "archive",
+    workspace_name: "Archive",
+    agent_name: "custom-agent",
+    last_message_at: "2026-10-03T08:00:00Z",
+  });
+  const busy = add("busy-manual", "Background indexing", {
+    status: "busy",
+    manual_unread: true,
+  });
+  const archivedGate = add("archive-gate", "Archived permission", {
+    workspace_id: "archive",
+    workspace_name: "Archive",
+    needs_attention: true,
+    attention_kind: "permission",
+  });
+  add("busy-unread", "Active verification", { status: "busy" });
+  add("read-result", "Previous review", { unread: false });
+  return {
+    ...fixture,
+    plan,
+    build,
+    question,
+    permission,
+    stopped,
+    busy,
+    archivedGate,
+    get conversationRequests() {
+      return fixture.conversationRequests;
+    },
+  };
+}
+
+async function inboxMenu(page: Page, title: string) {
+  const row = inboxRow(page, title);
+  await row.hover();
+  await row
+    .getByRole("button", { name: `Actions for ${title}`, exact: true })
+    .click();
+}
+
+async function refreshInbox(
+  fixture: Awaited<ReturnType<typeof installInboxFixtures>>,
+) {
+  const requests = fixture.conversationRequests;
+  await fixture.emit("harness.conversations_changed", {
+    workspace_id: "alpha",
+  });
+  await expect
+    .poll(() => fixture.conversationRequests)
+    .toBeGreaterThan(requests);
+}
+
+test("Inbox: gates first, deduplicated overlap, stopped idle results and agent semantics", async ({
+  page,
+}) => {
+  const fixture = await installInboxFixtures(page);
+  await page.goto("/");
+  await expect(page.getByTestId("action-required-section")).toHaveCount(0);
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  await expect(inbox(page).getByTestId("conversation-row")).toHaveCount(5);
+  const labels = () =>
+    inbox(page)
+      .getByTestId("conversation-row")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("aria-label")));
+  const expected = [
+    "Open chat Approve staging access — Permission required",
+    "Open chat Choose rollout strategy — Question waiting",
+    "Open chat Deployment checks ready — Unread build response",
+    "Open chat Review deployment plan — Unread plan response",
+    "Open chat Archived audit ready — Unread build response",
+  ];
+  expect(await labels()).toEqual(expected);
+  for (const [title, kind] of [
+    [fixture.plan.title, "plan"],
+    [fixture.build.title, "build"],
+    [fixture.stopped.title, "build"],
+  ]) {
+    const row = inboxRow(page, title!);
+    await expect(row).toHaveAttribute(
+      "aria-label",
+      `Open chat ${title} — Unread ${kind} response`,
+    );
+    await expect(row.getByTestId("inbox-result-icon")).toHaveAttribute(
+      "data-kind",
+      kind!,
+    );
+    await expect(row.getByTestId("inbox-result-edge")).toBeVisible();
+    await expect(row.getByTestId("unread-dot")).toHaveCount(0);
+    await expect(row.locator(`[title="Unread ${kind} response"]`)).toHaveCount(
+      1,
+    );
+    await expect(row).not.toContainText(`Unread ${kind} response`);
+    await expect(row.getByTestId("conversation-row-meta")).toHaveText(
+      title === fixture.stopped.title ? "Archive" : "Alpha",
+    );
+  }
+  await expect(
+    inboxRow(page, fixture.plan.title).getByTestId("inbox-result-icon"),
+  ).toHaveClass(/text-sidebar-accent-foreground|text-violet/);
+  await expect(
+    inboxRow(page, fixture.build.title).getByTestId("inbox-result-icon"),
+  ).toHaveClass(/text-emerald/);
+  for (const gate of [fixture.question, fixture.permission]) {
+    const row = inboxRow(page, gate.title);
+    await expect(row.getByTestId("attention-icon")).toBeVisible();
+    await expect(row.getByTestId("attention-edge")).toBeVisible();
+    await expect(row.getByTestId("inbox-result-icon")).toHaveCount(0);
+    await expect(row.getByTestId("busy-spinner")).toHaveCount(0);
+    await expect(row).not.toContainText(/Question waiting|Permission required/);
+  }
+  await expect(inboxRow(page, fixture.busy.title)).toHaveCount(0);
+  await expect(inboxRow(page, "Active verification")).toHaveCount(0);
+  await expect(inboxRow(page, fixture.archivedGate.title)).toHaveCount(0);
+  await expect(group(page, "archive")).toHaveCount(0);
+  const ordinaryBuild = group(page, "alpha").getByRole("button", {
+    name: `Open chat ${fixture.build.title}`,
+    exact: true,
+  });
+  await expect(ordinaryBuild.getByTestId("unread-dot")).toBeVisible();
+  await expect(ordinaryBuild.getByTestId("inbox-result-icon")).toHaveCount(0);
+  await group(page, "alpha").getByTestId("show-more-chats").click();
+  await expect(
+    group(page, "alpha")
+      .getByRole("button", {
+        name: `Open chat ${fixture.busy.title}`,
+        exact: true,
+      })
+      .getByTestId("busy-spinner"),
+  ).toBeVisible();
+  await collapseToggle(page, "alpha").click();
+  await expectCollapsed(page, "alpha", "Alpha");
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  await expect(inboxRow(page, fixture.plan.title)).toBeVisible();
+  // Result timestamp tie must use session ID, not feed order.
+  fixture.plan.last_message_at = fixture.build.last_message_at;
+  fixture.conversations.reverse();
+  await refreshInbox(fixture);
+  await expect.poll(labels).toEqual(expected);
+  fixture.question.last_message_at = "2026-10-03T12:00:00Z";
+  await refreshInbox(fixture);
+  await expect
+    .poll(labels)
+    .toEqual([expected[1], expected[0], ...expected.slice(2)]);
+  expect(fixture.errors).toEqual([]);
+});
+
+test("Inbox: read rollback, rename/delete/mark unread, click clears results but not gates", async ({
+  page,
+}) => {
+  const fixture = await installInboxFixtures(page);
+  await page.goto("/");
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  fixture.failedReads.add(fixture.build.session_id);
+  await inboxMenu(page, fixture.build.title);
+  await page
+    .getByRole("menuitem", { name: "Mark as read", exact: true })
+    .click();
+  await expect
+    .poll(() => fixture.readSessionIds.includes(fixture.build.session_id))
+    .toBe(true);
+  await expect(inboxRow(page, fixture.build.title)).toBeVisible();
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  fixture.failedReads.clear();
+  await inboxMenu(page, fixture.build.title);
+  await page
+    .getByRole("menuitem", { name: "Mark as read", exact: true })
+    .click();
+  await expect(inboxRow(page, fixture.build.title)).toHaveCount(0);
+  await rowMenu(page, fixture.build.title);
+  await page
+    .getByRole("menuitem", { name: "Mark as unread", exact: true })
+    .click();
+  await expect(inboxRow(page, fixture.build.title)).toBeVisible();
+  await inboxMenu(page, fixture.build.title);
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Rename chat" })
+    .fill("Verified deployment");
+  await page.getByRole("textbox", { name: "Rename chat" }).press("Enter");
+  await expect(inboxRow(page, "Verified deployment")).toBeVisible();
+  await inboxMenu(page, "Verified deployment");
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete chat?" });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(inboxRow(page, "Verified deployment")).toBeVisible();
+  await inboxMenu(page, "Verified deployment");
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(inboxRow(page, "Verified deployment")).toHaveCount(0);
+  await inboxRow(page, fixture.plan.title).press("Enter");
+  await expect(page).toHaveURL(/workspaces\/alpha\?session=result-plan/);
+  await expect(inboxRow(page, fixture.plan.title)).toHaveCount(0);
+  await expect
+    .poll(() => fixture.readSessionIds.includes(fixture.plan.session_id))
+    .toBe(true);
+  await inboxRow(page, fixture.permission.title).click();
+  await expect(page).toHaveURL(/workspaces\/alpha\?session=gate-permission/);
+  await expect(inboxRow(page, fixture.permission.title)).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect
+    .poll(() => fixture.readSessionIds.includes(fixture.permission.session_id))
+    .toBe(true);
+  await expect(page.getByTestId("inbox-count")).toHaveText("3");
+  fixture.permission.needs_attention = false;
+  fixture.permission.attention_kind = "";
+  await fixture.emit("harness.permission_required", {
+    workspace_id: "alpha",
+    session_id: fixture.permission.session_id,
+    decision: "allow",
+  });
+  await expect(inboxRow(page, fixture.permission.title)).toHaveCount(0);
+  expect(fixture.errors).toEqual([]);
+});
+
+test("Inbox: opening stopped idle results marks read and removes the entry", async ({
+  page,
+}) => {
+  const fixture = await installInboxFixtures(page);
+  await page.goto("/");
+  await expect(inboxRow(page, fixture.stopped.title)).toBeVisible();
+  await inboxRow(page, fixture.stopped.title).click();
+  await expect(page).toHaveURL(/workspaces\/archive\?session=stopped-result/);
+  await expect(inboxRow(page, fixture.stopped.title)).toHaveCount(0);
+  await expect
+    .poll(() => fixture.readSessionIds.includes(fixture.stopped.session_id))
+    .toBe(true);
+  await expect(page.getByTestId("inbox-count")).toHaveText("4");
+  await expect(group(page, "archive")).toHaveCount(0);
+  expect(fixture.errors).toEqual([]);
+});
+
+test("Inbox: realtime status, gates, workspace lifecycle and feed agent refresh", async ({
+  page,
+}) => {
+  const fixture = await installInboxFixtures(page);
+  await page.goto("/");
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  fixture.plan.status = "busy";
+  fixture.plan.unread = false;
+  await fixture.emit("harness.session_status", {
+    workspace_id: "alpha",
+    session_id: fixture.plan.session_id,
+    status: "busy",
+  });
+  await expect(inboxRow(page, fixture.plan.title)).toHaveCount(0);
+  fixture.plan.status = "idle";
+  fixture.plan.unread = true;
+  await fixture.emit("harness.session_status", {
+    workspace_id: "alpha",
+    session_id: fixture.plan.session_id,
+    status: "idle",
+  });
+  await expect(inboxRow(page, fixture.plan.title)).toBeVisible();
+  fixture.plan.agent_name = "build";
+  await refreshInbox(fixture);
+  await expect(
+    inboxRow(page, fixture.plan.title).getByTestId("inbox-result-icon"),
+  ).toHaveAttribute("data-kind", "build");
+  fixture.plan.needs_attention = true;
+  fixture.plan.attention_kind = "question";
+  await fixture.emit("harness.question_required", {
+    workspace_id: "alpha",
+    session_id: fixture.plan.session_id,
+    status: "pending",
+  });
+  await expect(inboxRow(page, fixture.plan.title)).toHaveAttribute(
+    "aria-label",
+    `Open chat ${fixture.plan.title} — Question waiting`,
+  );
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  fixture.plan.attention_kind = "both";
+  await fixture.emit("harness.permission_required", {
+    workspace_id: "alpha",
+    session_id: fixture.plan.session_id,
+  });
+  await expect(inboxRow(page, fixture.plan.title)).toHaveAttribute(
+    "aria-label",
+    `Open chat ${fixture.plan.title} — Permission and question waiting`,
+  );
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  fixture.plan.needs_attention = false;
+  fixture.plan.attention_kind = "";
+  await fixture.emit("harness.question_required", {
+    workspace_id: "alpha",
+    session_id: fixture.plan.session_id,
+    status: "answered",
+  });
+  await expect(
+    inboxRow(page, fixture.plan.title).getByTestId("inbox-result-icon"),
+  ).toHaveAttribute("data-kind", "build");
+  fixture.workspaces.find((row) => row.id === "alpha")!.status = "stopped";
+  await fixture.emit("workspace:status_changed", {
+    workspace_id: "alpha",
+    status: "stopped",
+    credentials_present: false,
+  });
+  await expect(group(page, "alpha")).toHaveCount(0);
+  await expect(page.getByTestId("inbox-count")).toHaveText("3");
+  await expect(inboxRow(page, fixture.plan.title)).toBeVisible();
+  await expect(inboxRow(page, fixture.question.title)).toHaveCount(0);
+  fixture.workspaces.find((row) => row.id === "archive")!.status = "running";
+  await fixture.emit("workspace:status_changed", {
+    workspace_id: "archive",
+    status: "running",
+    credentials_present: false,
+  });
+  await expect(inboxRow(page, fixture.archivedGate.title)).toBeVisible();
+  await expect(page.getByTestId("inbox-count")).toHaveText("4");
+  fixture.busy.status = "idle";
+  await fixture.emit("harness.session_status", {
+    workspace_id: "alpha",
+    session_id: fixture.busy.session_id,
+    status: "idle",
+  });
+  await expect(inboxRow(page, fixture.busy.title)).toBeVisible();
+  await expect(page.getByTestId("inbox-count")).toHaveText("5");
+  expect(fixture.errors).toEqual([]);
+});
+
+for (const appearance of ["light", "dark", "mobile"] as const) {
+  test(`Inbox: ${appearance} screenshots, native tooltips and accessible labels`, async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      viewport:
+        appearance === "mobile"
+          ? { width: 390, height: 844 }
+          : { width: 1440, height: 960 },
+      colorScheme: appearance === "dark" ? "dark" : "light",
+    });
+    try {
+      const page = await context.newPage();
+      const fixture = await installInboxFixtures(page);
+      await page.addInitScript(
+        (theme) => localStorage.setItem("vueuse-color-scheme", theme),
+        appearance === "dark" ? "dark" : "light",
+      );
+      await page.goto(BASE_URL);
+      if (appearance === "mobile") {
+        await page
+          .getByRole("button", { name: "Toggle Sidebar", exact: true })
+          .first()
+          .click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+      }
+      await expect(page.getByTestId("inbox-count")).toHaveText("5");
+      if (appearance === "dark")
+        await expect(page.locator("html")).toHaveClass(/dark/);
+      await collapseToggle(page, "alpha").click();
+      const row = inboxRow(page, fixture.plan.title);
+      await expect(row).toHaveAttribute("tabindex", "0");
+      await expect(row.locator('[title="Unread plan response"]')).toBeVisible();
+      await expect(
+        inboxRow(page, fixture.permission.title).locator(
+          '[title="Permission required"]',
+        ),
+      ).toBeVisible();
+      await row.locator("span.truncate").first().hover();
+      await expect(
+        page.locator('[data-slot="tooltip-content"]').first(),
+      ).toContainText("Unread plan response");
+      await expect(
+        page.locator('[data-slot="tooltip-content"]').first(),
+      ).toContainText("Alpha");
+      await page.mouse.move(10, 700);
+      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
+        0,
+      );
+      await settledScreenshot(page, `inbox-${appearance}.png`);
+      if (appearance === "mobile") {
+        await row.click();
+        await expect(page.getByRole("dialog")).toBeHidden();
+        await expect(page).toHaveURL(/session=result-plan/);
+      }
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+}

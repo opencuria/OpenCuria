@@ -1,13 +1,13 @@
 <script setup lang="ts">
 /**
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
- * action-required chats, workspace-grouped conversations, scheduled tasks, account.
+ * inbox, workspace-grouped conversations, scheduled tasks, account.
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CalendarClock as CalendarClockIcon, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
-import ActionRequiredSection from './sidebar/ActionRequiredSection.vue'
+import InboxSection from './sidebar/InboxSection.vue'
 import ConversationWorkspaceList from './sidebar/ConversationWorkspaceList.vue'
 import SidebarBrandHeader from './sidebar/SidebarBrandHeader.vue'
 import SidebarUserFooter from './sidebar/SidebarUserFooter.vue'
@@ -36,7 +36,7 @@ import { storeToRefs } from 'pinia'
 import {
   countableWorkspaces,
   conversationTitle,
-  extractActionRequired,
+  extractInboxConversations,
 } from '@/lib/conversationGroups'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
@@ -81,12 +81,8 @@ const runningWorkspaceIds = computed(
     ),
 )
 
-const actionRequiredConversations = computed(() =>
-  extractActionRequired(
-    conversationStore.conversations.filter((row) =>
-      runningWorkspaceIds.value.has(row.workspace_id),
-    ),
-  ),
+const inboxConversations = computed(() =>
+  extractInboxConversations(conversationStore.conversations, runningWorkspaceIds.value),
 )
 
 const workspaceTotal = computed(() => countableWorkspaces(workspaceStore.workspaces).length)
@@ -395,8 +391,8 @@ watch(
 
     <SidebarContent class="group-data-[collapsible=icon]:hidden">
       <div class="flex flex-col gap-3 pb-2">
-        <ActionRequiredSection
-          :conversations="actionRequiredConversations"
+        <InboxSection
+          :conversations="inboxConversations"
           :active-session-id="activeSessionId"
           @select="handleSelectConversation"
           @rename="handleRename"

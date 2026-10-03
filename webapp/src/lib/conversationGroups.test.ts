@@ -7,6 +7,7 @@ import {
   conversationTitle,
   extractActionRequired,
   extractActiveConversations,
+  extractInboxConversations,
   formatTimeAgo,
   groupConversationsByWorkspace,
   selectSidebarWorkspaces,
@@ -166,6 +167,93 @@ describe('extractActionRequired', () => {
       }),
     ])
     expect(rows.map((row) => row.session_id)).toEqual(['new-gate', 'old-gate'])
+  })
+})
+
+describe('extractInboxConversations', () => {
+  const runningIds = new Set(['ws-1'])
+
+  it('prioritizes gates over newer unread results, newest first in each group', () => {
+    const rows = [
+      conversation({ session_id: 'read' }),
+      conversation({ session_id: 'build', unread: true }),
+      conversation({
+        session_id: 'old-question',
+        status: 'busy',
+        needs_attention: true,
+        attention_kind: 'question',
+        unread: true,
+        last_message_at: new Date(NOW - 30_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'permission',
+        needs_attention: true,
+        attention_kind: 'permission',
+        last_message_at: new Date(NOW - 10_000).toISOString(),
+      }),
+      conversation({
+        session_id: 'plan',
+        unread: true,
+        mode: 'plan',
+        agent_name: 'plan',
+        last_message_at: new Date(NOW - 20_000).toISOString(),
+      }),
+    ]
+    const before = structuredClone(rows)
+    rows.forEach(Object.freeze)
+    Object.freeze(rows)
+    expect(extractInboxConversations(rows, runningIds).map((row) => row.session_id)).toEqual([
+      'permission',
+      'old-question',
+      'build',
+      'plan',
+    ])
+    expect(rows).toEqual(before)
+  })
+
+  it('includes idle unread from stopped/unknown workspaces but keeps gate visibility unchanged', () => {
+    const rows = [
+      conversation({ session_id: 'stopped-unread', workspace_id: 'stopped', unread: true }),
+      conversation({ session_id: 'unknown-unread', workspace_id: 'unknown', unread: true }),
+      conversation({ session_id: 'stopped-gate', workspace_id: 'stopped', needs_attention: true }),
+      conversation({
+        session_id: 'stopped-both',
+        workspace_id: 'stopped',
+        unread: true,
+        needs_attention: true,
+      }),
+      conversation({ session_id: 'stopped-read', workspace_id: 'stopped' }),
+    ]
+    expect(extractInboxConversations(rows, runningIds).map((row) => row.session_id)).toEqual([
+      'stopped-unread',
+      'unknown-unread',
+    ])
+  })
+
+  it('excludes busy unread even when manually marked, unless a gate is waiting', () => {
+    const rows = [
+      conversation({ session_id: 'busy', status: 'busy', unread: true }),
+      conversation({ session_id: 'manual', status: 'busy', unread: true, manual_unread: true }),
+      conversation({ session_id: 'idle-manual', unread: true, manual_unread: true }),
+      conversation({
+        session_id: 'busy-gate',
+        status: 'busy',
+        needs_attention: true,
+        attention_kind: 'both',
+      }),
+    ]
+    expect(extractInboxConversations(rows, runningIds).map((row) => row.session_id)).toEqual([
+      'busy-gate',
+      'idle-manual',
+    ])
+  })
+
+  it('has deterministic timestamp ties and does not cap unread results', () => {
+    const rows = Array.from({ length: 12 }, (_, index) =>
+      conversation({ session_id: `s-${String(index).padStart(2, '0')}`, unread: true }),
+    )
+    expect(extractInboxConversations([...rows].reverse(), runningIds)).toEqual(rows)
+    expect(extractInboxConversations([], runningIds)).toEqual([])
   })
 })
 

@@ -76,6 +76,28 @@ export function extractActionRequired(conversations: HarnessConversation[]): Har
 }
 
 /**
+ * Sidebar inbox: actionable gates from running workspaces, then idle unread
+ * chats from any workspace. A gate takes precedence over an unread result.
+ */
+export function extractInboxConversations(
+  conversations: HarnessConversation[],
+  runningWorkspaceIds: ReadonlySet<string>,
+): HarnessConversation[] {
+  return conversations
+    .filter((conversation) =>
+      conversation.needs_attention
+        ? runningWorkspaceIds.has(conversation.workspace_id)
+        : conversation.unread && conversation.status === 'idle',
+    )
+    .sort(
+      (a, b) =>
+        Number(Boolean(b.needs_attention)) - Number(Boolean(a.needs_attention)) ||
+        new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime() ||
+        a.session_id.localeCompare(b.session_id),
+    )
+}
+
+/**
  * Group running workspaces' chats, online first and alphabetically within each
  * partition. Include empty running workspaces; omit stopped and unknown history.
  */
