@@ -101,6 +101,7 @@ class ScheduledTaskRun(models.Model):
     )
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    completion_check_pending = models.BooleanField(default=False)
     error = models.TextField(blank=True, default="")
     reason = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)

@@ -112,7 +112,7 @@ const dropdownItemStub = defineComponent({
 const selectUpdateKey = Symbol('select-update')
 const tabsModelKey = Symbol('tabs-model')
 
-async function mountDialog(mode: 'edit' | 'new' = 'edit') {
+async function mountDialog(mode: 'edit' | 'new' = 'edit', selectedTask = task) {
   setActivePinia(createPinia())
   const auth = useAuthStore()
   auth.activeOrganizationId = 'org-1'
@@ -127,9 +127,9 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
   ]
   skillMocks.skills = [{ id: 'skill-1', name: 'Review skill' }]
   const store = useScheduledTaskStore()
-  store.tasks = [task]
+  store.tasks = [selectedTask]
   if (mode === 'new') store.openNew()
-  else store.openTask(task.id)
+  else store.openTask(selectedTask.id)
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -268,11 +268,7 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit') {
           setup(props, { slots, emit }) {
             provide(selectUpdateKey, (value: string) => emit('update:modelValue', value))
             return () =>
-              h(
-                'div',
-                { 'aria-disabled': props.disabled ? 'true' : undefined },
-                slots.default?.(),
-              )
+              h('div', { 'aria-disabled': props.disabled ? 'true' : undefined }, slots.default?.())
           },
         }),
         SelectTrigger: defineComponent({
@@ -353,12 +349,84 @@ describe('ScheduledTaskDialog', () => {
     expect(wrapper.find('[data-testid="workspace-files"]').exists()).toBe(false)
   })
 
+  it('defaults to seven days and saves daily with empty API weekdays', async () => {
+    const { wrapper } = await mountDialog('new')
+    expect(wrapper.find('[data-testid="recurrence-daily"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="recurrence-weekly"]').exists()).toBe(false)
+    for (let day = 0; day < 7; day += 1) {
+      expect(wrapper.get(`[data-testid="weekday-${day}"]`).attributes('aria-pressed')).toBe('true')
+    }
+    await wrapper.get('[data-testid="task-name"]').setValue('Daily review')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ recurrence: 'daily', weekdays: [] }),
+    )
+  })
+
+  it('loads daily tasks with seven days and derives weekly after deselecting one', async () => {
+    const { wrapper } = await mountDialog('edit', { ...task, recurrence: 'daily', weekdays: [] })
+    for (let day = 0; day < 7; day += 1) {
+      expect(wrapper.get(`[data-testid="weekday-${day}"]`).attributes('aria-pressed')).toBe('true')
+    }
+    expect(wrapper.get('[data-testid="save-task"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="weekday-6"]').trigger('click')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({ recurrence: 'weekly', weekdays: [0, 1, 2, 3, 4, 5] }),
+    )
+  })
+
+  it('retains weekly days and derives daily when all days are selected', async () => {
+    const { wrapper } = await mountDialog('edit', { ...task, weekdays: [1, 5] })
+    for (let day = 0; day < 7; day += 1) {
+      expect(wrapper.get(`[data-testid="weekday-${day}"]`).attributes('aria-pressed')).toBe(
+        [1, 5].includes(day) ? 'true' : 'false',
+      )
+    }
+    await wrapper.get('[data-testid="task-name"]').setValue('Updated review')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenLastCalledWith(
+      task.id,
+      expect.objectContaining({ recurrence: 'weekly', weekdays: [1, 5] }),
+    )
+    for (const day of [0, 2, 3, 4, 6]) {
+      await wrapper.get(`[data-testid="weekday-${day}"]`).trigger('click')
+    }
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenLastCalledWith(
+      task.id,
+      expect.objectContaining({ recurrence: 'daily', weekdays: [] }),
+    )
+  })
+
+  it('previews only selected days and rejects an empty selection', async () => {
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-name"]').setValue('Monday review')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
+    await wrapper.get('[data-testid="task-timezone"]').setValue('UTC')
+    for (let day = 1; day < 7; day += 1) {
+      await wrapper.get(`[data-testid="weekday-${day}"]`).trigger('click')
+    }
+    expect(wrapper.text()).toMatch(/Next run · Mon/)
+    await wrapper.get('[data-testid="weekday-0"]').trigger('click')
+    expect(wrapper.text()).toContain('Next run · Choose a valid time')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    expect(wrapper.text()).toContain('Choose at least one day.')
+    expect(api.createScheduledTask).not.toHaveBeenCalled()
+  })
+
   it('saves a weekly task through shared store, but does not run it', async () => {
     const { wrapper, store } = await mountDialog('new')
     await wrapper.get('[data-testid="task-name"]').setValue('Morning check')
     await wrapper.get('[data-testid="task-prompt"]').setValue('Check build health')
     await wrapper.get('[data-testid="task-timezone"]').setValue('Europe/Berlin')
-    await wrapper.get('[data-testid="recurrence-weekly"]').trigger('click')
+    await wrapper.get('[data-testid="weekdays-weekdays"]').trigger('click')
     await wrapper.get('[data-testid="weekday-0"]').trigger('click')
     await wrapper.get('[data-testid="save-task"]').trigger('click')
     await flushPromises()
@@ -466,6 +534,11 @@ describe('ScheduledTaskDialog', () => {
     await wrapper.get('[data-testid="task-runs-tab"]').trigger('click')
     await flushPromises()
     expect(api.listScheduledTaskRuns).toHaveBeenCalledWith('task-1')
+    expect(wrapper.text()).not.toContain('Back to settings')
+    expect(wrapper.get('[data-testid="task-settings-tab"]').text()).toBe('Settings')
+    const panel = wrapper.get('[data-testid="task-runs-panel"]')
+    expect(panel.findAll('button').map((button) => button.text())).toEqual(['Open chat', 'Run now'])
+    expect(panel.findAll('button')[1]?.element.parentElement?.className).toContain('!justify-end')
     await wrapper.get('[data-testid="open-run-run-1"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe('/workspaces/ws-1?session=session-1')

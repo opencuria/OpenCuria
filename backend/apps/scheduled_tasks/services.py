@@ -259,7 +259,32 @@ class ScheduledTaskService:
         self.repository.delete(task)
 
     def list_runs(self, task: ScheduledTask) -> list[ScheduledTaskRun]:
+        """Repair completed history for this owned task before returning it."""
+        for run in self.repository.active_runs(task_id=task.id):
+            self._finish_completed_run(run)
         return self.repository.list_runs(task)
+
+    def _finish_completed_run(self, run: ScheduledTaskRun) -> bool:
+        """Project the exact assistant outcome without overwriting terminal runs."""
+        message = run.assistant_message
+        if message is None or message.completed_at is None:
+            return False
+        status = (
+            ScheduledTaskRun.Status.ERROR
+            if message.error or message.finish == "error"
+            else ScheduledTaskRun.Status.SUCCEEDED
+        )
+        return self.repository.finish_run(
+            run,
+            status=status,
+            finished_at=message.completed_at,
+            error=message.error or "",
+        )
+
+    def complete_assistant_run(self, message_id: uuid.UUID) -> None:
+        """Settle linked task runs directly when their harness assistant finishes."""
+        for run in self.repository.active_runs(message_id=message_id):
+            self._finish_completed_run(run)
 
     @staticmethod
     def _validate_skill_ids(value: Any) -> list[str]:
@@ -431,20 +456,9 @@ class ScheduledTaskService:
         """Project assistant completion onto history and apply idle auto-stop."""
         rows = await sync_to_async(self.repository.active_runs)()
         for run in rows:
-            message = run.assistant_message
-            if message is None or message.completed_at is None:
-                continue
-            status = (
-                ScheduledTaskRun.Status.ERROR
-                if message.error or message.finish == "error"
-                else ScheduledTaskRun.Status.SUCCEEDED
-            )
-            await sync_to_async(self.repository.update_run)(
-                run,
-                status=status,
-                finished_at=message.completed_at,
-                error=message.error or "",
-            )
+            await sync_to_async(self._finish_completed_run)(run)
+        pending = await sync_to_async(self.repository.pending_completion_checks)()
+        for run in pending:
             workspace_id = (
                 run.scheduled_task.workspace_id
                 if run.scheduled_task is not None
@@ -452,6 +466,7 @@ class ScheduledTaskService:
             )
             if workspace_id is not None:
                 await self._maybe_stop_workspace(workspace_id)
+            await sync_to_async(self.repository.clear_completion_check)(run.id)
 
     async def _launch(
         self,
@@ -632,6 +647,14 @@ class ScheduledTaskService:
             status=ScheduledTaskRun.Status.RUNNING,
             started_at=timezone.now(),
         )
+        # The background assistant can finish before its ledger link is saved.
+        # Re-read persisted completion instead of trusting start_run's instance.
+        try:
+            await sync_to_async(self.complete_assistant_run)(assistant.id)
+        except Exception:
+            log.exception(
+                "scheduled_task_completion_failed", run_id=str(run.id)
+            )
         try:
             await sync_to_async(self.repository.touch_workspace_activity)(
                 task.workspace_id

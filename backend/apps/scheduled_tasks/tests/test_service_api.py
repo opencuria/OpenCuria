@@ -146,10 +146,9 @@ def test_run_now_links_provider_backed_chat_and_terminal_outcome(
     run.refresh_from_db()
     assert run.session_id == session.id
     assert run.assistant_message_id == assistant.id
-    assert run.status in {
-        ScheduledTaskRun.Status.RUNNING,
-        ScheduledTaskRun.Status.SUCCEEDED,
-    }
+    assert run.status == ScheduledTaskRun.Status.SUCCEEDED
+    assert run.finished_at == assistant.completed_at
+    assert run.error == ""
 
 
 @pytest.mark.django_db(transaction=True)
@@ -392,3 +391,186 @@ async def test_mcp_run_now_requires_permission_and_owner_scope(
         session_id=session_id, role="assistant"
     )
     assert assistant.finish == "stop"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("outcome", ["error", "abort"])
+def test_real_harness_failure_and_abort_settle_before_idle(
+    scheduled_run_setup, monkeypatch, outcome
+):
+    _, _, _, _, task = scheduled_run_setup
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    idle_statuses = []
+
+    class FailingProvider(TestProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):
+            entered.set()
+            await gate.wait()
+            raise RuntimeError("scheduled provider failed")
+            yield Delta(text="unreachable")
+
+    async def capture_emit(event, payload, **kwargs):
+        if payload.get("status") == "idle":
+            status = await sync_to_async(
+                lambda: ScheduledTaskRun.objects.get(scheduled_task=task).status
+            )()
+            idle_statuses.append(status)
+
+    harness = HarnessService(
+        provider_factory=lambda _org: FailingProvider(), emit=capture_emit
+    )
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: session.model,
+    )
+    harness._on_run_task_done = lambda task, key: None
+
+    async def complete():
+        run = await ScheduledTaskService(harness=harness).run_now(task)
+        running = harness._tasks[str(run.session_id)]
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if outcome == "abort":
+            await harness.abort_run(run.session_id)
+        else:
+            gate.set()
+        await asyncio.gather(running, return_exceptions=True)
+        return run
+
+    run = asyncio.run(complete())
+    run.refresh_from_db()
+    assistant = HarnessMessage.objects.get(id=run.assistant_message_id)
+    assert assistant.completed_at is not None
+    assert assistant.finish == ("aborted" if outcome == "abort" else "error")
+    assert run.status == ScheduledTaskRun.Status.ERROR
+    assert run.finished_at == assistant.completed_at
+    assert run.error == assistant.error
+    expected_error = (
+        "aborted by user" if outcome == "abort" else "scheduled provider failed"
+    )
+    assert expected_error in run.error
+    assert idle_statuses == [ScheduledTaskRun.Status.ERROR]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("access", ["other_owner", "no_read"])
+def test_unauthorized_history_cannot_repair_completed_run(scheduled_run_setup, access):
+    from django.utils import timezone
+
+    org, owner, outsider, workspace, task = scheduled_run_setup
+    session = HarnessSession.objects.create(workspace=workspace, organization_id=org.id)
+    assistant = HarnessMessage.objects.create(
+        session=session, role="assistant", completed_at=timezone.now(), finish="stop"
+    )
+    run = ScheduledTaskRun.objects.create(
+        scheduled_task=task,
+        scheduled_for=timezone.now(),
+        session=session,
+        assistant_message=assistant,
+        status=ScheduledTaskRun.Status.RUNNING,
+    )
+    client = _client(
+        outsider if access == "other_owner" else owner,
+        org,
+        [APIKeyPermission.HARNESS_READ.value]
+        if access == "other_owner"
+        else [APIKeyPermission.HARNESS_RUN.value],
+    )
+    response = client.get(f"/api/v1/scheduled-tasks/{task.id}/runs/")
+    assert response.status_code == (404 if access == "other_owner" else 403)
+    run.refresh_from_db()
+    assert run.status == ScheduledTaskRun.Status.RUNNING
+    assert run.finished_at is None
+    assert not run.completion_check_pending
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("failure_phase", ["admission", "finalization"])
+def test_projection_failure_preserves_live_run_and_idle_cleanup_then_history_repairs(
+    scheduled_run_setup, monkeypatch, failure_phase
+):
+    _, _, _, _, task = scheduled_run_setup
+    gate = asyncio.Event()
+    idle_statuses = []
+    projection_calls = []
+    repairs = []
+    callbacks = []
+    original_projection = ScheduledTaskService.complete_assistant_run
+
+    def project(service, message_id):
+        projection_calls.append(message_id)
+        phase = "admission" if len(projection_calls) == 1 else "finalization"
+        if phase == failure_phase:
+            raise RuntimeError("completion projection unavailable")
+        if failure_phase == "admission" and phase == "finalization":
+            # The completed assistant is now durable; exercise scoped recovery
+            # before the normal finalization projection can settle the ledger.
+            repairs.append(service.list_runs(task)[0].status)
+        original_projection(service, message_id)
+
+    class SlowProvider(TestProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):
+            await gate.wait()
+            yield Delta(text="scheduled answer", usage=Usage(1, 1, 2))
+
+    async def capture_emit(event, payload):
+        if payload.get("status") == "idle":
+            idle_statuses.append(
+                await sync_to_async(
+                    lambda: ScheduledTaskRun.objects.get(scheduled_task=task).status
+                )()
+            )
+
+    harness = HarnessService(
+        provider_factory=lambda _org: SlowProvider(), emit=capture_emit
+    )
+    original_callback = harness._on_run_task_done
+
+    def run_done(background, key):
+        callbacks.append(key)
+        original_callback(background, key)
+
+    monkeypatch.setattr(harness, "_on_run_task_done", run_done)
+    monkeypatch.setattr(ScheduledTaskService, "complete_assistant_run", project)
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: session.model,
+    )
+
+    async def complete():
+        run = await ScheduledTaskService(harness=harness).run_now(task)
+        key = str(run.session_id)
+        background = harness._tasks[key]
+        await sync_to_async(run.refresh_from_db)()
+        assert run.status == ScheduledTaskRun.Status.RUNNING
+        assert run.error == "" and run.finished_at is None
+        assert not background.done()
+        gate.set()
+        await background
+        await asyncio.sleep(0)  # Let the actual completion callback execute.
+        assert callbacks == [key]
+        assert key not in harness._tasks
+        assert key not in harness._runs
+        assert key not in harness._event_locks
+        assert key not in harness._admissions
+        return run
+
+    run = asyncio.run(complete())
+    run.refresh_from_db()
+    assistant = HarnessMessage.objects.get(id=run.assistant_message_id)
+    assert assistant.completed_at is not None and assistant.finish == "stop"
+    assert HarnessSession.objects.get(id=run.session_id).status == "idle"
+    assert projection_calls == [assistant.id, assistant.id]
+    if failure_phase == "finalization":
+        assert idle_statuses == [ScheduledTaskRun.Status.RUNNING]
+        assert run.status == ScheduledTaskRun.Status.RUNNING
+        assert run.error == "" and run.finished_at is None
+    else:
+        assert repairs == [ScheduledTaskRun.Status.SUCCEEDED]
+        assert idle_statuses == [ScheduledTaskRun.Status.SUCCEEDED]
+    repaired = ScheduledTaskService().list_runs(task)[0]
+    assert repaired.status == ScheduledTaskRun.Status.SUCCEEDED
+    assert repaired.finished_at == assistant.completed_at
+    assert repaired.error == ""

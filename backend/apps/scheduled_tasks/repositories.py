@@ -323,13 +323,53 @@ class ScheduledTaskRepository:
         return run
 
     @staticmethod
-    def active_runs() -> list[ScheduledTaskRun]:
-        return list(
-            ScheduledTaskRun.objects.filter(
-                status=ScheduledTaskRun.Status.RUNNING,
-                assistant_message__completed_at__isnull=False,
-            ).select_related("assistant_message", "scheduled_task")
+    def active_runs(
+        *, task_id: uuid.UUID | None = None, message_id: uuid.UUID | None = None
+    ) -> list[ScheduledTaskRun]:
+        """Find completed assistants whose task ledger still needs settling."""
+        rows = ScheduledTaskRun.objects.filter(
+            status=ScheduledTaskRun.Status.RUNNING,
+            assistant_message__completed_at__isnull=False,
         )
+        if task_id is not None:
+            rows = rows.filter(scheduled_task_id=task_id)
+        if message_id is not None:
+            rows = rows.filter(assistant_message_id=message_id)
+        return list(rows.select_related("assistant_message", "scheduled_task", "session"))
+
+    @staticmethod
+    def finish_run(
+        run: ScheduledTaskRun, *, status: str, finished_at: datetime, error: str
+    ) -> bool:
+        """Settle a linked running ledger once, without overwriting terminal states."""
+        fields = {
+            "status": status,
+            "finished_at": finished_at,
+            "error": error,
+            "completion_check_pending": True,
+        }
+        updated = ScheduledTaskRun.objects.filter(
+            id=run.id,
+            status=ScheduledTaskRun.Status.RUNNING,
+            assistant_message_id=run.assistant_message_id,
+        ).update(**fields)
+        if updated:
+            for key, value in fields.items():
+                setattr(run, key, value)
+        return bool(updated)
+
+    @staticmethod
+    def pending_completion_checks() -> list[ScheduledTaskRun]:
+        """Keep completion-triggered auto-stop checks durable after eager settlement."""
+        return list(
+            ScheduledTaskRun.objects.filter(completion_check_pending=True)
+            .select_related("scheduled_task", "session")
+        )
+
+    @staticmethod
+    def clear_completion_check(run_id: uuid.UUID) -> None:
+        """Consume a successful completion check, including a policy no-op."""
+        ScheduledTaskRun.objects.filter(id=run_id).update(completion_check_pending=False)
 
     @staticmethod
     def recover_backend_restart() -> int:

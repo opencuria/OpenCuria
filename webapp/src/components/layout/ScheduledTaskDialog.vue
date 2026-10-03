@@ -79,7 +79,6 @@ interface FormState {
   model: string
   reasoning_effort: string
   skill_ids: string[]
-  recurrence: 'daily' | 'weekly'
   weekdays: number[]
   local_time: string
   timezone_name: string
@@ -94,14 +93,16 @@ function blankForm(): FormState {
     model: '',
     reasoning_effort: '',
     skill_ids: [],
-    recurrence: 'daily',
-    weekdays: [0, 1, 2, 3, 4],
+    weekdays: WEEKDAYS.map((day) => day.value),
     local_time: '09:00',
     timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
     enabled: true,
   }
 }
 const form = ref<FormState>(blankForm())
+const recurrence = computed(() =>
+  WEEKDAYS.every((day) => form.value.weekdays.includes(day.value)) ? 'daily' : 'weekly',
+)
 const errors = ref<Record<string, string>>({})
 let formBaseline = JSON.stringify(form.value)
 watch(
@@ -155,7 +156,7 @@ const nextPreview = computed(() => {
     if (!Number.isNaN(authoritative.getTime())) return authoritative
   }
   return nextLocalOccurrence(
-    form.value.recurrence,
+    recurrence.value,
     form.value.weekdays,
     form.value.local_time,
     form.value.timezone_name,
@@ -193,8 +194,7 @@ function applyTask(task: ScheduledTask): void {
     model: task.model,
     reasoning_effort: task.reasoning_effort,
     skill_ids: [...task.skill_ids],
-    recurrence: task.recurrence,
-    weekdays: [...task.weekdays],
+    weekdays: task.recurrence === 'daily' ? WEEKDAYS.map((day) => day.value) : [...task.weekdays],
     local_time: task.local_time,
     timezone_name: task.timezone_name,
     enabled: task.enabled,
@@ -273,7 +273,7 @@ function updateForm<K extends keyof FormState>(key: K, value: FormState[K]): voi
   apiError.value = ''
 }
 function validate(): boolean {
-  const result = validateSchedule(form.value)
+  const result = validateSchedule({ ...form.value, recurrence: recurrence.value })
   errors.value = { ...result.errors }
   if (isNew.value && !form.value.workspace_id && visibleWorkspaces.value.length === 0)
     errors.value.workspace_id = 'Create a workspace before scheduling a task.'
@@ -297,7 +297,8 @@ async function save(): Promise<void> {
       ...form.value,
       name: form.value.name.trim(),
       prompt: form.value.prompt.trim(),
-      weekdays: form.value.recurrence === 'daily' ? [] : form.value.weekdays,
+      recurrence: recurrence.value,
+      weekdays: recurrence.value === 'daily' ? [] : form.value.weekdays,
     }
     const saved = selectedId.value
       ? await taskStore.update(selectedId.value, payload)
@@ -740,38 +741,38 @@ onMounted(async () => {
                 <div>
                   <h3 id="schedule-heading" class="text-xs font-semibold">Schedule</h3>
                 </div>
-                <div class="grid grid-cols-[minmax(0,1fr)_8.25rem] gap-3 sm:grid-cols-[1fr_130px]">
-                  <div>
-                    <span class="mb-1.5 block text-xs font-medium">Repeat</span>
-                    <div class="flex rounded-lg bg-muted p-0.5">
-                      <button
-                        type="button"
-                        class="flex-1 rounded-md px-2 py-1.5 text-xs"
+                <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_130px]">
+                  <div class="space-y-1.5">
+                    <span class="block text-xs font-medium">Days</span>
+                    <div class="flex flex-wrap items-center gap-1.5" data-testid="weekday-picker">
+                      <Button
+                        v-for="day in WEEKDAYS"
+                        :key="day.value"
+                        variant="outline"
+                        size="sm"
+                        class="h-9 min-w-9 rounded-md px-2 text-xs"
                         :class="
-                          form.recurrence === 'daily'
-                            ? 'bg-background shadow-sm'
-                            : 'text-muted-foreground'
+                          form.weekdays.includes(day.value)
+                            ? 'border-primary/50 bg-primary/10 text-primary'
+                            : 'border-border text-muted-foreground'
                         "
-                        data-testid="recurrence-daily"
-                        :aria-pressed="form.recurrence === 'daily'"
-                        @click="updateForm('recurrence', 'daily')"
+                        :aria-pressed="form.weekdays.includes(day.value)"
+                        :data-testid="`weekday-${day.value}`"
+                        @click="toggleWeekday(day.value)"
                       >
-                        Every day</button
-                      ><button
-                        type="button"
-                        class="flex-1 rounded-md px-2 py-1.5 text-xs"
-                        :class="
-                          form.recurrence === 'weekly'
-                            ? 'bg-background shadow-sm'
-                            : 'text-muted-foreground'
-                        "
-                        data-testid="recurrence-weekly"
-                        :aria-pressed="form.recurrence === 'weekly'"
-                        @click="updateForm('recurrence', 'weekly')"
+                        {{ day.label }}</Button
+                      ><Button
+                        variant="ghost"
+                        size="sm"
+                        class="h-8 rounded-lg px-2 text-xs"
+                        data-testid="weekdays-weekdays"
+                        @click="updateForm('weekdays', [0, 1, 2, 3, 4])"
+                        >Mon–Fri</Button
                       >
-                        Selected days
-                      </button>
                     </div>
+                    <span v-if="errors.weekdays" class="text-xs text-destructive">{{
+                      errors.weekdays
+                    }}</span>
                   </div>
                   <label class="block space-y-1.5"
                     ><span class="block text-xs font-medium">Time</span
@@ -786,38 +787,6 @@ onMounted(async () => {
                     }}</span></label
                   >
                 </div>
-                <div
-                  v-if="form.recurrence === 'weekly'"
-                  class="flex flex-wrap items-center gap-1.5"
-                  data-testid="weekday-picker"
-                >
-                  <button
-                    v-for="day in WEEKDAYS"
-                    :key="day.value"
-                    type="button"
-                    class="min-h-9 min-w-9 rounded-md border px-2 py-1 text-xs"
-                    :class="
-                      form.weekdays.includes(day.value)
-                        ? 'border-primary/50 bg-primary/10 text-primary'
-                        : 'border-border text-muted-foreground'
-                    "
-                    :aria-pressed="form.weekdays.includes(day.value)"
-                    :data-testid="`weekday-${day.value}`"
-                    @click="toggleWeekday(day.value)"
-                  >
-                    {{ day.label }}</button
-                  ><Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-8 rounded-lg px-2 text-xs"
-                    data-testid="weekdays-weekdays"
-                    @click="((form.weekdays = [0, 1, 2, 3, 4]), (dirty = true))"
-                    >Mon–Fri</Button
-                  >
-                </div>
-                <span v-if="errors.weekdays" class="text-xs text-destructive">{{
-                  errors.weekdays
-                }}</span>
                 <div class="grid gap-3 sm:grid-cols-2">
                   <label class="block space-y-1.5"
                     ><span class="block text-xs font-medium">Time zone</span
@@ -975,9 +944,7 @@ onMounted(async () => {
             </p>
           </div>
           <DialogFooter
-            class="!flex !flex-row !items-center !justify-between gap-2 border-t border-border px-4 py-3 sm:px-6"
-            ><Button variant="ghost" size="sm" class="h-9 rounded-lg" @click="tab = 'settings'"
-              >Back to settings</Button
+            class="!flex !flex-row !items-center !justify-end gap-2 border-t border-border px-4 py-3 sm:px-6"
             ><Button
               variant="outline"
               size="sm"

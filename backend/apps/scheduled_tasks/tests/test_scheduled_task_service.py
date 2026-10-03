@@ -23,6 +23,9 @@ class FakeRepository:
     def due(self, now):
         return self.rows
 
+    def active_runs(self, *, task_id=None, message_id=None):
+        return []
+
     def claim(self, task, *, scheduled_for):
         return SimpleNamespace(
             id=uuid.uuid4(),
