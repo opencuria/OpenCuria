@@ -330,7 +330,12 @@ describe('HarnessChatPanel', () => {
     expect(store.viewingSessionId).toBeNull()
   })
 
-  it('surfaces abort and error notices in the composer sheet stack', async () => {
+  it.each([
+    ['aborted', 'aborted by user', 'Run stopped by user', 'info'],
+    ['aborted', 'Run interrupted unexpectedly', 'Run interrupted unexpectedly', 'error'],
+    ['error', 'Run interrupted unexpectedly', 'Run interrupted unexpectedly', 'error'],
+    ['error', 'aborted by user', 'aborted by user', 'error'],
+  ] as const)('surfaces and dismisses %s / %s notices', async (finish, error, text, tone) => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
@@ -359,19 +364,23 @@ describe('HarnessChatPanel', () => {
         session_id: 'session-root',
         role: 'assistant',
         content: '',
-        finish: 'aborted',
-        error: 'aborted by user',
+        finish,
+        error,
         parts: [],
       },
     ]
     await wrapper.vm.$nextTick()
 
     const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
-    const sheets = stack.props('sheets') as Array<{ kind: string; notice?: { text: string } }>
+    const sheets = stack.props('sheets') as Array<{
+      kind: string
+      notice?: { text: string; tone: string }
+    }>
     expect(sheets.map((sheet) => sheet.kind)).toContain('notice')
-    expect(sheets.find((sheet) => sheet.kind === 'notice')?.notice?.text).toBe(
-      'Run stopped by user',
-    )
+    expect(sheets.find((sheet) => sheet.kind === 'notice')?.notice).toMatchObject({
+      text,
+      tone,
+    })
 
     stack.vm.$emit('dismiss-notice', 'msg-abort')
     await wrapper.vm.$nextTick()
@@ -380,77 +389,80 @@ describe('HarnessChatPanel', () => {
     expect(after.map((sheet) => sheet.kind)).not.toContain('notice')
   })
 
-  it('hides server-dismissed notices and auto-clears on a newer user message', async () => {
-    const wrapper = mount(HarnessChatPanel, {
-      props: {
-        workspaceId: 'ws-1',
-        canPrompt: true,
-      },
-      global: {
-        plugins: [router],
-        stubs,
-      },
-    })
-    await flushPromises()
+  it.each(['aborted', 'error'] as const)(
+    'hides server-dismissed notices and auto-clears %s on a newer user message',
+    async (finish) => {
+      const wrapper = mount(HarnessChatPanel, {
+        props: {
+          workspaceId: 'ws-1',
+          canPrompt: true,
+        },
+        global: {
+          plugins: [router],
+          stubs,
+        },
+      })
+      await flushPromises()
 
-    const store = useHarnessStore()
-    store.sessions = [makeSession()]
-    store.setActiveSession('session-root')
-    store.messagesBySession['session-root'] = [
-      {
-        id: 'msg-user',
-        session_id: 'session-root',
-        role: 'user',
-        content: 'hello',
-        parts: [],
-      },
-      {
-        id: 'msg-abort',
-        session_id: 'session-root',
-        role: 'assistant',
-        content: '',
-        finish: 'aborted',
-        error: 'aborted by user',
-        notice_dismissed_at: '2026-09-15T10:00:00.000Z',
-        parts: [],
-      },
-    ]
-    await wrapper.vm.$nextTick()
+      const store = useHarnessStore()
+      store.sessions = [makeSession()]
+      store.setActiveSession('session-root')
+      store.messagesBySession['session-root'] = [
+        {
+          id: 'msg-user',
+          session_id: 'session-root',
+          role: 'user',
+          content: 'hello',
+          parts: [],
+        },
+        {
+          id: 'msg-abort',
+          session_id: 'session-root',
+          role: 'assistant',
+          content: '',
+          finish: 'aborted',
+          error: 'aborted by user',
+          notice_dismissed_at: '2026-09-15T10:00:00.000Z',
+          parts: [],
+        },
+      ]
+      await wrapper.vm.$nextTick()
 
-    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
-    const dismissed = stack.props('sheets') as Array<{ kind: string }>
-    expect(dismissed.map((sheet) => sheet.kind)).not.toContain('notice')
+      const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+      const dismissed = stack.props('sheets') as Array<{ kind: string }>
+      expect(dismissed.map((sheet) => sheet.kind)).not.toContain('notice')
 
-    // An error message before the latest user message is auto-cleared.
-    store.messagesBySession['session-root'] = [
-      {
-        id: 'msg-user-1',
-        session_id: 'session-root',
-        role: 'user',
-        content: 'first',
-        parts: [],
-      },
-      {
-        id: 'msg-old-error',
-        session_id: 'session-root',
-        role: 'assistant',
-        content: '',
-        finish: 'error',
-        error: 'boom',
-        parts: [],
-      },
-      {
-        id: 'msg-user-2',
-        session_id: 'session-root',
-        role: 'user',
-        content: 'second',
-        parts: [],
-      },
-    ]
-    await wrapper.vm.$nextTick()
-    const cleared = stack.props('sheets') as Array<{ kind: string }>
-    expect(cleared.map((sheet) => sheet.kind)).not.toContain('notice')
-  })
+      // An error message before the latest user message is auto-cleared.
+      store.messagesBySession['session-root'] = [
+        {
+          id: 'msg-user-1',
+          session_id: 'session-root',
+          role: 'user',
+          content: 'first',
+          parts: [],
+        },
+        {
+          id: 'msg-old-error',
+          session_id: 'session-root',
+          role: 'assistant',
+          content: '',
+          finish,
+          error: 'Run interrupted unexpectedly',
+          parts: [],
+        },
+        {
+          id: 'msg-user-2',
+          session_id: 'session-root',
+          role: 'user',
+          content: 'second',
+          parts: [],
+        },
+      ]
+      await wrapper.vm.$nextTick()
+      const cleared = stack.props('sheets') as Array<{ kind: string }>
+      expect(cleared.map((sheet) => sheet.kind)).not.toContain('notice')
+    },
+  )
 
   it('includes the processes sheet when processesOpen is true', async () => {
     const wrapper = mount(HarnessChatPanel, {

@@ -775,14 +775,21 @@ class HarnessRunner:
             raw = await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             for task in tasks:
-                if not task.done():
+                # gather has already cancelled its children. Do not interrupt
+                # their cancellation handlers a second time while they clean up.
+                if not task.done() and not task.cancelling():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         outcomes: list[_ToolCallOutcome] = []
         for call, item in zip(calls, raw):
             if isinstance(item, asyncio.CancelledError):
-                raise item
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise item
+                # gather completed normally: only this tool was interrupted,
+                # not the owning run. Preserve siblings and let the model recover.
+                item = RuntimeError("Tool execution interrupted unexpectedly")
             if isinstance(item, BaseException):
                 log.warning(
                     "tool_dispatch_failed",

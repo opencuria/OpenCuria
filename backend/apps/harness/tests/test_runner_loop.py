@@ -1099,12 +1099,17 @@ async def test_parallel_tools_overlap_and_preserve_call_order() -> None:
     assert tool_ids == ["c1", "c2"]
 
 
-async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
-    """One failing call still lets the sibling complete."""
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_parallel_tool_failure_does_not_cancel_sibling(cancelled: bool) -> None:
+    """One failing/interrupted call still lets the sibling and run complete."""
     probe = ProbeTool()
     registry = default_tool_registry()
     registry.register(probe)
-    registry.register(BoomTool())
+    class InterruptedTool(BoomTool):
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            raise asyncio.CancelledError()
+
+    registry.register(InterruptedTool() if cancelled else BoomTool())
     provider = FakeProvider(
         [
             _multi_tool_step(
@@ -1133,6 +1138,11 @@ async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
     release_ok.set()
     result = await run_task
     assert result.output == "recovered"
+    assert not any(event["type"] == "aborted" for event in events)
+    outputs = [message for message in provider.messages[-1] if message.role == "tool"]
+    assert [message.tool_call_id for message in outputs] == ["c1", "c2"]
+    if cancelled:
+        assert "interrupted unexpectedly" in outputs[0].content
     assert any(
         event["type"] == "tool_error" and event.get("call_id") == "c1"
         for event in events

@@ -269,7 +269,7 @@ class McpRuntime:
                         continue
                     connection.harness_tools = tools
                     self.connections.append(connection)
-                    self._stack.push(connection.aclose)
+                    self._stack.push_async_callback(connection.aclose)
                     seen.update(lowered)
             if self.skipped:
                 log.warning(

@@ -488,25 +488,29 @@ class McpServerConnection:
                 await self._open_transport(stack, accessor)
                 await self._open_session(stack)
                 await self._discover()
-            except BaseException:
-                # Close the entered scopes (SDK sessions, transport)
-                # while the timeout scope is still the outermost entry:
-                # LIFO unwind closes the inner scopes first, which keeps
-                # the original error's type and message.
+            except BaseException as exc:
+                # Pass the active exception through the nested scopes in LIFO
+                # order. fail_after must see its own cancellation to turn it
+                # into TimeoutError; aclose() would lose that exception state.
                 try:
-                    await stack.aclose()
-                except (
-                    asyncio.CancelledError,
-                    anyio.get_cancelled_exc_class(),
-                ):
+                    suppressed = await stack.__aexit__(
+                        type(exc), exc, exc.__traceback__
+                    )
+                except TimeoutError:
+                    # The startup deadline is converted to a health error below.
                     raise
                 except Exception as close_exc:
+                    # SDK task groups may wrap the original health error in an
+                    # ExceptionGroup. Keep the actionable startup failure, as
+                    # before, while logging unexpected teardown failures.
                     log.warning(
                         "mcp_server_open_close_failed",
                         server=self.desc,
                         error=f"{type(close_exc).__name__}",
                     )
-                raise
+                    raise exc
+                if not suppressed:
+                    raise
         except TimeoutError as exc:
             log.warning(
                 "mcp_server_open_timeout",
