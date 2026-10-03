@@ -114,6 +114,19 @@ function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): v
 }
 
 const selectedRunnerId = ref<string | undefined>()
+const runnerDetailOpen = ref(false)
+
+watch(activeTab, (tab, previous) => {
+  runnerDetailOpen.value = false
+  if (previous === 'runners' && tab !== 'runners') selectedRunnerId.value = undefined
+})
+watch(open, (isOpen) => {
+  if (!isOpen) {
+    selectedRunnerId.value = undefined
+    runnerDetailOpen.value = false
+    settingsContext.value = { version: settingsContext.value.version + 1 }
+  }
+})
 
 function handleSettingsEvent(event: Event): void {
   const detail = (
@@ -166,7 +179,7 @@ watch(isAdmin, (admin) => {
       concatenated without merge. -->
     <DialogContent
       aria-describedby="settings-sheet-description"
-      class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
+      class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl min-w-0 p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
       data-testid="settings-sheet"
       @open-auto-focus.prevent
     >
@@ -178,11 +191,11 @@ watch(isAdmin, (admin) => {
       <!-- Side nav: horizontal on mobile, vertical from md -->
       <nav
         aria-label="Settings"
-        class="shrink-0 border-b border-border md:w-60 md:border-b-0 md:border-r"
+        class="min-w-0 max-w-full shrink-0 border-b border-border md:w-60 md:border-b-0 md:border-r"
       >
         <!-- Mobile: horizontal chips -->
         <div
-          class="flex gap-1.5 overflow-x-auto p-2 md:hidden"
+          class="flex min-w-0 max-w-full gap-1.5 overflow-x-auto p-2 md:hidden"
           role="tablist"
           aria-label="Settings tabs"
         >
@@ -250,9 +263,10 @@ watch(isAdmin, (admin) => {
             {{ activeLabel }}
           </h2>
         </div>
-        <ScrollArea class="min-h-0 flex-1">
+        <ScrollArea class="min-h-0 min-w-0 flex-1">
           <div
-            class="mx-auto w-full max-w-3xl p-4 lg:p-6"
+            class="mx-auto min-w-0 w-full p-4 lg:p-6"
+            :class="activeTab === 'runners' && runnerDetailOpen ? 'max-w-none' : 'max-w-3xl'"
             role="tabpanel"
             :aria-label="activeLabel"
           >
@@ -278,6 +292,8 @@ watch(isAdmin, (admin) => {
             <RunnersPanel
               v-else-if="activeTab === 'runners' && isAdmin"
               :runner-id="selectedRunnerId"
+              :context-version="settingsContext.version"
+              @detail-change="runnerDetailOpen = $event"
             />
             <CredentialServicesTab v-else-if="activeTab === 'credential-services'" />
             <ImageDefinitionsTab v-else-if="activeTab === 'image-definitions'" />
